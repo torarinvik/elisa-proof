@@ -182,7 +182,9 @@ The native checker currently supports:
 - structural equality and Boolean goals;
 - conservative integer comparisons, explicit bounds, conjunctions, and overflow-safe constant
   arithmetic, plus bounded affine differences such as `x + 1 > x` when no-overflow bounds are
-  available, exact closed bitwise/shift evaluation, and total fixed-width identities such as
+  available. Upper overflow and MIN_I64 subtraction/negation claims are adversarially rejected
+  without compiler or replay traps. This tier also supports exact closed bitwise/shift evaluation
+  and total fixed-width identities such as
   `x * 0`, `x * 1`, `x + 0`, `x / 1`, `x & x`, `x | 0`, and `x ^ x`;
 - bounded model checking over explicit finite integer intervals, with exact enumeration of the
   product domain for small pure Boolean/integer goals (including nonlinear arithmetic);
