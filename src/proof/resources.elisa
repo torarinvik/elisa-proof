@@ -201,11 +201,14 @@ extend ElisaProof:
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "region allocation requires an active lexical region and a kernel-replayable operand") if not valid
             proof_resource_record_event(state, report, "resource-region-alloc-discard", "", encoded, "", region, 0) if valid
 
-        def proof_resource_add_region_return_alloc[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
+        def proof_resource_add_region_return_alloc[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> usize:
             encoded: usize = proof_kernel_encode_expression(operand, &report.kernel_nodes, &report.kernel_children)
             valid: bool = proof_resource_region_is_active(state, region) and encoded < report.kernel_nodes.count and report.kernel_nodes[encoded].kind != "unsupported"
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "a returned region allocation requires an active lifetime and a kernel-replayable operand") if not valid
-            proof_resource_record_event(state, report, "resource-region-return-alloc", "", encoded, "", region, 0) if valid
+            if valid:
+                proof_resource_record_event(state, report, "resource-region-return-alloc", "", encoded, "", region, 0)
+                return state.trace_events[state.trace_events.count - 1]
+            return report.kernel_nodes.count
 
         def proof_resource_rebind_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
             target_name: sview = proof_resource_direct_binding_name(target)
@@ -2239,13 +2242,23 @@ extend ElisaProof:
                             returned_region: sview = proof_resource_expr_result_region(returned, state, functions, report)
                             return_function_index: usize = proof_resource_function_index(functions, function_name)
                             return_mutable_reference: bool = return_function_index < functions.return_mutable_references.count and functions.return_mutable_references[return_function_index]
+                            # Check the returned expression before emitting its summary marker. The
+                            # resulting resource-use/call transition (or the explicit allocation
+                            # transition below) is then available as the marker's witness.
+                            proof_resource_check_expression(returned, state, report, function_name, functions)
+                            return_witness: usize = report.kernel_nodes.count
                             match returned:
                                 Ast::Expr.RegionNew(operand, allocated_region, _):
-                                    proof_resource_add_region_return_alloc(state, report, operand, allocated_region, position, function_name) if allocated_region != "" and proof_resource_region_is_external(state, allocated_region)
+                                    return_witness <- proof_resource_add_region_return_alloc(state, report, operand, allocated_region, position, function_name) if allocated_region != "" and proof_resource_region_is_external(state, allocated_region)
                                 _:
-                                    pass
-                            proof_resource_record_event(state, report, "resource-region-return", "param", 0, returned_region, "", 1 if return_mutable_reference else 0) if returned_region != "" and proof_resource_region_is_external(state, returned_region)
-                            proof_resource_check_expression(returned, state, report, function_name, functions)
+                                    if state.trace_events.count > 0:
+                                        candidate: usize = state.trace_events[state.trace_events.count - 1]
+                                        if candidate < report.kernel_nodes.count:
+                                            candidate_kind: sview = report.kernel_nodes[candidate].kind
+                                            return_witness <- candidate if candidate_kind == "resource-use"
+                            if returned_region != "" and proof_resource_region_is_external(state, returned_region):
+                                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a region return must be tied to a replayed resource use or returned allocation") if return_witness >= report.kernel_nodes.count
+                                proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if return_witness < report.kernel_nodes.count
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         proof_resource_check_expression(condition, state, report, function_name, functions)
                         then_state: mutable ProofResourceState = proof_resource_empty()
