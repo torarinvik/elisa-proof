@@ -47,6 +47,10 @@ proof search. Each Elisa lemma includes its structured parameters, preconditions
 termination measure, recursion flag, verification state, and rejection reason. Unverified lemmas
 remain discoverable for repair but are never presented as usable theorems; the catalog also carries
 the source completeness and semantic-admissibility gates.
+Use `build/elisa-proof --suggest N file.elisa` to narrow that catalog to verified lemmas whose
+conclusions first-order match goal `N`. The deterministic response includes inferred parameter
+bindings, instantiated premises, and whether the current goal facts discharge every premise.
+Suggestions are navigation hints only: they do not admit a goal or bypass tactic and kernel replay.
 Goal-generated entries in `findings` also expose their exact `goal_id`; non-goal diagnostics use
 `null`.
 The `action_protocol` capability declaration identifies the Elisa-native `elisa-proof-tactics-v1`

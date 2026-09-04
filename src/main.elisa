@@ -757,6 +757,164 @@ def proof_push_json_theorem_catalog(buffer: mutable darray[u8]&, report: ProofRe
         proof_push_json_theorem(buffer, report, report.theorem_summaries[index])
     proof_push(buffer, "]}\n")
 
+# First-order conclusion matching for theorem discovery. Only declared theorem parameters are
+# metavariables; every other identifier remains rigid. This is deliberately an advisory search
+# operation, not a kernel rule, and therefore favors a small auditable matching language.
+def proof_suggestion_parameter_index(report: ProofReport&, theorem: ProofTheoremSummary, name: sview) -> usize:
+    for index in 0..<theorem.parameters_count |index, theorem, report, name|:
+        return index if report.theorem_parameters[theorem.parameters_start + index] == name
+    return theorem.parameters_count
+
+def proof_suggestion_match(pattern: Ast::Expr, target: Ast::Expr, report: ProofReport&, theorem: ProofTheoremSummary, bound: mutable darray[bool]&, values: mutable darray[Ast::Expr]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+    requires depth <= 128
+    decreases 128 - depth
+    return false if depth >= 128
+    match pattern:
+        Ast::Expr.Paren(inner, _):
+            return proof_suggestion_match(inner, target, report, theorem, bound, values, depth + 1)
+        Ast::Expr.Ident(name, _):
+            parameter_index: usize = proof_suggestion_parameter_index(report, theorem, name)
+            if parameter_index < theorem.parameters_count:
+                return false if parameter_index >= bound.count or parameter_index >= values.count
+                if bound[parameter_index]:
+                    return proof_expr_equal(values[parameter_index], target)
+                bound[parameter_index] <- true
+                values[parameter_index] <- target
+                return true
+        _:
+            pass
+    match target:
+        Ast::Expr.Paren(inner, _):
+            return proof_suggestion_match(pattern, inner, report, theorem, bound, values, depth + 1)
+        _:
+            pass
+    match pattern:
+        Ast::Expr.Unary(operator, operand, _):
+            match target:
+                Ast::Expr.Unary(other_operator, other_operand, _):
+                    return operator == other_operator and proof_suggestion_match(operand, other_operand, report, theorem, bound, values, depth + 1)
+                _:
+                    return false
+        Ast::Expr.Binary(left, operator, right, _):
+            match target:
+                Ast::Expr.Binary(other_left, other_operator, other_right, _):
+                    return operator == other_operator and proof_suggestion_match(left, other_left, report, theorem, bound, values, depth + 1) and proof_suggestion_match(right, other_right, report, theorem, bound, values, depth + 1)
+                _:
+                    return false
+        Ast::Expr.Field(object, field, _):
+            match target:
+                Ast::Expr.Field(other_object, other_field, _):
+                    return field == other_field and proof_suggestion_match(object, other_object, report, theorem, bound, values, depth + 1)
+                _:
+                    return false
+        Ast::Expr.Scope(base, name, _):
+            match target:
+                Ast::Expr.Scope(other_base, other_name, _):
+                    return name == other_name and proof_suggestion_match(base, other_base, report, theorem, bound, values, depth + 1)
+                _:
+                    return false
+        Ast::Expr.Index(object, index, _):
+            match target:
+                Ast::Expr.Index(other_object, other_index, _):
+                    return proof_suggestion_match(object, other_object, report, theorem, bound, values, depth + 1) and proof_suggestion_match(index, other_index, report, theorem, bound, values, depth + 1)
+                _:
+                    return false
+        Ast::Expr.Slice(object, low, high, _):
+            match target:
+                Ast::Expr.Slice(other_object, other_low, other_high, _):
+                    return proof_suggestion_match(object, other_object, report, theorem, bound, values, depth + 1) and proof_suggestion_match(low, other_low, report, theorem, bound, values, depth + 1) and proof_suggestion_match(high, other_high, report, theorem, bound, values, depth + 1)
+                _:
+                    return false
+        _:
+            return proof_expr_equal(pattern, target)
+
+def proof_push_json_suggestions(buffer: mutable darray[u8]&, report: ProofReport&, annotations: darray[Ast::EnumAnnotation]&, goal_id: usize, source_bytes: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"format\":\"elisa-proof-suggestions-v1\",\"status\":")
+    proof_push_json_string(buffer, "ok" if goal_id < report.goal_attempts.count else "not_found")
+    proof_push(buffer, ",\"source\":{\"bytes\":")
+    proof_push_number(buffer, source_bytes.u32())
+    proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, "},\"complete\":")
+    proof_push(buffer, "true" if source_complete else "false")
+    proof_push(buffer, ",\"admissible\":")
+    proof_push(buffer, "true" if source_admissible else "false")
+    proof_push(buffer, "},\"goal_id\":")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ",\"goal_fingerprint\":")
+    if goal_id < report.goal_attempts.count:
+        fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint(report, report.goal_attempts[goal_id])
+        if fingerprint.valid:
+            proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-goal-v1\",\"value\":")
+            proof_push_number(buffer, fingerprint.value)
+            proof_push(buffer, "}")
+        else:
+            proof_push(buffer, "null")
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, ",\"candidates\":[")
+    emitted: mutable usize = 0
+    if goal_id < report.goal_attempts.count:
+        attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+        valid_facts: bool = attempt.facts_start <= report.certificate_facts.count and attempt.facts_count <= report.certificate_facts.count - attempt.facts_start
+        for theorem in report.theorem_summaries |report, annotations, attempt, valid_facts, buffer, emitted|:
+            valid_parameters: bool = theorem.parameters_start <= report.theorem_parameters.count and theorem.parameters_count <= report.theorem_parameters.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_has_defaults.count and theorem.parameters_count <= report.theorem_parameter_has_defaults.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_defaults.count and theorem.parameters_count <= report.theorem_parameter_defaults.count - theorem.parameters_start
+            valid_requires: bool = theorem.requires_start <= report.theorem_requires.count and theorem.requires_count <= report.theorem_requires.count - theorem.requires_start
+            valid_ensures: bool = theorem.ensures_start <= report.theorem_ensures.count and theorem.ensures_count <= report.theorem_ensures.count - theorem.ensures_start
+            if theorem.verified and valid_parameters and valid_requires and valid_ensures and valid_facts:
+                for ensure_index in 0..<theorem.ensures_count |ensure_index, theorem, report, annotations, attempt, buffer, emitted|:
+                    bound: mutable darray[bool] = []
+                    values: mutable darray[Ast::Expr] = []
+                    names: mutable darray[sview] = []
+                    for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, bound, values, names|:
+                        bound.push(false)
+                        values.push(Ast::Expr.Absent)
+                        names.push(report.theorem_parameters[theorem.parameters_start + parameter_index])
+                    conclusion: Ast::Expr = report.theorem_ensures[theorem.ensures_start + ensure_index]
+                    matched: bool = proof_suggestion_match(conclusion, attempt.goal, report, theorem, &bound, &values, 0)
+                    all_bound: mutable bool = matched
+                    for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, bound, values, names, all_bound|:
+                        if not bound[parameter_index] and report.theorem_parameter_has_defaults[theorem.parameters_start + parameter_index]:
+                            values[parameter_index] <- proof_substitute(report.theorem_parameter_defaults[theorem.parameters_start + parameter_index], names, values)
+                            bound[parameter_index] <- true
+                        all_bound <- false if not bound[parameter_index]
+                    if matched and all_bound:
+                        proof_push(buffer, ",") if emitted > 0
+                        emitted <- emitted + 1
+                        proof_push(buffer, "{\"theorem\":")
+                        proof_push_json_string(buffer, theorem.name)
+                        proof_push(buffer, ",\"line\":")
+                        proof_push_number(buffer, theorem.line)
+                        proof_push(buffer, ",\"ensure_index\":")
+                        proof_push_number(buffer, ensure_index.u32())
+                        proof_push(buffer, ",\"bindings\":[")
+                        for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, values, buffer|:
+                            proof_push(buffer, ",") if parameter_index > 0
+                            proof_push(buffer, "{\"parameter\":")
+                            proof_push_json_string(buffer, report.theorem_parameters[theorem.parameters_start + parameter_index])
+                            proof_push(buffer, ",\"value\":")
+                            proof_push_json_expr(buffer, values[parameter_index])
+                            proof_push(buffer, "}")
+                        proof_push(buffer, "],\"premises\":[")
+                        applicable: mutable bool = true
+                        facts: mutable darray[Ast::Expr] = []
+                        for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, facts|:
+                            facts.push(report.certificate_facts[attempt.facts_start + fact_index])
+                        for require_index in 0..<theorem.requires_count |require_index, theorem, report, names, values, facts, annotations, buffer, applicable|:
+                            proof_push(buffer, ",") if require_index > 0
+                            premise: Ast::Expr = proof_substitute(report.theorem_requires[theorem.requires_start + require_index], names, values)
+                            satisfied: bool = proof_goal(facts, premise, annotations)
+                            applicable <- false if not satisfied
+                            proof_push(buffer, "{\"proposition\":")
+                            proof_push_json_expr(buffer, premise)
+                            proof_push(buffer, ",\"satisfied\":")
+                            proof_push(buffer, "true" if satisfied else "false")
+                            proof_push(buffer, "}")
+                        proof_push(buffer, "],\"applicable\":")
+                        proof_push(buffer, "true" if applicable else "false")
+                        proof_push(buffer, "}")
+    proof_push(buffer, "]}\n")
+
 def proof_report_has_open_goals(report: ProofReport&) -> bool:
     for attempt in report.goal_attempts:
         return true if not attempt.proven
@@ -1248,12 +1406,13 @@ def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTact
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
-        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
+        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
         proof_write(usage)
         return 2
     slots: mutable cstr&& = argv.cast[mutable cstr&&]
     json_output: mutable bool = false
     goal_json_output: mutable bool = false
+    suggestion_json_output: mutable bool = false
     theorem_json_output: mutable bool = false
     focused_goal_id: mutable usize = 0
     tactic_json_output: mutable bool = false
@@ -1300,6 +1459,21 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
             proof_write(usage)
             return 2
         path_slot <- 2
+    elif proof_cstr_equals(first_argument, "--suggest"):
+        suggestion_json_output <- true
+        if argc < 4:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --suggest <id> <file.elisa>\n")
+            proof_write(usage)
+            return 2
+        parsed_goal: (valid: bool, parsed: u32) = proof_cstr_u32(slots[2].cast[cstr])
+        if not parsed_goal.valid:
+            message: mutable darray[u8] = []
+            proof_push(&message, "elisa-proof: goal id must be an unsigned 32-bit integer\n")
+            proof_write(message)
+            return 2
+        focused_goal_id <- parsed_goal.parsed.usize()
+        path_slot <- 3
     path: cstr = slots[path_slot].cast[cstr]
     root_path: mutable darray[u8] = []
     path_index: mutable usize = 0
@@ -1361,6 +1535,13 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
         proof_push_json_theorem_catalog(&catalog, report, source_bytes, source_fingerprint, source_complete, source_admissible)
         proof_write(catalog)
         return 0
+    if suggestion_json_output:
+        source_complete: bool = report.failed == 0 and not proof_report_has_open_goals(report) and report.replay_gaps == 0 and semantic_errors == 0 and not import_failed
+        source_admissible: bool = not import_failed and semantic_errors == 0 and report.replay_gaps == 0
+        suggestions: mutable darray[u8] = []
+        proof_push_json_suggestions(&suggestions, report, file.enum_annotations, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible)
+        proof_write(suggestions)
+        return 0 if focused_goal_id < report.goal_attempts.count else 2
     if tactic_json_output:
         source_status: mutable sview = "proved"
         source_status <- "failed" if report.failed > 0 or proof_report_has_open_goals(report) or report.replay_gaps > 0 or semantic_errors > 0
