@@ -25,11 +25,23 @@ extend ElisaProof:
             continue_fact_counts: mutable darray[usize]
             continue_facts: mutable darray[Ast::Expr]
 
+        # Structural subterms are tracked with their origin subject, not only their binder name.
+        # This distinction is essential for inferred product rankings: a subterm of `left` may
+        # not be silently passed as the decreasing argument for `right`.
+        struct ProofStructuralSmaller:
+            name: sview
+            subject: sview
+
         def proof_empty_flow() -> ProofFlow:
             return ProofFlow{normal: true, breaks: false, continues: false, valid: true, continue_name_starts: [], continue_name_counts: [], continue_names: [], continue_value_starts: [], continue_value_counts: [], continue_values: [], continue_fact_starts: [], continue_fact_counts: [], continue_facts: []}
 
         def proof_copy_names(source: darray[sview]&) -> darray[sview]:
             result: mutable darray[sview] = []
+            result.extend(source)
+            return result
+
+        def proof_copy_structural_smaller(source: darray[ProofStructuralSmaller]&) -> darray[ProofStructuralSmaller]:
+            result: mutable darray[ProofStructuralSmaller] = []
             result.extend(source)
             return result
 
@@ -1747,9 +1759,9 @@ extend ElisaProof:
         # it is itself one of the strict-subterm binders used by a recursive edge. Keep
         # the conservative rejection for captures that overlap those binders, but do not
         # let an accumulator or parser cursor hide an otherwise checked descent.
-        def proof_structural_captures_overlap(captures: darray[sview]&, smaller: darray[sview]&) -> bool:
+        def proof_structural_captures_overlap(captures: darray[sview]&, smaller: darray[ProofStructuralSmaller]&) -> bool:
             for capture in captures |smaller|:
-                return true if proof_structural_name_in(smaller, capture)
+                return true if any candidate in smaller where candidate.name == capture
             return false
 
         # Structural termination environments are name-based because the compiler AST does not
@@ -1768,6 +1780,21 @@ extend ElisaProof:
             result: mutable darray[sview] = []
             for candidate in left |result, right|:
                 result.push(candidate) if proof_structural_name_in(right, candidate)
+            return result
+
+        def proof_structural_smaller_without(source: darray[ProofStructuralSmaller]&, blocked: darray[sview]&) -> darray[ProofStructuralSmaller]:
+            result: mutable darray[ProofStructuralSmaller] = []
+            for candidate in source |result, blocked|:
+                result.push(candidate) if not proof_structural_name_in(blocked, candidate.name)
+            return result
+
+        # Branch joins retain a mapped subterm only when both paths preserve the same origin
+        # subject. Matching names with different subjects would recreate the product-ranking bug
+        # this provenance exists to prevent.
+        def proof_structural_smaller_intersect(left: darray[ProofStructuralSmaller]&, right: darray[ProofStructuralSmaller]&) -> darray[ProofStructuralSmaller]:
+            result: mutable darray[ProofStructuralSmaller] = []
+            for candidate in left |result, right|:
+                result.push(candidate) if any other in right where other.name == candidate.name and other.subject == candidate.subject
             return result
 
         # Pattern bindings that are in scope after a match. This list is used only to decide
@@ -1807,25 +1834,25 @@ extend ElisaProof:
         # category binder names the complete matched value and is therefore never accepted as a
         # structural decrease. Or-patterns are left opaque because a binder may exist in only one
         # alternative; rejecting them is safer than guessing which names are common.
-        def proof_structural_pattern_subterms(pattern: Ast::Pattern, subterms: mutable darray[sview]&) -> void:
+        def proof_structural_pattern_subterms(pattern: Ast::Pattern, subject: sview, subterms: mutable darray[ProofStructuralSmaller]&) -> void:
             match pattern:
                 Ast::Pattern.Variant(_, fields):
                     for subpattern in fields |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subterms)
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
                 Ast::Pattern.Struct(_, fields):
                     for subpattern in fields |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subterms)
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
                 Ast::Pattern.Field(_, inner):
                     for subpattern in inner |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subterms)
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
                 Ast::Pattern.Tuple(elements):
                     for subpattern in elements |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subterms)
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
                 Ast::Pattern.Binding(name):
-                    subterms.push(name) if name != ""
+                    subterms.push(ProofStructuralSmaller{name: name, subject: subject}) if name != ""
                 Ast::Pattern.As(_, inner):
                     for subpattern in inner |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subterms)
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
                 _:
                     pass
 
@@ -1835,20 +1862,34 @@ extend ElisaProof:
         # from that element (for example `field.value`) are strict as well. The compiler has
         # already type-checked the recursive call; this helper recognizes only the structural
         # shape and never infers a type from a spelling.
-        def proof_structural_argument_is_smaller(expression: Ast::Expr, smaller: darray[sview]&) -> bool:
+        def proof_structural_argument_root(expression: Ast::Expr) -> sview:
             match expression:
                 Ast::Expr.Ident(name, _):
-                    return proof_structural_name_in(smaller, name)
+                    return name
                 Ast::Expr.Paren(inner, _):
-                    return proof_structural_name_in(smaller, proof_ident_name(inner))
+                    return proof_structural_argument_root(inner)
                 Ast::Expr.Field(object, _, _):
-                    return proof_structural_name_in(smaller, proof_ident_name(object))
+                    return proof_structural_argument_root(object)
                 Ast::Expr.Index(object, _, _):
-                    return proof_structural_name_in(smaller, proof_ident_name(object))
+                    return proof_structural_argument_root(object)
                 Ast::Expr.IndexN(object, _, _):
-                    return proof_structural_name_in(smaller, proof_ident_name(object))
+                    return proof_structural_argument_root(object)
                 _:
-                    return false
+                    return ""
+
+        def proof_structural_argument_is_smaller(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> bool:
+            root: sview = proof_structural_argument_root(expression)
+            return root != "" and any candidate in smaller where candidate.name == root
+
+        def proof_structural_argument_is_smaller_for_subject(expression: Ast::Expr, subject: sview, smaller: darray[ProofStructuralSmaller]&) -> bool:
+            root: sview = proof_structural_argument_root(expression)
+            return root != "" and any candidate in smaller where candidate.name == root and candidate.subject == subject
+
+        def proof_structural_argument_subject(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> sview:
+            root: sview = proof_structural_argument_root(expression)
+            for candidate in smaller |root|:
+                return candidate.subject if candidate.name == root
+            return ""
 
         def proof_structural_call_argument(arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, parameters: darray[Ast::ParamDecl]&, position: usize) -> Ast::Expr:
             return Ast::Expr.Invalid if position >= parameters.count
@@ -1908,7 +1949,7 @@ extend ElisaProof:
         # never justify a call in a sibling or after the match. Mutual structural edges use the
         # callee's own decreasing-parameter position, but still require the same enum subject
         # type and a binder from the caller's matched strict subterms.
-        def proof_structural_check_expression(expression: Ast::Expr, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[sview]&, report: mutable ProofReport&, name: sview) -> void:
+        def proof_structural_check_expression(expression: Ast::Expr, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview) -> void:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     called_name: sview = proof_callable_name(callee)
@@ -1931,7 +1972,7 @@ extend ElisaProof:
                                 subject_index: usize = proof_parameter_position(parameters, subject)
                                 recursive_argument: Ast::Expr = proof_structural_call_argument(arguments, argument_names, parameters, subject_index)
                                 recursive_name: sview = proof_ident_name(recursive_argument)
-                                if proof_structural_argument_is_smaller(recursive_argument, smaller):
+                                if proof_structural_argument_is_smaller_for_subject(recursive_argument, subject, smaller):
                                     multi_strict <- true
                                 elif recursive_name != subject:
                                     multi_valid <- false
@@ -2005,7 +2046,7 @@ extend ElisaProof:
                     proof_structural_check_expression(iterable, own_name, subject_position, parameters, destructurable, smaller, report, name)
                     comprehension_blocked: darray[sview] = [variable]
                     comprehension_destructurable: darray[sview] = proof_structural_without(destructurable, comprehension_blocked)
-                    comprehension_smaller: darray[sview] = proof_structural_without(smaller, comprehension_blocked)
+                    comprehension_smaller: darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, comprehension_blocked)
                     proof_structural_check_expression(condition, own_name, subject_position, parameters, comprehension_destructurable, comprehension_smaller, report, name)
                     proof_structural_check_expression(body, own_name, subject_position, parameters, comprehension_destructurable, comprehension_smaller, report, name)
                 Ast::Expr.Refinement(base, predicate, _):
@@ -2017,11 +2058,11 @@ extend ElisaProof:
                         arm_bindings: mutable darray[sview] = []
                         proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
                         arm_destructurable: mutable darray[sview] = proof_structural_without(destructurable, arm_bindings)
-                        arm_smaller: mutable darray[sview] = proof_structural_without(smaller, arm_bindings)
+                        arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, arm_bindings)
                         scrutinee_name: sview = proof_ident_name(scrutinee)
                         if proof_structural_name_in(destructurable, scrutinee_name):
                             proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
-                            proof_structural_pattern_subterms(arm.pattern, &arm_smaller)
+                            proof_structural_pattern_subterms(arm.pattern, scrutinee_name, &arm_smaller)
                         proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
                         proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
                 Ast::Expr.Catch(guarded, arms, _):
@@ -2038,7 +2079,7 @@ extend ElisaProof:
                     pass
                 Ast::Expr.Block(statements, value, captures, _):
                     block_destructurable: darray[sview] = proof_copy_names(destructurable)
-                    block_smaller: darray[sview] = proof_copy_names(smaller)
+                    block_smaller: darray[ProofStructuralSmaller] = proof_copy_structural_smaller(smaller)
                     proof_structural_check_body(statements, own_name, subject_position, parameters, &block_destructurable, &block_smaller, report, name)
                     proof_structural_check_expression(value, own_name, subject_position, parameters, block_destructurable, block_smaller, report, name)
                     proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "captured value block is not structurally certified") if captures.count > 0 and proof_expr_has_call(expression) and proof_structural_captures_overlap(captures, block_smaller)
@@ -2047,9 +2088,9 @@ extend ElisaProof:
                 _:
                     proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "unsupported expression may hide a structural recursive call") if proof_expr_has_call(expression)
 
-        def proof_structural_check_body(body: darray[Ast::Stmt]&, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[sview]&, report: mutable ProofReport&, name: sview) -> void:
+        def proof_structural_check_body(body: darray[Ast::Stmt]&, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview) -> void:
             current_destructurable: mutable darray[sview] = proof_copy_names(destructurable)
-            current_smaller: mutable darray[sview] = proof_copy_names(smaller)
+            current_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(smaller)
             for statement in body |own_name, subject_position, parameters, current_destructurable, current_smaller, report, name|:
                 match statement:
                     Ast::Stmt.Return(value, _):
@@ -2060,30 +2101,30 @@ extend ElisaProof:
                         proof_structural_check_expression(initializer, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
                         blocked: darray[sview] = [local_name]
                         current_destructurable <- proof_structural_without(current_destructurable, blocked)
-                        current_smaller <- proof_structural_without(current_smaller, blocked)
+                        current_smaller <- proof_structural_smaller_without(current_smaller, blocked)
                     Ast::Stmt.Assign(target, _, initializer, _):
                         proof_structural_check_expression(target, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
                         proof_structural_check_expression(initializer, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
                         blocked: darray[sview] = [proof_ident_name(target)]
                         current_destructurable <- proof_structural_without(current_destructurable, blocked)
-                        current_smaller <- proof_structural_without(current_smaller, blocked)
+                        current_smaller <- proof_structural_smaller_without(current_smaller, blocked)
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         proof_structural_check_expression(condition, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
                         then_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
-                        then_smaller: mutable darray[sview] = proof_copy_names(current_smaller)
+                        then_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
                         proof_structural_check_body(then_body, own_name, subject_position, parameters, &then_destructurable, &then_smaller, report, name)
                         else_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
-                        else_smaller: mutable darray[sview] = proof_copy_names(current_smaller)
+                        else_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
                         proof_structural_check_body(else_body, own_name, subject_position, parameters, &else_destructurable, &else_smaller, report, name)
                         current_destructurable <- proof_structural_intersect(then_destructurable, else_destructurable)
-                        current_smaller <- proof_structural_intersect(then_smaller, else_smaller)
+                        current_smaller <- proof_structural_smaller_intersect(then_smaller, else_smaller)
                     Ast::Stmt.While(condition, while_body, _):
                         proof_structural_check_expression(condition, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
                         loop_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
-                        loop_smaller: mutable darray[sview] = proof_copy_names(current_smaller)
+                        loop_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
                         proof_structural_check_body(while_body, own_name, subject_position, parameters, &loop_destructurable, &loop_smaller, report, name)
                         current_destructurable <- proof_structural_intersect(current_destructurable, loop_destructurable)
-                        current_smaller <- proof_structural_intersect(current_smaller, loop_smaller)
+                        current_smaller <- proof_structural_smaller_intersect(current_smaller, loop_smaller)
                     Ast::Stmt.For(_, _, iterable, for_body, _):
                         proof_structural_check_expression(iterable, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
                         loop_variables: mutable darray[sview] = []
@@ -2093,42 +2134,42 @@ extend ElisaProof:
                             _:
                                 pass
                         loop_destructurable: mutable darray[sview] = proof_structural_without(current_destructurable, loop_variables)
-                        loop_smaller: mutable darray[sview] = proof_structural_without(current_smaller, loop_variables)
+                        loop_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(current_smaller, loop_variables)
                         # Each element of a matched AST side-table is a strict subterm of the
                         # enclosing AST node. Promote loop variables only for an iterable already
                         # known to be such a subterm; ordinary user collections never enter this
                         # structural environment.
                         if proof_structural_argument_is_smaller(iterable, current_smaller):
                             for loop_variable in loop_variables |loop_variable, loop_smaller|:
-                                loop_smaller.push(loop_variable) if not proof_structural_name_in(loop_smaller, loop_variable)
+                                loop_smaller.push(ProofStructuralSmaller{name: loop_variable, subject: proof_structural_argument_subject(iterable, current_smaller)}) if not any candidate in loop_smaller where candidate.name == loop_variable
                         proof_structural_check_body(for_body, own_name, subject_position, parameters, &loop_destructurable, &loop_smaller, report, name)
                         current_destructurable <- proof_structural_intersect(current_destructurable, loop_destructurable)
-                        current_smaller <- proof_structural_intersect(current_smaller, loop_smaller)
+                        current_smaller <- proof_structural_smaller_intersect(current_smaller, loop_smaller)
                     Ast::Stmt.Match(scrutinee, arms, _):
                         proof_structural_check_expression(scrutinee, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
                         merged_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
-                        merged_smaller: mutable darray[sview] = proof_copy_names(current_smaller)
+                        merged_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
                         first_arm: mutable bool = true
                         for arm in arms |own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, merged_destructurable, merged_smaller, first_arm|:
                             arm_bindings: mutable darray[sview] = []
                             proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
                             arm_destructurable: mutable darray[sview] = proof_structural_without(current_destructurable, arm_bindings)
-                            arm_smaller: mutable darray[sview] = proof_structural_without(current_smaller, arm_bindings)
+                            arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(current_smaller, arm_bindings)
                             scrutinee_name: sview = proof_ident_name(scrutinee)
                             if proof_structural_name_in(current_destructurable, scrutinee_name):
                                 proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
-                                proof_structural_pattern_subterms(arm.pattern, &arm_smaller)
+                                proof_structural_pattern_subterms(arm.pattern, scrutinee_name, &arm_smaller)
                             proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
                             proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
                             arm_outer_destructurable: darray[sview] = proof_structural_intersect(current_destructurable, arm_destructurable)
-                            arm_outer_smaller: darray[sview] = proof_structural_intersect(current_smaller, arm_smaller)
+                            arm_outer_smaller: darray[ProofStructuralSmaller] = proof_structural_smaller_intersect(current_smaller, arm_smaller)
                             if first_arm:
                                 merged_destructurable <- arm_outer_destructurable
                                 merged_smaller <- arm_outer_smaller
                                 first_arm <- false
                             else:
                                 merged_destructurable <- proof_structural_intersect(merged_destructurable, arm_outer_destructurable)
-                                merged_smaller <- proof_structural_intersect(merged_smaller, arm_outer_smaller)
+                                merged_smaller <- proof_structural_smaller_intersect(merged_smaller, arm_outer_smaller)
                         current_destructurable <- merged_destructurable if not first_arm
                         current_smaller <- merged_smaller if not first_arm
                     Ast::Stmt.Block(block_kind, _, _, block_body, _):
@@ -2140,17 +2181,17 @@ extend ElisaProof:
                                     pass
                         if block_kind != "assert_by":
                             block_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
-                            block_smaller: mutable darray[sview] = proof_copy_names(current_smaller)
+                            block_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
                             match statement:
                                 Ast::Stmt.Block(_, _, binding, _, _):
                                     blocked: darray[sview] = [binding]
                                     block_destructurable <- proof_structural_without(block_destructurable, blocked) if binding != ""
-                                    block_smaller <- proof_structural_without(block_smaller, blocked) if binding != ""
+                                    block_smaller <- proof_structural_smaller_without(block_smaller, blocked) if binding != ""
                                 _:
                                     pass
                             proof_structural_check_body(block_body, own_name, subject_position, parameters, &block_destructurable, &block_smaller, report, name)
                             current_destructurable <- proof_structural_intersect(current_destructurable, block_destructurable)
-                            current_smaller <- proof_structural_intersect(current_smaller, block_smaller)
+                            current_smaller <- proof_structural_smaller_intersect(current_smaller, block_smaller)
                     Ast::Stmt.Contract(kind, expression, _):
                         proof_structural_check_expression(expression, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name) if kind == "assert"
                     _:
@@ -2176,7 +2217,7 @@ extend ElisaProof:
             subject_position <- parameters.count if inferred_structural and enum_subjects.count > 1
             destructurable: mutable darray[sview] = [subject]
             destructurable <- enum_subjects if subject_position >= parameters.count
-            smaller: mutable darray[sview] = []
+            smaller: mutable darray[ProofStructuralSmaller] = []
             own_index: usize = proof_structural_report_index(report, function_name)
             has_mutual_structural_member: mutable bool = false
             if own_index < report.structural_names.count and own_index < report.structural_component_ids.count and own_index < report.structural_subject_types.count:
