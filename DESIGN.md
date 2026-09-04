@@ -22,7 +22,12 @@ The proof kernel is intentionally fail-closed:
    is the sum of their constructor heights: every recursive edge must leave each subject unchanged
    or pass a matched strict subterm, and at least one subject must be strict. The inferred measure
     is still checked by the same matched strict-subterm rule; it is not an assumption and does not
-    apply to integer or reference parameters.
+    apply to integer or reference parameters. Each accepted recursive edge now emits a
+    source-neutral structural certificate containing every preserved/strict ranking component;
+    the replay kernel checks that certificate before the report can claim zero replay gaps. The
+    source correspondence between a typed match binder and an actual ADT subterm remains an
+    explicit compiler/frontend boundary until inductive declarations and pattern typing are
+    represented in the standalone kernel environment.
     Captured value blocks are checked against that same environment: an unrelated accumulator or
     cursor capture does not hide a recursive descent, while a capture that overlaps an active
     strict-subterm binder remains conservative and must still be structurally certified.
