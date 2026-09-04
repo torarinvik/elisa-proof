@@ -51,6 +51,11 @@ the source completeness and semantic-admissibility gates.
 Every theorem also identifies its owned proof goals and their certificate/replay status.
 `proof_replay_complete` is true only for a verified theorem with at least one owned obligation and
 a replayed certificate for every one, making the evidence behind theorem search directly auditable.
+`theorem_fingerprint` canonically hashes the theorem name, typed parameters, defaults, ordered
+preconditions, postconditions, termination measures, and recursion mode using source-neutral kernel
+terms. It survives unrelated declarations and line shifts but changes with the theorem statement.
+Like the source and goal FNV identifiers, it is a cache/binding guard rather than proof evidence;
+verification and independent replay remain mandatory admission gates.
 Use `build/elisa-proof --suggest N file.elisa` to narrow that catalog to verified lemmas whose
 conclusions first-order match goal `N`. The deterministic response includes inferred parameter
 bindings, instantiated premises, and whether the current goal facts discharge every premise.

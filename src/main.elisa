@@ -144,6 +144,50 @@ def proof_goal_fingerprint(report: ProofReport&, attempt: ProofGoalAttempt) -> (
     return (false, 0) if not valid
     return (true, proof_source_fingerprint(identity))
 
+def proof_push_theorem_expression_identity(buffer: mutable darray[u8]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, expression: Ast::Expr) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if not proof_kernel_expression_supported(expression)
+    root: usize = proof_kernel_encode_expression(expression, nodes, children)
+    return proof_push_kernel_identity(buffer, nodes, children, root, 0)
+
+# Canonical identity of a theorem statement and invocation signature. Source positions, report
+# indices, proof scripts, and certificate arena offsets are excluded: changing the proof without
+# changing the checked theorem does not invalidate consumers. Verification and replay remain
+# separate admission gates and are never implied by this observational FNV identity.
+def proof_theorem_fingerprint(report: ProofReport&, theorem: ProofTheoremSummary) -> (valid: bool, value: u32) can[Memory.Allocate, Abort.Panic]:
+    valid_parameters: bool = theorem.parameters_start <= report.theorem_parameters.count and theorem.parameters_count <= report.theorem_parameters.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_types.count and theorem.parameters_count <= report.theorem_parameter_types.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_has_defaults.count and theorem.parameters_count <= report.theorem_parameter_has_defaults.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_defaults.count and theorem.parameters_count <= report.theorem_parameter_defaults.count - theorem.parameters_start
+    valid_requires: bool = theorem.requires_start <= report.theorem_requires.count and theorem.requires_count <= report.theorem_requires.count - theorem.requires_start
+    valid_ensures: bool = theorem.ensures_start <= report.theorem_ensures.count and theorem.ensures_count <= report.theorem_ensures.count - theorem.ensures_start
+    valid_decreases: bool = theorem.decreases_start <= report.theorem_decreases.count and theorem.decreases_count <= report.theorem_decreases.count - theorem.decreases_start
+    return (false, 0) if not valid_parameters or not valid_requires or not valid_ensures or not valid_decreases
+    identity: mutable darray[u8] = []
+    nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+    children: mutable darray[usize] = []
+    proof_push(&identity, "elisa-proof-theorem-v1:")
+    proof_push_json_string(&identity, theorem.name)
+    proof_push(&identity, ":recursive:" if theorem.recursive else ":nonrecursive:")
+    valid: mutable bool = true
+    for index in 0..<theorem.parameters_count |index, theorem, report, identity, nodes, children, valid|:
+        parameter_index: usize = theorem.parameters_start + index
+        proof_push(&identity, "P")
+        proof_push_json_string(&identity, report.theorem_parameters[parameter_index])
+        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_parameter_types[parameter_index]) and valid
+        if report.theorem_parameter_has_defaults[parameter_index]:
+            proof_push(&identity, "D")
+            valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_parameter_defaults[parameter_index]) and valid
+        else:
+            proof_push(&identity, "N")
+    for index in 0..<theorem.requires_count |index, theorem, report, identity, nodes, children, valid|:
+        proof_push(&identity, "R")
+        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_requires[theorem.requires_start + index]) and valid
+    for index in 0..<theorem.ensures_count |index, theorem, report, identity, nodes, children, valid|:
+        proof_push(&identity, "E")
+        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_ensures[theorem.ensures_start + index]) and valid
+    for index in 0..<theorem.decreases_count |index, theorem, report, identity, nodes, children, valid|:
+        proof_push(&identity, "M")
+        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_decreases[theorem.decreases_start + index]) and valid
+    return (false, 0) if not valid
+    return (true, proof_source_fingerprint(identity))
+
 def proof_cstr_equals(left: cstr, right: sview) -> bool:
     index: mutable usize = 0
     right_length: usize = sview_len(right)
@@ -711,6 +755,14 @@ def proof_push_json_theorem(buffer: mutable darray[u8]&, report: ProofReport&, t
                 proof_replay_complete <- false if not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count or not report.certificates[attempt.certificate_index].replayed
     proof_push(buffer, "{\"name\":")
     proof_push_json_string(buffer, theorem.name)
+    proof_push(buffer, ",\"theorem_fingerprint\":")
+    theorem_fingerprint: (valid: bool, value: u32) = proof_theorem_fingerprint(report, theorem)
+    if theorem_fingerprint.valid:
+        proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-theorem-v1\",\"value\":")
+        proof_push_number(buffer, theorem_fingerprint.value)
+        proof_push(buffer, "}")
+    else:
+        proof_push(buffer, "null")
     proof_push(buffer, ",\"line\":")
     proof_push_number(buffer, theorem.line)
     proof_push(buffer, ",\"verified\":")
@@ -988,6 +1040,14 @@ def proof_push_json_suggestions(buffer: mutable darray[u8]&, report: ProofReport
                         emitted <- emitted + 1
                         proof_push(buffer, "{\"theorem\":")
                         proof_push_json_string(buffer, theorem.name)
+                        proof_push(buffer, ",\"theorem_fingerprint\":")
+                        theorem_fingerprint: (valid: bool, value: u32) = proof_theorem_fingerprint(report, theorem)
+                        if theorem_fingerprint.valid:
+                            proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-theorem-v1\",\"value\":")
+                            proof_push_number(buffer, theorem_fingerprint.value)
+                            proof_push(buffer, "}")
+                        else:
+                            proof_push(buffer, "null")
                         proof_push(buffer, ",\"line\":")
                         proof_push_number(buffer, theorem.line)
                         proof_push(buffer, ",\"ensure_index\":")
