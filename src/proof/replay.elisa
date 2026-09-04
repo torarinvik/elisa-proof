@@ -814,21 +814,108 @@ extend ElisaProof:
             return ProofReplayInt{known: true, value: bound.lower} if bound.has_lower and bound.has_upper and bound.lower == bound.upper
             return ProofReplayInt{known: false, value: 0}
 
-        def proof_replay_substitute(expression: Ast::Expr, name: sview, value: Ast::Expr) -> Ast::Expr:
+        # Packed AST payloads contain growable side tables. Tie rebuilt payload arrays to the
+        # caller's region so returning the AST cannot leave handles into call-local storage.
+        def proof_replay_substitute[@r](expression: Ast::Expr, name: sview, value: Ast::Expr) -> Ast::Expr @r:
             match expression:
+                Ast::Expr.Invalid or Ast::Expr.Absent or Ast::Expr.IntLit(_) or Ast::Expr.FloatLit(_) or Ast::Expr.StringLit(_) or Ast::Expr.CharLit(_) or Ast::Expr.BoolLit(_) or Ast::Expr.ShorthandMember(_, _):
+                    return expression
                 Ast::Expr.Ident(expression_name, _):
                     return value if expression_name == name
+                    return expression
                 Ast::Expr.Paren(inner, position):
                     return Ast::Expr.Paren(proof_replay_substitute(inner, name, value), position)
                 Ast::Expr.Unary(operator, operand, position):
                     return Ast::Expr.Unary(operator, proof_replay_substitute(operand, name, value), position)
-                Ast::Expr.Move(operand, position):
-                    return Ast::Expr.Move(proof_replay_substitute(operand, name, value), position)
                 Ast::Expr.Binary(left, operator, right, position):
                     return Ast::Expr.Binary(proof_replay_substitute(left, name, value), operator, proof_replay_substitute(right, name, value), position)
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for argument in arguments |substituted, name, value|:
+                        substituted.push(proof_replay_substitute(argument, name, value))
+                    return Ast::Expr.Call(proof_replay_substitute(callee, name, value), substituted, argument_names, position)
+                Ast::Expr.Field(object, field, position):
+                    substituted_object: Ast::Expr = proof_replay_substitute(object, name, value)
+                    match substituted_object:
+                        Ast::Expr.Construct(_, fields, _):
+                            for initializer in fields |field|:
+                                return initializer.value if initializer.name == field
+                        Ast::Expr.RecordUpdate(base, fields, _):
+                            for initializer in fields |field|:
+                                return initializer.value if initializer.name == field
+                            return Ast::Expr.Field(base, field, position)
+                        _:
+                            pass
+                    return Ast::Expr.Field(substituted_object, field, position)
+                Ast::Expr.Scope(base, member, position):
+                    return Ast::Expr.Scope(proof_replay_substitute(base, name, value), member, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_replay_substitute(object, name, value), proof_replay_substitute(index, name, value), position)
+                Ast::Expr.Slice(object, low, high, position):
+                    return Ast::Expr.Slice(proof_replay_substitute(object, name, value), proof_replay_substitute(low, name, value), proof_replay_substitute(high, name, value), position)
+                Ast::Expr.IndexN(object, arguments, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for argument in arguments |substituted, name, value|:
+                        substituted.push(proof_replay_substitute(argument, name, value))
+                    return Ast::Expr.IndexN(proof_replay_substitute(object, name, value), substituted, position)
+                Ast::Expr.Move(operand, position):
+                    return Ast::Expr.Move(proof_replay_substitute(operand, name, value), position)
+                Ast::Expr.RegionNew(operand, region, position):
+                    return Ast::Expr.RegionNew(proof_replay_substitute(operand, name, value), region, position)
+                Ast::Expr.Array(elements, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for element in elements |substituted, name, value|:
+                        substituted.push(proof_replay_substitute(element, name, value))
+                    return Ast::Expr.Array(substituted, position)
+                Ast::Expr.Tuple(elements, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for element in elements |substituted, name, value|:
+                        substituted.push(proof_replay_substitute(element, name, value))
+                    return Ast::Expr.Tuple(substituted, position)
+                Ast::Expr.SetLit(elements, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for element in elements |substituted, name, value|:
+                        substituted.push(proof_replay_substitute(element, name, value))
+                    return Ast::Expr.SetLit(substituted, position)
+                Ast::Expr.DictLit(entries, position):
+                    substituted: mutable darray[Ast::DictEntry] @r = []
+                    for entry in entries |substituted, name, value|:
+                        substituted.push(Ast::DictEntry{key: proof_replay_substitute(entry.key, name, value), value: proof_replay_substitute(entry.value, name, value)})
+                    return Ast::Expr.DictLit(substituted, position)
+                Ast::Expr.Construct(type_expression, fields, position):
+                    substituted: mutable darray[Ast::FieldInit] @r = []
+                    for field in fields |substituted, name, value|:
+                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute(field.value, name, value)})
+                    return Ast::Expr.Construct(type_expression, substituted, position)
+                Ast::Expr.RecordUpdate(base, fields, position):
+                    substituted: mutable darray[Ast::FieldInit] @r = []
+                    for field in fields |substituted, name, value|:
+                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute(field.value, name, value)})
+                    return Ast::Expr.RecordUpdate(proof_replay_substitute(base, name, value), substituted, position)
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    return Ast::Expr.If(proof_replay_substitute(condition, name, value), proof_replay_substitute(then_expression, name, value), proof_replay_substitute(else_expression, name, value), position)
+                Ast::Expr.GetElse(guarded, _, _):
+                    return proof_replay_substitute(guarded, name, value)
+                Ast::Expr.Comprehension(variable, iterable, condition, body, position):
+                    substituted_iterable: Ast::Expr = proof_replay_substitute(iterable, name, value)
+                    return Ast::Expr.Comprehension(variable, substituted_iterable, condition, body, position) if variable == name
+                    return Ast::Expr.Comprehension(variable, substituted_iterable, proof_replay_substitute(condition, name, value), proof_replay_substitute(body, name, value), position)
+                Ast::Expr.Refinement(base, predicate, position):
+                    return Ast::Expr.Refinement(proof_replay_substitute(base, name, value), proof_replay_substitute(predicate, name, value), position)
+                Ast::Expr.Block(statements, block_value, captures, position):
+                    substituted_statements: mutable darray[Ast::Stmt] @r = []
+                    shadowed: mutable bool = false
+                    for statement in statements |substituted_statements, name, value, shadowed|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
+                                substituted_initializer: Ast::Expr = initializer if shadowed else proof_replay_substitute(initializer, name, value)
+                                substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
+                                shadowed <- true if local_name == name
+                            _:
+                                return Ast::Expr.Invalid
+                    return Ast::Expr.Block(substituted_statements, block_value if shadowed else proof_replay_substitute(block_value, name, value), captures, position)
                 _:
-                    pass
-            return expression
+                    return Ast::Expr.Invalid
 
         def proof_replay_quantifier_values(kind: sview, facts: darray[Ast::Expr]&, body: Ast::Expr, binder: sview, values: darray[Ast::Expr]&) -> bool:
             return false if values.count == 0 and kind == "exists"
@@ -1219,9 +1306,9 @@ extend ElisaProof:
             return proof_replay_certificate_with_stack(report, certificate, dependency_stack, 0)
 
     public:
-        # Standalone provenance entry point for auditors and adversarial harnesses. A trace must
-        # pass both the independently implemented AST reconstruction and source-neutral kernel
-        # validation; callers cannot validate only the presentation mirror.
+        # Standalone provenance entry point for auditors and adversarial harnesses. Require both
+        # independently implemented views so this audit API detects drift between source-level
+        # reconstruction and the authoritative source-neutral kernel trace.
         def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool:
             return false if trace_index >= report.fact_traces.count
             trace: ProofFactTrace = report.fact_traces[trace_index]

@@ -55,6 +55,9 @@ Every consumed `lemma-summary` fact is additionally bound to its normalized form
 mapping, selected postcondition index, and exact caller certificates for all instantiated
 preconditions. Independent replay reconstructs that postcondition and rejects a mismatched fact;
 lemma summaries therefore no longer count as trusted-boundary facts.
+The replay-side substitution is separately implemented across the kernel term language—including
+calls, fields, indexing, aggregates, constructors, conditionals, comprehensions, and scoped
+quantifier blocks—and preserves binder shadowing instead of reusing the elaborator's substitution.
 `theorem_fingerprint` canonically hashes the theorem name, typed parameters, defaults, ordered
 preconditions, postconditions, termination measures, and recursion mode using source-neutral kernel
 terms. It survives unrelated declarations and line shifts but changes with the theorem statement.
