@@ -4,11 +4,29 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER="${ELISA_COMPILER_BIN:-}"
 if [[ -z "$COMPILER" ]]; then
-    COMPILER="$(command -v elisac 2>/dev/null || true)"
+    # `elisac` was a symlink to the Go compiler and is gone; the stage names are
+    # explicit now. Prefer the self-hosted compiler. Its objects need the runtime
+    # object discovered below; stage0 remains a supported fallback.
+    for candidate in elisac-stage1 elisac-stage0 elisac; do
+        COMPILER="$(command -v "$candidate" 2>/dev/null || true)"
+        [[ -n "$COMPILER" ]] && break
+    done
 fi
 if [[ -z "$COMPILER" ]]; then
-    printf 'dogfood failed: set ELISA_COMPILER_BIN to a stage-0 Elisa compiler\n' >&2
+    printf 'dogfood failed: set ELISA_COMPILER_BIN to an Elisa compiler\n' >&2
     exit 1
+fi
+
+# A stage1 wrapper emits objects that use the self-hosted runtime. Keep this in
+# sync with build.sh so the executable dogfood harness exercises the same product
+# configuration as the proof binary itself.
+RUNTIME_OBJ="${ELISA_RUNTIME_OBJ:-}"
+if [[ -z "$RUNTIME_OBJ" ]]; then
+    driver="$(grep -o '/[^\"]*/scripts/elisac_stage1\.sh' "$COMPILER" 2>/dev/null | head -1 || true)"
+    if [[ -n "$driver" ]]; then
+        candidate="${driver%/scripts/elisac_stage1.sh}/build/runtime/elisacore_runtime.o"
+        [[ -f "$candidate" ]] && RUNTIME_OBJ="$candidate"
+    fi
 fi
 
 "$ROOT_DIR/scripts/build.sh"
@@ -70,6 +88,8 @@ run_probe replay_standalone examples/kernel_replay_standalone.elisa 1
 run_probe arena_cycle_rejected examples/rejected_kernel_arena_cycle.elisa 1
 run_probe borrow_four_nested_fields examples/borrow_four_nested_fields.elisa 0
 run_probe rejected_borrow_four_nested_alias examples/rejected_borrow_four_nested_alias.elisa 1
+run_probe borrow_indexed_places examples/borrow_indexed_places.elisa 0
+run_probe rejected_borrow_index_alias examples/rejected_borrow_index_alias.elisa 1
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.
@@ -80,9 +100,13 @@ if [[ ! -f "$runtime_source" ]]; then
     printf 'dogfood failed: Elisa runtime source is missing for executable arena harness\n' >&2
     exit 1
 fi
-"$COMPILER" -emit obj -O0 -o "$runtime_dir/runtime-support.o" "$runtime_source" >/dev/null 2>&1
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/program.o" "$ROOT_DIR/examples/kernel_arena_runtime.elisa" >/dev/null 2>&1
-clang -Wl,-dead_strip -o "$runtime_dir/program" "$runtime_dir/program.o" "$runtime_dir/runtime-support.o"
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    clang -Wl,-dead_strip -o "$runtime_dir/program" "$runtime_dir/program.o" "$RUNTIME_OBJ"
+else
+    "$COMPILER" -emit obj -O0 -o "$runtime_dir/runtime-support.o" "$runtime_source" >/dev/null 2>&1
+    clang -Wl,-dead_strip -o "$runtime_dir/program" "$runtime_dir/program.o" "$runtime_dir/runtime-support.o"
+fi
 set +e
 "$runtime_dir/program"
 runtime_status=$?
@@ -91,13 +115,17 @@ if [[ "$runtime_status" -ne 0 ]]; then
     printf 'dogfood failed: executable arena admission suite failed (exit %s)\n' "$runtime_status" >&2
     exit 1
 fi
-printf 'dogfood arena_runtime: malformed arenas rejected and valid DAG sharing accepted\n'
+printf 'dogfood arena_runtime: malformed arenas/resource places rejected and valid DAG sharing accepted\n'
 
 # Exercise the Elisa-native proof-state action layer itself. This is intentionally an
 # executable harness rather than a report-only probe: both branches of split/cases must solve,
 # rewrite requires an explicit equality, and a rejected action must leave the state unsolved.
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/tactic-runtime.o" "$ROOT_DIR/examples/tactic_runtime.elisa" >/dev/null 2>&1
-clang -Wl,-dead_strip -o "$runtime_dir/tactic-runtime" "$runtime_dir/tactic-runtime.o"
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    clang -Wl,-dead_strip -o "$runtime_dir/tactic-runtime" "$runtime_dir/tactic-runtime.o" "$RUNTIME_OBJ"
+else
+    clang -Wl,-dead_strip -o "$runtime_dir/tactic-runtime" "$runtime_dir/tactic-runtime.o"
+fi
 set +e
 "$runtime_dir/tactic-runtime"
 tactic_status=$?

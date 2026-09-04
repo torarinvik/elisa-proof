@@ -7,9 +7,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 set +e
 SELF_HOST_COMPILER="${ELISA_COMPILER_BIN:-}"
 if [[ -z "$SELF_HOST_COMPILER" ]]; then
-    SELF_HOST_COMPILER="$(command -v elisac 2>/dev/null || true)"
+    # `elisac` was a symlink to the Go compiler and is gone; the stage names are
+    # explicit now. Prefer the self-hosted compiler. The probe below only checks
+    # compilation, so it deliberately uses the object mode shared by both stages.
+    for candidate in elisac-stage1 elisac-stage0 elisac; do
+        SELF_HOST_COMPILER="$(command -v "$candidate" 2>/dev/null || true)"
+        [[ -n "$SELF_HOST_COMPILER" ]] && break
+    done
 fi
-"$SELF_HOST_COMPILER" -emit semantic "$ROOT_DIR/examples/kernel_replay_standalone.elisa" >/dev/null 2>&1
+standalone_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-test.XXXXXX")"
+"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/kernel-replay-standalone.o" "$ROOT_DIR/examples/kernel_replay_standalone.elisa" >/dev/null 2>&1
 kernel_replay_standalone_status=$?
 if [[ "$kernel_replay_standalone_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-neutral replay module is not standalone-compilable\n' >&2
@@ -404,6 +411,8 @@ rejected_borrow_four_nested_alias_status=$?
 borrow_move_disjoint_field_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_call_summary.elisa" >/dev/null
 borrow_call_summary_status=$?
+"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_indexed_places.elisa" >/dev/null
+borrow_indexed_places_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_nested_expression.elisa" >/dev/null
 borrow_nested_expression_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_reference_return_summary.elisa" >/dev/null
@@ -446,6 +455,8 @@ rejected_borrow_move_status=$?
 rejected_borrow_escape_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_call.elisa" >/dev/null
 rejected_borrow_call_status=$?
+"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_index_alias.elisa" >/dev/null
+rejected_borrow_index_alias_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_call_alias.elisa" >/dev/null
 rejected_borrow_call_alias_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_resource_branch_move.elisa" >/dev/null
@@ -720,6 +731,8 @@ borrow_four_nested_fields_probe_status=${PIPESTATUS[1]}
 borrow_move_disjoint_field_probe_status=${PIPESTATUS[1]}
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/borrow_call_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "resource-call" and node["name"] == "read_ref" for node in report["kernel"]["nodes"]); assert any(node["kind"] == "resource-call-arg" and node["operator"] == "reference" for node in report["kernel"]["nodes"])'
 borrow_call_summary_probe_status=${PIPESTATUS[1]}
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/borrow_indexed_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "index" and node["value"] in (0, 1) for node in report["kernel"]["nodes"]); assert any(node["kind"] == "resource-call" and node["name"] == "read_index_ref" for node in report["kernel"]["nodes"]); assert any(node["kind"] == "resource-call-arg" and node["operator"] == "borrow" for node in report["kernel"]["nodes"])'
+borrow_indexed_places_probe_status=${PIPESTATUS[1]}
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/borrow_nested_expression.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "resource-call" and node["name"] == "borrow_nested_catch_reader" for node in report["kernel"]["nodes"])'
 borrow_nested_expression_probe_status=${PIPESTATUS[1]}
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/borrow_reference_return_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "resource-call" and node["name"] == "return_reference" for node in report["kernel"]["nodes"])'
@@ -762,6 +775,8 @@ rejected_borrow_move_probe_status=${PIPESTATUS[1]}
 rejected_borrow_escape_probe_status=${PIPESTATUS[1]}
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_borrow_call.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-call-opaque" and finding["status"] == "unsupported" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_borrow_call_probe_status=${PIPESTATUS[1]}
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_borrow_index_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-alias-conflict" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
+rejected_borrow_index_alias_probe_status=${PIPESTATUS[1]}
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_borrow_call_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-call-summary-unsupported" and finding["status"] == "unsupported" for finding in report["findings"]); assert not any(node["kind"] == "resource-call" and node["name"] == "set_inner_ref" for node in report["kernel"]["nodes"]); assert report["replay"]["gaps"] == 0'
 rejected_borrow_call_alias_probe_status=${PIPESTATUS[1]}
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_resource_branch_move.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "resource-use-after-move" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
@@ -864,7 +879,7 @@ if [[ "$rejected_value_match_impure_call_status" -ne 1 || "$rejected_value_match
     exit 1
 fi
 
-if [[ "$borrow_shared_status" -ne 0 || "$borrow_mutable_status" -ne 0 || "$borrow_lexical_scope_status" -ne 0 || "$borrow_disjoint_fields_status" -ne 0 || "$borrow_nested_disjoint_fields_status" -ne 0 || "$borrow_four_nested_fields_status" -ne 0 || "$borrow_move_disjoint_field_status" -ne 0 || "$borrow_call_summary_status" -ne 0 || "$resource_branch_join_status" -ne 0 || "$nested_frame_resource_probe_status" -ne 0 || "$resource_branch_join_probe_status" -ne 0 || "$rejected_borrow_write_status" -ne 1 || "$rejected_borrow_alias_status" -ne 1 || "$rejected_borrow_field_write_status" -ne 1 || "$rejected_borrow_field_alias_status" -ne 1 || "$rejected_borrow_nested_prefix_status" -ne 1 || "$rejected_borrow_four_nested_alias_status" -ne 1 || "$rejected_borrow_move_parent_status" -ne 1 || "$rejected_resource_use_after_move_status" -ne 1 || "$rejected_borrow_move_status" -ne 1 || "$rejected_borrow_escape_status" -ne 1 || "$rejected_borrow_call_status" -ne 1 || "$rejected_borrow_call_alias_status" -ne 1 || "$rejected_resource_branch_move_status" -ne 1 || "$rejected_borrow_mutable_source_status" -ne 1 || "$rejected_borrow_nested_catch_status" -ne 1 || "$rejected_borrow_nested_match_status" -ne 1 || "$borrow_shared_probe_status" -ne 0 || "$borrow_mutable_probe_status" -ne 0 || "$borrow_lexical_scope_probe_status" -ne 0 || "$borrow_disjoint_fields_probe_status" -ne 0 || "$borrow_nested_disjoint_fields_probe_status" -ne 0 || "$borrow_four_nested_fields_probe_status" -ne 0 || "$borrow_move_disjoint_field_probe_status" -ne 0 || "$borrow_call_summary_probe_status" -ne 0 || "$nested_frame_resource_probe_status" -ne 0 || "$resource_branch_join_probe_status" -ne 0 || "$rejected_borrow_write_probe_status" -ne 0 || "$rejected_borrow_alias_probe_status" -ne 0 || "$rejected_borrow_field_write_probe_status" -ne 0 || "$rejected_borrow_field_alias_probe_status" -ne 0 || "$rejected_borrow_nested_prefix_probe_status" -ne 0 || "$rejected_borrow_four_nested_alias_probe_status" -ne 0 || "$rejected_borrow_move_parent_probe_status" -ne 0 || "$rejected_resource_use_after_move_probe_status" -ne 0 || "$rejected_borrow_move_probe_status" -ne 0 || "$rejected_borrow_escape_probe_status" -ne 0 || "$rejected_borrow_call_probe_status" -ne 0 || "$rejected_borrow_call_alias_probe_status" -ne 0 || "$rejected_resource_branch_move_probe_status" -ne 0 || "$rejected_borrow_mutable_source_probe_status" -ne 0 || "$rejected_borrow_nested_catch_probe_status" -ne 0 || "$rejected_borrow_nested_match_probe_status" -ne 0 ]]; then
+if [[ "$borrow_shared_status" -ne 0 || "$borrow_mutable_status" -ne 0 || "$borrow_lexical_scope_status" -ne 0 || "$borrow_disjoint_fields_status" -ne 0 || "$borrow_nested_disjoint_fields_status" -ne 0 || "$borrow_four_nested_fields_status" -ne 0 || "$borrow_move_disjoint_field_status" -ne 0 || "$borrow_call_summary_status" -ne 0 || "$borrow_indexed_places_status" -ne 0 || "$resource_branch_join_status" -ne 0 || "$nested_frame_resource_probe_status" -ne 0 || "$resource_branch_join_probe_status" -ne 0 || "$rejected_borrow_write_status" -ne 1 || "$rejected_borrow_alias_status" -ne 1 || "$rejected_borrow_field_write_status" -ne 1 || "$rejected_borrow_field_alias_status" -ne 1 || "$rejected_borrow_nested_prefix_status" -ne 1 || "$rejected_borrow_four_nested_alias_status" -ne 1 || "$rejected_borrow_move_parent_status" -ne 1 || "$rejected_resource_use_after_move_status" -ne 1 || "$rejected_borrow_move_status" -ne 1 || "$rejected_borrow_escape_status" -ne 1 || "$rejected_borrow_call_status" -ne 1 || "$rejected_borrow_index_alias_status" -ne 1 || "$rejected_borrow_call_alias_status" -ne 1 || "$rejected_resource_branch_move_status" -ne 1 || "$rejected_borrow_mutable_source_status" -ne 1 || "$rejected_borrow_nested_catch_status" -ne 1 || "$rejected_borrow_nested_match_status" -ne 1 || "$borrow_shared_probe_status" -ne 0 || "$borrow_mutable_probe_status" -ne 0 || "$borrow_lexical_scope_probe_status" -ne 0 || "$borrow_disjoint_fields_probe_status" -ne 0 || "$borrow_nested_disjoint_fields_probe_status" -ne 0 || "$borrow_four_nested_fields_probe_status" -ne 0 || "$borrow_move_disjoint_field_probe_status" -ne 0 || "$borrow_call_summary_probe_status" -ne 0 || "$borrow_indexed_places_probe_status" -ne 0 || "$nested_frame_resource_probe_status" -ne 0 || "$resource_branch_join_probe_status" -ne 0 || "$rejected_borrow_write_probe_status" -ne 0 || "$rejected_borrow_alias_probe_status" -ne 0 || "$rejected_borrow_field_write_probe_status" -ne 0 || "$rejected_borrow_field_alias_probe_status" -ne 0 || "$rejected_borrow_nested_prefix_probe_status" -ne 0 || "$rejected_borrow_four_nested_alias_probe_status" -ne 0 || "$rejected_borrow_move_parent_probe_status" -ne 0 || "$rejected_resource_use_after_move_probe_status" -ne 0 || "$rejected_borrow_move_probe_status" -ne 0 || "$rejected_borrow_escape_probe_status" -ne 0 || "$rejected_borrow_call_probe_status" -ne 0 || "$rejected_borrow_index_alias_probe_status" -ne 0 || "$rejected_borrow_call_alias_probe_status" -ne 0 || "$rejected_resource_branch_move_probe_status" -ne 0 || "$rejected_borrow_mutable_source_probe_status" -ne 0 || "$rejected_borrow_nested_catch_probe_status" -ne 0 || "$rejected_borrow_nested_match_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: resource statuses shared=%s mutable=%s call_summary=%s branch_join=%s rejected_branch_move=%s probes call_summary=%s nested_frame=%s branch_join=%s rejected_call_alias=%s rejected_branch_move=%s\n' "$borrow_shared_status" "$borrow_mutable_status" "$borrow_call_summary_status" "$resource_branch_join_status" "$rejected_resource_branch_move_status" "$borrow_call_summary_probe_status" "$nested_frame_resource_probe_status" "$resource_branch_join_probe_status" "$rejected_borrow_call_alias_probe_status" "$rejected_resource_branch_move_probe_status" >&2
     exit 1
 fi
