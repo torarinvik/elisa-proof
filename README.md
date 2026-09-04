@@ -50,6 +50,8 @@ the source completeness and semantic-admissibility gates.
 Use `build/elisa-proof --suggest N file.elisa` to narrow that catalog to verified lemmas whose
 conclusions first-order match goal `N`. The deterministic response includes inferred parameter
 bindings, instantiated premises, and whether the current goal facts discharge every premise.
+`premises_satisfied` reports local proof search independently, while `applicable` additionally
+requires the imported source to pass its semantic/replay admissibility gates.
 Suggestions are navigation hints only: they do not admit a goal or bypass tactic and kernel replay.
 Goal-generated entries in `findings` also expose their exact `goal_id`; non-goal diagnostics use
 `null`.
