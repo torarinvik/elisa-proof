@@ -21,8 +21,10 @@ report with the compatibility verdict, an explicit `verification_state` (`proved
 `unsupported`, or `unknown`), the expanded-source byte count and observational FNV-1a fingerprint,
 trust-boundary counters, structured findings, replay coverage, compiler semantic diagnostics, and
 every goal attempt (including failed goals) with its hypotheses and structured expression tree.
-The `trust` object also contains an explicit `trusted_assumptions` ledger; it is empty in the
-current system, and future foreign axioms or unchecked escape hatches must appear there explicitly.
+The `trust` object contains an itemized `boundary_facts` ledger (kind, source owner/line, and
+source-neutral kernel root) whose length must equal `trusted_boundary_facts`, plus an explicit
+`trusted_assumptions` ledger. The latter is empty in the current system, and future foreign axioms
+or unchecked escape hatches must appear there explicitly.
 `declaration_details` provides deterministic source-level
 function/module metadata, parameter names, contract counts, recursion/purity/structural flags,
 and executable-summary status. For executable functions, `verified` is true only after the body
