@@ -336,9 +336,11 @@ Runtime ownership transfers (`move`) are modeled as conservative state transitio
 root becomes unavailable and all symbolic facts are discarded across the transfer. The resource
 kernel now also models the sound local region subset: `region r(size)` and `region r(size):`
 introduce tracked lifetimes, `new[r] value` records allocation into `@r` whether its result is
-bound or discarded, aliases/reassignments retain the region identity, and explicit or implicit
-region close transitions are replayed. Region-owned values in logical contracts, opaque calls,
-and opaque calls remain rejected until their provenance is summarized. Exact region-polymorphic
+bound, discarded, or passed directly to a reference parameter, aliases/reassignments retain the
+region identity, and explicit or implicit region close transitions are replayed. Fresh call
+temporaries have no caller-visible place; mutable callee effects are checked but cannot escape or
+be exported into caller state. Region-owned values in logical contracts and opaque calls remain
+rejected until their provenance is summarized. Exact region-polymorphic
 calls are supported when a pinned reference formal witnesses each `[@r]` parameter: the callee
 summary records the region return and the kernel replays the mapped `resource-call-result` against
 the caller's live region. Scalar-only calls to a region-polymorphic function remain rejected

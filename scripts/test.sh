@@ -35,6 +35,12 @@ if [[ "$(basename "$SELF_HOST_COMPILER")" == "elisac-stage1" ]]; then
         printf 'proof test matrix failed: stage1 rejected region-polymorphic new[r] allocation\n' >&2
         exit 1
     fi
+    "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/region-new-call.o" "$ROOT_DIR/examples/region_new_call_argument.elisa" >/dev/null 2>&1
+    region_new_call_compiler_status=$?
+    if [[ "$region_new_call_compiler_status" -ne 0 ]]; then
+        printf 'proof test matrix failed: stage1 rejected new[r] passed to a reference formal\n' >&2
+        exit 1
+    fi
 fi
 "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/region-statement.o" "$ROOT_DIR/examples/region_statement.elisa" >/dev/null 2>&1
 region_statement_compiler_status=$?
@@ -54,7 +60,7 @@ if [[ "$json_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: JSON report is not a valid structured proof state\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant arithmetic_identity equality_alias quantifier collection_quantifier quantifier_structural_terms difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds slice_kernel indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel dogfood_kernel_core region_allocation region_statement region_auto_close; do
+for replay_fixture in replay_constant arithmetic_identity equality_alias quantifier collection_quantifier quantifier_structural_terms difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds slice_kernel indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel dogfood_kernel_core region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
     "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -72,6 +78,31 @@ fi
 region_generic_probe_status=${PIPESTATUS[1]}
 if [[ "$region_generic_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: region-polymorphic new[r] call/result was not replayed\n' >&2
+    exit 1
+fi
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_new_call_argument.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert "resource-region-call-alloc" in kinds and any(node["kind"] == "resource-call-arg" and node["operator"] == "region-new" for node in report["kernel"]["nodes"])'
+region_new_call_probe_status=${PIPESTATUS[1]}
+if [[ "$region_new_call_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: direct new[r] call temporary was not independently replayed\n' >&2
+    exit 1
+fi
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_new_mutable_call_argument.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "resource-region-call-alloc" for node in report["kernel"]["nodes"])'
+region_new_mutable_call_probe_status=${PIPESTATUS[1]}
+if [[ "$region_new_mutable_call_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: mutable new[r] call temporary was not independently replayed\n' >&2
+    exit 1
+fi
+set +e
+rejected_region_new_return_report="$standalone_probe_dir/rejected-region-new-return.json"
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_new_return_argument.elisa" >"$rejected_region_new_return_report"
+rejected_region_new_return_status=$?
+set -e
+if [[ "$rejected_region_new_return_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: new[r] temporary escaped through a reference return\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "borrow-escape" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_region_new_return_report"; then
+    printf 'proof test matrix failed: region temporary escape report was incomplete\n' >&2
     exit 1
 fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert kinds.count("resource-region-open") == 1 and kinds.count("resource-region-close") == 1 and "resource-region-alloc" in kinds and "resource-region-bind" in kinds and "resource-region-alloc-discard" in kinds'
