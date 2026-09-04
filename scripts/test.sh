@@ -248,14 +248,14 @@ if [[ "$rejected_conditional_status" -ne 1 ]]; then
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/implicit_structural_decreases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/implicit_structural_decreases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'
 implicit_structural_status=${PIPESTATUS[1]}
 if [[ "$implicit_structural_status" -ne 0 ]]; then
     printf 'proof test matrix failed: implicit structural termination\n' >&2
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/inferred_product_structural_decreases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/inferred_product_structural_decreases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'
 inferred_product_structural_status=${PIPESTATUS[1]}
 if [[ "$inferred_product_structural_status" -ne 0 ]]; then
     printf 'proof test matrix failed: inferred product structural termination\n' >&2

@@ -32,6 +32,31 @@ extend ElisaProof:
             name: sview
             subject: sview
 
+        # One source-neutral witness for a recursive edge. `same` records the unchanged
+        # component of an inferred product ranking; `strict` records the component that came
+        # from a matched strict subterm. The kernel checks the relation shape independently of
+        # the AST walker that discovered it.
+        struct ProofStructuralWitness:
+            subject: sview
+            argument: sview
+            strict: bool
+
+        def proof_add_structural_edge_attempt(report: mutable ProofReport&, caller: sview, callee: sview, witnesses: darray[ProofStructuralWitness]&, line: u32) -> void:
+            return if caller == "" or callee == "" or witnesses.count == 0
+            for witness in witnesses |witness|:
+                return if witness.subject == "" or witness.argument == ""
+                return if not witness.strict and witness.subject != witness.argument
+            witness_start: usize = report.kernel_children.count
+            witness_nodes: mutable darray[usize] = []
+            for witness in witnesses |witness, report, witness_nodes|:
+                witness_nodes.push(proof_kernel_add_node(&report.kernel_nodes, "structural-argument", "strict" if witness.strict else "same", 0, 0, 0, 0, 0, 0, witness.subject, witness.argument))
+            report.kernel_children.extend(witness_nodes)
+            edge_start: usize = report.kernel_children.count
+            edge: usize = proof_kernel_add_node(&report.kernel_nodes, "structural-edge", "", 0, 0, 0, witness_start, witnesses.count, 0, caller, callee)
+            report.kernel_children.push(edge)
+            root: usize = proof_kernel_add_node(&report.kernel_nodes, "structural-safety", "", 0, 0, 0, edge_start, 1, 0, caller, "structural-v1")
+            proof_add_structural_goal_attempt(report, root, line, caller)
+
         def proof_empty_flow() -> ProofFlow:
             return ProofFlow{normal: true, breaks: false, continues: false, valid: true, continue_name_starts: [], continue_name_counts: [], continue_names: [], continue_value_starts: [], continue_value_counts: [], continue_values: [], continue_fact_starts: [], continue_fact_counts: [], continue_facts: []}
 
@@ -1968,16 +1993,22 @@ extend ElisaProof:
                             enum_subjects: darray[sview] = proof_enum_parameter_names_from_parameters(parameters, destructurable)
                             multi_valid: mutable bool = enum_subjects.count > 0
                             multi_strict: mutable bool = false
-                            for subject in enum_subjects |subject, arguments, argument_names, parameters, smaller, multi_valid, multi_strict|:
+                            witnesses: mutable darray[ProofStructuralWitness] = []
+                            for subject in enum_subjects |subject, arguments, argument_names, parameters, smaller, multi_valid, multi_strict, witnesses|:
                                 subject_index: usize = proof_parameter_position(parameters, subject)
                                 recursive_argument: Ast::Expr = proof_structural_call_argument(arguments, argument_names, parameters, subject_index)
                                 recursive_name: sview = proof_ident_name(recursive_argument)
                                 if proof_structural_argument_is_smaller_for_subject(recursive_argument, subject, smaller):
                                     multi_strict <- true
+                                    argument_root: sview = proof_structural_argument_root(recursive_argument)
+                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: argument_root, strict: true}) if argument_root != ""
                                 elif recursive_name != subject:
                                     multi_valid <- false
+                                else:
+                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: subject, strict: false})
                             if multi_valid and multi_strict:
                                 report.proof_obligation(true)
+                                proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line)
                             else:
                                 proof_structural_termination_finding(report, position.line, name, "recursive call must preserve or strictly descend every inferred enum subject")
                         else:
@@ -1987,6 +2018,11 @@ extend ElisaProof:
                             recursive_name: sview = proof_ident_name(recursive_argument)
                             if proof_structural_argument_is_smaller(recursive_argument, smaller):
                                 report.proof_obligation(true)
+                                argument_root: sview = proof_structural_argument_root(recursive_argument)
+                                witness_subject: mutable sview = proof_structural_argument_subject(recursive_argument, smaller)
+                                witness_subject <- parameters[recursive_position].name if witness_subject == "" and recursive_position < parameters.count
+                                witnesses: darray[ProofStructuralWitness] = [ProofStructuralWitness{subject: witness_subject, argument: argument_root, strict: true}]
+                                proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line)
                             else:
                                 proof_structural_termination_finding(report, position.line, name, "recursive call does not pass a binder from a matched strict subterm")
                     proof_structural_check_expression(callee, own_name, subject_position, parameters, destructurable, smaller, report, name)
