@@ -43,7 +43,8 @@ carried explicitly as `proved`, `disproved`, `unsupported`, or `unknown` in the 
 `dependency_index` provides the reverse mapping from theorem/function-summary dependency names to
 the stable goal IDs that consume them, making downstream invalidation direct and deterministic.
 `build/elisa-proof --theorems file.elisa` emits a compact `elisa-proof-theorems-v1` catalog for
-proof search. Each Elisa lemma includes its structured parameters, preconditions, postconditions,
+proof search. Each Elisa lemma includes its structured parameter names and Elisa type expressions,
+preconditions, postconditions,
 termination measure, recursion flag, verification state, and rejection reason. Unverified lemmas
 remain discoverable for repair but are never presented as usable theorems; the catalog also carries
 the source completeness and semantic-admissibility gates.
