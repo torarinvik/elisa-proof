@@ -77,7 +77,9 @@ The proof kernel is intentionally fail-closed:
    root becomes unavailable and all symbolic facts are discarded across the move. The resource
    state also models local region identities: both block and statement-form region declarations,
    bound/discarded `new[r]` allocations, same-region aliases, explicit `destroy r`, and implicit
-   function-scope close are source-neutral transitions independently replayed by the kernel.
+   function-scope close are source-neutral transitions independently replayed by the kernel. Replay
+   tracks region liveness separately from its source spelling, invalidating owned bindings and
+   inherited aliases at close so a same-named later region cannot resurrect stale storage.
    Region-owned values in logical contracts, opaque calls, and richer returned-reference forms
    remain rejected rather than treated as transparent values.
    `parallel for` is checked in a cloned worker state, but is then a hard proof-state barrier:

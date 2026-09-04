@@ -168,8 +168,10 @@ if [[ "$continue_decreases_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: straight-line continue decreases path was not checked\n' >&2
     exit 1
 fi
+set +e
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_getelse_recovery.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "getelse-recovery-nonterminating" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_getelse_recovery_probe_status=${PIPESTATUS[1]}
+set -e
 if [[ "$rejected_getelse_recovery_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: falling-through get-else recovery was not rejected\n' >&2
     exit 1
@@ -360,7 +362,7 @@ if [[ "$fixed_array_bounds_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: fixed-array type bounds\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["declarations"] == 8; assert report["summary"]["obligations"] == 16; assert report["replay"]["gaps"] == 0; assert [goal["goal_id"] for goal in report["goals"]] == list(range(len(report["goals"]))); assert [certificate["certificate_id"] for certificate in report["certificates"]] == list(range(len(report["certificates"]))); assert all(goal["certificate_id"] is not None for goal in report["goals"]); assert all(goal["certificate_id"] < len(report["certificates"]) for goal in report["goals"])'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["declarations"] == 9; assert report["summary"]["obligations"] == 20; assert report["replay"]["gaps"] == 0; assert [goal["goal_id"] for goal in report["goals"]] == list(range(len(report["goals"]))); assert [certificate["certificate_id"] for certificate in report["certificates"]] == list(range(len(report["certificates"]))); assert all(goal["certificate_id"] is not None for goal in report["goals"]); assert all(goal["certificate_id"] < len(report["certificates"]) for goal in report["goals"])'
 dogfood_core_contract_probe_status=${PIPESTATUS[1]}
 if [[ "$dogfood_core_contract_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: direct calls to dogfood kernel contracts\n' >&2
