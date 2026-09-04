@@ -410,6 +410,52 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     missing_call_event_admitted: bool = proof_kernel_replay_resource_report(&generic_call_nodes, &generic_call_children, [], missing_call_event)
     return 46 if missing_call_event_admitted
 
+    # A single serialized call may produce at most one resource result and may be replayed only
+    # once. Otherwise one call node could duplicate an effect or mint multiple output bindings.
+    duplicate_result_start: usize = generic_call_children.count
+    generic_call_children.push(generic_caller_open)
+    generic_call_children.push(generic_seed_alloc)
+    generic_call_children.push(generic_call)
+    generic_call_children.push(generic_result)
+    generic_call_children.push(generic_result)
+    generic_call_children.push(generic_close)
+    duplicate_result: usize = add_node(&generic_call_nodes, "resource-safety", "", 0, 0, 0, duplicate_result_start, 6, 0, "duplicate-result", "resource-v1")
+    duplicate_result_admitted: bool = proof_kernel_replay_resource_report(&generic_call_nodes, &generic_call_children, [], duplicate_result)
+    return 50 if duplicate_result_admitted
+
+    duplicate_call_start: usize = generic_call_children.count
+    generic_call_children.push(generic_caller_open)
+    generic_call_children.push(generic_seed_alloc)
+    generic_call_children.push(generic_call)
+    generic_call_children.push(generic_call)
+    generic_call_children.push(generic_close)
+    duplicate_call: usize = add_node(&generic_call_nodes, "resource-safety", "", 0, 0, 0, duplicate_call_start, 5, 0, "duplicate-call", "resource-v1")
+    duplicate_call_admitted: bool = proof_kernel_replay_resource_report(&generic_call_nodes, &generic_call_children, [], duplicate_call)
+    return 51 if duplicate_call_admitted
+
+    # A callee summary cannot leave a local region active. External region parameters may cross
+    # the call boundary, but a callee-local region must be closed before its effects are composed.
+    leaky_callee_open: usize = add_node(&generic_call_nodes, "resource-region-open", "", 0, 0, 0, 0, 0, 0, "local", "")
+    leaky_callee_start: usize = generic_call_children.count
+    generic_call_children.push(generic_region_param)
+    generic_call_children.push(generic_owner)
+    generic_call_children.push(generic_value)
+    generic_call_children.push(leaky_callee_open)
+    generic_call_children.push(generic_return)
+    leaky_callee: usize = add_node(&generic_call_nodes, "resource-safety", "", 0, 0, 2, leaky_callee_start, 5, 0, "leaky-make", "resource-v1")
+    leaky_call_start: usize = generic_call_children.count
+    generic_call_children.push(generic_call_arg_owner)
+    generic_call_children.push(generic_call_arg_value)
+    generic_call_children.push(generic_call_region)
+    leaky_call: usize = add_node(&generic_call_nodes, "resource-call", "", leaky_callee, 1, 2, leaky_call_start, 3, 0, "leaky-make", "")
+    leaky_report_start: usize = generic_call_children.count
+    generic_call_children.push(generic_caller_open)
+    generic_call_children.push(generic_seed_alloc)
+    generic_call_children.push(leaky_call)
+    leaky_report: usize = add_node(&generic_call_nodes, "resource-safety", "", 0, 0, 0, leaky_report_start, 3, 0, "leaky-caller", "resource-v1")
+    leaky_report_admitted: bool = proof_kernel_replay_resource_report(&generic_call_nodes, &generic_call_children, [], leaky_report)
+    return 53 if leaky_report_admitted
+
     # A region-new call argument is admitted only when it names a live region and points to the
     # exact allocation event. Merely relabelling an arbitrary expression as a fresh allocation
     # must not manufacture a writable temporary in the trusted replay kernel.
@@ -442,6 +488,20 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     generic_call_children.push(forged_call_temporary_call)
     forged_call_temporary_report: usize = add_node(&generic_call_nodes, "resource-safety", "", 0, 0, 0, forged_call_temporary_report_start, 2, 0, "forged-call-temporary", "resource-v1")
     return 36 if proof_kernel_replay_resource_report(&generic_call_nodes, &generic_call_children, [], forged_call_temporary_report)
+
+    reused_call_children_start: usize = generic_call_children.count
+    generic_call_children.push(call_temporary_owner)
+    generic_call_children.push(generic_call_arg_value)
+    generic_call_children.push(generic_call_region)
+    reused_call: usize = add_node(&generic_call_nodes, "resource-call", "", generic_callee, 1, 2, reused_call_children_start, 3, 0, "make", "")
+    reused_call_report_start: usize = generic_call_children.count
+    generic_call_children.push(generic_caller_open)
+    generic_call_children.push(call_temporary_alloc)
+    generic_call_children.push(call_temporary_call)
+    generic_call_children.push(reused_call)
+    reused_call_report: usize = add_node(&generic_call_nodes, "resource-safety", "", 0, 0, 0, reused_call_report_start, 4, 0, "reused-call-allocation", "resource-v1")
+    reused_call_admitted: bool = proof_kernel_replay_resource_report(&generic_call_nodes, &generic_call_children, [], reused_call_report)
+    return 52 if reused_call_admitted
 
     # Region rebinding is a write to the target binding. It may not resurrect a moved target.
     illegal_region_nodes: mutable darray[ProofKernelNode] = []
@@ -481,6 +541,18 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     illegal_borrow_root: usize = add_node(&illegal_borrow_nodes, "resource-safety", "", 0, 0, 0, 0, 4, 0, "illegal-borrow-rebind", "resource-v1")
     illegal_borrow_admitted: bool = proof_kernel_replay_resource_report(&illegal_borrow_nodes, &illegal_borrow_children, [], illegal_borrow_root)
     return 48 if illegal_borrow_admitted
+
+    # A return-region marker must be backed by either a live region-owned binding or a direct
+    # returned allocation. A naked marker cannot manufacture a reference result.
+    naked_return_nodes: mutable darray[ProofKernelNode] = []
+    naked_return_children: mutable darray[usize] = []
+    naked_return_param: usize = add_node(&naked_return_nodes, "resource-region-param", "external", 0, 0, 0, 0, 0, 0, "r", "")
+    naked_return_marker: usize = add_node(&naked_return_nodes, "resource-region-return", "param", 0, 0, 0, 0, 0, 0, "r", "")
+    naked_return_children.push(naked_return_param)
+    naked_return_children.push(naked_return_marker)
+    naked_return_root: usize = add_node(&naked_return_nodes, "resource-safety", "", 0, 0, 0, 0, 2, 0, "naked-return", "resource-v1")
+    naked_return_admitted: bool = proof_kernel_replay_resource_report(&naked_return_nodes, &naked_return_children, [], naked_return_root)
+    return 49 if naked_return_admitted
 
     # Rewriting under a quantifier body is rejected until the arena has binding-aware names.
     # Otherwise a free replacement name can be captured by the body's binder (`y == x` under
