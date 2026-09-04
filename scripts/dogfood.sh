@@ -108,6 +108,10 @@ run_probe borrow_symbolic_disjoint examples/borrow_symbolic_disjoint.elisa 0
 run_probe rejected_borrow_symbolic_alias examples/rejected_borrow_symbolic_alias.elisa 1
 run_probe for_invariant examples/for_invariant.elisa 0
 run_probe for_loop_control_invariant examples/for_loop_control_invariant.elisa 0
+run_probe region_allocation examples/region_allocation.elisa 0
+run_probe region_statement examples/region_statement.elisa 0
+run_probe region_auto_close examples/region_auto_close.elisa 0
+run_probe rejected_region_use_after_destroy examples/rejected_region_use_after_destroy.elisa 1
 run_probe rejected_for_invariant examples/rejected_for_invariant.elisa 1
 run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.elisa 1
 

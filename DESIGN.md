@@ -74,9 +74,12 @@ The proof kernel is intentionally fail-closed:
    complete nested call expression is certified total-pure; effectful nested calls remain rejected
    until the evaluator can retain their exact post-call value.
    Runtime ownership-transfer expressions are modeled as conservative state transitions: a moved
-   root becomes unavailable and all symbolic facts are discarded across the move. Ownership
-   transfers in logical contracts and region-allocation expressions remain outside the proof-state
-   model and are rejected rather than treated as transparent values.
+   root becomes unavailable and all symbolic facts are discarded across the move. The resource
+   state also models local region identities: both block and statement-form region declarations,
+   bound/discarded `new[r]` allocations, same-region aliases, explicit `destroy r`, and implicit
+   function-scope close are source-neutral transitions independently replayed by the kernel.
+   Region-owned values in logical contracts, opaque calls, and richer returned-reference forms
+   remain rejected rather than treated as transparent values.
    `parallel for` is checked in a cloned worker state, but is then a hard proof-state barrier:
    sequential facts, symbolic values, and worker transfers are not allowed to cross its join until
    the kernel models worker isolation, reduction ownership, and structured-concurrency joins.
@@ -97,8 +100,9 @@ The proof kernel is intentionally fail-closed:
    exact formal/actual mapping and a verified callee `resource-safety` root; the kernel replays
    that callee trace from an empty state, checks shared/mutable permissions at the call site, and
    propagates only summarized external writes back to the caller. Recursive-SCC, defaulted,
-   dynamic, and opaque resource calls remain unsupported. Region allocation and richer returned
-   reference expressions remain outside the resource kernel until they have replayable identities.
+   dynamic, and opaque resource calls remain unsupported. Interprocedural region propagation and
+   richer returned-reference expressions remain outside the resource kernel until their replayable
+   identities and lifetime summaries are explicit.
    Continuing control-flow joins emit explicit move-join transitions for inherited bindings moved
    on any branch. The source state and replay kernel both treat those bindings as unavailable
    afterward, while purely lexical child bindings remain scoped and are discarded at the join.
@@ -471,7 +475,7 @@ isolation check, not a claim that the full replay implementation has already bee
 verified by Elisa-Proof; progressively annotating and dogfooding the replay engine remains work.
 
 The next high-value kernel extensions are symbolic index/heap alias reasoning beyond the current
-closed-literal indexed-place calculus, region identities and interprocedural resource
-summaries that can replay borrow lifetimes, an independently checked SMT/bit-vector backend behind
+closed-literal indexed-place calculus, interprocedural region/resource summaries that can replay
+borrow lifetimes, an independently checked SMT/bit-vector backend behind
 the same obligation interface, and structured-concurrency isolation/reduction rules. These should
 extend the kernel without weakening the rules above.

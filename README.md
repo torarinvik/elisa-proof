@@ -333,9 +333,12 @@ remain unsupported until loop-target resolution is imported.
 state, but no sequential fact, symbolic value, or worker control-flow result is exported across
 the join until isolation, reduction ownership, and join semantics are represented explicitly.
 Runtime ownership transfers (`move`) are modeled as conservative state transitions: the moved
-root becomes unavailable and all symbolic facts are discarded across the transfer. Moves in
-logical contracts and region allocation expressions remain rejected until the kernel carries
-precise resource and lifetime state.
+root becomes unavailable and all symbolic facts are discarded across the transfer. The resource
+kernel now also models the sound local region subset: `region r(size)` and `region r(size):`
+introduce tracked lifetimes, `new[r] value` records allocation into `@r` whether its result is
+bound or discarded, aliases/reassignments retain the region identity, and explicit or implicit
+region close transitions are replayed. Region-owned values in logical contracts, opaque calls,
+and richer returned-reference expressions remain rejected until their provenance is summarized.
 The proof checker now carries a separate lexical resource state for a useful ownership slice:
 bounded named places (`&x`, `&box.inner`, and arbitrary named-field paths within the kernel depth
 bound) have stable structural identities,
@@ -351,9 +354,9 @@ Recursive-SCC, defaulted, dynamic, and opaque calls remain unsupported.
 Successful resource checks emit a source-neutral transition trace with explicit lexical scope
 nodes, explicit place terms, and post-branch move-join transitions; the independent kernel replays
 that trace before counting the resource obligation as certified. A move on any continuing branch
-therefore makes the inherited root unavailable after the join. Region allocation and richer
-returned-reference forms remain explicit unsupported boundaries. Return and assignment boundaries
-now distinguish a
+therefore makes the inherited root unavailable after the join. Region allocation is supported
+only through the explicit local lifetime transitions described above; richer returned-reference
+forms remain an explicit unsupported boundary. Return and assignment boundaries now distinguish a
 temporary borrow passed to a verified value-returning call from the value that actually escapes;
 direct reference-formal returns may also compose when the actual reference is externally owned,
 while field/conditional/aggregate reference results remain conservative until their source
