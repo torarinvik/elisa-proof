@@ -1064,12 +1064,23 @@ focused_open_goal_status=${PIPESTATUS[0]}
 focused_proved_goal_status=${PIPESTATUS[0]}
 "$ROOT_DIR/build/elisa-proof" --goal 999999 "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["status"] == "not_found"; assert goal["goal"] is None; assert goal["failure"] is None'
 focused_missing_goal_status=${PIPESTATUS[0]}
+python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/goal_fingerprint_a.elisa" "$ROOT_DIR/examples/goal_fingerprint_b.elisa" <<'PY'
+import json
+import subprocess
+import sys
+
+first = json.loads(subprocess.check_output([sys.argv[1], "--goal", "1", sys.argv[2]]))
+shifted = json.loads(subprocess.check_output([sys.argv[1], "--goal", "2", sys.argv[3]]))
+assert first["goal_fingerprint"] == shifted["goal_fingerprint"]
+assert first["goal"]["line"] != shifted["goal"]["line"]
+PY
+stable_goal_fingerprint_status=$?
 "$ROOT_DIR/build/elisa-proof" --goal 4294967296 "$ROOT_DIR/examples/verified.elisa" >/dev/null
 focused_overflow_goal_status=$?
 "$ROOT_DIR/build/elisa-proof" --goal -1 "$ROOT_DIR/examples/verified.elisa" >/dev/null
 focused_negative_goal_status=$?
 set -e
-if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$focused_open_goal_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 ]]; then
+if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$focused_open_goal_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 || "$stable_goal_fingerprint_status" -ne 0 ]]; then
     printf 'proof test matrix failed: repair diagnostics were not bound to exact goals\n' >&2
     exit 1
 fi
@@ -1143,23 +1154,39 @@ if [[ "$portable_nested_cases_status" -ne 0 ]]; then
     printf 'proof test matrix failed: nested portable cases tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target_nested_branch.json" "$ROOT_DIR/examples/verified_branch.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source_goal_binding"] == {"bound": True, "goal_id": 1, "previously_proven": True}; assert report["tactic"]["certificate_replayed"] is True; assert report["branches"]["left"]["branches"]["right"]["solved"] is True'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target_nested_branch.json" "$ROOT_DIR/examples/verified_branch.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 1 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert report["branches"]["left"]["branches"]["right"]["solved"] is True'
 source_nested_branch_status=${PIPESTATUS[0]}
 if [[ "$source_nested_branch_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound nested branch tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source_goal_binding"] == {"bound": True, "goal_id": 7, "previously_proven": True}; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 1'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 1'
 source_bound_script_status=${PIPESTATUS[0]}
 if [[ "$source_bound_script_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic script\n' >&2
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert report["source_goal_binding"] == {"bound": True, "goal_id": 1, "previously_proven": False}; assert report["tactic"]["certificate_replayed"] is True'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]; assert binding["goal_fingerprint"]["value"] == 1172841562 and binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True'
 repair_target_status=${PIPESTATUS[0]}
 if [[ "$repair_target_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic could not repair an open target\n' >&2
+    exit 1
+fi
+
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_shifted.json" "$ROOT_DIR/examples/tactic_repair_target_shifted.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["goal_id"] == 2; assert binding["goal_fingerprint"]["value"] == 1172841562; assert binding["fingerprint_match"] is True'
+shifted_repair_target_status=${PIPESTATUS[0]}
+if [[ "$shifted_repair_target_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: stable target proof did not survive unrelated source insertion\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_stale_goal.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["fingerprint_match"] is False; assert report["tactic"]["valid"] is False; assert "goal_fingerprint" in report["tactic"]["reason"]'
+stale_repair_target_status=${PIPESTATUS[0]}
+set -e
+if [[ "$stale_repair_target_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: stale target goal fingerprint was admitted\n' >&2
     exit 1
 fi
 

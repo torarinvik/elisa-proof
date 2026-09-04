@@ -78,7 +78,12 @@ runner then takes the exact goal and traced facts captured for imported source g
 `initial` is rejected in this mode, so a proof of a different proposition cannot be relabeled as a
 source proof. The command imports and checks the Elisa source, then requires the script's
 transition trace and final certificate to replay independently; an optional unsigned
-`source_fingerprint` makes stale scripts fail closed. The result is a compact
+`source_fingerprint` makes any source edit invalidate the script. A source-bound script may
+instead put the focused view's canonical value in `target.goal_fingerprint`; this binds the script
+to the exact source-neutral proposition and ordered hypotheses while allowing unrelated
+declarations or source-line shifts. The FNV value is an incremental identity guard rather than
+cryptographic proof; the matching term and complete tactic certificate are still independently
+replayed. The result is a compact
 `elisa-proof-tactic-result-v1` document containing the source-goal binding, final state, and trace.
 For a source-bound script, top-level `status: "proved"` means the selected target was admitted; it
 does not claim that every source obligation is closed. The nested `source.complete` field retains

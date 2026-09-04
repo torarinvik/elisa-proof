@@ -79,6 +79,71 @@ def proof_source_fingerprint(source: darray[u8]&) -> u32:
         hash <- ((hash ^ byte.i64()) * 16777619) % 4294967296
     return hash.u32()
 
+# Canonical identity encoding for one source-neutral kernel term. Arena indices and unrelated
+# source positions are deliberately excluded, so inserting an unrelated declaration does not
+# invalidate a cached target proof. This fingerprint is an incremental cache/binding guard, not a
+# cryptographic proof; the independently replayed term remains the admission authority.
+def proof_push_kernel_identity(buffer: mutable darray[u8]&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+    requires depth <= 128
+    decreases 128 - depth
+    return false if depth >= 128 or root >= nodes.count
+    node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+    proof_push(buffer, "(")
+    proof_push(buffer, node.kind)
+    proof_push(buffer, ":")
+    proof_push(buffer, node.operator)
+    proof_push(buffer, ":")
+    proof_push_json_i64(buffer, node.value)
+    proof_push(buffer, ":")
+    proof_push_json_string(buffer, node.name)
+    proof_push(buffer, ":")
+    proof_push_json_string(buffer, node.secondary_name)
+    valid: mutable bool = true
+    match node.kind:
+        "unary" or "move" or "field" or "scope" or "call_arg" or "checked-get":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "binary" or "index" or "checked-index" or "dict_entry":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "if" or "slice":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.auxiliary, depth + 1) and valid
+        "call" or "index-n" or "construct" or "record-update":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "array" or "tuple" or "set" or "dict":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "quantifier":
+            proof_push(buffer, ":")
+            proof_push_json_i64(buffer, node.auxiliary.i64())
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        _:
+            pass
+    proof_push(buffer, ")")
+    return valid
+
+def proof_goal_fingerprint(report: ProofReport&, attempt: ProofGoalAttempt) -> (valid: bool, value: u32) can[Memory.Allocate, Abort.Panic]:
+    return (false, 0) if attempt.kernel_facts_start > report.kernel_certificate_facts.count or attempt.kernel_facts_count > report.kernel_certificate_facts.count - attempt.kernel_facts_start
+    identity: mutable darray[u8] = []
+    proof_push(&identity, "elisa-proof-goal-v1:")
+    valid: mutable bool = true
+    for index in 0..<attempt.kernel_facts_count |index, attempt, report, identity, valid|:
+        proof_push(&identity, "F")
+        root: usize = report.kernel_certificate_facts[attempt.kernel_facts_start + index]
+        valid <- proof_push_kernel_identity(&identity, report.kernel_nodes, report.kernel_children, root, 0) and valid
+    proof_push(&identity, "G")
+    valid <- proof_push_kernel_identity(&identity, report.kernel_nodes, report.kernel_children, attempt.kernel_goal, 0) and valid
+    return (false, 0) if not valid
+    return (true, proof_source_fingerprint(identity))
+
 def proof_cstr_equals(left: cstr, right: sview) -> bool:
     index: mutable usize = 0
     right_length: usize = sview_len(right)
@@ -536,6 +601,17 @@ def proof_push_json_focused_goal(buffer: mutable darray[u8]&, report: ProofRepor
     proof_push(buffer, "true" if source_admissible else "false")
     proof_push(buffer, "},\"goal_id\":")
     proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ",\"goal_fingerprint\":")
+    if found:
+        fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint(report, report.goal_attempts[goal_id])
+        if fingerprint.valid:
+            proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-goal-v1\",\"value\":")
+            proof_push_number(buffer, fingerprint.value)
+            proof_push(buffer, "}")
+        else:
+            proof_push(buffer, "null")
+    else:
+        proof_push(buffer, "null")
     proof_push(buffer, ",\"goal\":")
     if not found:
         proof_push(buffer, "null,\"failure\":null}\n")
@@ -1030,7 +1106,7 @@ def proof_tactic_result_admitted(result: ProofTacticJsonResult, source_status: s
     tactic_admitted: bool = result.valid and result.certificate_replayed and source_match
     return tactic_admitted and (source_status == "proved" or target_bound and source_admissible)
 
-def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTacticJsonResult, state: ProofTacticState&, tree: ProofTacticJsonTree&, source_bytes: usize, source_fingerprint: u32, source_status: sview, source_admissible: bool, source_match: bool, target_bound: bool, target_goal_id: usize, target_previously_proven: bool) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTacticJsonResult, state: ProofTacticState&, tree: ProofTacticJsonTree&, source_bytes: usize, source_fingerprint: u32, source_status: sview, source_admissible: bool, source_match: bool, target_bound: bool, target_goal_id: usize, target_goal_fingerprint: u32, target_fingerprint_valid: bool, target_fingerprint_match: bool, target_previously_proven: bool) -> void can[Memory.Allocate, Abort.Panic]:
     tactic_admitted: bool = result.valid and result.certificate_replayed and source_match
     # A source-bound script proves exactly one imported obligation. It may therefore repair that
     # obligation while other logical goals remain open, but parse/import failures, semantic errors,
@@ -1060,6 +1136,15 @@ def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTact
         proof_push_number(buffer, target_goal_id.u32())
     else:
         proof_push(buffer, "null")
+    proof_push(buffer, ",\"goal_fingerprint\":")
+    if target_bound and target_fingerprint_valid:
+        proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-goal-v1\",\"value\":")
+        proof_push_number(buffer, target_goal_fingerprint)
+        proof_push(buffer, "}")
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, ",\"fingerprint_match\":")
+    proof_push(buffer, "true" if target_fingerprint_match else "false")
     proof_push(buffer, ",\"previously_proven\":")
     proof_push(buffer, "true" if target_previously_proven else "false")
     proof_push(buffer, "},\"tactic\":{\"status\":")
@@ -1229,6 +1314,9 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
                 source_match: mutable bool = false
                 target_bound: mutable bool = false
                 target_goal_id: mutable usize = 0
+                target_goal_fingerprint: mutable u32 = 0
+                target_fingerprint_valid: mutable bool = false
+                target_fingerprint_match: mutable bool = true
                 target_previously_proven: mutable bool = false
                 script_arena: mutable Arena = zeroed
                 scratch_empty: mutable darray[Ast::Expr] = []
@@ -1244,6 +1332,10 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
                         target_bound <- target.present
                         target_goal_id <- target.goal_id
                         target_previously_proven <- report.goal_attempts[target.goal_id].proven if target.present and target.valid and target.goal_id < report.goal_attempts.count
+                        if target.present and target.valid and target.goal_id < report.goal_attempts.count:
+                            computed_target_fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint(report, report.goal_attempts[target.goal_id])
+                            target_fingerprint_valid <- computed_target_fingerprint.valid
+                            target_goal_fingerprint <- computed_target_fingerprint.value
                         if target.present:
                             if target.valid:
                                 if source_target_state.count > 0:
@@ -1254,6 +1346,15 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
                                 tactic_result.reason <- "target.goal_id must be an exact nonnegative integer"
                         else:
                             tactic_result <- proof_tactic_json_run(parsed_script.value, &annotations, &tactic_state, &tactic_tree, &scratch_states)
+                        declared_target_fingerprint: (present: bool, valid: bool, value: u32) = proof_tactic_json_target_fingerprint(parsed_script.value)
+                        if declared_target_fingerprint.present:
+                            target_fingerprint_match <- declared_target_fingerprint.valid and target.present and target.valid and target_fingerprint_valid and declared_target_fingerprint.value == target_goal_fingerprint
+                            if not declared_target_fingerprint.valid:
+                                tactic_result.valid <- false
+                                tactic_result.reason <- "target.goal_fingerprint must be an exact unsigned 32-bit integer"
+                            elif not target_fingerprint_match:
+                                tactic_result.valid <- false
+                                tactic_result.reason <- "target.goal_fingerprint does not match the imported kernel goal and hypotheses"
                         declared: (present: bool, valid: bool, value: u32) = proof_tactic_json_source_fingerprint(parsed_script.value)
                         source_match <- not declared.present or declared.valid and declared.value == source_fingerprint
                         if declared.present and not declared.valid:
@@ -1268,7 +1369,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
                         source_match <- false
                         tactic_result.reason <- "proof script is not valid JSON"
                 output: mutable darray[u8] = []
-                proof_push_json_tactic_result(&output, tactic_result, &tactic_state, &tactic_tree, source_bytes, source_fingerprint, source_status, source_admissible, source_match, target_bound, target_goal_id, target_previously_proven)
+                proof_push_json_tactic_result(&output, tactic_result, &tactic_state, &tactic_tree, source_bytes, source_fingerprint, source_status, source_admissible, source_match, target_bound, target_goal_id, target_goal_fingerprint, target_fingerprint_valid, target_fingerprint_match, target_previously_proven)
                 proof_write(output)
                 admitted: bool = proof_tactic_result_admitted(tactic_result, source_status, source_admissible, source_match, target_bound)
                 return 0 if admitted else 1

@@ -298,7 +298,9 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 assert report["status"] == "proved"
-assert report["source_goal_binding"] == {"bound": True, "goal_id": 1, "previously_proven": True}
+binding = report["source_goal_binding"]
+assert binding["bound"] and binding["goal_id"] == 1 and binding["previously_proven"]
+assert binding["fingerprint_match"] is True
 assert report["tactic"]["certificate_replayed"] is True
 assert report["branches"]["left"]["branches"]["right"]["solved"] is True
 print("dogfood tactic_script_target_nested_branch: source-bound tree certificate passed")
@@ -343,7 +345,8 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 binding = report["source_goal_binding"]
 assert report["status"] == "proved"
-assert binding == {"bound": True, "goal_id": 7, "previously_proven": True}
+assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]
+assert binding["fingerprint_match"] is True
 assert report["tactic"]["status"] == "proved"
 assert report["tactic"]["certificate_replayed"] is True
 assert len(report["state"]["initial_facts"]) == 1
@@ -370,7 +373,10 @@ assert report["admission_scope"] == "target"
 assert report["source"]["status"] == "failed"
 assert report["source"]["complete"] is False
 assert report["source"]["admissible"] is True
-assert report["source_goal_binding"] == {"bound": True, "goal_id": 1, "previously_proven": False}
+binding = report["source_goal_binding"]
+assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]
+assert binding["goal_fingerprint"]["value"] == 1172841562
+assert binding["fingerprint_match"] is True
 assert report["tactic"]["certificate_replayed"] is True
 assert [step["action"] for step in report["state"]["trace"]] == ["rewrite", "decide"]
 print("dogfood tactic_script_repair_target: an open imported goal was independently repaired")
@@ -391,7 +397,8 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 assert report["status"] == "failed"
-assert report["source_goal_binding"] == {"bound": True, "goal_id": 7, "previously_proven": True}
+binding = report["source_goal_binding"]
+assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]
 assert report["tactic"]["valid"] is False
 assert report["state"]["initial_goal"] == {"kind": "invalid"}
 assert "source-bound" in report["tactic"]["reason"]
