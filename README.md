@@ -34,6 +34,12 @@ proof-only summary was checked before a caller can consume it.
 location, rule, replay status, structured failure classification/message, optional counterexample,
 and theorem dependencies so an agent can request focused repair without scanning the complete goal
 stream.
+Use `build/elisa-proof --goal N file.elisa` to retrieve only one of those goals without loading the
+full report or kernel arena. The deterministic `elisa-proof-goal-v1` response includes the source
+fingerprint and completeness gate, proposition, exact hypotheses and origins, dependencies,
+certificate/replay state, and the goal-bound failure classification. Retrieval exits `0` when the
+goal exists—including an unresolved goal—and `2` for an invalid or missing ID; proof status is
+carried explicitly as `proved`, `disproved`, `unsupported`, or `unknown` in the response.
 `dependency_index` provides the reverse mapping from theorem/function-summary dependency names to
 the stable goal IDs that consume them, making downstream invalidation direct and deterministic.
 Goal-generated entries in `findings` also expose their exact `goal_id`; non-goal diagnostics use

@@ -87,6 +87,19 @@ def proof_cstr_equals(left: cstr, right: sview) -> bool:
         index <- index + 1
     return left[index] == 0
 
+def proof_cstr_u32(value: cstr) -> (valid: bool, parsed: u32):
+    return (false, 0) if value[0] == 0
+    result: mutable u32 = 0
+    index: mutable usize = 0
+    while value[index] != 0 |value, result, index|:
+        byte: u8 = value[index]
+        return (false, 0) if byte < '0'.u8() or byte > '9'.u8()
+        digit: u32 = (byte - '0'.u8()).u32()
+        return (false, 0) if result > 429496729 or result == 429496729 and digit > 5
+        result <- result * 10 + digit
+        index <- index + 1
+    return (true, result)
+
 def proof_push_json_string(buffer: mutable darray[u8]&, value: sview) -> void can[Memory.Allocate, Abort.Panic]:
     buffer.push('"'.u8())
     for index in 0..<sview_len(value) |index, buffer, value|:
@@ -471,13 +484,14 @@ def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofRep
         proof_push_json_expr(buffer, report.counterexample_facts[finding.counterexample_start + index])
     proof_push(buffer, "]}")
 
-def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_repair_finding_index(report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize) -> (known: bool, index: usize, ambiguous: bool):
     # Stable goal provenance wins unconditionally. Never select a different goal's diagnostic
     # merely because the compiler placed both obligations on the same source line.
-    for finding in report.findings |finding, report, buffer, goal_id|:
+    index: mutable usize = 0
+    for finding in report.findings |finding, report, goal_id, index|:
         if finding.has_goal and finding.goal_id == goal_id:
-            proof_push_json_repair_finding(buffer, report, finding)
-            return
+            return (true, index, false)
+        index <- index + 1
     # Legacy non-goal diagnostics can be used only when the line/name pair identifies exactly one
     # candidate. Ambiguity is reported as unknown instead of fabricating a causal association.
     candidate_count: mutable usize = 0
@@ -487,12 +501,84 @@ def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofRep
         if not finding.has_goal and finding.line == attempt.line and finding.name == attempt.name:
             candidate_count <- candidate_count + 1
             candidate_index <- index
-    if candidate_count == 1:
-        proof_push_json_repair_finding(buffer, report, report.findings[candidate_index])
+    return (true, candidate_index, false) if candidate_count == 1
+    return (false, 0, candidate_count > 1)
+
+def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+    if selected.known:
+        proof_push_json_repair_finding(buffer, report, report.findings[selected.index])
         return
     proof_push(buffer, "{\"kind\":\"unresolved-goal\",\"status\":\"unknown\",\"message\":")
-    proof_push_json_string(buffer, "multiple unbound diagnostics share this source location" if candidate_count > 1 else "no matching diagnostic was recorded")
+    proof_push_json_string(buffer, "multiple unbound diagnostics share this source location" if selected.ambiguous else "no matching diagnostic was recorded")
     proof_push(buffer, ",\"counterexample_found\":false,\"goal_id\":null,\"counterexample\":[]}")
+
+def proof_push_json_focused_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_bytes: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    found: bool = goal_id < report.goal_attempts.count
+    proof_push(buffer, "{\"format\":\"elisa-proof-goal-v1\",\"status\":")
+    if not found:
+        proof_push_json_string(buffer, "not_found")
+    else:
+        attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+        certificate_replayed: bool = attempt.has_certificate and attempt.certificate_index < report.certificates.count and report.certificates[attempt.certificate_index].replayed
+        attempt_status: mutable sview = "proved" if attempt.proven and certificate_replayed else "unknown"
+        if not attempt.proven:
+            selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+            attempt_status <- report.findings[selected.index].status if selected.known else "unknown"
+        proof_push_json_string(buffer, attempt_status)
+    proof_push(buffer, ",\"source\":{\"bytes\":")
+    proof_push_number(buffer, source_bytes.u32())
+    proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, "},\"complete\":")
+    proof_push(buffer, "true" if source_complete else "false")
+    proof_push(buffer, ",\"admissible\":")
+    proof_push(buffer, "true" if source_admissible else "false")
+    proof_push(buffer, "},\"goal_id\":")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ",\"goal\":")
+    if not found:
+        proof_push(buffer, "null,\"failure\":null}\n")
+        return
+    attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+    replay_status: mutable sview = "not_certified"
+    if attempt.has_certificate and attempt.certificate_index < report.certificates.count:
+        replay_status <- "replayed" if report.certificates[attempt.certificate_index].replayed else "gap"
+    proof_push(buffer, "{\"line\":")
+    proof_push_number(buffer, attempt.line)
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, attempt.name)
+    proof_push(buffer, ",\"rule\":")
+    proof_push_json_string(buffer, attempt.rule)
+    proof_push(buffer, ",\"proven\":")
+    proof_push(buffer, "true" if attempt.proven else "false")
+    proof_push(buffer, ",\"replay_status\":")
+    proof_push_json_string(buffer, replay_status)
+    proof_push(buffer, ",\"certificate_id\":")
+    if attempt.has_certificate and attempt.certificate_index < report.certificates.count:
+        proof_push_number(buffer, attempt.certificate_index.u32())
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, ",\"kernel_goal\":")
+    proof_push_number(buffer, attempt.kernel_goal.u32())
+    proof_push(buffer, ",\"facts\":[")
+    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
+        proof_push(buffer, ",") if fact_index > 0
+        proof_push_json_expr(buffer, report.certificate_facts[attempt.facts_start + fact_index])
+    proof_push(buffer, "],\"fact_origins\":[")
+    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
+        proof_push(buffer, ",") if fact_index > 0
+        proof_push_json_fact_origin(buffer, report, report.certificate_facts[attempt.facts_start + fact_index], attempt.name)
+    proof_push(buffer, "],\"dependencies\":[")
+    proof_push_json_goal_dependencies(buffer, report, attempt.facts_start, attempt.facts_count, attempt.name)
+    proof_push(buffer, "],\"proposition\":")
+    proof_push_json_expr(buffer, attempt.goal)
+    proof_push(buffer, "},\"failure\":")
+    if attempt.proven:
+        proof_push(buffer, "null")
+    else:
+        proof_push_json_repair_failure(buffer, report, attempt, goal_id)
+    proof_push(buffer, "}\n")
 
 def proof_push_json_declaration(buffer: mutable darray[u8]&, report: ProofReport&, declaration: ProofDeclarationSummary) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "{\"kind\":")
@@ -1013,11 +1099,13 @@ def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTact
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
-        proof_push(&usage, "usage: elisa-proof [--json] <file.elisa> | [--tactics] <proof.json> <file.elisa>\n")
+        proof_push(&usage, "usage: elisa-proof [--json] <file.elisa> | --goal <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
         proof_write(usage)
         return 2
     slots: mutable cstr&& = argv.cast[mutable cstr&&]
     json_output: mutable bool = false
+    goal_json_output: mutable bool = false
+    focused_goal_id: mutable usize = 0
     tactic_json_output: mutable bool = false
     script_slot: mutable usize = 0
     path_slot: mutable usize = 1
@@ -1039,6 +1127,21 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
             proof_write(usage)
             return 2
         path_slot <- 2
+    elif proof_cstr_equals(first_argument, "--goal"):
+        goal_json_output <- true
+        if argc < 4:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --goal <id> <file.elisa>\n")
+            proof_write(usage)
+            return 2
+        parsed_goal: (valid: bool, parsed: u32) = proof_cstr_u32(slots[2].cast[cstr])
+        if not parsed_goal.valid:
+            message: mutable darray[u8] = []
+            proof_push(&message, "elisa-proof: goal id must be an unsigned 32-bit integer\n")
+            proof_write(message)
+            return 2
+        focused_goal_id <- parsed_goal.parsed.usize()
+        path_slot <- 3
     path: cstr = slots[path_slot].cast[cstr]
     root_path: mutable darray[u8] = []
     path_index: mutable usize = 0
@@ -1086,6 +1189,13 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
     for diagnostic in semantic_diagnostics |semantic_errors, report|:
         continue if not proof_semantic_diagnostic_visible(diagnostic, report)
         semantic_errors <- semantic_errors + 1 if Semantic::diagnostic_severity(diagnostic) == 1
+    if goal_json_output:
+        source_complete: bool = report.failed == 0 and not proof_report_has_open_goals(report) and report.replay_gaps == 0 and semantic_errors == 0 and not import_failed
+        source_admissible: bool = not import_failed and semantic_errors == 0 and report.replay_gaps == 0
+        focused: mutable darray[u8] = []
+        proof_push_json_focused_goal(&focused, report, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible)
+        proof_write(focused)
+        return 0 if focused_goal_id < report.goal_attempts.count else 2
     if tactic_json_output:
         source_status: mutable sview = "proved"
         source_status <- "failed" if report.failed > 0 or proof_report_has_open_goals(report) or report.replay_gaps > 0 or semantic_errors > 0

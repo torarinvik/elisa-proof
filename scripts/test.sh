@@ -1058,8 +1058,18 @@ multiple_preconditions_status=${PIPESTATUS[0]}
 lexicographic_repair_queue_status=${PIPESTATUS[0]}
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_void_postcondition.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); repairs = report["repair_queue"]; assert len(repairs) == 1; assert repairs[0]["failure"]["kind"] == "ensure-unproven"; assert repairs[0]["goal_id"] == repairs[0]["failure"]["goal_id"]'
 void_postcondition_goal_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --goal 3 "$ROOT_DIR/examples/rejected_checked_index_nested.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["format"] == "elisa-proof-goal-v1"; assert goal["status"] == "unknown"; assert goal["goal_id"] == 3; assert goal["goal"]["rule"] == "index-upper"; assert goal["goal"]["proposition"]["operator"] == "<"; assert goal["failure"]["goal_id"] == 3; assert goal["source"]["complete"] is False; assert "kernel" not in goal'
+focused_open_goal_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --goal 7 "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["status"] == "proved"; assert goal["goal"]["replay_status"] == "replayed"; assert goal["failure"] is None; assert goal["source"]["complete"] is True'
+focused_proved_goal_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --goal 999999 "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["status"] == "not_found"; assert goal["goal"] is None; assert goal["failure"] is None'
+focused_missing_goal_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --goal 4294967296 "$ROOT_DIR/examples/verified.elisa" >/dev/null
+focused_overflow_goal_status=$?
+"$ROOT_DIR/build/elisa-proof" --goal -1 "$ROOT_DIR/examples/verified.elisa" >/dev/null
+focused_negative_goal_status=$?
 set -e
-if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 ]]; then
+if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$focused_open_goal_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 ]]; then
     printf 'proof test matrix failed: repair diagnostics were not bound to exact goals\n' >&2
     exit 1
 fi
