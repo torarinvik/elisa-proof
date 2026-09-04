@@ -1,0 +1,1283 @@
+# A conservative interval prover over the compiler's integer AST. It proves only facts that
+# follow from explicit bounds and overflow-safe identities; unknown shapes remain unproven.
+extend ElisaProof:
+    public:
+        struct ProofBound:
+            name: sview
+            lower: mutable i64
+            upper: mutable i64
+            has_lower: mutable bool
+            has_upper: mutable bool
+
+        # A normalized signed-integer difference constraint `left - right <= bound`. Empty
+        # names denote the mathematical zero node, so the same representation covers ordinary
+        # bounds (`x >= 0`) and relations between two symbolic values.
+        struct ProofDifference:
+            left: sview
+            right: sview
+            bound: i64
+
+        # A deliberately small affine form. The base is one bare identifier, the coefficient is
+        # either +1 or -1, and the offset is a fixed i64 constant. This is still far from a
+        # general Presburger solver, but it covers both `x + k` and well-founded ranks such as
+        # `127 - depth` without treating arithmetic normalization as an axiom.
+        struct ProofAffine:
+            known: bool
+            base: sview
+            offset: i64
+            negative: bool
+
+        def proof_bound_index(bounds: darray[ProofBound]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < bounds.count |index, bounds, name|:
+                return index if bounds[index].name == name
+                index <- index + 1
+            return bounds.count
+
+        def proof_bound_for(bounds: darray[ProofBound]&, name: sview) -> ProofBound:
+            index: usize = proof_bound_index(bounds, name)
+            return bounds[index] if index < bounds.count
+            return ProofBound{name: name, has_lower: false, lower: 0, has_upper: false, upper: 0}
+
+        def proof_add_lower(bounds: mutable darray[ProofBound]&, name: sview, value: i64) -> void:
+            return if name == ""
+            index: usize = proof_bound_index(bounds, name)
+            if index == bounds.count:
+                bounds <- bounds.push(ProofBound{name: name, has_lower: true, lower: value, has_upper: false, upper: 0})
+                return
+            old_has: bool = bounds[index].has_lower
+            old_value: i64 = bounds[index].lower
+            bounds[index].has_lower <- true
+            bounds[index].lower <- value if not old_has or value > old_value
+
+        def proof_add_upper(bounds: mutable darray[ProofBound]&, name: sview, value: i64) -> void:
+            return if name == ""
+            index: usize = proof_bound_index(bounds, name)
+            if index == bounds.count:
+                bounds <- bounds.push(ProofBound{name: name, has_lower: false, lower: 0, has_upper: true, upper: value})
+                return
+            old_has: bool = bounds[index].has_upper
+            old_value: i64 = bounds[index].upper
+            bounds[index].has_upper <- true
+            bounds[index].upper <- value if not old_has or value < old_value
+
+        def proof_comparison_negation(operator: TokenKind) -> TokenKind:
+            return TokenKind.BangEq if operator == TokenKind.EqEq
+            return TokenKind.EqEq if operator == TokenKind.BangEq
+            return TokenKind.GtEq if operator == TokenKind.Lt
+            return TokenKind.Lt if operator == TokenKind.GtEq
+            return TokenKind.Gt if operator == TokenKind.LtEq
+            return TokenKind.LtEq if operator == TokenKind.Gt
+            # Eof is outside the comparison-token set and serves as the impossible result.
+            return TokenKind.Eof
+
+        def proof_collect_comparison_bounds(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, bounds: mutable darray[ProofBound]&) -> void:
+            return if not proof_is_comparison(operator)
+            left_name: sview = proof_ident_name(left)
+            right_name: sview = proof_ident_name(right)
+            right_constant: (known: bool, value: i64) = proof_constant_int(right)
+            left_constant: (known: bool, value: i64) = proof_constant_int(left)
+            if left_name != "" and right_constant.known:
+                incremented: (known: bool, value: i64) = proof_add_safe(right_constant.value, 1)
+                proof_add_lower(bounds, left_name, incremented.value) if operator == TokenKind.Gt and incremented.known
+                proof_add_lower(bounds, left_name, right_constant.value) if operator == TokenKind.GtEq
+                decremented: (known: bool, value: i64) = proof_sub_safe(right_constant.value, 1)
+                proof_add_upper(bounds, left_name, decremented.value) if operator == TokenKind.Lt and decremented.known
+                proof_add_upper(bounds, left_name, right_constant.value) if operator == TokenKind.LtEq
+                proof_add_lower(bounds, left_name, right_constant.value) if operator == TokenKind.EqEq
+                proof_add_upper(bounds, left_name, right_constant.value) if operator == TokenKind.EqEq
+            if right_name != "" and left_constant.known:
+                decremented_left: (known: bool, value: i64) = proof_sub_safe(left_constant.value, 1)
+                proof_add_upper(bounds, right_name, decremented_left.value) if operator == TokenKind.Gt and decremented_left.known
+                proof_add_upper(bounds, right_name, left_constant.value) if operator == TokenKind.GtEq
+                incremented_left: (known: bool, value: i64) = proof_add_safe(left_constant.value, 1)
+                proof_add_lower(bounds, right_name, incremented_left.value) if operator == TokenKind.Lt and incremented_left.known
+                proof_add_lower(bounds, right_name, left_constant.value) if operator == TokenKind.LtEq
+                proof_add_lower(bounds, right_name, left_constant.value) if operator == TokenKind.EqEq
+                proof_add_upper(bounds, right_name, left_constant.value) if operator == TokenKind.EqEq
+
+        # Extract facts of the form x OP constant or constant OP x, including conjunctions.
+        def proof_collect_bounds(expression: Ast::Expr, bounds: mutable darray[ProofBound]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_bounds(inner, bounds)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated_operator: TokenKind = proof_comparison_negation(operator)
+                            proof_collect_comparison_bounds(left, negated_operator, right, bounds) if negated_operator != TokenKind.Eof
+                        _:
+                            pass
+                Ast::Expr.Binary(left, operator, right, position):
+                    if operator == TokenKind.And:
+                        proof_collect_bounds(left, bounds)
+                        proof_collect_bounds(right, bounds)
+                        return
+                    proof_collect_comparison_bounds(left, operator, right, bounds)
+                _:
+                    pass
+
+        # Collect only explicit identifier equalities. This is deliberately narrower than
+        # general expression rewriting: a positive `x == y` fact is safe to use as an alias,
+        # while inventing a canonical form for calls, references, or arithmetic could cross
+        # effects and fixed-width overflow boundaries.
+        def proof_collect_name_equalities(expression: Ast::Expr, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_name_equalities(inner, left_names, right_names)
+                Ast::Expr.Binary(left, operator, right, position):
+                    if operator == TokenKind.And:
+                        proof_collect_name_equalities(left, left_names, right_names)
+                        proof_collect_name_equalities(right, left_names, right_names)
+                    if operator == TokenKind.EqEq:
+                        left_name: sview = proof_ident_name(left)
+                        right_name: sview = proof_ident_name(right)
+                        if left_name != "" and right_name != "":
+                            left_names.push(left_name)
+                            right_names.push(right_name)
+                _:
+                    pass
+
+        # Equality aliases also transport interval bounds. Iterate by relation count so a
+        # chain such as x == y, y == z reaches every member without relying on a host solver.
+        def proof_close_equalities(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            left_names: mutable darray[sview] = []
+            right_names: mutable darray[sview] = []
+            for fact in facts |left_names, right_names|:
+                proof_collect_name_equalities(fact, &left_names, &right_names)
+            rounds: mutable usize = 0
+            max_rounds: usize = facts.count * 2 + 2
+            while rounds < max_rounds |rounds, left_names, right_names, bounds|:
+                for index in 0..<left_names.count |index, left_names, right_names, bounds|:
+                    left_bound: ProofBound = proof_bound_for(bounds, left_names[index])
+                    right_bound: ProofBound = proof_bound_for(bounds, right_names[index])
+                    proof_add_lower(bounds, right_names[index], left_bound.lower) if left_bound.has_lower
+                    proof_add_upper(bounds, right_names[index], left_bound.upper) if left_bound.has_upper
+                    proof_add_lower(bounds, left_names[index], right_bound.lower) if right_bound.has_lower
+                    proof_add_upper(bounds, left_names[index], right_bound.upper) if right_bound.has_upper
+                rounds <- rounds + 1
+
+        def proof_names_equal_from_facts(left_name: sview, right_name: sview, facts: darray[Ast::Expr]&) -> bool:
+            return false if left_name == "" or right_name == ""
+            return true if left_name == right_name
+            relation_left: mutable darray[sview] = []
+            relation_right: mutable darray[sview] = []
+            for fact in facts |relation_left, relation_right|:
+                proof_collect_name_equalities(fact, &relation_left, &relation_right)
+            reachable: mutable darray[sview] = [left_name]
+            cursor: mutable usize = 0
+            while cursor < reachable.count |cursor, reachable, relation_left, relation_right|:
+                current: sview = reachable[cursor]
+                for index in 0..<relation_left.count |index, relation_left, relation_right, reachable, current, right_name|:
+                    next_name: mutable sview = ""
+                    next_name <- relation_right[index] if relation_left[index] == current
+                    next_name <- relation_left[index] if relation_right[index] == current
+                    if next_name != "":
+                        return true if next_name == right_name
+                        already_seen: bool = any existing in reachable where existing == next_name
+                        reachable.push(next_name) if not already_seen
+                cursor <- cursor + 1
+            return false
+
+        # An inconsistent set of explicit interval facts has no reachable state. Applying
+        # ex-falso here is sound Hoare reasoning (a function with impossible preconditions has
+        # no executions), and it also makes contradictory branch complements useful without
+        # teaching the kernel a general-purpose theorem prover.
+        def proof_facts_inconsistent(facts: darray[Ast::Expr]&) -> bool:
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            for bound in bounds:
+                return true if bound.has_lower and bound.has_upper and bound.lower > bound.upper
+            for fact in facts:
+                match fact:
+                    Ast::Expr.BoolLit(value):
+                        return true if not value
+                    Ast::Expr.Unary(TokenKind.Not, operand, _):
+                        match operand:
+                            Ast::Expr.BoolLit(value):
+                                return true if value
+                            _:
+                                pass
+                    _:
+                        pass
+            return false
+
+        # Return a conservative interval for affine expressions. Lower and upper knowledge are
+        # tracked independently: a fact such as x >= 0 is enough for a later lower-bound goal,
+        # but never gets mistaken for a finite interval or used to justify an unsafe operation.
+        def proof_interval(expression: Ast::Expr, bounds: darray[ProofBound]&) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
+            constant: (known: bool, value: i64) = proof_constant_int(expression)
+            return (true, constant.value, constant.value, true, true) if constant.known
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_interval(inner, bounds)
+                Ast::Expr.Ident(name, _):
+                    found: ProofBound = proof_bound_for(bounds, name)
+                    return (found.has_lower and found.has_upper, found.lower, found.upper, found.has_lower, found.has_upper)
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(operand, bounds)
+                    if operator == TokenKind.Minus:
+                        negated_lower: mutable i64 = 0
+                        negated_upper: mutable i64 = 0
+                        has_negated_lower: mutable bool = inner.has_upper and inner.upper != proof_i64_min()
+                        has_negated_upper: mutable bool = inner.has_lower and inner.lower != proof_i64_min()
+                        negated_lower <- 0 - inner.upper if has_negated_lower
+                        negated_upper <- 0 - inner.lower if has_negated_upper
+                        return (has_negated_lower and has_negated_upper, negated_lower, negated_upper, has_negated_lower, has_negated_upper)
+                    if operator == TokenKind.Plus:
+                        return inner
+                Ast::Expr.Binary(left, operator, right, position):
+                    a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(left, bounds)
+                    b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
+                    if operator == TokenKind.Plus:
+                        lower: mutable i64 = 0
+                        upper: mutable i64 = 0
+                        has_lower: mutable bool = false
+                        has_upper: mutable bool = false
+                        if a.has_lower and b.has_lower:
+                            low: (known: bool, value: i64) = proof_add_safe(a.lower, b.lower)
+                            lower <- low.value if low.known
+                            has_lower <- low.known
+                        if a.has_upper and b.has_upper:
+                            high: (known: bool, value: i64) = proof_add_safe(a.upper, b.upper)
+                            upper <- high.value if high.known
+                            has_upper <- high.known
+                        return (has_lower and has_upper, lower, upper, has_lower, has_upper)
+                    if operator == TokenKind.Minus:
+                        lower: mutable i64 = 0
+                        upper: mutable i64 = 0
+                        has_lower: mutable bool = false
+                        has_upper: mutable bool = false
+                        if a.has_lower and b.has_upper:
+                            low_sub: (known: bool, value: i64) = proof_sub_safe(a.lower, b.upper)
+                            lower <- low_sub.value if low_sub.known
+                            has_lower <- low_sub.known
+                        if a.has_upper and b.has_lower:
+                            high_sub: (known: bool, value: i64) = proof_sub_safe(a.upper, b.lower)
+                            upper <- high_sub.value if high_sub.known
+                            has_upper <- high_sub.known
+                        return (has_lower and has_upper, lower, upper, has_lower, has_upper)
+                    if operator == TokenKind.Star and a.known and b.known:
+                        p1_result: (known: bool, value: i64) = proof_mul_safe(a.lower, b.lower)
+                        p2_result: (known: bool, value: i64) = proof_mul_safe(a.lower, b.upper)
+                        p3_result: (known: bool, value: i64) = proof_mul_safe(a.upper, b.lower)
+                        p4_result: (known: bool, value: i64) = proof_mul_safe(a.upper, b.upper)
+                        return (false, 0, 0, false, false) if not p1_result.known or not p2_result.known or not p3_result.known or not p4_result.known
+                        p1: i64 = p1_result.value
+                        p2: i64 = p2_result.value
+                        p3: i64 = p3_result.value
+                        p4: i64 = p4_result.value
+                        low: mutable i64 = p1
+                        high: mutable i64 = p1
+                        low <- p2 if p2 < low
+                        low <- p3 if p3 < low
+                        low <- p4 if p4 < low
+                        high <- p2 if p2 > high
+                        high <- p3 if p3 > high
+                        high <- p4 if p4 > high
+                        return (true, low, high, true, true)
+                    if operator == TokenKind.Slash and b.known and b.lower == b.upper and a.has_lower and a.has_upper:
+                        lower_quotient: (known: bool, value: i64) = proof_div_safe(a.lower, b.lower)
+                        upper_quotient: (known: bool, value: i64) = proof_div_safe(a.upper, b.lower)
+                        return (false, 0, 0, false, false) if not lower_quotient.known or not upper_quotient.known
+                        return (true, lower_quotient.value, upper_quotient.value, true, true) if b.lower > 0
+                        return (true, upper_quotient.value, lower_quotient.value, true, true)
+                    if operator == TokenKind.Percent:
+                        divisor: (known: bool, value: i64) = proof_constant_int(right)
+                        return (false, 0, 0, false, false) if not divisor.known or divisor.value == 0
+                        magnitude: mutable i64 = divisor.value
+                        if magnitude < 0:
+                            absolute: (known: bool, value: i64) = proof_sub_safe(0, magnitude)
+                            return (false, 0, 0, false, false) if not absolute.known
+                            magnitude <- absolute.value
+                        remainder_limit: (known: bool, value: i64) = proof_sub_safe(magnitude, 1)
+                        return (false, 0, 0, false, false) if not remainder_limit.known
+                        negative_limit: (known: bool, value: i64) = proof_sub_safe(0, remainder_limit.value)
+                        return (false, 0, 0, false, false) if not negative_limit.known
+                        return (true, negative_limit.value, remainder_limit.value, true, true)
+                _:
+                    pass
+            return (false, 0, 0, false, false)
+
+        def proof_exact_int_from_facts(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, value: i64):
+            constant: (known: bool, value: i64) = proof_constant_int(expression)
+            return constant if constant.known
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+            return (true, interval.lower) if interval.known and interval.lower == interval.upper
+            return (false, 0)
+
+        def proof_affine_expression(expression: Ast::Expr) -> ProofAffine:
+            empty: ProofAffine = ProofAffine{known: false, base: "", offset: 0, negative: false}
+            constant: (known: bool, value: i64) = proof_constant_int(expression)
+            return ProofAffine{known: true, base: "", offset: constant.value, negative: false} if constant.known
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_affine_expression(inner)
+                Ast::Expr.Ident(name, _):
+                    return ProofAffine{known: name != "", base: name, offset: 0, negative: false}
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_affine_expression(operand)
+                Ast::Expr.Unary(TokenKind.Minus, operand, _):
+                    inner: ProofAffine = proof_affine_expression(operand)
+                    return empty if not inner.known or inner.base == ""
+                    negated_offset: (known: bool, value: i64) = proof_sub_safe(0, inner.offset)
+                    return empty if not negated_offset.known
+                    return ProofAffine{known: true, base: inner.base, offset: negated_offset.value, negative: not inner.negative}
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_affine: ProofAffine = proof_affine_expression(left)
+                    right_constant: (known: bool, value: i64) = proof_constant_int(right)
+                    if left_affine.known and left_affine.base != "" and right_constant.known:
+                        if operator == TokenKind.Plus:
+                            combined: (known: bool, value: i64) = proof_add_safe(left_affine.offset, right_constant.value)
+                            return ProofAffine{known: true, base: left_affine.base, offset: combined.value, negative: left_affine.negative} if combined.known
+                        if operator == TokenKind.Minus:
+                            # `x - MIN_I64` has no representable +offset form. Decline it
+                            # rather than manufacturing an overflowing negation.
+                            return empty if right_constant.value == proof_i64_min()
+                            negated: (known: bool, value: i64) = proof_sub_safe(0, right_constant.value)
+                            combined: (known: bool, value: i64) = proof_add_safe(left_affine.offset, negated.value) if negated.known else (false, 0)
+                            return ProofAffine{known: true, base: left_affine.base, offset: combined.value, negative: left_affine.negative} if combined.known
+                        if operator == TokenKind.Star and right_constant.value == 1:
+                            return left_affine
+                    left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                    right_affine: ProofAffine = proof_affine_expression(right)
+                    if left_constant.known and right_affine.known and operator == TokenKind.Plus:
+                        combined: (known: bool, value: i64) = proof_add_safe(left_constant.value, right_affine.offset)
+                        return ProofAffine{known: true, base: right_affine.base, offset: combined.value, negative: right_affine.negative} if combined.known
+                    if left_constant.known and right_affine.known and right_affine.base != "" and operator == TokenKind.Minus:
+                        combined: (known: bool, value: i64) = proof_sub_safe(left_constant.value, right_affine.offset) if not right_affine.negative else proof_add_safe(left_constant.value, right_affine.offset)
+                        return ProofAffine{known: true, base: right_affine.base, offset: combined.value, negative: not right_affine.negative} if combined.known
+                    if left_constant.known and operator == TokenKind.Star and left_constant.value == 1:
+                        return right_affine
+                _:
+                    pass
+            return empty
+
+        # Prove that an affine expression is evaluated without fixed-width overflow for every
+        # value in the current interval. Only the endpoint relevant to the offset is required:
+        # positive offsets need an upper bound, negative offsets a lower bound.
+        def proof_affine_safe(affine: ProofAffine, bounds: darray[ProofBound]&) -> bool:
+            return false if not affine.known
+            return true if affine.base == ""
+            return true if not affine.negative and affine.offset == 0
+            base_bound: ProofBound = proof_bound_for(bounds, affine.base)
+            if affine.negative:
+                return false if not base_bound.has_lower or not base_bound.has_upper
+                negated_upper: (known: bool, value: i64) = proof_sub_safe(0, base_bound.upper)
+                negated_lower: (known: bool, value: i64) = proof_sub_safe(0, base_bound.lower)
+                return false if not negated_upper.known or not negated_lower.known
+                lower: (known: bool, value: i64) = proof_add_safe(negated_upper.value, affine.offset)
+                upper: (known: bool, value: i64) = proof_add_safe(negated_lower.value, affine.offset)
+                return lower.known and upper.known
+            if affine.offset > 0:
+                limit: (known: bool, value: i64) = proof_sub_safe(proof_i64_max(), affine.offset)
+                return limit.known and base_bound.has_upper and base_bound.upper <= limit.value
+            limit: (known: bool, value: i64) = proof_sub_safe(proof_i64_min(), affine.offset)
+            return limit.known and base_bound.has_lower and base_bound.lower >= limit.value
+
+        def proof_difference_push(left: ProofAffine, right: ProofAffine, reverse: bool, strict: bool, constraints: mutable darray[ProofDifference]&) -> void:
+            first: ProofAffine = left if not reverse else right
+            second: ProofAffine = right if not reverse else left
+            difference: (known: bool, value: i64) = proof_sub_safe(second.offset, first.offset)
+            return if not difference.known
+            bound: mutable i64 = difference.value
+            if strict:
+                decremented: (known: bool, value: i64) = proof_sub_safe(bound, 1)
+                return if not decremented.known
+                bound <- decremented.value
+            constraints.push(ProofDifference{left: first.base, right: second.base, bound: bound})
+
+        # Normalize only comparison facts whose affine subexpressions are safe to evaluate for
+        # the current fixed-width intervals. A relation involving `x + 1` is not imported unless
+        # the known bounds prove that expression cannot wrap.
+        def proof_collect_difference_constraints(expression: Ast::Expr, bounds: darray[ProofBound]&, constraints: mutable darray[ProofDifference]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_difference_constraints(inner, bounds, constraints)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated_operator: TokenKind = proof_comparison_negation(operator)
+                            proof_collect_difference_constraints(Ast::Expr.Binary(left, negated_operator, right, Ast::expr_pos(expression)), bounds, constraints) if negated_operator != TokenKind.Eof
+                        _:
+                            pass
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        proof_collect_difference_constraints(left, bounds, constraints)
+                        proof_collect_difference_constraints(right, bounds, constraints)
+                        return
+                    return if not proof_is_comparison(operator)
+                    left_affine: ProofAffine = proof_affine_expression(left)
+                    right_affine: ProofAffine = proof_affine_expression(right)
+                    return if not proof_affine_safe(left_affine, bounds) or not proof_affine_safe(right_affine, bounds)
+                    if operator == TokenKind.LtEq:
+                        proof_difference_push(left_affine, right_affine, false, false, constraints)
+                    if operator == TokenKind.Lt:
+                        proof_difference_push(left_affine, right_affine, false, true, constraints)
+                    if operator == TokenKind.GtEq:
+                        proof_difference_push(left_affine, right_affine, true, false, constraints)
+                    if operator == TokenKind.Gt:
+                        proof_difference_push(left_affine, right_affine, true, true, constraints)
+                    if operator == TokenKind.EqEq:
+                        proof_difference_push(left_affine, right_affine, false, false, constraints)
+                        proof_difference_push(left_affine, right_affine, true, false, constraints)
+                _:
+                    pass
+
+        def proof_difference_node_index(nodes: darray[sview]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < nodes.count |index, nodes, name|:
+                return index if nodes[index] == name
+                index <- index + 1
+            return nodes.count
+
+        def proof_difference_matrix_query(nodes: darray[sview]&, matrix: darray[i64]&, known: darray[bool]&, left: sview, right: sview, bound: i64) -> bool:
+            left_index: usize = proof_difference_node_index(nodes, left)
+            right_index: usize = proof_difference_node_index(nodes, right)
+            return false if left_index >= nodes.count or right_index >= nodes.count
+            slot: usize = left_index * nodes.count + right_index
+            return known[slot] and matrix[slot] <= bound
+
+        # Floyd-Warshall closure over a bounded relation graph. The node and constraint caps are
+        # resource guards: a hostile source file can force an opaque proof failure, never an
+        # unbounded allocation or an arithmetic overflow in the closure itself.
+        def proof_difference_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if not proof_is_comparison(operator)
+            bounds: mutable darray[ProofBound] = []
+            constraints: mutable darray[ProofDifference] = []
+            for fact in facts |bounds, constraints|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            left_affine: ProofAffine = proof_affine_expression(left)
+            right_affine: ProofAffine = proof_affine_expression(right)
+            return false if not proof_affine_safe(left_affine, bounds) or not proof_affine_safe(right_affine, bounds)
+            for fact in facts |bounds, constraints|:
+                proof_collect_difference_constraints(fact, bounds, &constraints)
+            return false if constraints.count > 4096
+            nodes: mutable darray[sview] = [""]
+            for constraint in constraints |nodes|:
+                nodes.push(constraint.left) if constraint.left != "" and proof_difference_node_index(nodes, constraint.left) == nodes.count
+                nodes.push(constraint.right) if constraint.right != "" and proof_difference_node_index(nodes, constraint.right) == nodes.count
+            return false if nodes.count > 128
+            matrix: mutable darray[i64] = []
+            known: mutable darray[bool] = []
+            matrix.resize(nodes.count * nodes.count)
+            known.resize(nodes.count * nodes.count)
+            for index in 0..<matrix.count |index, matrix, known|:
+                matrix[index] <- 0
+                known[index] <- false
+            for index in 0..<nodes.count |index, nodes, matrix, known|:
+                slot: usize = index * nodes.count + index
+                matrix[slot] <- 0
+                known[slot] <- true
+            for constraint in constraints |constraint, nodes, matrix, known|:
+                left_index: usize = proof_difference_node_index(nodes, constraint.left)
+                right_index: usize = proof_difference_node_index(nodes, constraint.right)
+                slot: usize = left_index * nodes.count + right_index
+                matrix[slot] <- constraint.bound if not known[slot] or constraint.bound < matrix[slot]
+                known[slot] <- true
+            for pivot in 0..<nodes.count |pivot, nodes, matrix, known|:
+                for source in 0..<nodes.count |source, pivot, nodes, matrix, known|:
+                    first_slot: usize = source * nodes.count + pivot
+                    continue if not known[first_slot]
+                    for target in 0..<nodes.count |target, source, pivot, nodes, matrix, known|:
+                        second_slot: usize = pivot * nodes.count + target
+                        continue if not known[second_slot]
+                        combined: (known: bool, value: i64) = proof_add_safe(matrix[first_slot], matrix[second_slot])
+                        continue if not combined.known
+                        result_slot: usize = source * nodes.count + target
+                        matrix[result_slot] <- combined.value if not known[result_slot] or combined.value < matrix[result_slot]
+                        known[result_slot] <- true
+            target_bound: mutable i64 = 0
+            left_to_right: mutable bool = true
+            if operator == TokenKind.LtEq or operator == TokenKind.Lt:
+                difference: (known: bool, value: i64) = proof_sub_safe(right_affine.offset, left_affine.offset)
+                return false if not difference.known
+                target_bound <- difference.value
+                if operator == TokenKind.Lt:
+                    decremented: (known: bool, value: i64) = proof_sub_safe(target_bound, 1)
+                    return false if not decremented.known
+                    target_bound <- decremented.value
+            if operator == TokenKind.GtEq or operator == TokenKind.Gt:
+                left_to_right <- false
+                difference: (known: bool, value: i64) = proof_sub_safe(left_affine.offset, right_affine.offset)
+                return false if not difference.known
+                target_bound <- difference.value
+                if operator == TokenKind.Gt:
+                    decremented: (known: bool, value: i64) = proof_sub_safe(target_bound, 1)
+                    return false if not decremented.known
+                    target_bound <- decremented.value
+            if operator == TokenKind.EqEq:
+                forward_difference: (known: bool, value: i64) = proof_sub_safe(right_affine.offset, left_affine.offset)
+                reverse_difference: (known: bool, value: i64) = proof_sub_safe(left_affine.offset, right_affine.offset)
+                return false if not forward_difference.known or not reverse_difference.known
+                return proof_difference_matrix_query(nodes, matrix, known, left_affine.base, right_affine.base, forward_difference.value) and proof_difference_matrix_query(nodes, matrix, known, right_affine.base, left_affine.base, reverse_difference.value)
+            return proof_difference_matrix_query(nodes, matrix, known, left_affine.base, right_affine.base, target_bound) if left_to_right
+            return proof_difference_matrix_query(nodes, matrix, known, right_affine.base, left_affine.base, target_bound)
+
+        # Compare two affine expressions sharing the same base. The operation safety checks are
+        # independent of the comparison itself; without them a wrapped `x + 1` could reverse
+        # the mathematical difference at the i64 endpoint.
+        def proof_affine_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, bounds: darray[ProofBound]&, facts: darray[Ast::Expr]&) -> bool:
+            left_affine: ProofAffine = proof_affine_expression(left)
+            right_affine: ProofAffine = proof_affine_expression(right)
+            return false if not left_affine.known or not right_affine.known or left_affine.base == ""
+            return false if left_affine.base != right_affine.base and not proof_names_equal_from_facts(left_affine.base, right_affine.base, facts)
+            return false if left_affine.negative != right_affine.negative
+            return false if not proof_affine_safe(left_affine, bounds) or not proof_affine_safe(right_affine, bounds)
+            difference: (known: bool, value: i64) = proof_sub_safe(left_affine.offset, right_affine.offset)
+            return false if not difference.known
+            return difference.value > 0 if operator == TokenKind.Gt
+            return difference.value >= 0 if operator == TokenKind.GtEq
+            return difference.value < 0 if operator == TokenKind.Lt
+            return difference.value <= 0 if operator == TokenKind.LtEq
+            return difference.value != 0 if operator == TokenKind.BangEq
+            return difference.value == 0 if operator == TokenKind.EqEq
+            return false
+
+        # Evaluate a bounded contract quantifier by finite instantiation. The range bounds must
+        # be constants (possibly made constant by exact facts), the body must be understood by
+        # the ordinary kernel, and the work budget is capped. This is a proof-producing check,
+        # not a heuristic: forall requires every instance and exists requires a checked witness.
+        def proof_quantifier_goal(facts: darray[Ast::Expr]&, expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, depth: usize, budget: mutable usize&, split_depth: usize) -> bool:
+            kind: sview = proof_quantifier_kind(expression, annotations)
+            return false if kind == ""
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_quantifier_goal(facts, inner, annotations, depth, budget, split_depth)
+                Ast::Expr.Block(statements, body, _, _):
+                    return false if statements.count == 0
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, _, range_expression, _):
+                            match range_expression:
+                                Ast::Expr.Binary(lower_expression, range_operator, upper_expression, _):
+                                    return false if statements.count != 1
+                                    return false if range_operator != TokenKind.RangeLt and range_operator != TokenKind.RangeLe
+                                    lower: (known: bool, value: i64) = proof_exact_int_from_facts(lower_expression, facts)
+                                    upper: (known: bool, value: i64) = proof_exact_int_from_facts(upper_expression, facts)
+                                    return false if not lower.known or not upper.known
+                                    if range_operator == TokenKind.RangeLt and lower.value >= upper.value:
+                                        return kind == "forall"
+                                    if range_operator == TokenKind.RangeLe and lower.value > upper.value:
+                                        return kind == "forall"
+                                    width_difference: (known: bool, value: i64) = proof_sub_safe(upper.value, lower.value)
+                                    return false if not width_difference.known
+                                    width: mutable i64 = width_difference.value
+                                    if range_operator == TokenKind.RangeLe:
+                                        width_with_end: (known: bool, value: i64) = proof_add_safe(width, 1)
+                                        return false if not width_with_end.known
+                                        width <- width_with_end.value
+                                    return false if width <= 0 or width > 65536
+                                    binder_names: mutable darray[sview] = [binder]
+                                    binder_values: mutable darray[Ast::Expr] = []
+                                    candidate: mutable i64 = lower.value
+                                    offset: mutable i64 = 0
+                                    while offset < width |offset, candidate, binder_values, binder_names, facts, body, annotations, kind, budget|:
+                                        return false if budget >= 65536
+                                        budget <- budget + 1
+                                        binder_values.clear()
+                                        binder_values.push(Ast::Expr.IntLit(candidate))
+                                        instance: Ast::Expr = proof_substitute(body, binder_names, binder_values)
+                                        proven: bool = proof_goal_depth(facts, instance, annotations, depth + 1, budget, split_depth)
+                                        return false if kind == "forall" and not proven
+                                        return true if kind == "exists" and proven
+                                        offset <- offset + 1
+                                        if offset < width:
+                                            next_candidate: (known: bool, value: i64) = proof_add_safe(candidate, 1)
+                                            return false if not next_candidate.known
+                                            candidate <- next_candidate.value
+                                    return kind == "forall"
+                                _:
+                                    pass
+                            # Finite literal collections are also safe to instantiate. Dynamic
+                            # collections remain opaque: without a heap snapshot or a quantified
+                            # collection invariant, iterating them here would silently assume
+                            # that their contents are stable and fully represented by the AST.
+                            match range_expression:
+                                Ast::Expr.Array(elements, _):
+                                    return false if statements.count != 1
+                                    return false if elements.count > 65536
+                                    return false if elements.count == 0 and kind == "exists"
+                                    binder_names: mutable darray[sview] = [binder]
+                                    binder_values: mutable darray[Ast::Expr] = []
+                                    collection_offset: mutable usize = 0
+                                    while collection_offset < elements.count |collection_offset, elements, binder_names, binder_values, facts, body, annotations, kind, budget, depth|:
+                                        return false if budget >= 65536
+                                        budget <- budget + 1
+                                        binder_values.clear()
+                                        binder_values.push(elements[collection_offset])
+                                        instance: Ast::Expr = proof_substitute(body, binder_names, binder_values)
+                                        proven: bool = proof_goal_depth(facts, instance, annotations, depth + 1, budget, split_depth)
+                                        return false if kind == "forall" and not proven
+                                        return true if kind == "exists" and proven
+                                        collection_offset <- collection_offset + 1
+                                    return kind == "forall"
+                                Ast::Expr.Tuple(elements, _):
+                                    return false if statements.count != 1
+                                    return false if elements.count > 65536
+                                    return false if elements.count == 0 and kind == "exists"
+                                    binder_names: mutable darray[sview] = [binder]
+                                    binder_values: mutable darray[Ast::Expr] = []
+                                    collection_offset: mutable usize = 0
+                                    while collection_offset < elements.count |collection_offset, elements, binder_names, binder_values, facts, body, annotations, kind, budget, depth|:
+                                        return false if budget >= 65536
+                                        budget <- budget + 1
+                                        binder_values.clear()
+                                        binder_values.push(elements[collection_offset])
+                                        instance: Ast::Expr = proof_substitute(body, binder_names, binder_values)
+                                        proven: bool = proof_goal_depth(facts, instance, annotations, depth + 1, budget, split_depth)
+                                        return false if kind == "forall" and not proven
+                                        return true if kind == "exists" and proven
+                                        collection_offset <- collection_offset + 1
+                                    return kind == "forall"
+                                Ast::Expr.SetLit(elements, _):
+                                    return false if statements.count != 1
+                                    return false if elements.count > 65536
+                                    return false if elements.count == 0 and kind == "exists"
+                                    binder_names: mutable darray[sview] = [binder]
+                                    binder_values: mutable darray[Ast::Expr] = []
+                                    collection_offset: mutable usize = 0
+                                    while collection_offset < elements.count |collection_offset, elements, binder_names, binder_values, facts, body, annotations, kind, budget, depth|:
+                                        return false if budget >= 65536
+                                        budget <- budget + 1
+                                        binder_values.clear()
+                                        binder_values.push(elements[collection_offset])
+                                        instance: Ast::Expr = proof_substitute(body, binder_names, binder_values)
+                                        proven: bool = proof_goal_depth(facts, instance, annotations, depth + 1, budget, split_depth)
+                                        return false if kind == "forall" and not proven
+                                        return true if kind == "exists" and proven
+                                        collection_offset <- collection_offset + 1
+                                    return kind == "forall"
+                                Ast::Expr.DictLit(entries, _):
+                                    return false if statements.count != 2
+                                    return false if entries.count > 32768
+                                    return false if entries.count == 0 and kind == "exists"
+                                    match statements[1]:
+                                        Ast::Stmt.VarDecl(value_binder, _, _, _):
+                                            binder_names: mutable darray[sview] = [binder, value_binder]
+                                            binder_values: mutable darray[Ast::Expr] = []
+                                            dictionary_offset: mutable usize = 0
+                                            while dictionary_offset < entries.count |dictionary_offset, entries, binder_names, binder_values, facts, body, annotations, kind, budget, depth|:
+                                                return false if budget >= 65536
+                                                budget <- budget + 1
+                                                binder_values.clear()
+                                                binder_values.push(entries[dictionary_offset].key)
+                                                binder_values.push(entries[dictionary_offset].value)
+                                                instance: Ast::Expr = proof_substitute(body, binder_names, binder_values)
+                                                proven: bool = proof_goal_depth(facts, instance, annotations, depth + 1, budget, split_depth)
+                                                return false if kind == "forall" and not proven
+                                                return true if kind == "exists" and proven
+                                                dictionary_offset <- dictionary_offset + 1
+                                            return kind == "forall"
+                                        _:
+                                            return false
+                                _:
+                                    return false
+                        _:
+                            return false
+                _:
+                    return false
+
+        # A cancellation rule handles only exact identities and x + 0 / x - 0. We deliberately
+        # do not infer x + c OP x for c != 0 here: Elisa integers are fixed-width, so that
+        # statement can fail at an endpoint because of overflow. The separate affine tier may
+        # prove such a relation only when explicit bounds establish that both expressions are
+        # safe; neither tier guesses about opaque calls.
+        def proof_delta_constant(left: Ast::Expr, right: Ast::Expr) -> (known: bool, value: i64):
+            if proof_expr_equal(left, right):
+                return (true, 0)
+            match left:
+                Ast::Expr.Binary(base, operator, amount, _):
+                    amount_value: (known: bool, value: i64) = proof_constant_int(amount)
+                    if amount_value.known and proof_expr_equal(base, right):
+                        return (true, 0) if amount_value.value == 0 and (operator == TokenKind.Plus or operator == TokenKind.Minus)
+                _:
+                    pass
+            match right:
+                Ast::Expr.Binary(base, operator, amount, _):
+                    amount_value: (known: bool, value: i64) = proof_constant_int(amount)
+                    if amount_value.known and proof_expr_equal(base, left):
+                        return (true, 0) if amount_value.value == 0 and (operator == TokenKind.Plus or operator == TokenKind.Minus)
+                _:
+                    pass
+            return (false, 0)
+
+        # Definitional fixed-width identities. These rewrites are valid for every i64 value,
+        # including endpoints: adding/subtracting zero, multiplying by zero/one, dividing by
+        # one, taking a remainder by one, and the listed bitwise identities cannot introduce an
+        # arithmetic side condition. We intentionally do not add cancellation, distributivity,
+        # or x / x rules here.
+        def proof_definitionally_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
+            return true if proof_expr_equal(left, right)
+            match left:
+                Ast::Expr.Paren(inner, _):
+                    return proof_definitionally_equal(inner, right)
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_definitionally_equal(operand, right)
+                Ast::Expr.Binary(base, operator, amount, _):
+                    amount_constant: (known: bool, value: i64) = proof_constant_int(amount)
+                    if operator == TokenKind.Plus or operator == TokenKind.Minus:
+                        return proof_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 0
+                    if operator == TokenKind.Star:
+                        return proof_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 1
+                        target_constant: (known: bool, value: i64) = proof_constant_int(right)
+                        return target_constant.known and target_constant.value == 0 if amount_constant.known and amount_constant.value == 0
+                        base_constant: (known: bool, value: i64) = proof_constant_int(base)
+                        return proof_definitionally_equal(amount, right) if base_constant.known and base_constant.value == 1
+                        return target_constant.known and target_constant.value == 0 if base_constant.known and base_constant.value == 0
+                    if operator == TokenKind.Slash:
+                        return proof_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 1
+                    if operator == TokenKind.Percent:
+                        target_constant: (known: bool, value: i64) = proof_constant_int(right)
+                        return target_constant.known and target_constant.value == 0 if amount_constant.known and amount_constant.value == 1
+                    if operator == TokenKind.Ampersand:
+                        base_constant: (known: bool, value: i64) = proof_constant_int(base)
+                        target_constant: (known: bool, value: i64) = proof_constant_int(right)
+                        return target_constant.known and target_constant.value == 0 if amount_constant.known and amount_constant.value == 0
+                        return target_constant.known and target_constant.value == 0 if base_constant.known and base_constant.value == 0
+                        return proof_definitionally_equal(base, right) if proof_expr_equal(base, amount)
+                    if operator == TokenKind.Pipe:
+                        base_constant: (known: bool, value: i64) = proof_constant_int(base)
+                        return proof_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 0
+                        return proof_definitionally_equal(amount, right) if base_constant.known and base_constant.value == 0
+                        return proof_definitionally_equal(base, right) if proof_expr_equal(base, amount)
+                    if operator == TokenKind.Caret:
+                        base_constant: (known: bool, value: i64) = proof_constant_int(base)
+                        target_constant: (known: bool, value: i64) = proof_constant_int(right)
+                        return proof_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 0
+                        return proof_definitionally_equal(amount, right) if base_constant.known and base_constant.value == 0
+                        return target_constant.known and target_constant.value == 0 if proof_expr_equal(base, amount)
+                    if operator == TokenKind.LShift or operator == TokenKind.RShift:
+                        return proof_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 0
+                _:
+                    pass
+            match right:
+                Ast::Expr.Paren(inner, _):
+                    return proof_definitionally_equal(left, inner)
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_definitionally_equal(left, operand)
+                Ast::Expr.Binary(base, operator, amount, _):
+                    amount_constant: (known: bool, value: i64) = proof_constant_int(amount)
+                    if operator == TokenKind.Plus or operator == TokenKind.Minus:
+                        return proof_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 0
+                    if operator == TokenKind.Star:
+                        return proof_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 1
+                        left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                        return left_constant.known and left_constant.value == 0 if amount_constant.known and amount_constant.value == 0
+                        base_constant: (known: bool, value: i64) = proof_constant_int(base)
+                        return proof_definitionally_equal(left, amount) if base_constant.known and base_constant.value == 1
+                        return left_constant.known and left_constant.value == 0 if base_constant.known and base_constant.value == 0
+                    if operator == TokenKind.Slash:
+                        return proof_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 1
+                    if operator == TokenKind.Percent:
+                        left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                        return left_constant.known and left_constant.value == 0 if amount_constant.known and amount_constant.value == 1
+                    if operator == TokenKind.Ampersand:
+                        base_constant: (known: bool, value: i64) = proof_constant_int(base)
+                        left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                        return left_constant.known and left_constant.value == 0 if amount_constant.known and amount_constant.value == 0
+                        return left_constant.known and left_constant.value == 0 if base_constant.known and base_constant.value == 0
+                        return proof_definitionally_equal(left, base) if proof_expr_equal(base, amount)
+                    if operator == TokenKind.Pipe:
+                        base_constant: (known: bool, value: i64) = proof_constant_int(base)
+                        return proof_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 0
+                        return proof_definitionally_equal(left, amount) if base_constant.known and base_constant.value == 0
+                        return proof_definitionally_equal(left, base) if proof_expr_equal(base, amount)
+                    if operator == TokenKind.Caret:
+                        base_constant: (known: bool, value: i64) = proof_constant_int(base)
+                        left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                        return proof_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 0
+                        return proof_definitionally_equal(left, amount) if base_constant.known and base_constant.value == 0
+                        return left_constant.known and left_constant.value == 0 if proof_expr_equal(base, amount)
+                    if operator == TokenKind.LShift or operator == TokenKind.RShift:
+                        return proof_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 0
+                _:
+                    pass
+            return false
+
+        def proof_linear_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return true if proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
+            left_name: sview = proof_ident_name(left)
+            right_name: sview = proof_ident_name(right)
+            if proof_names_equal_from_facts(left_name, right_name, facts):
+                return true if operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+                return false if operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt
+            delta: (known: bool, value: i64) = proof_delta_constant(left, right)
+            if delta.known:
+                return delta.value > 0 if operator == TokenKind.Gt
+                return delta.value >= 0 if operator == TokenKind.GtEq
+                return delta.value < 0 if operator == TokenKind.Lt
+                return delta.value <= 0 if operator == TokenKind.LtEq
+                return delta.value != 0 if operator == TokenKind.BangEq
+                return delta.value == 0 if operator == TokenKind.EqEq
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            return true if proof_affine_goal(left, operator, right, bounds, facts)
+            return true if proof_difference_goal(left, operator, right, facts)
+            a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(left, bounds)
+            b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
+            return a.has_lower and b.has_upper and a.lower > b.upper if operator == TokenKind.Gt
+            return a.has_lower and b.has_upper and a.lower >= b.upper if operator == TokenKind.GtEq
+            return a.has_upper and b.has_lower and a.upper < b.lower if operator == TokenKind.Lt
+            return a.has_upper and b.has_lower and a.upper <= b.lower if operator == TokenKind.LtEq
+            return a.known and b.known and a.lower == a.upper and b.lower == b.upper and a.lower == b.lower if operator == TokenKind.EqEq
+            return (a.has_upper and b.has_lower and a.upper < b.lower) or (a.has_lower and b.has_upper and a.lower > b.upper) if operator == TokenKind.BangEq
+            return false
+
+        # A bounded, deterministic counterexample search for the same small integer fragment
+        # used by the prover. This is a diagnostic aid, never an acceptance rule: a witness is
+        # emitted only when every fact and the failed goal evaluate exactly under the assignment.
+        # Unsupported expressions therefore produce no witness instead of a misleading guess.
+        def proof_counterexample_name_index(names: darray[sview]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < names.count |index, names, name|:
+                return index if names[index] == name
+                index <- index + 1
+            return names.count
+
+        def proof_counterexample_collect_names(expression: Ast::Expr, names: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    if name != "" and proof_counterexample_name_index(names, name) == names.count:
+                        names.push(name)
+                Ast::Expr.Paren(inner, _):
+                    proof_counterexample_collect_names(inner, names)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_counterexample_collect_names(operand, names)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_counterexample_collect_names(left, names)
+                    proof_counterexample_collect_names(right, names)
+                _:
+                    pass
+
+        def proof_counterexample_int(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&) -> (known: bool, value: i64):
+            match expression:
+                Ast::Expr.IntLit(value):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_int(inner, names, values)
+                Ast::Expr.Ident(name, _):
+                    index: usize = proof_counterexample_name_index(names, name)
+                    return (true, values[index]) if index < values.count
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: (known: bool, value: i64) = proof_counterexample_int(operand, names, values)
+                    return (false, 0) if not inner.known
+                    return inner if operator == TokenKind.Plus
+                    if operator == TokenKind.Minus:
+                        return (false, 0) if inner.value == proof_i64_min()
+                        return (true, 0 - inner.value)
+                Ast::Expr.Binary(left, operator, right, _):
+                    a: (known: bool, value: i64) = proof_counterexample_int(left, names, values)
+                    b: (known: bool, value: i64) = proof_counterexample_int(right, names, values)
+                    return (false, 0) if not a.known or not b.known
+                    if operator == TokenKind.Plus:
+                        return proof_add_safe(a.value, b.value)
+                    if operator == TokenKind.Minus:
+                        return proof_sub_safe(a.value, b.value)
+                    if operator == TokenKind.Star:
+                        return proof_mul_safe(a.value, b.value)
+                    if operator == TokenKind.Slash:
+                        return proof_div_safe(a.value, b.value)
+                    if operator == TokenKind.Percent:
+                        return proof_mod_safe(a.value, b.value)
+                    if operator == TokenKind.Ampersand:
+                        return (true, a.value & b.value)
+                    if operator == TokenKind.Pipe:
+                        return (true, a.value | b.value)
+                    if operator == TokenKind.Caret:
+                        return (true, a.value ^ b.value)
+                    if operator == TokenKind.LShift:
+                        return proof_shift_safe(a.value, b.value, true)
+                    if operator == TokenKind.RShift:
+                        return proof_shift_safe(a.value, b.value, false)
+                _:
+                    pass
+            return (false, 0)
+
+        def proof_counterexample_bool(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&) -> (known: bool, value: bool):
+            match expression:
+                Ast::Expr.BoolLit(value):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_bool(inner, names, values)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    inner: (known: bool, value: bool) = proof_counterexample_bool(operand, names, values)
+                    return (inner.known, not inner.value) if inner.known
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        a_bool: (known: bool, value: bool) = proof_counterexample_bool(left, names, values)
+                        b_bool: (known: bool, value: bool) = proof_counterexample_bool(right, names, values)
+                        return (false, false) if not a_bool.known or not b_bool.known
+                        return (true, a_bool.value and b_bool.value) if operator == TokenKind.And
+                        return (true, a_bool.value or b_bool.value)
+                    if proof_is_comparison(operator):
+                        a: (known: bool, value: i64) = proof_counterexample_int(left, names, values)
+                        b: (known: bool, value: i64) = proof_counterexample_int(right, names, values)
+                        if a.known and b.known:
+                            return (true, a.value == b.value) if operator == TokenKind.EqEq
+                            return (true, a.value != b.value) if operator == TokenKind.BangEq
+                            return (true, a.value < b.value) if operator == TokenKind.Lt
+                            return (true, a.value > b.value) if operator == TokenKind.Gt
+                            return (true, a.value <= b.value) if operator == TokenKind.LtEq
+                            return (true, a.value >= b.value) if operator == TokenKind.GtEq
+                        if operator == TokenKind.EqEq or operator == TokenKind.BangEq:
+                            left_bool: (known: bool, value: bool) = proof_counterexample_bool(left, names, values)
+                            right_bool: (known: bool, value: bool) = proof_counterexample_bool(right, names, values)
+                            if left_bool.known and right_bool.known:
+                                equal: bool = left_bool.value == right_bool.value
+                                return (true, equal) if operator == TokenKind.EqEq
+                                return (true, not equal)
+                _:
+                    pass
+            return (false, false)
+
+        def proof_counterexample_add_candidate(candidates: mutable darray[i64]&, start: usize, bound: ProofBound, value: i64) -> void:
+            return if bound.has_lower and value < bound.lower
+            return if bound.has_upper and value > bound.upper
+            for index in start..<candidates.count |index, candidates, start, value|:
+                return if candidates[index] == value
+            candidates.push(value)
+
+        def proof_counterexample_search(index: usize, names: darray[sview]&, values: mutable darray[i64]&, starts: darray[usize]&, counts: darray[usize]&, candidates: darray[i64]&, facts: darray[Ast::Expr]&, goal: Ast::Expr, budget: mutable usize&) -> bool:
+            if index == names.count:
+                return false if budget == 0
+                budget <- budget - 1
+                for fact in facts |fact, names, values|:
+                    fact_value: (known: bool, value: bool) = proof_counterexample_bool(fact, names, values)
+                    return false if not fact_value.known or not fact_value.value
+                goal_value: (known: bool, value: bool) = proof_counterexample_bool(goal, names, values)
+                return goal_value.known and not goal_value.value
+            start: usize = starts[index]
+            end: usize = start + counts[index]
+            candidate_index: mutable usize = start
+            while candidate_index < end |candidate_index, end, candidates, values, index, names, starts, counts, facts, goal, budget|:
+                values[index] <- candidates[candidate_index]
+                return true if proof_counterexample_search(index + 1, names, values, starts, counts, candidates, facts, goal, budget)
+                candidate_index <- candidate_index + 1
+            return false
+
+        # Populate `assignments` only after an exact falsifying state is found. The result uses
+        # ordinary equality expressions so existing JSON tooling can display/replay it directly.
+        def proof_find_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, assignments: mutable darray[Ast::Expr]&) -> bool:
+            names: mutable darray[sview] = []
+            for fact in facts |names|:
+                proof_counterexample_collect_names(fact, &names)
+            proof_counterexample_collect_names(goal, &names)
+            return false if names.count > 6
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            starts: mutable darray[usize] = []
+            counts: mutable darray[usize] = []
+            candidates: mutable darray[i64] = []
+            for name in names |name, starts, counts, candidates, bounds|:
+                bound: ProofBound = proof_bound_for(bounds, name)
+                start: usize = candidates.count
+                proof_counterexample_add_candidate(&candidates, start, bound, 0)
+                proof_counterexample_add_candidate(&candidates, start, bound, 1)
+                proof_counterexample_add_candidate(&candidates, start, bound, -1)
+                proof_counterexample_add_candidate(&candidates, start, bound, bound.lower) if bound.has_lower
+                proof_counterexample_add_candidate(&candidates, start, bound, bound.upper) if bound.has_upper
+                if bound.has_lower:
+                    next_lower: (known: bool, value: i64) = proof_add_safe(bound.lower, 1)
+                    proof_counterexample_add_candidate(&candidates, start, bound, next_lower.value) if next_lower.known
+                if bound.has_upper:
+                    previous_upper: (known: bool, value: i64) = proof_sub_safe(bound.upper, 1)
+                    proof_counterexample_add_candidate(&candidates, start, bound, previous_upper.value) if previous_upper.known
+                starts.push(start)
+                counts.push(candidates.count - start)
+                return false if counts[counts.count - 1] == 0
+            values: mutable darray[i64] = []
+            values.resize(names.count)
+            budget: mutable usize = 4096
+            found: bool = proof_counterexample_search(0, names, &values, starts, counts, candidates, facts, goal, &budget)
+            return false if not found
+            position: Ast::Pos = Ast::expr_pos(goal)
+            for index in 0..<names.count |index, names, values, assignments, position|:
+                assignments.push(Ast::Expr.Binary(Ast::Expr.Ident(names[index], position), TokenKind.EqEq, Ast::Expr.IntLit(values[index]), position))
+            return true
+
+        # Complete bounded model checking for the same pure integer/Boolean fragment. This is
+        # deliberately separate from the sparse counterexample search above: a proof may use
+        # this rule only when every symbolic integer has an explicit finite interval, every
+        # evaluated fact is known, and every point in the product domain is visited. It therefore
+        # handles small nonlinear properties such as `x * x >= 0` without treating samples as a
+        # theorem. Fixed-width overflow and unsupported expressions make the result unknown.
+        def proof_bounded_model_visit(index: usize, names: darray[sview]&, values: mutable darray[i64]&, lowers: darray[i64]&, widths: darray[i64]&, facts: darray[Ast::Expr]&, goal: Ast::Expr, budget: mutable usize&, all_known: mutable bool&, holds: mutable bool&) -> void:
+            known_now: bool = all_known
+            holds_now: bool = holds
+            return if not known_now or not holds_now
+            if index == names.count:
+                if budget == 0:
+                    all_known <- false
+                    return
+                budget <- budget - 1
+                facts_hold: mutable bool = true
+                for fact in facts |fact, names, values, all_known, facts_hold|:
+                    fact_value: (known: bool, value: bool) = proof_counterexample_bool(fact, names, values)
+                    if not fact_value.known:
+                        all_known <- false
+                        return
+                    facts_hold <- false if not fact_value.value
+                return if not facts_hold
+                goal_value: (known: bool, value: bool) = proof_counterexample_bool(goal, names, values)
+                if not goal_value.known:
+                    all_known <- false
+                    return
+                holds <- false if not goal_value.value
+                return
+            candidate: mutable i64 = lowers[index]
+            offset: mutable i64 = 0
+            while offset < widths[index] |offset, candidate, index, widths, values, facts, goal, budget, all_known, holds, names, lowers|:
+                values[index] <- candidate
+                proof_bounded_model_visit(index + 1, names, values, lowers, widths, facts, goal, budget, all_known, holds)
+                known_after: bool = all_known
+                holds_after: bool = holds
+                return if not known_after or not holds_after
+                offset <- offset + 1
+                if offset < widths[index]:
+                    next_candidate: (known: bool, value: i64) = proof_add_safe(candidate, 1)
+                    if not next_candidate.known:
+                        all_known <- false
+                        return
+                    candidate <- next_candidate.value
+
+        def proof_bounded_model_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            names: mutable darray[sview] = []
+            for fact in facts |names|:
+                proof_counterexample_collect_names(fact, &names)
+            proof_counterexample_collect_names(goal, &names)
+            return false if names.count == 0 or names.count > 6
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            lowers: mutable darray[i64] = []
+            widths: mutable darray[i64] = []
+            total: mutable i64 = 1
+            for name in names |name, bounds, lowers, widths, total|:
+                bound: ProofBound = proof_bound_for(bounds, name)
+                return false if not bound.has_lower or not bound.has_upper or bound.lower > bound.upper
+                width_difference: (known: bool, value: i64) = proof_sub_safe(bound.upper, bound.lower)
+                return false if not width_difference.known
+                width_with_end: (known: bool, value: i64) = proof_add_safe(width_difference.value, 1)
+                return false if not width_with_end.known or width_with_end.value <= 0 or width_with_end.value > 4096
+                total_width: (known: bool, value: i64) = proof_mul_safe(total, width_with_end.value)
+                return false if not total_width.known or total_width.value > 65536
+                total <- total_width.value
+                lowers.push(bound.lower)
+                widths.push(width_with_end.value)
+            values: mutable darray[i64] = []
+            values.resize(names.count)
+            budget: mutable usize = 65536
+            all_known: mutable bool = true
+            holds: mutable bool = true
+            proof_bounded_model_visit(0, names, &values, lowers, widths, facts, goal, &budget, &all_known, &holds)
+            return all_known and holds
+
+        # A false branch carries `not condition`. Recognize the exact logical complement of a
+        # comparison so branch-sensitive checking can prove facts such as `not (x < 0) |- x >= 0`
+        # without pretending that arbitrary Boolean negation is an arithmetic theorem.
+        def proof_fact_proves_comparison_negation(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            negated_operator: TokenKind = proof_comparison_negation(operator)
+            return false if negated_operator == TokenKind.Eof
+            for fact in facts:
+                match fact:
+                    Ast::Expr.Unary(TokenKind.Not, operand, _):
+                        match operand:
+                            Ast::Expr.Binary(inner_left, inner_operator, inner_right, _):
+                                return true if inner_operator == negated_operator and proof_expr_equal(inner_left, left) and proof_expr_equal(inner_right, right)
+                            _:
+                                pass
+                    _:
+                        pass
+            return false
+
+        # Project a conjunct from a Boolean fact. This is a structural logical rule, not an
+        # arithmetic assumption: a fact `A and B` entails each of A and B.
+        def proof_fact_contains(fact: Ast::Expr, goal: Ast::Expr) -> bool:
+            return true if proof_expr_equal(fact, goal)
+            match fact:
+                Ast::Expr.Paren(inner, _):
+                    return proof_fact_contains(inner, goal)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_fact_contains(left, goal) or proof_fact_contains(right, goal)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    match inner:
+                        Ast::Expr.Unary(TokenKind.Not, nested, _):
+                            return proof_fact_contains(nested, goal)
+                        _:
+                            pass
+                    return false
+                _:
+                    return false
+
+        # A verified function summary equates a call result with its postcondition. When a
+        # branch has already established the Boolean call (or its negation), the corresponding
+        # postcondition is available by equality substitution. Keep this rule narrow: one side
+        # must remain a call-shaped term, and the branch fact must contain that exact call. This
+        # avoids turning arbitrary arithmetic equalities into unrestricted rewriting while still
+        # letting guarded pure summaries justify bounds such as `root < nodes.count`.
+        def proof_fact_proves_call_summary(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            for summary in facts:
+                match summary:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, position):
+                        left_is_call: mutable bool = false
+                        right_is_call: mutable bool = false
+                        match left:
+                            Ast::Expr.Call(_, _, _, _):
+                                left_is_call <- true
+                            _:
+                                pass
+                        match right:
+                            Ast::Expr.Call(_, _, _, _):
+                                right_is_call <- true
+                            _:
+                                pass
+                        for fact in facts |fact, left, right, goal, left_is_call, right_is_call, position|:
+                            if left_is_call:
+                                return true if proof_expr_equal(right, goal) and proof_fact_contains(fact, left)
+                                match goal:
+                                    Ast::Expr.Unary(TokenKind.Not, inner, _):
+                                        return true if proof_expr_equal(right, inner) and proof_fact_contains(fact, Ast::Expr.Unary(TokenKind.Not, left, position))
+                                    _:
+                                        pass
+                            if right_is_call:
+                                return true if proof_expr_equal(left, goal) and proof_fact_contains(fact, right)
+                                match goal:
+                                    Ast::Expr.Unary(TokenKind.Not, inner, _):
+                                        return true if proof_expr_equal(left, inner) and proof_fact_contains(fact, Ast::Expr.Unary(TokenKind.Not, right, position))
+                                    _:
+                                        pass
+                    _:
+                        pass
+            return false
+
+        # Return one disjunctive branch from a Boolean fact. The original fact is replaced by
+        # exactly one branch in each recursive proof, so neither branch can silently retain the
+        # un-split disjunction as an axiom. Parentheses are transparent. A disjunction nested in
+        # a conjunction reconstructs that conjunction in each branch, preserving all context.
+        def proof_find_disjunction(expression: Ast::Expr) -> (known: bool, left: Ast::Expr, right: Ast::Expr):
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_find_disjunction(inner)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return (true, left, right)
+                Ast::Expr.Binary(left, TokenKind.And, right, position):
+                    left_split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(left)
+                    if left_split.known:
+                        return (true, Ast::Expr.Binary(left_split.left, TokenKind.And, right, position), Ast::Expr.Binary(left_split.right, TokenKind.And, right, position))
+                    right_split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(right)
+                    if right_split.known:
+                        return (true, Ast::Expr.Binary(left, TokenKind.And, right_split.left, position), Ast::Expr.Binary(left, TokenKind.And, right_split.right, position))
+                _:
+                    pass
+            return (false, Ast::Expr.Absent, Ast::Expr.Absent)
+
+        def proof_goal_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, depth: usize, budget: mutable usize&, split_depth: usize) -> bool:
+            # An explicitly asserted proposition is accepted before trying the arithmetic
+            # fragment. This matters for one-sided facts such as `x >= 0`: the fact itself is
+            # valid even though it is not enough to construct a finite interval for `x`.
+            for fact in facts:
+                return true if proof_fact_contains(fact, goal) or proof_quantifier_equal(fact, goal, annotations)
+            return true if proof_facts_inconsistent(facts)
+            return true if proof_fact_proves_call_summary(facts, goal)
+            if split_depth < 4:
+                disjunction_index: mutable usize = facts.count
+                disjunction_left: mutable Ast::Expr = Ast::Expr.Absent
+                disjunction_right: mutable Ast::Expr = Ast::Expr.Absent
+                for index in 0..<facts.count |index, facts, disjunction_index, disjunction_left, disjunction_right|:
+                    candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(facts[index])
+                    if candidate.known:
+                        disjunction_index <- index
+                        disjunction_left <- candidate.left
+                        disjunction_right <- candidate.right
+                        break
+                if disjunction_index < facts.count:
+                    left_facts: mutable darray[Ast::Expr] = []
+                    right_facts: mutable darray[Ast::Expr] = []
+                    for index in 0..<facts.count |index, facts, left_facts, right_facts, disjunction_index|:
+                        continue if index == disjunction_index
+                        left_facts.push(facts[index])
+                        right_facts.push(facts[index])
+                    left_facts.push(disjunction_left)
+                    right_facts.push(disjunction_right)
+                    return proof_goal_depth(left_facts, goal, annotations, depth, budget, split_depth + 1) and proof_goal_depth(right_facts, goal, annotations, depth, budget, split_depth + 1)
+            quantifier_kind: sview = proof_quantifier_kind(goal, annotations)
+            return false if quantifier_kind != "" and depth >= 4
+            return proof_quantifier_goal(facts, goal, annotations, depth, budget, split_depth) if quantifier_kind != ""
+            return true if proof_bounded_model_goal(facts, goal)
+            match goal:
+                Ast::Expr.BoolLit(value):
+                    return value
+                Ast::Expr.Paren(inner, _):
+                    return proof_goal_depth(facts, inner, annotations, depth, budget, split_depth)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.BoolLit(value):
+                            return not value
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated_operator: TokenKind = proof_comparison_negation(operator)
+                            return proof_linear_goal(left, negated_operator, right, facts) if negated_operator != TokenKind.Eof
+                        _:
+                            pass
+                Ast::Expr.Binary(left, operator, right, position):
+                    if operator == TokenKind.And:
+                        return proof_goal_depth(facts, left, annotations, depth, budget, split_depth) and proof_goal_depth(facts, right, annotations, depth, budget, split_depth)
+                    if operator == TokenKind.Or:
+                        return proof_goal_depth(facts, left, annotations, depth, budget, split_depth) or proof_goal_depth(facts, right, annotations, depth, budget, split_depth)
+                    if operator == TokenKind.FatArrow:
+                        implication_facts: mutable darray[Ast::Expr] = []
+                        implication_facts.extend(facts)
+                        implication_facts.push(left)
+                        return proof_goal_depth(implication_facts, right, annotations, depth, budget, split_depth)
+                    # Eliminate a conditional expression by checking both semantic branches.
+                    # The condition and its negation are path assumptions, not asserted facts;
+                    # both branches are required, so an opaque condition cannot manufacture a
+                    # proof. Bound the split with the same small case-splitting budget used for
+                    # disjunctive facts.
+                    if split_depth < 4:
+                        match left:
+                            Ast::Expr.If(condition, then_expression, else_expression, _):
+                                then_facts: mutable darray[Ast::Expr] = []
+                                else_facts: mutable darray[Ast::Expr] = []
+                                then_facts.extend(facts)
+                                else_facts.extend(facts)
+                                then_facts.push(condition)
+                                else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
+                                then_goal: Ast::Expr = Ast::Expr.Binary(then_expression, operator, right, position)
+                                else_goal: Ast::Expr = Ast::Expr.Binary(else_expression, operator, right, position)
+                                return proof_goal_depth(then_facts, then_goal, annotations, depth, budget, split_depth + 1) and proof_goal_depth(else_facts, else_goal, annotations, depth, budget, split_depth + 1)
+                            _:
+                                pass
+                        match right:
+                            Ast::Expr.If(condition, then_expression, else_expression, _):
+                                then_facts: mutable darray[Ast::Expr] = []
+                                else_facts: mutable darray[Ast::Expr] = []
+                                then_facts.extend(facts)
+                                else_facts.extend(facts)
+                                then_facts.push(condition)
+                                else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
+                                then_goal: Ast::Expr = Ast::Expr.Binary(left, operator, then_expression, position)
+                                else_goal: Ast::Expr = Ast::Expr.Binary(left, operator, else_expression, position)
+                                return proof_goal_depth(then_facts, then_goal, annotations, depth, budget, split_depth + 1) and proof_goal_depth(else_facts, else_goal, annotations, depth, budget, split_depth + 1)
+                            _:
+                                pass
+                    if proof_is_comparison(operator):
+                        return proof_fact_proves_comparison_negation(left, operator, right, facts) or proof_linear_goal(left, operator, right, facts)
+                _:
+                    pass
+            return false
+
+        def proof_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            budget: mutable usize = 0
+            return proof_goal_depth(facts, goal, annotations, 0, budget, 0)

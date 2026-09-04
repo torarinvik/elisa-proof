@@ -1,0 +1,1168 @@
+# Elisa Proof — self-hosted proof assistant entry point.
+#
+# The parser and semantic model are the compiler's own Elisa implementation. The proof
+# checker is intentionally a separate module: importing Elisa stays compiler-compatible,
+# while proof obligations can grow without weakening ordinary compilation.
+include "../../Elisa-compiler/src/semantic/semantic.elisa"
+include "../../Elisa-compiler/elisacore_std/elisacore_json.elisa"
+include "./proof/kernel_core.elisa"
+include "./proof/model.elisa"
+include "./proof/kernel.elisa"
+include "./proof/expr.elisa"
+include "./proof/linear.elisa"
+include "./proof/resources.elisa"
+include "./proof/check.elisa"
+include "./proof/kernel_replay.elisa"
+include "./proof/replay.elisa"
+include "./proof/import.elisa"
+include "./proof/tactics.elisa"
+include "./proof/tactic_json.elisa"
+
+using Ast
+using Semantic
+using ElisaProof
+
+extern open(path: cstr, flags: i64, ...) -> i64
+extern close(fd: i64) -> i64
+extern read(fd: i64, buf: u8&, count: usize) -> i64
+
+def proof_read_file(path: cstr) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    contents: mutable darray[u8] = []
+    descriptor: i64 = open(path, 0, 0)
+    return contents if descriptor < 0
+    chunk: mutable darray[u8] = []
+    chunk.resize(65536)
+    while true |contents, chunk, descriptor|:
+        amount: i64 = read(descriptor, &chunk[0], 65536)
+        break if amount <= 0
+        for index in 0..<amount.usize() |contents, chunk|:
+            contents.push(chunk[index])
+    _ = close(descriptor)
+    return contents
+
+def proof_write(text: darray[u8]&) -> void can[Console, Unsafe.PointerCast]:
+    return if text.count == 0
+    raw: void& = (&text[0]).cast[void&] can Unsafe.PointerCast
+    _ = write(1, raw, text.count)
+
+def proof_push(buffer: mutable darray[u8]&, text: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    for index in 0..<sview_len(text) |buffer|:
+        buffer.push(sview_at(text, index))
+
+def proof_push_number(buffer: mutable darray[u8]&, value: u32) -> void can[Memory.Allocate, Abort.Panic]:
+    digits: mutable darray[u8] = []
+    remaining: mutable u32 = value
+    if remaining == 0:
+        buffer.push('0'.u8())
+        return
+    while remaining > 0 |digits, remaining|:
+        digits.push(('0'.u8()) + (remaining % 10).u8())
+        remaining <- remaining / 10
+    index: mutable usize = digits.count
+    while index > 0 |buffer, digits, index|:
+        index <- index - 1
+        buffer.push(digits[index])
+
+def proof_source_fingerprint(source: darray[u8]&) -> u32:
+    # FNV-1a over the exact expanded bytes handed to the parser. This is an identity hint for
+    # proof caches and AI clients, not a cryptographic digest or a kernel acceptance condition.
+    hash: mutable i64 = 2166136261
+    for byte in source |hash|:
+        hash <- ((hash ^ byte.i64()) * 16777619) % 4294967296
+    return hash.u32()
+
+def proof_cstr_equals(left: cstr, right: sview) -> bool:
+    index: mutable usize = 0
+    right_length: usize = sview_len(right)
+    while index < right_length |index, left, right|:
+        return false if left[index] == 0 or left[index] != sview_at(right, index)
+        index <- index + 1
+    return left[index] == 0
+
+def proof_push_json_string(buffer: mutable darray[u8]&, value: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    buffer.push('"'.u8())
+    for index in 0..<sview_len(value) |index, buffer, value|:
+        byte: u8 = sview_at(value, index)
+        if byte == '"'.u8() or byte == '\\'.u8():
+            buffer.push('\\'.u8())
+            buffer.push(byte)
+        elif byte == '\n'.u8():
+            proof_push(buffer, "\\n")
+        elif byte == '\r'.u8():
+            proof_push(buffer, "\\r")
+        elif byte == '\t'.u8():
+            proof_push(buffer, "\\t")
+        elif byte < 32:
+            proof_push(buffer, "?")
+        else:
+            buffer.push(byte)
+    buffer.push('"'.u8())
+
+def proof_push_json_bytes(buffer: mutable darray[u8]&, value: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    # `Semantic::diagnostic_message` returns owned bytes rather than an sview. Keep the JSON
+    # encoder's escaping rules identical for compiler diagnostics without manufacturing a view
+    # whose lifetime would outlive the temporary message.
+    buffer.push('"'.u8())
+    for index in 0..<value.count |index, value, buffer|:
+        byte: u8 = value[index]
+        if byte == '"'.u8() or byte == '\\'.u8():
+            buffer.push('\\'.u8())
+            buffer.push(byte)
+        elif byte == '\n'.u8():
+            proof_push(buffer, "\\n")
+        elif byte == '\r'.u8():
+            proof_push(buffer, "\\r")
+        elif byte == '\t'.u8():
+            proof_push(buffer, "\\t")
+        elif byte < 32:
+            proof_push(buffer, "?")
+        else:
+            buffer.push(byte)
+    buffer.push('"'.u8())
+
+def proof_push_json_i64(buffer: mutable darray[u8]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    if value == 0 - 9223372036854775807 - 1:
+        proof_push(buffer, "-9223372036854775808")
+        return
+    working: mutable i64 = value
+    if working < 0:
+        buffer.push('-'.u8())
+        working <- 0 - working
+    digits: mutable darray[u8] = []
+    remaining: mutable i64 = working
+    if remaining == 0:
+        buffer.push('0'.u8())
+        return
+    while remaining > 0 |digits, remaining|:
+        digits.push(('0'.u8()) + (remaining % 10).u8())
+        remaining <- remaining / 10
+    index: mutable usize = digits.count
+    while index > 0 |buffer, digits, index|:
+        index <- index - 1
+        buffer.push(digits[index])
+
+def proof_push_json_operator(buffer: mutable darray[u8]&, operator: TokenKind) -> void can[Memory.Allocate, Abort.Panic]:
+    value: mutable sview = "unknown"
+    value <- "+" if operator == TokenKind.Plus
+    value <- "-" if operator == TokenKind.Minus
+    value <- "*" if operator == TokenKind.Star
+    value <- "/" if operator == TokenKind.Slash
+    value <- "%" if operator == TokenKind.Percent
+    value <- "==" if operator == TokenKind.EqEq
+    value <- "!=" if operator == TokenKind.BangEq
+    value <- "<" if operator == TokenKind.Lt
+    value <- ">" if operator == TokenKind.Gt
+    value <- "<=" if operator == TokenKind.LtEq
+    value <- ">=" if operator == TokenKind.GtEq
+    value <- "and" if operator == TokenKind.And
+    value <- "or" if operator == TokenKind.Or
+    value <- "=>" if operator == TokenKind.FatArrow
+    value <- "not" if operator == TokenKind.Not
+    value <- "in" if operator == TokenKind.In
+    value <- "is" if operator == TokenKind.Is
+    value <- "as" if operator == TokenKind.As
+    value <- "|" if operator == TokenKind.Pipe
+    value <- "^" if operator == TokenKind.Caret
+    value <- "&" if operator == TokenKind.Ampersand
+    value <- "<<" if operator == TokenKind.LShift
+    value <- ">>" if operator == TokenKind.RShift
+    value <- "range_lt" if operator == TokenKind.RangeLt
+    value <- "range_le" if operator == TokenKind.RangeLe
+    proof_push_json_string(buffer, value)
+
+def proof_push_json_expr(buffer: mutable darray[u8]&, expression: Ast::Expr) -> void can[Memory.Allocate, Abort.Panic]:
+    match expression:
+        Ast::Expr.Invalid:
+            proof_push(buffer, "{\"kind\":\"invalid\"}")
+        Ast::Expr.Absent:
+            proof_push(buffer, "{\"kind\":\"absent\"}")
+        Ast::Expr.IntLit(value):
+            proof_push(buffer, "{\"kind\":\"int\",\"value\":")
+            proof_push_json_i64(buffer, value)
+            proof_push(buffer, "}")
+        Ast::Expr.FloatLit(value):
+            proof_push(buffer, "{\"kind\":\"float\",\"text\":")
+            proof_push_json_string(buffer, value)
+            proof_push(buffer, "}")
+        Ast::Expr.StringLit(value):
+            proof_push(buffer, "{\"kind\":\"string\",\"text\":")
+            proof_push_json_string(buffer, value)
+            proof_push(buffer, "}")
+        Ast::Expr.CharLit(value):
+            proof_push(buffer, "{\"kind\":\"char\",\"text\":")
+            proof_push_json_string(buffer, value)
+            proof_push(buffer, "}")
+        Ast::Expr.BoolLit(value):
+            proof_push(buffer, "{\"kind\":\"bool\",\"value\":")
+            proof_push(buffer, "true" if value else "false")
+            proof_push(buffer, "}")
+        Ast::Expr.Ident(name, position):
+            proof_push(buffer, "{\"kind\":\"ident\",\"name\":")
+            proof_push_json_string(buffer, name)
+            proof_push(buffer, ",\"line\":")
+            proof_push_number(buffer, position.line)
+            proof_push(buffer, "}")
+
+        Ast::Expr.Paren(inner, _):
+            proof_push(buffer, "{\"kind\":\"paren\",\"inner\":")
+            proof_push_json_expr(buffer, inner)
+            proof_push(buffer, "}")
+        Ast::Expr.Unary(operator, operand, _):
+            proof_push(buffer, "{\"kind\":\"unary\",\"operator\":")
+            proof_push_json_operator(buffer, operator)
+            proof_push(buffer, ",\"operand\":")
+            proof_push_json_expr(buffer, operand)
+            proof_push(buffer, "}")
+        Ast::Expr.Binary(left, operator, right, _):
+            proof_push(buffer, "{\"kind\":\"binary\",\"operator\":")
+            proof_push_json_operator(buffer, operator)
+            proof_push(buffer, ",\"left\":")
+            proof_push_json_expr(buffer, left)
+            proof_push(buffer, ",\"right\":")
+            proof_push_json_expr(buffer, right)
+            proof_push(buffer, "}")
+        Ast::Expr.Call(callee, arguments, argument_names, _):
+            proof_push(buffer, "{\"kind\":\"call\",\"callee\":")
+            proof_push_json_expr(buffer, callee)
+            proof_push(buffer, ",\"arguments\":[")
+            for index in 0..<arguments.count |index, arguments, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, arguments[index])
+            proof_push(buffer, "],\"argument_names\":[")
+            for index in 0..<argument_names.count |index, argument_names, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_string(buffer, argument_names[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.Field(object, field, _):
+            proof_push(buffer, "{\"kind\":\"field\",\"object\":")
+            proof_push_json_expr(buffer, object)
+            proof_push(buffer, ",\"field\":")
+            proof_push_json_string(buffer, field)
+            proof_push(buffer, "}")
+        Ast::Expr.Scope(base, field, _):
+            proof_push(buffer, "{\"kind\":\"scope\",\"base\":")
+            proof_push_json_expr(buffer, base)
+            proof_push(buffer, ",\"name\":")
+            proof_push_json_string(buffer, field)
+            proof_push(buffer, "}")
+        Ast::Expr.ShorthandMember(parts, _):
+            proof_push(buffer, "{\"kind\":\"shorthand_member\",\"parts\":[")
+            for index in 0..<parts.count |index, parts, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_string(buffer, parts[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.Index(object, index, _):
+            proof_push(buffer, "{\"kind\":\"index\",\"object\":")
+            proof_push_json_expr(buffer, object)
+            proof_push(buffer, ",\"index\":")
+            proof_push_json_expr(buffer, index)
+            proof_push(buffer, "}")
+        Ast::Expr.Slice(object, low, high, _):
+            proof_push(buffer, "{\"kind\":\"slice\",\"object\":")
+            proof_push_json_expr(buffer, object)
+            proof_push(buffer, ",\"low\":")
+            proof_push_json_expr(buffer, low)
+            proof_push(buffer, ",\"high\":")
+            proof_push_json_expr(buffer, high)
+            proof_push(buffer, "}")
+        Ast::Expr.IndexN(object, arguments, _):
+            proof_push(buffer, "{\"kind\":\"index_n\",\"object\":")
+            proof_push_json_expr(buffer, object)
+            proof_push(buffer, ",\"arguments\":[")
+            for index in 0..<arguments.count |index, arguments, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, arguments[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.Move(operand, _):
+            proof_push(buffer, "{\"kind\":\"move\",\"operand\":")
+            proof_push_json_expr(buffer, operand)
+            proof_push(buffer, "}")
+        Ast::Expr.RegionNew(operand, region, _):
+            proof_push(buffer, "{\"kind\":\"region_new\",\"region\":")
+            proof_push_json_string(buffer, region)
+            proof_push(buffer, ",\"operand\":")
+            proof_push_json_expr(buffer, operand)
+            proof_push(buffer, "}")
+        Ast::Expr.Array(elements, _):
+            proof_push(buffer, "{\"kind\":\"array\",\"elements\":[")
+            for index in 0..<elements.count |index, elements, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, elements[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.Tuple(elements, _):
+            proof_push(buffer, "{\"kind\":\"tuple\",\"elements\":[")
+            for index in 0..<elements.count |index, elements, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, elements[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.SetLit(elements, _):
+            proof_push(buffer, "{\"kind\":\"set\",\"elements\":[")
+            for index in 0..<elements.count |index, elements, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, elements[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.DictLit(entries, _):
+            proof_push(buffer, "{\"kind\":\"dict\",\"entries\":[")
+            for index in 0..<entries.count |index, entries, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push(buffer, "{\"key\":")
+                proof_push_json_expr(buffer, entries[index].key)
+                proof_push(buffer, ",\"value\":")
+                proof_push_json_expr(buffer, entries[index].value)
+                proof_push(buffer, "}")
+            proof_push(buffer, "]}")
+        Ast::Expr.Construct(type_expression, fields, _):
+            proof_push(buffer, "{\"kind\":\"construct\",\"type\":")
+            proof_push_json_expr(buffer, type_expression)
+            proof_push(buffer, ",\"fields\":[")
+            for index in 0..<fields.count |index, fields, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push(buffer, "{\"name\":")
+                proof_push_json_string(buffer, fields[index].name)
+                proof_push(buffer, ",\"value\":")
+                proof_push_json_expr(buffer, fields[index].value)
+                proof_push(buffer, "}")
+            proof_push(buffer, "]}")
+        Ast::Expr.RecordUpdate(base, fields, _):
+            proof_push(buffer, "{\"kind\":\"record_update\",\"base\":")
+            proof_push_json_expr(buffer, base)
+            proof_push(buffer, ",\"fields\":[")
+            for index in 0..<fields.count |index, fields, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push(buffer, "{\"name\":")
+                proof_push_json_string(buffer, fields[index].name)
+                proof_push(buffer, ",\"value\":")
+                proof_push_json_expr(buffer, fields[index].value)
+                proof_push(buffer, "}")
+            proof_push(buffer, "]}")
+        Ast::Expr.If(condition, then_expr, else_expr, _):
+            proof_push(buffer, "{\"kind\":\"if\",\"condition\":")
+            proof_push_json_expr(buffer, condition)
+            proof_push(buffer, ",\"then\":")
+            proof_push_json_expr(buffer, then_expr)
+            proof_push(buffer, ",\"else\":")
+            proof_push_json_expr(buffer, else_expr)
+            proof_push(buffer, "}")
+        Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+            proof_push(buffer, "{\"kind\":\"comprehension\",\"variable\":")
+            proof_push_json_string(buffer, variable)
+            proof_push(buffer, ",\"iterable\":")
+            proof_push_json_expr(buffer, iterable)
+            proof_push(buffer, ",\"condition\":")
+            proof_push_json_expr(buffer, condition)
+            proof_push(buffer, ",\"body\":")
+            proof_push_json_expr(buffer, body)
+            proof_push(buffer, "}")
+        Ast::Expr.Refinement(base, predicate, _):
+            proof_push(buffer, "{\"kind\":\"refinement\",\"base\":")
+            proof_push_json_expr(buffer, base)
+            proof_push(buffer, ",\"predicate\":")
+            proof_push_json_expr(buffer, predicate)
+            proof_push(buffer, "}")
+        Ast::Expr.Block(statements, value, _, position):
+            proof_push(buffer, "{\"kind\":\"block\",\"line\":")
+            proof_push_number(buffer, position.line)
+            proof_push(buffer, ",\"statements\":[")
+            for index in 0..<statements.count |index, statements, buffer|:
+                proof_push(buffer, ",") if index > 0
+                match statements[index]:
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                        proof_push(buffer, "{\"kind\":\"var_decl\",\"name\":")
+                        proof_push_json_string(buffer, name)
+                        proof_push(buffer, ",\"type\":")
+                        proof_push_json_expr(buffer, type_expression)
+                        proof_push(buffer, ",\"initializer\":")
+                        proof_push_json_expr(buffer, initializer)
+                        proof_push(buffer, "}")
+                    _:
+                        proof_push(buffer, "{\"kind\":\"unsupported_statement\"}")
+            proof_push(buffer, "],\"value\":")
+            proof_push_json_expr(buffer, value)
+            proof_push(buffer, "}")
+        _:
+            position: Ast::Pos = Ast::expr_pos(expression)
+            proof_push(buffer, "{\"kind\":\"unsupported\",\"line\":")
+            proof_push_number(buffer, position.line)
+            proof_push(buffer, "}")
+
+def proof_push_json_kernel_node(buffer: mutable darray[u8]&, node: ElisaProofKernelCore::ProofKernelNode) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"kind\":")
+    proof_push_json_string(buffer, node.kind)
+    proof_push(buffer, ",\"operator\":")
+    proof_push_json_string(buffer, node.operator)
+    proof_push(buffer, ",\"left\":")
+    proof_push_number(buffer, node.left.u32())
+    proof_push(buffer, ",\"right\":")
+    proof_push_number(buffer, node.right.u32())
+    proof_push(buffer, ",\"auxiliary\":")
+    proof_push_number(buffer, node.auxiliary.u32())
+    proof_push(buffer, ",\"children_start\":")
+    proof_push_number(buffer, node.children_start.u32())
+    proof_push(buffer, ",\"children_count\":")
+    proof_push_number(buffer, node.children_count.u32())
+    proof_push(buffer, ",\"value\":")
+    proof_push_json_i64(buffer, node.value)
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, node.name)
+    proof_push(buffer, ",\"secondary_name\":")
+    proof_push_json_string(buffer, node.secondary_name)
+    proof_push(buffer, "}")
+
+def proof_push_json_fact_origin(buffer: mutable darray[u8]&, report: ProofReport&, expression: Ast::Expr, owner: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin(report, expression, owner)
+    if not origin.known:
+        proof_push(buffer, "null")
+        return
+    proof_push(buffer, "{\"kind\":")
+    proof_push_json_string(buffer, origin.kind)
+    proof_push(buffer, ",\"line\":")
+    proof_push_number(buffer, origin.line)
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, origin.name)
+    proof_push(buffer, ",\"dependency\":")
+    proof_push_json_string(buffer, origin.dependency)
+    proof_push(buffer, ",\"premises\":")
+    proof_push_number(buffer, origin.premises_count.u32())
+    proof_push(buffer, "}")
+
+def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: ProofReport&, facts_start: usize, facts_count: usize, owner: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    emitted: mutable usize = 0
+    for fact_index in 0..<facts_count |fact_index, facts_start, report, owner, emitted, buffer|:
+        origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin(report, report.certificate_facts[facts_start + fact_index], owner)
+        continue if not origin.known or origin.dependency == ""
+        duplicate: mutable bool = false
+        for prior_index in 0..<fact_index |prior_index, facts_start, report, owner, origin, duplicate|:
+            prior: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin(report, report.certificate_facts[facts_start + prior_index], owner)
+            duplicate <- true if prior.known and prior.kind == origin.kind and prior.dependency == origin.dependency
+        continue if duplicate
+        proof_push(buffer, ",") if emitted > 0
+        proof_push(buffer, "{\"kind\":")
+        proof_push_json_string(buffer, origin.kind)
+        proof_push(buffer, ",\"name\":")
+        proof_push_json_string(buffer, origin.dependency)
+        proof_push(buffer, ",\"line\":")
+        proof_push_number(buffer, origin.line)
+        proof_push(buffer, "}")
+        emitted <- emitted + 1
+
+def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    for finding in report.findings |finding, report, buffer, attempt|:
+        continue if finding.has_goal and finding.goal_id != goal_id
+        continue if finding.line != attempt.line or finding.name != attempt.name
+        proof_push(buffer, "{\"kind\":")
+        proof_push_json_string(buffer, finding.kind)
+        proof_push(buffer, ",\"status\":")
+        proof_push_json_string(buffer, finding.status)
+        proof_push(buffer, ",\"message\":")
+        proof_push_json_string(buffer, finding.message)
+        proof_push(buffer, ",\"counterexample_found\":")
+        proof_push(buffer, "true" if finding.counterexample_found else "false")
+        proof_push(buffer, ",\"goal_id\":")
+        proof_push_number(buffer, finding.goal_id.u32()) if finding.has_goal
+        proof_push(buffer, "null") if not finding.has_goal
+        proof_push(buffer, ",\"counterexample\":[")
+        for index in 0..<finding.counterexample_count |index, finding, report, buffer|:
+            proof_push(buffer, ",") if index > 0
+            proof_push_json_expr(buffer, report.counterexample_facts[finding.counterexample_start + index])
+        proof_push(buffer, "]}")
+        return
+    proof_push(buffer, "{\"kind\":\"unresolved-goal\",\"status\":\"unknown\",\"message\":\"no matching diagnostic was recorded\",\"counterexample_found\":false,\"counterexample\":[]}")
+
+def proof_push_json_declaration(buffer: mutable darray[u8]&, report: ProofReport&, declaration: ProofDeclarationSummary) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"kind\":")
+    proof_push_json_string(buffer, declaration.kind)
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, declaration.name)
+    proof_push(buffer, ",\"line\":")
+    proof_push_number(buffer, declaration.line)
+    proof_push(buffer, ",\"parameters\":[")
+    valid_parameter_range: bool = declaration.parameters_start <= report.declaration_parameters.count and declaration.parameters_count <= report.declaration_parameters.count - declaration.parameters_start
+    if valid_parameter_range:
+        for index in 0..<declaration.parameters_count |index, declaration, report, buffer|:
+            proof_push(buffer, ",") if index > 0
+            proof_push_json_string(buffer, report.declaration_parameters[declaration.parameters_start + index])
+    proof_push(buffer, "],\"requires\":")
+    proof_push_number(buffer, declaration.requires_count.u32())
+    proof_push(buffer, ",\"ensures\":")
+    proof_push_number(buffer, declaration.ensures_count.u32())
+    proof_push(buffer, ",\"changes\":")
+    proof_push_number(buffer, declaration.changes_count.u32())
+    proof_push(buffer, ",\"preserves\":")
+    proof_push_number(buffer, declaration.preserves_count.u32())
+    proof_push(buffer, ",\"decreases\":")
+    proof_push_number(buffer, declaration.decreases_count.u32())
+    proof_push(buffer, ",\"lemma\":")
+    proof_push(buffer, "true" if declaration.lemma else "false")
+    proof_push(buffer, ",\"recursive\":")
+    proof_push(buffer, "true" if declaration.recursive else "false")
+    proof_push(buffer, ",\"pure\":")
+    proof_push(buffer, "true" if declaration.pure else "false")
+    proof_push(buffer, ",\"verified\":")
+    proof_push(buffer, "true" if declaration.verified else "false")
+    proof_push(buffer, ",\"verification_reason\":")
+    proof_push_json_string(buffer, declaration.verification_reason)
+    proof_push(buffer, ",\"structural\":")
+    proof_push(buffer, "true" if declaration.structural else "false")
+    proof_push(buffer, "}")
+
+def proof_report_verification_state(report: ProofReport&, semantic_errors: u32) -> sview:
+    # `status` remains the compatibility verdict (`proved`, `failed`, or replay-gap aware),
+    # while this field gives agents the precise reason a run did not establish a theorem.
+    # Disproof has priority over unsupported/unknown because it carries a concrete violated
+    # obligation; unsupported has priority over a residual unknown proof hole.
+    has_disproved: mutable bool = false
+    has_unsupported: mutable bool = false
+    has_unknown: mutable bool = false
+    for finding in report.findings |has_disproved, has_unsupported, has_unknown|:
+        has_disproved <- true if finding.status == "disproved"
+        has_unsupported <- true if finding.status == "unsupported"
+        has_unknown <- true if finding.status == "unknown"
+    return "disproved" if has_disproved
+    return "unsupported" if has_unsupported
+    return "unknown" if has_unknown or report.replay_gaps > 0 or semantic_errors > 0
+    return "proved"
+
+def proof_report_trusted_boundary_count(report: ProofReport&) -> u32:
+    # Source/runtime transitions and imported summaries are explicit semantic boundaries. They
+    # are not proof-step derivations, so expose their count instead of presenting a certificate
+    # as if the small arithmetic kernel had derived every program-state fact itself.
+    count: mutable u32 = 0
+    for trace in report.fact_traces:
+        count <- count + 1 if trace.kind != "proof-step" and trace.kind != "lemma-step"
+    return count
+
+def proof_semantic_diagnostic_visible(diagnostic: Semantic::Diagnostic, report: ProofReport&) -> bool:
+    return false if diagnostic.kind == Semantic::DiagnosticKind.AssertByUnproven
+    return false if diagnostic.kind == Semantic::DiagnosticKind.MutualDecreasesCycle and any verified_name in report.structural_verified_names where verified_name == diagnostic.name
+    return true
+
+def proof_push_json_semantic_diagnostic(buffer: mutable darray[u8]&, diagnostic: Semantic::Diagnostic) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    message: darray[u8] = Semantic::diagnostic_message(diagnostic)
+    proof_push(buffer, "{\"kind_code\":")
+    # DiagnosticKind is append-only in the compiler and its ordinal is the stable machine code;
+    # the rendered message remains present for clients that do not have the compiler enum table.
+    proof_push_number(buffer, diagnostic.kind.u32())
+    proof_push(buffer, ",\"severity\":")
+    proof_push_number(buffer, Semantic::diagnostic_severity(diagnostic).u32())
+    proof_push(buffer, ",\"line\":")
+    proof_push_number(buffer, diagnostic.line)
+    proof_push(buffer, ",\"column\":")
+    proof_push_number(buffer, diagnostic.pos.column)
+    proof_push(buffer, ",\"end_column\":")
+    proof_push_number(buffer, diagnostic.pos.end_column)
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, diagnostic.name)
+    proof_push(buffer, ",\"expected\":")
+    proof_push_json_string(buffer, diagnostic.expected)
+    proof_push(buffer, ",\"actual\":")
+    proof_push_json_string(buffer, diagnostic.actual)
+    proof_push(buffer, ",\"detail\":")
+    proof_push_json_string(buffer, diagnostic.detail)
+    proof_push(buffer, ",\"detail2\":")
+    proof_push_json_string(buffer, diagnostic.detail2)
+    proof_push(buffer, ",\"detail3\":")
+    proof_push_json_string(buffer, diagnostic.detail3)
+    proof_push(buffer, ",\"expected_count\":")
+    proof_push_number(buffer, diagnostic.expected_count)
+    proof_push(buffer, ",\"actual_count\":")
+    proof_push_number(buffer, diagnostic.actual_count)
+    proof_push(buffer, ",\"effect_refs\":[")
+    effect_count: mutable usize = diagnostic.effect_ref_count.usize()
+    effect_count <- 8 if effect_count > 8
+    for index in 0..<effect_count |index, diagnostic, buffer|:
+        proof_push(buffer, ",") if index > 0
+        effect_ref: sview = match index:
+            0: diagnostic.effect_ref_1
+            1: diagnostic.effect_ref_2
+            2: diagnostic.effect_ref_3
+            3: diagnostic.effect_ref_4
+            4: diagnostic.effect_ref_5
+            5: diagnostic.effect_ref_6
+            6: diagnostic.effect_ref_7
+            _: diagnostic.effect_ref_8
+        proof_push_json_string(buffer, effect_ref)
+    proof_push(buffer, "],\"message\":")
+    proof_push_json_bytes(buffer, message)
+    proof_push(buffer, "}")
+
+def proof_push_json_report(buffer: mutable darray[u8]&, report: ProofReport&, semantic_diagnostics: darray[Semantic::Diagnostic]&, semantic_visible: u32, semantic_errors: u32, source_bytes: usize, source_fingerprint: u32) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    verdict: mutable sview = "proved"
+    verdict <- "failed" if report.failed > 0 or semantic_errors > 0
+    verdict <- "proved_with_replay_gaps" if verdict == "proved" and report.replay_gaps > 0
+    verification_state: sview = proof_report_verification_state(report, semantic_errors)
+    trusted_boundaries: u32 = proof_report_trusted_boundary_count(report)
+    proof_push(buffer, "{\"status\":")
+    proof_push_json_string(buffer, verdict)
+    proof_push(buffer, ",\"verification_state\":")
+    proof_push_json_string(buffer, verification_state)
+    proof_push(buffer, ",\"source\":{\"bytes\":")
+    proof_push_number(buffer, source_bytes.u32())
+    proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, "}}")
+    # The action list is a stable capability declaration for proof-state clients. The
+    # implementation lives in tactics.elisa, and every state-changing operation is still
+    # required to pass the existing kernel's soundness boundary.
+    proof_push(buffer, ",\"action_protocol\":{\"format\":\"elisa-proof-tactics-v1\",\"admission\":\"kernel-backed\",\"operations\":[\"assumption\",\"exact\",\"decide\",\"intro\",\"apply\",\"simp\",\"have\",\"instantiate\",\"rewrite\",\"split\",\"left\",\"right\",\"cases\"],\"trace\":{\"initial_state\":true,\"post_state\":true,\"facts_snapshot\":\"flat-arena-independent\",\"replay\":\"proof_tactic_replay\",\"kernel_step_replay\":\"proof_kernel_replay_tactic_step\",\"kernel_trace_replay\":\"proof_tactic_kernel_trace_replay\",\"replays_rejected_actions\":true},\"final_state_replay\":\"proof_tactic_kernel_replay\",\"certificate_replay\":\"proof_tactic_kernel_certificate_replay\",\"branch_transition_replay\":\"proof_tactic_kernel_branch_transition_replay\",\"branch_certificate_replay\":\"proof_tactic_json_tree_certificate_replay\",\"script_import\":\"elisa-proof-tactics-v1\",\"script_result\":\"elisa-proof-tactic-result-v1\",\"source_binding\":\"optional-fnv1a32\",\"source_goal_binding\":\"target.goal_id\",\"branch_script\":{\"final_parent_action\":true,\"children\":\"branches[2]\",\"nested\":true,\"max_branch_depth\":32,\"child_state_injection\":false}}")
+    proof_push(buffer, ",\"trust\":{\"trusted_boundary_facts\":")
+    proof_push_number(buffer, trusted_boundaries)
+    proof_push(buffer, ",\"kernel_replayed_certificates\":")
+    proof_push_number(buffer, report.replayed)
+    # No trusted assumptions are currently accepted by the proof language. Keep the ledger
+    # explicit so future axiom or foreign-proof escape hatches must be named and reviewed.
+    proof_push(buffer, ",\"trusted_assumptions\":[]")
+    proof_push(buffer, "},\"summary\":{\"declarations\":")
+    proof_push_number(buffer, report.declarations)
+    proof_push(buffer, ",\"obligations\":")
+    proof_push_number(buffer, report.obligations)
+    proof_push(buffer, ",\"proven\":")
+    proof_push_number(buffer, report.proven)
+    proof_push(buffer, ",\"failed\":")
+    proof_push_number(buffer, report.failed)
+    proof_push(buffer, ",\"semantic_diagnostics\":")
+    proof_push_number(buffer, semantic_visible)
+    proof_push(buffer, ",\"semantic_errors\":")
+    proof_push_number(buffer, semantic_errors)
+    proof_push(buffer, "},\"declaration_details\":[")
+    for index in 0..<report.declaration_details.count |index, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_json_declaration(buffer, report, report.declaration_details[index])
+    proof_push(buffer, "],\"semantic_diagnostics\":[")
+    semantic_index: mutable usize = 0
+    for diagnostic in semantic_diagnostics |diagnostic, report, buffer, semantic_index|:
+        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
+        proof_push(buffer, ",") if semantic_index > 0
+        proof_push_json_semantic_diagnostic(buffer, diagnostic)
+        semantic_index <- semantic_index + 1
+    proof_push(buffer, "],\"replay\":{\"certificates\":")
+    proof_push_number(buffer, report.certificates.count.u32())
+    proof_push(buffer, ",\"replayed\":")
+    proof_push_number(buffer, report.replayed)
+    proof_push(buffer, ",\"gaps\":")
+    proof_push_number(buffer, report.replay_gaps)
+    proof_push(buffer, "},\"kernel\":{\"format\":\"elisa-proof-kernel-v1\",\"independent_replay\":true,\"nodes\":[")
+    for index in 0..<report.kernel_nodes.count |index, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_json_kernel_node(buffer, report.kernel_nodes[index])
+    proof_push(buffer, "],\"children\":[")
+    for index in 0..<report.kernel_children.count |index, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_number(buffer, report.kernel_children[index].u32())
+    proof_push(buffer, "],\"certificate_facts\":[")
+    for index in 0..<report.kernel_certificate_facts.count |index, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_number(buffer, report.kernel_certificate_facts[index].u32())
+    proof_push(buffer, "],\"fact_trace_premises\":[")
+    for index in 0..<report.kernel_fact_trace_premises.count |index, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_number(buffer, report.kernel_fact_trace_premises[index].u32())
+    proof_push(buffer, "],\"fact_traces\":[")
+    for index in 0..<report.fact_traces.count |index, report, buffer|:
+        trace: ProofFactTrace = report.fact_traces[index]
+        proof_push(buffer, ",") if index > 0
+        proof_push(buffer, "{\"expression\":")
+        proof_push_number(buffer, trace.kernel_expression.u32())
+        proof_push(buffer, ",\"kind\":")
+        proof_push_json_string(buffer, trace.kind)
+        proof_push(buffer, ",\"line\":")
+        proof_push_number(buffer, trace.line)
+        proof_push(buffer, ",\"name\":")
+        proof_push_json_string(buffer, trace.name)
+        proof_push(buffer, ",\"dependency\":")
+        proof_push_json_string(buffer, trace.dependency)
+        proof_push(buffer, ",\"premises_start\":")
+        proof_push_number(buffer, trace.kernel_premises_start.u32())
+        proof_push(buffer, ",\"premises_count\":")
+        proof_push_number(buffer, trace.kernel_premises_count.u32())
+        proof_push(buffer, "}")
+    proof_push(buffer, "]},\"findings\":[")
+    for index in 0..<report.findings.count |index, report, buffer|:
+        finding: ProofFinding = report.findings[index]
+        proof_push(buffer, ",") if index > 0
+        proof_push(buffer, "{\"kind\":")
+        proof_push_json_string(buffer, finding.kind)
+        proof_push(buffer, ",\"status\":")
+        proof_push_json_string(buffer, finding.status)
+        proof_push(buffer, ",\"line\":")
+        proof_push_number(buffer, finding.line)
+        proof_push(buffer, ",\"name\":")
+        proof_push_json_string(buffer, finding.name)
+        proof_push(buffer, ",\"message\":")
+        proof_push_json_string(buffer, finding.message)
+        proof_push(buffer, ",\"counterexample_found\":")
+        proof_push(buffer, "true" if finding.counterexample_found else "false")
+        proof_push(buffer, ",\"goal_id\":")
+        proof_push_number(buffer, finding.goal_id.u32()) if finding.has_goal
+        proof_push(buffer, "null") if not finding.has_goal
+        proof_push(buffer, ",\"counterexample\":[")
+        for counterexample_index in 0..<finding.counterexample_count |counterexample_index, finding, report, buffer|:
+            proof_push(buffer, ",") if counterexample_index > 0
+            proof_push_json_expr(buffer, report.counterexample_facts[finding.counterexample_start + counterexample_index])
+        proof_push(buffer, "]")
+        proof_push(buffer, "}")
+    proof_push(buffer, "],\"goals\":[")
+    for index in 0..<report.goal_attempts.count |index, report, buffer|:
+        attempt: ProofGoalAttempt = report.goal_attempts[index]
+        replay_status: mutable sview = "not_certified"
+        if attempt.has_certificate and attempt.certificate_index < report.certificates.count:
+            replay_status <- "replayed" if report.certificates[attempt.certificate_index].replayed else "gap"
+        proof_push(buffer, ",") if index > 0
+        proof_push(buffer, "{\"goal_id\":")
+        proof_push_number(buffer, index.u32())
+        proof_push(buffer, ",\"line\":")
+        proof_push_number(buffer, attempt.line)
+        proof_push(buffer, ",\"name\":")
+        proof_push_json_string(buffer, attempt.name)
+        proof_push(buffer, ",\"rule\":")
+        proof_push_json_string(buffer, attempt.rule)
+        proof_push(buffer, ",\"proven\":")
+        proof_push(buffer, "true" if attempt.proven else "false")
+        proof_push(buffer, ",\"replay_status\":")
+        proof_push_json_string(buffer, replay_status)
+        proof_push(buffer, ",\"certificate_id\":")
+        if attempt.has_certificate and attempt.certificate_index < report.certificates.count:
+            proof_push_number(buffer, attempt.certificate_index.u32())
+        else:
+            proof_push(buffer, "null")
+        proof_push(buffer, ",\"kernel_goal\":")
+        proof_push_number(buffer, attempt.kernel_goal.u32())
+        proof_push(buffer, ",\"kernel_facts_start\":")
+        proof_push_number(buffer, attempt.kernel_facts_start.u32())
+        proof_push(buffer, ",\"kernel_facts_count\":")
+        proof_push_number(buffer, attempt.kernel_facts_count.u32())
+        proof_push(buffer, ",\"facts\":[")
+        for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
+            proof_push(buffer, ",") if fact_index > 0
+            proof_push_json_expr(buffer, report.certificate_facts[attempt.facts_start + fact_index])
+        proof_push(buffer, "],\"fact_origins\":[")
+        for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
+            proof_push(buffer, ",") if fact_index > 0
+            proof_push_json_fact_origin(buffer, report, report.certificate_facts[attempt.facts_start + fact_index], attempt.name)
+        proof_push(buffer, "],\"dependencies\":[")
+        proof_push_json_goal_dependencies(buffer, report, attempt.facts_start, attempt.facts_count, attempt.name)
+        proof_push(buffer, "],\"goal\":")
+        proof_push_json_expr(buffer, attempt.goal)
+        proof_push(buffer, "}")
+    proof_push(buffer, "],\"repair_queue\":[")
+    repair_index: mutable usize = 0
+    for index in 0..<report.goal_attempts.count |index, report, buffer, repair_index|:
+        attempt: ProofGoalAttempt = report.goal_attempts[index]
+        continue if attempt.proven
+        proof_push(buffer, ",") if repair_index > 0
+        proof_push(buffer, "{\"goal_id\":")
+        proof_push_number(buffer, index.u32())
+        proof_push(buffer, ",\"line\":")
+        proof_push_number(buffer, attempt.line)
+        proof_push(buffer, ",\"name\":")
+        proof_push_json_string(buffer, attempt.name)
+        proof_push(buffer, ",\"rule\":")
+        proof_push_json_string(buffer, attempt.rule)
+        proof_push(buffer, ",\"replay_status\":\"not_certified\",\"failure\":")
+        proof_push_json_repair_failure(buffer, report, attempt, index)
+        proof_push(buffer, ",\"dependencies\":[")
+        proof_push_json_goal_dependencies(buffer, report, attempt.facts_start, attempt.facts_count, attempt.name)
+        proof_push(buffer, "]}")
+        repair_index <- repair_index + 1
+    proof_push(buffer, "],\"dependency_index\":[")
+    dependency_names: mutable darray[sview] = []
+    dependency_starts: mutable darray[usize] = []
+    dependency_counts: mutable darray[usize] = []
+    dependency_goal_ids: mutable darray[usize] = []
+    for goal_index in 0..<report.goal_attempts.count |goal_index, report, dependency_names, dependency_starts, dependency_counts, dependency_goal_ids|:
+        attempt: ProofGoalAttempt = report.goal_attempts[goal_index]
+        for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, dependency_names, dependency_starts, dependency_counts, dependency_goal_ids, goal_index|:
+            origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin(report, report.certificate_facts[attempt.facts_start + fact_index], attempt.name)
+            continue if not origin.known or origin.dependency == ""
+            dependency_index: mutable usize = dependency_names.count
+            for candidate in 0..<dependency_names.count |candidate, dependency_names, origin, dependency_index|:
+                dependency_index <- candidate if dependency_names[candidate] == origin.dependency
+            if dependency_index == dependency_names.count:
+                dependency_names.push(origin.dependency)
+                dependency_starts.push(dependency_goal_ids.count)
+                dependency_counts.push(0)
+            start: usize = dependency_starts[dependency_index]
+            count: usize = dependency_counts[dependency_index]
+            already: mutable bool = false
+            for prior in 0..<count |prior, dependency_goal_ids, start, goal_index, already|:
+                already <- true if dependency_goal_ids[start + prior] == goal_index
+            if not already:
+                dependency_goal_ids.push(goal_index)
+                dependency_counts[dependency_index] <- count + 1
+    for dependency_index in 0..<dependency_names.count |dependency_index, dependency_names, dependency_starts, dependency_counts, dependency_goal_ids, buffer|:
+        dependency: sview = dependency_names[dependency_index]
+        proof_push(buffer, ",") if dependency_index > 0
+        proof_push(buffer, "{\"name\":")
+        proof_push_json_string(buffer, dependency)
+        proof_push(buffer, ",\"goal_ids\":[")
+        start: usize = dependency_starts[dependency_index]
+        count: usize = dependency_counts[dependency_index]
+        for goal_offset in 0..<count |goal_offset, dependency_goal_ids, start, buffer|:
+            proof_push(buffer, ",") if goal_offset > 0
+            proof_push_number(buffer, dependency_goal_ids[start + goal_offset].u32())
+        proof_push(buffer, "]}")
+    proof_push(buffer, "],\"certificates\":[")
+    for index in 0..<report.certificates.count |index, report, buffer|:
+        certificate: ProofGoalCertificate = report.certificates[index]
+        proof_push(buffer, ",") if index > 0
+        proof_push(buffer, "{\"certificate_id\":")
+        proof_push_number(buffer, index.u32())
+        proof_push(buffer, ",\"line\":")
+        proof_push_number(buffer, certificate.line)
+        proof_push(buffer, ",\"name\":")
+        proof_push_json_string(buffer, certificate.name)
+        proof_push(buffer, ",\"rule\":")
+        proof_push_json_string(buffer, certificate.rule)
+        proof_push(buffer, ",\"replayed\":")
+        proof_push(buffer, "true" if certificate.replayed else "false")
+        proof_push(buffer, ",\"kernel_goal\":")
+        proof_push_number(buffer, certificate.kernel_goal.u32())
+        proof_push(buffer, ",\"kernel_facts_start\":")
+        proof_push_number(buffer, certificate.kernel_facts_start.u32())
+        proof_push(buffer, ",\"kernel_facts_count\":")
+        proof_push_number(buffer, certificate.kernel_facts_count.u32())
+        proof_push(buffer, ",\"facts\":[")
+        for fact_index in 0..<certificate.facts_count |fact_index, certificate, report, buffer|:
+            proof_push(buffer, ",") if fact_index > 0
+            proof_push_json_expr(buffer, report.certificate_facts[certificate.facts_start + fact_index])
+        proof_push(buffer, "],\"fact_origins\":[")
+        for fact_index in 0..<certificate.facts_count |fact_index, certificate, report, buffer|:
+            proof_push(buffer, ",") if fact_index > 0
+            proof_push_json_fact_origin(buffer, report, report.certificate_facts[certificate.facts_start + fact_index], certificate.name)
+        proof_push(buffer, "],\"dependencies\":[")
+        proof_push_json_goal_dependencies(buffer, report, certificate.facts_start, certificate.facts_count, certificate.name)
+        proof_push(buffer, "],\"goal\":")
+        proof_push_json_expr(buffer, certificate.goal)
+        proof_push(buffer, "}")
+    proof_push(buffer, "]}\n")
+
+def proof_push_json_tactic_step(buffer: mutable darray[u8]&, step: ProofTacticStep) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"action\":")
+    proof_push_json_string(buffer, step.action)
+    proof_push(buffer, ",\"accepted\":")
+    proof_push(buffer, "true" if step.accepted else "false")
+    proof_push(buffer, ",\"solved\":")
+    proof_push(buffer, "true" if step.solved else "false")
+    proof_push(buffer, ",\"facts_start\":")
+    proof_push_number(buffer, step.facts_start.u32())
+    proof_push(buffer, ",\"facts_count\":")
+    proof_push_number(buffer, step.facts_count.u32())
+    proof_push(buffer, ",\"goal\":")
+    proof_push_json_expr(buffer, step.goal)
+    proof_push(buffer, ",\"reason\":")
+    proof_push_json_string(buffer, step.reason)
+    proof_push(buffer, ",\"has_argument\":")
+    proof_push(buffer, "true" if step.has_argument else "false")
+    proof_push(buffer, ",\"argument\":")
+    proof_push_json_expr(buffer, step.argument) if step.has_argument else proof_push(buffer, "null")
+    proof_push(buffer, ",\"has_secondary\":")
+    proof_push(buffer, "true" if step.has_secondary else "false")
+    proof_push(buffer, ",\"secondary\":")
+    proof_push_json_expr(buffer, step.secondary) if step.has_secondary else proof_push(buffer, "null")
+    proof_push(buffer, ",\"has_argument_index\":")
+    proof_push(buffer, "true" if step.has_argument_index else "false")
+    proof_push(buffer, ",\"argument_index\":")
+    proof_push_number(buffer, step.argument_index.u32())
+    proof_push(buffer, ",\"detail\":")
+    proof_push_json_string(buffer, step.detail)
+    proof_push(buffer, "}")
+
+def proof_push_json_tactic_state_prefix(buffer: mutable darray[u8]&, state: ProofTacticState&) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"solved\":")
+    proof_push(buffer, "true" if state.solved else "false")
+    proof_push(buffer, ",\"action_count\":")
+    proof_push_number(buffer, state.action_count.u32())
+    proof_push(buffer, ",\"initial_facts\":[")
+    for index in 0..<state.initial_facts.count |index, state, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_json_expr(buffer, state.initial_facts[index])
+    proof_push(buffer, "],\"initial_goal\":")
+    proof_push_json_expr(buffer, state.initial_goal)
+    proof_push(buffer, ",\"facts\":[")
+    for index in 0..<state.facts.count |index, state, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_json_expr(buffer, state.facts[index])
+    proof_push(buffer, "],\"goal\":")
+    proof_push_json_expr(buffer, state.goal)
+    proof_push(buffer, ",\"trace\":[")
+    for index in 0..<state.trace.count |index, state, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_json_tactic_step(buffer, state.trace[index])
+    proof_push(buffer, "]")
+
+def proof_push_json_tactic_state(buffer: mutable darray[u8]&, state: ProofTacticState&) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push_json_tactic_state_prefix(buffer, state)
+    proof_push(buffer, "}")
+
+def proof_push_json_tactic_tree_state(buffer: mutable darray[u8]&, tree: ProofTacticJsonTree&, node: usize, depth: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    requires depth <= 32
+    decreases 32 - depth
+    return if node >= tree.states.count
+    proof_push_json_tactic_state_prefix(buffer, tree.states[node])
+    if tree.has_branch[node] and depth < 32:
+        left: usize = tree.left[node]
+        right: usize = tree.right[node]
+        if left < node and right < node:
+            proof_push(buffer, ",\"branches\":{\"left\":")
+            proof_push_json_tactic_tree_state(buffer, tree, left, depth + 1)
+            proof_push(buffer, ",\"right\":")
+            proof_push_json_tactic_tree_state(buffer, tree, right, depth + 1)
+            proof_push(buffer, "}")
+    proof_push(buffer, "}")
+
+def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTacticJsonResult, state: ProofTacticState&, tree: ProofTacticJsonTree&, source_bytes: usize, source_fingerprint: u32, source_status: sview, source_match: bool, target_bound: bool, target_goal_id: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    tactic_admitted: bool = result.valid and result.certificate_replayed and source_match
+    admitted: bool = tactic_admitted and source_status == "proved"
+    proof_push(buffer, "{\"format\":\"elisa-proof-tactic-result-v1\",\"status\":")
+    proof_push_json_string(buffer, "proved" if admitted else "failed")
+    proof_push(buffer, ",\"source\":{\"bytes\":")
+    proof_push_number(buffer, source_bytes.u32())
+    proof_push(buffer, ",\"fingerprint\":")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, ",\"status\":")
+    proof_push_json_string(buffer, source_status)
+    proof_push(buffer, ",\"fingerprint_match\":")
+    proof_push(buffer, "true" if source_match else "false")
+    proof_push(buffer, "},\"source_goal_binding\":{\"bound\":")
+    proof_push(buffer, "true" if target_bound else "false")
+    proof_push(buffer, ",\"goal_id\":")
+    if target_bound:
+        proof_push_number(buffer, target_goal_id.u32())
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, "},\"tactic\":{\"status\":")
+    proof_push_json_string(buffer, "proved" if tactic_admitted else "failed")
+    proof_push(buffer, ",\"valid\":")
+    proof_push(buffer, "true" if result.valid else "false")
+    proof_push(buffer, ",\"solved\":")
+    proof_push(buffer, "true" if result.solved else "false")
+    proof_push(buffer, ",\"action_count\":")
+    proof_push_number(buffer, result.action_count.u32())
+    proof_push(buffer, ",\"accepted_count\":")
+    proof_push_number(buffer, result.accepted_count.u32())
+    proof_push(buffer, ",\"trace_replayed\":")
+    proof_push(buffer, "true" if result.trace_replayed else "false")
+    proof_push(buffer, ",\"kernel_trace_replayed\":")
+    proof_push(buffer, "true" if result.kernel_trace_replayed else "false")
+    proof_push(buffer, ",\"kernel_replayed\":")
+    proof_push(buffer, "true" if result.kernel_replayed else "false")
+    proof_push(buffer, ",\"certificate_replayed\":")
+    proof_push(buffer, "true" if result.certificate_replayed else "false")
+    proof_push(buffer, ",\"branch_present\":")
+    proof_push(buffer, "true" if result.branch_present else "false")
+    proof_push(buffer, ",\"branch_certificate_replayed\":")
+    proof_push(buffer, "true" if result.branch_certificate_replayed else "false")
+    proof_push(buffer, ",\"reason\":")
+    proof_push_json_string(buffer, result.reason)
+    proof_push(buffer, "},\"state\":")
+    proof_push_json_tactic_state(buffer, state)
+    if result.branch_present and result.tree_node < tree.states.count:
+        proof_push(buffer, ",\"branches\":{\"left\":")
+        proof_push_json_tactic_tree_state(buffer, tree, tree.left[result.tree_node], 0)
+        proof_push(buffer, ",\"right\":")
+        proof_push_json_tactic_tree_state(buffer, tree, tree.right[result.tree_node], 0)
+        proof_push(buffer, "}")
+    proof_push(buffer, "}\n")
+
+def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    if argc < 2:
+        usage: mutable darray[u8] = []
+        proof_push(&usage, "usage: elisa-proof [--json] <file.elisa> | [--tactics] <proof.json> <file.elisa>\n")
+        proof_write(usage)
+        return 2
+    slots: mutable cstr&& = argv.cast[mutable cstr&&]
+    json_output: mutable bool = false
+    tactic_json_output: mutable bool = false
+    script_slot: mutable usize = 0
+    path_slot: mutable usize = 1
+    first_argument: cstr = slots[1].cast[cstr]
+    if proof_cstr_equals(first_argument, "--tactics"):
+        tactic_json_output <- true
+        script_slot <- 2
+        path_slot <- 3
+        if argc < 4:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --tactics <proof.json> <file.elisa>\n")
+            proof_write(usage)
+            return 2
+    elif proof_cstr_equals(first_argument, "--json"):
+        json_output <- true
+        if argc < 3:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --json <file.elisa>\n")
+            proof_write(usage)
+            return 2
+        path_slot <- 2
+    path: cstr = slots[path_slot].cast[cstr]
+    root_path: mutable darray[u8] = []
+    path_index: mutable usize = 0
+    while path[path_index] != 0 |path_index, root_path, path|:
+        root_path.push(path[path_index])
+        path_index <- path_index + 1
+    source: mutable darray[u8] = proof_read_file(path)
+    if source.count == 0:
+        message: mutable darray[u8] = []
+        proof_push(&message, "elisa-proof: could not read source\n")
+        proof_write(message)
+        return 2
+    import_failed: mutable bool = false
+    imported_source: mutable darray[u8] = proof_import_source(root_path, &import_failed)
+    if imported_source.count > 0 or import_failed:
+        source <- imported_source
+    source_bytes: usize = source.count
+    source_fingerprint: u32 = proof_source_fingerprint(source)
+    source.push(0)
+    file: Ast::File = frontend_parse(&source[0])
+    report: mutable ProofReport = proof_empty_report()
+    proof_check(file, &report)
+    proof_replay_certificates(&report)
+    proof_add_finding(&report, "import-error", 0, "", "one or more Elisa include files could not be read") if import_failed
+    semantic_diagnostics: mutable darray[Semantic::Diagnostic] = []
+    # Run the compiler's strongest built-in semantic mode as a second defense layer. The
+    # custom proof kernel remains the verdict for proof obligations; this flag only enables
+    # additional compiler-side refinement/invariant diagnostics.
+    Semantic::check_full_diagnostics(file, &semantic_diagnostics, false, false, false, false, true, false, false, false, false, false, 64)
+    semantic_errors: mutable u32 = 0
+    semantic_visible: mutable u32 = 0
+    # `assert … by:` is the compiler's legacy proof-block hook. The custom kernel below
+    # owns this obligation now, including bounded arithmetic and recursive rules that the
+    # compiler's general semantic pass does not know about. Keep every other compiler
+    # diagnostic as an independent defense layer, but do not apply the weaker legacy
+    # proof result a second time after the kernel has accepted the same AST.
+    # The compiler's mutual-decreases pass predates structural SCC certificates and cannot
+    # recognize a mutual call that receives a matched strict subterm. Suppress only that one
+    # diagnostic when the custom kernel recorded a verified same-type structural SCC member;
+    # all unrelated compiler diagnostics remain visible and fatal as before.
+    for diagnostic in semantic_diagnostics |semantic_visible, report|:
+        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
+        semantic_visible <- semantic_visible + 1
+    for diagnostic in semantic_diagnostics |semantic_errors, report|:
+        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
+        semantic_errors <- semantic_errors + 1 if Semantic::diagnostic_severity(diagnostic) == 1
+    if tactic_json_output:
+        source_status: mutable sview = "proved"
+        source_status <- "failed" if report.failed > 0 or report.replay_gaps > 0 or semantic_errors > 0
+        script_source: mutable darray[u8] = proof_read_file(slots[script_slot].cast[cstr])
+        # A source-bound tactic state must be rebuilt in the tactic store. AST values are opaque
+        # handles tied to the imported parser store, so export the selected attempt to the same
+        # JSON expression interchange used by --json and reparse it below in the fresh store.
+        source_target_state: mutable darray[u8] = []
+        source_script_arena: mutable Arena = zeroed
+        if script_source.count > 0:
+            source_script: JsonParseResult = json_parse_checked(&source_script_arena, sview(&script_source[0], 0, script_source.count.i64()))
+            if source_script.code == JsonErrorCode.OK:
+                source_target: (present: bool, valid: bool, goal_id: usize) = proof_tactic_json_target(source_script.value)
+                if source_target.present and source_target.valid and source_target.goal_id < report.goal_attempts.count:
+                    source_attempt: ProofGoalAttempt = report.goal_attempts[source_target.goal_id]
+                    if source_attempt.facts_start <= report.certificate_facts.count and source_attempt.facts_count <= report.certificate_facts.count - source_attempt.facts_start:
+                        proof_push(&source_target_state, "{\"facts\":[")
+                        for fact_index in 0..<source_attempt.facts_count |fact_index, source_attempt, report, source_target_state|:
+                            proof_push(&source_target_state, ",") if fact_index > 0
+                            proof_push_json_expr(&source_target_state, report.certificate_facts[source_attempt.facts_start + fact_index])
+                        proof_push(&source_target_state, "],\"goal\":")
+                        proof_push_json_expr(&source_target_state, source_attempt.goal)
+                        proof_push(&source_target_state, "}")
+        region tactic_region(1048576):
+            store: Ast::Node.Store[Local] = Ast::Node.Store(tactic_region)
+            in store:
+                empty: mutable darray[Ast::Expr] = []
+                tactic_state: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.Invalid)
+                tactic_result: mutable ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "proof script could not be read", tree_node: 0}
+                source_match: mutable bool = false
+                target_bound: mutable bool = false
+                target_goal_id: mutable usize = 0
+                script_arena: mutable Arena = zeroed
+                scratch_empty: mutable darray[Ast::Expr] = []
+                scratch_states: mutable darray[ProofTacticState] = []
+                for scratch_index in 0..<64 |scratch_index, scratch_empty, scratch_states|:
+                    scratch_states.push(proof_tactic_state(&scratch_empty, Ast::Expr.Invalid))
+                tactic_tree: mutable ProofTacticJsonTree = ProofTacticJsonTree{states: [], left: [], right: [], has_branch: []}
+                if script_source.count > 0:
+                    parsed_script: JsonParseResult = json_parse_checked(&script_arena, sview(&script_source[0], 0, script_source.count.i64()))
+                    if parsed_script.code == JsonErrorCode.OK:
+                        annotations: mutable darray[Ast::EnumAnnotation] = []
+                        target: (present: bool, valid: bool, goal_id: usize) = proof_tactic_json_target(parsed_script.value)
+                        target_bound <- target.present
+                        target_goal_id <- target.goal_id
+                        if target.present:
+                            if target.valid:
+                                if source_target_state.count > 0:
+                                    parsed_source_state: JsonParseResult = json_parse_checked(&script_arena, sview(&source_target_state[0], 0, source_target_state.count.i64()))
+                                    tactic_result <- proof_tactic_json_run_source(parsed_script.value, parsed_source_state.value, &annotations, &tactic_state, &tactic_tree, &scratch_states, report, target.goal_id) if parsed_source_state.code == JsonErrorCode.OK
+                            else:
+                                tactic_result.valid <- false
+                                tactic_result.reason <- "target.goal_id must be an exact nonnegative integer"
+                        else:
+                            tactic_result <- proof_tactic_json_run(parsed_script.value, &annotations, &tactic_state, &tactic_tree, &scratch_states)
+                        declared: (present: bool, valid: bool, value: u32) = proof_tactic_json_source_fingerprint(parsed_script.value)
+                        source_match <- not declared.present or declared.valid and declared.value == source_fingerprint
+                        if declared.present and not declared.valid:
+                            source_match <- false
+                            tactic_result.valid <- false
+                            tactic_result.reason <- "source_fingerprint must be an exact unsigned 32-bit integer"
+                        elif declared.present and declared.value != source_fingerprint:
+                            source_match <- false
+                            tactic_result.valid <- false
+                            tactic_result.reason <- "proof script source_fingerprint does not match imported Elisa"
+                    else:
+                        source_match <- false
+                        tactic_result.reason <- "proof script is not valid JSON"
+                output: mutable darray[u8] = []
+                proof_push_json_tactic_result(&output, tactic_result, &tactic_state, &tactic_tree, source_bytes, source_fingerprint, source_status, source_match, target_bound, target_goal_id)
+                proof_write(output)
+                admitted: bool = tactic_result.valid and tactic_result.certificate_replayed and source_match and source_status == "proved"
+                return 0 if admitted else 1
+    if json_output:
+        json: mutable darray[u8] = []
+        proof_push_json_report(&json, report, semantic_diagnostics, semantic_visible, semantic_errors, source_bytes, source_fingerprint)
+        proof_write(json)
+        return 1 if report.failed > 0 or report.replay_gaps > 0 or semantic_errors > 0 else 0
+    output: mutable darray[u8] = []
+    proof_push(&output, "Elisa Proof\n")
+    proof_push(&output, "  verification state: ")
+    proof_push(&output, proof_report_verification_state(report, semantic_errors))
+    proof_push(&output, "\n")
+    proof_push(&output, "  declarations: ")
+    proof_push_number(&output, report.declarations)
+    proof_push(&output, "\n  obligations: ")
+    proof_push_number(&output, report.obligations)
+    proof_push(&output, "\n  proven: ")
+    proof_push_number(&output, report.proven)
+    proof_push(&output, "\n  failed: ")
+    proof_push_number(&output, report.failed)
+    proof_push(&output, "\n")
+    for finding in report.findings |output|:
+        proof_push(&output, "  ")
+        proof_push(&output, finding.kind)
+        proof_push(&output, " [")
+        proof_push(&output, finding.status)
+        proof_push(&output, "]")
+        proof_push(&output, " line ")
+        proof_push_number(&output, finding.line)
+        proof_push(&output, ": ")
+        proof_push(&output, finding.message)
+        proof_push(&output, "\n")
+    proof_push(&output, "  semantic diagnostics: ")
+    proof_push_number(&output, semantic_visible)
+    proof_push(&output, "\n")
+    proof_push(&output, "  certificate replay: ")
+    proof_push_number(&output, report.replayed)
+    proof_push(&output, " replayed, ")
+    proof_push_number(&output, report.replay_gaps)
+    proof_push(&output, " gaps\n")
+    proof_push(&output, "  source-neutral kernel: ")
+    proof_push_number(&output, report.kernel_nodes.count.u32())
+    proof_push(&output, " nodes, format elisa-proof-kernel-v1\n")
+    for diagnostic in semantic_diagnostics |output, report|:
+        continue if diagnostic.kind == Semantic::DiagnosticKind.AssertByUnproven
+        continue if diagnostic.kind == Semantic::DiagnosticKind.MutualDecreasesCycle and any verified_name in report.structural_verified_names where verified_name == diagnostic.name
+        proof_push(&output, "  semantic line ")
+        proof_push_number(&output, diagnostic.line)
+        proof_push(&output, ": ")
+        message: darray[u8] = Semantic::diagnostic_message(diagnostic)
+        output.extend(message)
+        proof_push(&output, "\n")
+    proof_write(output)
+    return 1 if report.failed > 0 or report.replay_gaps > 0 or semantic_errors > 0 else 0
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    return proof_main(argc, argv)

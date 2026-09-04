@@ -1,0 +1,296 @@
+# Source-neutral certificate terms and the first trusted-kernel lowering boundary.
+#
+# The main checker works on the compiler AST because that is what makes importing Elisa
+# practical. Certificates are additionally lowered here into an arena whose nodes contain
+# only canonical operators, literals, names, and indices. The replay implementation consumes
+# this arena rather than calling compiler AST helpers. An expression outside this deliberately
+# small term language is represented as `unsupported` and can never replay successfully.
+extend ElisaProof:
+    public:
+        def proof_kernel_operator(operator: TokenKind) -> sview:
+            return "+" if operator == TokenKind.Plus
+            return "-" if operator == TokenKind.Minus
+            return "*" if operator == TokenKind.Star
+            return "/" if operator == TokenKind.Slash
+            return "%" if operator == TokenKind.Percent
+            return "==" if operator == TokenKind.EqEq
+            return "!=" if operator == TokenKind.BangEq
+            return "<" if operator == TokenKind.Lt
+            return ">" if operator == TokenKind.Gt
+            return "<=" if operator == TokenKind.LtEq
+            return ">=" if operator == TokenKind.GtEq
+            return "and" if operator == TokenKind.And
+            return "or" if operator == TokenKind.Or
+            return "=>" if operator == TokenKind.FatArrow
+            return "not" if operator == TokenKind.Not
+            return "in" if operator == TokenKind.In
+            return "is" if operator == TokenKind.Is
+            return "as" if operator == TokenKind.As
+            return "|" if operator == TokenKind.Pipe
+            return "^" if operator == TokenKind.Caret
+            return "&" if operator == TokenKind.Ampersand
+            return "<<" if operator == TokenKind.LShift
+            return ">>" if operator == TokenKind.RShift
+            return "range_lt" if operator == TokenKind.RangeLt
+            return "range_le" if operator == TokenKind.RangeLe
+            return "else" if operator == TokenKind.Else
+            return "unknown"
+
+        def proof_kernel_add_node(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, kind: sview, operator: sview, left: usize, right: usize, auxiliary: usize, children_start: usize, children_count: usize, value: i64, name: sview, secondary_name: sview) -> usize:
+            return ElisaProofKernelCore::add_node(nodes, kind, operator, left, right, auxiliary, children_start, children_count, value, name, secondary_name)
+
+        # Certificate premises must belong to the source-neutral term language, not merely to
+        # the richer AST language accepted by the main prover. This mirrors the encoder's shape
+        # boundary so an unsupported child cannot be smuggled into an otherwise supported parent.
+        def proof_kernel_expression_supported(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.IntLit(_):
+                    return true
+                Ast::Expr.Absent:
+                    # Open slice endpoints are explicit source terms. Keeping the omitted
+                    # endpoint distinct from an invalid expression prevents `[:]` from being
+                    # confused with a malformed certificate child.
+                    return true
+                Ast::Expr.BoolLit(_):
+                    return true
+                Ast::Expr.FloatLit(_):
+                    return true
+                Ast::Expr.StringLit(_):
+                    return true
+                Ast::Expr.CharLit(_):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.ShorthandMember(parts, _):
+                    # Keep enum shorthand distinct from an ordinary identifier. Only the
+                    # one-segment value form is admitted until qualified type identity is carried
+                    # by the source-neutral term language.
+                    return parts.count == 1 and parts[0] != ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_kernel_expression_supported(inner)
+                # `get collection[index] else fallback` is represented in the compiler AST as
+                # an Else binary around an Index. Keep this source form explicit in the arena so
+                # the replay kernel can validate the checked-access primitive instead of treating
+                # it as an unknown arithmetic operator.
+                Ast::Expr.Binary(Ast::Expr.Index(object, index, _), TokenKind.Else, fallback, _):
+                    return proof_kernel_expression_supported(object) and proof_kernel_expression_supported(index) and proof_kernel_expression_supported(fallback)
+                # A statement-level `get collection[index] else recovery` has no value-shaped
+                # fallback to encode. Its control recovery is checked by the AST proof pass;
+                # this source-neutral term records only the guarded load boundary so replay can
+                # validate that boundary independently.
+                Ast::Expr.GetElse(Ast::Expr.Index(object, index, _), recovery, _):
+                    return false if recovery.count == 0
+                    return proof_kernel_expression_supported(object) and proof_kernel_expression_supported(index)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_kernel_expression_supported(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_kernel_expression_supported(left) and proof_kernel_expression_supported(right)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_kernel_expression_supported(condition) and proof_kernel_expression_supported(then_expression) and proof_kernel_expression_supported(else_expression)
+                Ast::Expr.Move(operand, _):
+                    return proof_kernel_expression_supported(operand)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_kernel_expression_supported(callee)
+                    for argument in arguments:
+                        return false if not proof_kernel_expression_supported(argument)
+                    return true
+                Ast::Expr.Field(object, _, _):
+                    return proof_kernel_expression_supported(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_kernel_expression_supported(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_kernel_expression_supported(object) and proof_kernel_expression_supported(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_kernel_expression_supported(object) and proof_kernel_expression_supported(low) and proof_kernel_expression_supported(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    # Multi-argument indexing/generic application is a structural term here.
+                    # It remains outside the memory-bound engine, but losing its argument list
+                    # at the certificate boundary would make equal source terms indistinguishable.
+                    return false if arguments.count == 0
+                    return false if not proof_kernel_expression_supported(object)
+                    for argument in arguments:
+                        return false if not proof_kernel_expression_supported(argument)
+                    return true
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return false if not proof_kernel_expression_supported(element)
+                    return true
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return false if not proof_kernel_expression_supported(element)
+                    return true
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return false if not proof_kernel_expression_supported(element)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return false if not proof_kernel_expression_supported(entry.key) or not proof_kernel_expression_supported(entry.value)
+                    return true
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return false if not proof_kernel_expression_supported(type_expression)
+                    for field in fields:
+                        return false if not proof_kernel_expression_supported(field.value)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_kernel_expression_supported(base)
+                    for field in fields:
+                        return false if not proof_kernel_expression_supported(field.value)
+                    return true
+                Ast::Expr.Block(statements, value, _, _):
+                    return false if statements.count == 0 or statements.count > 2
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(_, _, range_expression, _):
+                            return false if not proof_kernel_expression_supported(range_expression) or not proof_kernel_expression_supported(value)
+                            if statements.count == 2:
+                                match statements[1]:
+                                    Ast::Stmt.VarDecl(_, _, _, _):
+                                        pass
+                                    _:
+                                        return false
+                            return true
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_kernel_encode_expression_depth(expression: Ast::Expr, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, depth: usize) -> usize:
+            if not ElisaProofKernelCore::depth_valid(depth):
+                return proof_kernel_add_node(nodes, "unsupported", "depth", 0, 0, 0, 0, 0, 0, "", "")
+            match expression:
+                Ast::Expr.IntLit(value):
+                    return proof_kernel_add_node(nodes, "int", "", 0, 0, 0, 0, 0, value, "", "")
+                Ast::Expr.Absent:
+                    return proof_kernel_add_node(nodes, "absent", "", 0, 0, 0, 0, 0, 0, "", "")
+                Ast::Expr.BoolLit(value):
+                    return proof_kernel_add_node(nodes, "bool", "", 0, 0, 0, 0, 0, 1 if value else 0, "", "")
+                Ast::Expr.FloatLit(value):
+                    return proof_kernel_add_node(nodes, "float", "", 0, 0, 0, 0, 0, 0, value, "")
+                Ast::Expr.StringLit(value):
+                    return proof_kernel_add_node(nodes, "string", "", 0, 0, 0, 0, 0, 0, value, "")
+                Ast::Expr.CharLit(value):
+                    return proof_kernel_add_node(nodes, "char", "", 0, 0, 0, 0, 0, 0, value, "")
+                Ast::Expr.Ident(name, _):
+                    return proof_kernel_add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, name, "")
+                Ast::Expr.ShorthandMember(parts, _):
+                    return proof_kernel_add_node(nodes, "shorthand", "", 0, 0, 0, 0, 0, 0, parts[0], "") if parts.count == 1 and parts[0] != ""
+                    return proof_kernel_add_node(nodes, "unsupported", "shorthand", 0, 0, 0, 0, 0, 0, "", "")
+                Ast::Expr.Paren(inner, _):
+                    return proof_kernel_encode_expression_depth(inner, nodes, children, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    operand_index: usize = proof_kernel_encode_expression_depth(operand, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "unary", proof_kernel_operator(operator), operand_index, 0, 0, 0, 0, 0, "", "")
+                Ast::Expr.Binary(Ast::Expr.Index(object, index, _), TokenKind.Else, fallback, _):
+                    object_index: usize = proof_kernel_encode_expression_depth(object, nodes, children, depth + 1)
+                    index_index: usize = proof_kernel_encode_expression_depth(index, nodes, children, depth + 1)
+                    index_node: usize = proof_kernel_add_node(nodes, "index", "", object_index, index_index, 0, 0, 0, 0, "", "")
+                    fallback_index: usize = proof_kernel_encode_expression_depth(fallback, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "checked-index", "", index_node, fallback_index, 0, 0, 0, 0, "", "")
+                Ast::Expr.GetElse(Ast::Expr.Index(object, index, _), _, _):
+                    object_index: usize = proof_kernel_encode_expression_depth(object, nodes, children, depth + 1)
+                    index_index: usize = proof_kernel_encode_expression_depth(index, nodes, children, depth + 1)
+                    index_node: usize = proof_kernel_add_node(nodes, "index", "", object_index, index_index, 0, 0, 0, 0, "", "")
+                    return proof_kernel_add_node(nodes, "checked-get", "", index_node, 0, 0, 0, 0, 0, "", "")
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_index: usize = proof_kernel_encode_expression_depth(left, nodes, children, depth + 1)
+                    right_index: usize = proof_kernel_encode_expression_depth(right, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "binary", proof_kernel_operator(operator), left_index, right_index, 0, 0, 0, 0, "", "")
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    condition_index: usize = proof_kernel_encode_expression_depth(condition, nodes, children, depth + 1)
+                    then_index: usize = proof_kernel_encode_expression_depth(then_expression, nodes, children, depth + 1)
+                    else_index: usize = proof_kernel_encode_expression_depth(else_expression, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "if", "", condition_index, then_index, else_index, 0, 0, 0, "", "")
+                Ast::Expr.Move(operand, _):
+                    operand_index: usize = proof_kernel_encode_expression_depth(operand, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "move", "", operand_index, 0, 0, 0, 0, 0, "", "")
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    callee_index: usize = proof_kernel_encode_expression_depth(callee, nodes, children, depth + 1)
+                    argument_start: usize = children.count
+                    for index in 0..<arguments.count |index, arguments, argument_names, nodes, children, depth|:
+                        argument_index: usize = proof_kernel_encode_expression_depth(arguments[index], nodes, children, depth + 1)
+                        argument_name: sview = argument_names[index] if index < argument_names.count else ""
+                        children.push(proof_kernel_add_node(nodes, "call_arg", "", argument_index, 0, 0, 0, 0, 0, argument_name, ""))
+                    return proof_kernel_add_node(nodes, "call", "", callee_index, 0, argument_names.count, argument_start, arguments.count, 0, "", "")
+                Ast::Expr.Field(object, field, _):
+                    object_index: usize = proof_kernel_encode_expression_depth(object, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "field", "", object_index, 0, 0, 0, 0, 0, field, "")
+                Ast::Expr.Scope(base, field, _):
+                    base_index: usize = proof_kernel_encode_expression_depth(base, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "scope", "", base_index, 0, 0, 0, 0, 0, field, "")
+                Ast::Expr.Index(object, index, _):
+                    object_index: usize = proof_kernel_encode_expression_depth(object, nodes, children, depth + 1)
+                    index_index: usize = proof_kernel_encode_expression_depth(index, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "index", "", object_index, index_index, 0, 0, 0, 0, "", "")
+                Ast::Expr.Slice(object, low, high, _):
+                    object_index: usize = proof_kernel_encode_expression_depth(object, nodes, children, depth + 1)
+                    low_index: usize = proof_kernel_encode_expression_depth(low, nodes, children, depth + 1)
+                    high_index: usize = proof_kernel_encode_expression_depth(high, nodes, children, depth + 1)
+                    return proof_kernel_add_node(nodes, "slice", "", object_index, low_index, high_index, 0, 0, 0, "", "")
+                Ast::Expr.IndexN(object, arguments, _):
+                    object_index: usize = proof_kernel_encode_expression_depth(object, nodes, children, depth + 1)
+                    start: usize = children.count
+                    for argument in arguments |argument, nodes, children, depth|:
+                        children.push(proof_kernel_encode_expression_depth(argument, nodes, children, depth + 1))
+                    return proof_kernel_add_node(nodes, "index-n", "", object_index, 0, 0, start, arguments.count, 0, "", "") if arguments.count > 0
+                    return proof_kernel_add_node(nodes, "unsupported", "index-n", 0, 0, 0, 0, 0, 0, "", "")
+                Ast::Expr.Array(elements, _):
+                    start: usize = children.count
+                    for element in elements |element, nodes, children, depth|:
+                        children.push(proof_kernel_encode_expression_depth(element, nodes, children, depth + 1))
+                    return proof_kernel_add_node(nodes, "array", "", 0, 0, 0, start, elements.count, 0, "", "")
+                Ast::Expr.Tuple(elements, _):
+                    start: usize = children.count
+                    for element in elements |element, nodes, children, depth|:
+                        children.push(proof_kernel_encode_expression_depth(element, nodes, children, depth + 1))
+                    return proof_kernel_add_node(nodes, "tuple", "", 0, 0, 0, start, elements.count, 0, "", "")
+                Ast::Expr.SetLit(elements, _):
+                    start: usize = children.count
+                    for element in elements |element, nodes, children, depth|:
+                        children.push(proof_kernel_encode_expression_depth(element, nodes, children, depth + 1))
+                    return proof_kernel_add_node(nodes, "set", "", 0, 0, 0, start, elements.count, 0, "", "")
+                Ast::Expr.DictLit(entries, _):
+                    start: usize = children.count
+                    for entry in entries |entry, nodes, children, depth|:
+                        key_index: usize = proof_kernel_encode_expression_depth(entry.key, nodes, children, depth + 1)
+                        value_index: usize = proof_kernel_encode_expression_depth(entry.value, nodes, children, depth + 1)
+                        entry_index: usize = proof_kernel_add_node(nodes, "dict_entry", "", key_index, value_index, 0, 0, 0, 0, "", "")
+                        children.push(entry_index)
+                    return proof_kernel_add_node(nodes, "dict", "", 0, 0, 0, start, entries.count, 0, "", "")
+                Ast::Expr.Construct(type_expression, fields, _):
+                    type_index: usize = proof_kernel_encode_expression_depth(type_expression, nodes, children, depth + 1)
+                    start: usize = children.count
+                    for field in fields |field, nodes, children, depth|:
+                        value_index: usize = proof_kernel_encode_expression_depth(field.value, nodes, children, depth + 1)
+                        children.push(proof_kernel_add_node(nodes, "field-init", "", value_index, 0, 0, 0, 0, 0, field.name, ""))
+                    return proof_kernel_add_node(nodes, "construct", "", type_index, 0, 0, start, fields.count, 0, "", "")
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    base_index: usize = proof_kernel_encode_expression_depth(base, nodes, children, depth + 1)
+                    start: usize = children.count
+                    for field in fields |field, nodes, children, depth|:
+                        value_index: usize = proof_kernel_encode_expression_depth(field.value, nodes, children, depth + 1)
+                        children.push(proof_kernel_add_node(nodes, "field-init", "", value_index, 0, 0, 0, 0, 0, field.name, ""))
+                    return proof_kernel_add_node(nodes, "record-update", "", base_index, 0, 0, start, fields.count, 0, "", "")
+                Ast::Expr.Block(statements, value, _, _):
+                    # Quantifier blocks are the only block form accepted by the replay kernel.
+                    # The checker has already validated the erased forall/exists annotation;
+                    # the rule tag on the certificate supplies that missing proposition kind.
+                    return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "") if statements.count == 0 or statements.count > 2
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, _, range_expression, _):
+                            range_index: usize = proof_kernel_encode_expression_depth(range_expression, nodes, children, depth + 1)
+                            body_index: usize = proof_kernel_encode_expression_depth(value, nodes, children, depth + 1)
+                            secondary: mutable sview = ""
+                            if statements.count == 2:
+                                match statements[1]:
+                                    Ast::Stmt.VarDecl(value_binder, _, _, _):
+                                        secondary <- value_binder
+                                    _:
+                                        return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "")
+                            return proof_kernel_add_node(nodes, "quantifier", "", range_index, body_index, statements.count, 0, 0, 0, binder, secondary)
+                        _:
+                            return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "")
+                _:
+                    return proof_kernel_add_node(nodes, "unsupported", "", 0, 0, 0, 0, 0, 0, "", "")
+
+        def proof_kernel_encode_expression(expression: Ast::Expr, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&) -> usize:
+            return proof_kernel_encode_expression_depth(expression, nodes, children, 0)

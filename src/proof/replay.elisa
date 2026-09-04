@@ -1,0 +1,1164 @@
+# Independent certificate replay kernel. This module intentionally has no
+# access to the arithmetic prover: it rechecks structural facts, a small interval fragment,
+# and closed arithmetic without importing the main prover's implementation.
+# A replay gap is diagnostic rather than an acceptance failure until every proof rule has a
+# certificate-level replay implementation.
+extend ElisaProof:
+    private:
+        struct ProofReplayInt:
+            known: bool
+            value: i64
+
+        struct ProofReplayBound:
+            name: sview
+            lower: mutable i64
+            upper: mutable i64
+            has_lower: mutable bool
+            has_upper: mutable bool
+
+        struct ProofReplayAffine:
+            known: bool
+            base: sview
+            offset: i64
+
+        struct ProofReplayDifference:
+            left: sview
+            right: sview
+            bound: i64
+
+        def proof_replay_i64_max() -> i64:
+            return 9223372036854775807
+
+        def proof_replay_i64_min() -> i64:
+            return 0 - 9223372036854775807 - 1
+
+        def proof_replay_add_safe(left: i64, right: i64) -> ProofReplayInt:
+            return ProofReplayInt{known: false, value: 0} if right > 0 and left > proof_replay_i64_max() - right
+            return ProofReplayInt{known: false, value: 0} if right < 0 and left < proof_replay_i64_min() - right
+            return ProofReplayInt{known: true, value: left + right}
+
+        def proof_replay_sub_safe(left: i64, right: i64) -> ProofReplayInt:
+            return ProofReplayInt{known: false, value: 0} if right > 0 and left < proof_replay_i64_min() + right
+            return ProofReplayInt{known: false, value: 0} if right < 0 and left > proof_replay_i64_max() + right
+            return ProofReplayInt{known: true, value: left - right}
+
+        def proof_replay_mul_safe(left: i64, right: i64) -> ProofReplayInt:
+            return ProofReplayInt{known: true, value: 0} if left == 0 or right == 0
+            return ProofReplayInt{known: true, value: right} if left == 1
+            return ProofReplayInt{known: true, value: left} if right == 1
+            if left == -1:
+                return ProofReplayInt{known: false, value: 0} if right == proof_replay_i64_min()
+                return ProofReplayInt{known: true, value: 0 - right}
+            if right == -1:
+                return ProofReplayInt{known: false, value: 0} if left == proof_replay_i64_min()
+                return ProofReplayInt{known: true, value: 0 - left}
+            if left > 0:
+                return ProofReplayInt{known: false, value: 0} if right > 0 and left > proof_replay_i64_max() / right
+                return ProofReplayInt{known: false, value: 0} if right < 0 and right < proof_replay_i64_min() / left
+            else:
+                return ProofReplayInt{known: false, value: 0} if right > 0 and left < proof_replay_i64_min() / right
+                return ProofReplayInt{known: false, value: 0} if right < 0 and left < proof_replay_i64_max() / right
+            return ProofReplayInt{known: true, value: left * right}
+
+        def proof_replay_div_safe(left: i64, right: i64) -> ProofReplayInt:
+            return ProofReplayInt{known: false, value: 0} if right == 0 or (left == proof_replay_i64_min() and right == -1)
+            return ProofReplayInt{known: true, value: left / right}
+
+        def proof_replay_mod_safe(left: i64, right: i64) -> ProofReplayInt:
+            return ProofReplayInt{known: false, value: 0} if right == 0 or (left == proof_replay_i64_min() and right == -1)
+            return ProofReplayInt{known: true, value: left % right}
+
+        def proof_replay_shift_safe(value: i64, amount: i64, left: bool) -> ProofReplayInt:
+            return ProofReplayInt{known: false, value: 0} if amount < 0 or amount > 63
+            return ProofReplayInt{known: true, value: value << amount} if left
+            return ProofReplayInt{known: true, value: value >> amount}
+
+        def proof_replay_constant_int(expression: Ast::Expr) -> ProofReplayInt:
+            match expression:
+                Ast::Expr.IntLit(value):
+                    return ProofReplayInt{known: true, value: value}
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_constant_int(inner)
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: ProofReplayInt = proof_replay_constant_int(operand)
+                    return ProofReplayInt{known: false, value: 0} if not inner.known
+                    return inner if operator == TokenKind.Plus
+                    if operator == TokenKind.Minus:
+                        return ProofReplayInt{known: false, value: 0} if inner.value == proof_replay_i64_min()
+                        return ProofReplayInt{known: true, value: 0 - inner.value}
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_value: ProofReplayInt = proof_replay_constant_int(left)
+                    right_value: ProofReplayInt = proof_replay_constant_int(right)
+                    return ProofReplayInt{known: false, value: 0} if not left_value.known or not right_value.known
+                    return proof_replay_add_safe(left_value.value, right_value.value) if operator == TokenKind.Plus
+                    return proof_replay_sub_safe(left_value.value, right_value.value) if operator == TokenKind.Minus
+                    return proof_replay_mul_safe(left_value.value, right_value.value) if operator == TokenKind.Star
+                    return proof_replay_div_safe(left_value.value, right_value.value) if operator == TokenKind.Slash
+                    return proof_replay_mod_safe(left_value.value, right_value.value) if operator == TokenKind.Percent
+                    return ProofReplayInt{known: true, value: left_value.value & right_value.value} if operator == TokenKind.Ampersand
+                    return ProofReplayInt{known: true, value: left_value.value | right_value.value} if operator == TokenKind.Pipe
+                    return ProofReplayInt{known: true, value: left_value.value ^ right_value.value} if operator == TokenKind.Caret
+                    return proof_replay_shift_safe(left_value.value, right_value.value, true) if operator == TokenKind.LShift
+                    return proof_replay_shift_safe(left_value.value, right_value.value, false) if operator == TokenKind.RShift
+                _:
+                    pass
+            return ProofReplayInt{known: false, value: 0}
+
+        def proof_replay_constant_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr) -> bool:
+            left_value: ProofReplayInt = proof_replay_constant_int(left)
+            right_value: ProofReplayInt = proof_replay_constant_int(right)
+            return false if not left_value.known or not right_value.known
+            return left_value.value == right_value.value if operator == TokenKind.EqEq
+            return left_value.value != right_value.value if operator == TokenKind.BangEq
+            return left_value.value < right_value.value if operator == TokenKind.Lt
+            return left_value.value > right_value.value if operator == TokenKind.Gt
+            return left_value.value <= right_value.value if operator == TokenKind.LtEq
+            return left_value.value >= right_value.value if operator == TokenKind.GtEq
+            return false
+
+        def proof_replay_bound_index(bounds: darray[ProofReplayBound]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < bounds.count |index, bounds, name|:
+                return index if bounds[index].name == name
+                index <- index + 1
+            return bounds.count
+
+        def proof_replay_bound_for(bounds: darray[ProofReplayBound]&, name: sview) -> ProofReplayBound:
+            index: usize = proof_replay_bound_index(bounds, name)
+            return bounds[index] if index < bounds.count
+            return ProofReplayBound{name: name, has_lower: false, lower: 0, has_upper: false, upper: 0}
+
+        def proof_replay_add_lower(bounds: mutable darray[ProofReplayBound]&, name: sview, value: i64) -> void:
+            return if name == ""
+            index: usize = proof_replay_bound_index(bounds, name)
+            if index == bounds.count:
+                bounds <- bounds.push(ProofReplayBound{name: name, has_lower: true, lower: value, has_upper: false, upper: 0})
+                return
+            old_has: bool = bounds[index].has_lower
+            old_value: i64 = bounds[index].lower
+            bounds[index].has_lower <- true
+            bounds[index].lower <- value if not old_has or value > old_value
+
+        def proof_replay_add_upper(bounds: mutable darray[ProofReplayBound]&, name: sview, value: i64) -> void:
+            return if name == ""
+            index: usize = proof_replay_bound_index(bounds, name)
+            if index == bounds.count:
+                bounds <- bounds.push(ProofReplayBound{name: name, has_lower: false, lower: 0, has_upper: true, upper: value})
+                return
+            old_has: bool = bounds[index].has_upper
+            old_value: i64 = bounds[index].upper
+            bounds[index].has_upper <- true
+            bounds[index].upper <- value if not old_has or value < old_value
+
+        def proof_replay_collect_bound_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, bounds: mutable darray[ProofReplayBound]&) -> void:
+            left_name: mutable sview = ""
+            right_name: mutable sview = ""
+            left_constant: ProofReplayInt = proof_replay_constant_int(left)
+            right_constant: ProofReplayInt = proof_replay_constant_int(right)
+            match left:
+                Ast::Expr.Ident(name, _):
+                    left_name <- name
+                Ast::Expr.Paren(inner, _):
+                    match inner:
+                        Ast::Expr.Ident(name, _):
+                            left_name <- name
+                        _:
+                            pass
+                _:
+                    pass
+            match right:
+                Ast::Expr.Ident(name, _):
+                    right_name <- name
+                Ast::Expr.Paren(inner, _):
+                    match inner:
+                        Ast::Expr.Ident(name, _):
+                            right_name <- name
+                        _:
+                            pass
+                _:
+                    pass
+            if left_name != "" and right_constant.known:
+                incremented: ProofReplayInt = proof_replay_add_safe(right_constant.value, 1)
+                proof_replay_add_lower(bounds, left_name, incremented.value) if operator == TokenKind.Gt and incremented.known
+                proof_replay_add_lower(bounds, left_name, right_constant.value) if operator == TokenKind.GtEq or operator == TokenKind.EqEq
+                decremented: ProofReplayInt = proof_replay_sub_safe(right_constant.value, 1)
+                proof_replay_add_upper(bounds, left_name, decremented.value) if operator == TokenKind.Lt and decremented.known
+                proof_replay_add_upper(bounds, left_name, right_constant.value) if operator == TokenKind.LtEq or operator == TokenKind.EqEq
+            if right_name != "" and left_constant.known:
+                decremented_left: ProofReplayInt = proof_replay_sub_safe(left_constant.value, 1)
+                proof_replay_add_upper(bounds, right_name, decremented_left.value) if operator == TokenKind.Gt and decremented_left.known
+                proof_replay_add_upper(bounds, right_name, left_constant.value) if operator == TokenKind.GtEq or operator == TokenKind.EqEq
+                incremented_left: ProofReplayInt = proof_replay_add_safe(left_constant.value, 1)
+                proof_replay_add_lower(bounds, right_name, incremented_left.value) if operator == TokenKind.Lt and incremented_left.known
+                proof_replay_add_lower(bounds, right_name, left_constant.value) if operator == TokenKind.LtEq or operator == TokenKind.EqEq
+
+        def proof_replay_collect_bounds(expression: Ast::Expr, bounds: mutable darray[ProofReplayBound]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_replay_collect_bounds(inner, bounds)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated_operator: TokenKind = proof_replay_comparison_negation(operator)
+                            proof_replay_collect_bound_comparison(left, negated_operator, right, bounds) if negated_operator != TokenKind.Eof
+                        _:
+                            pass
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        proof_replay_collect_bounds(left, bounds)
+                        proof_replay_collect_bounds(right, bounds)
+                    else:
+                        proof_replay_collect_bound_comparison(left, operator, right, bounds)
+                _:
+                    pass
+
+        def proof_replay_ident_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_ident_name(inner)
+                _:
+                    pass
+            return ""
+
+        def proof_replay_collect_name_equalities(expression: Ast::Expr, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_replay_collect_name_equalities(inner, left_names, right_names)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    proof_replay_collect_name_equalities(left, left_names, right_names)
+                    proof_replay_collect_name_equalities(right, left_names, right_names)
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    left_name: sview = proof_replay_ident_name(left)
+                    right_name: sview = proof_replay_ident_name(right)
+                    if left_name != "" and right_name != "":
+                        left_names.push(left_name)
+                        right_names.push(right_name)
+                _:
+                    pass
+
+        def proof_replay_close_equalities(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofReplayBound]&) -> void:
+            left_names: mutable darray[sview] = []
+            right_names: mutable darray[sview] = []
+            for fact in facts |left_names, right_names|:
+                proof_replay_collect_name_equalities(fact, &left_names, &right_names)
+            rounds: mutable usize = 0
+            max_rounds: usize = facts.count * 2 + 2
+            while rounds < max_rounds |rounds, left_names, right_names, bounds|:
+                for index in 0..<left_names.count |index, left_names, right_names, bounds|:
+                    left_bound: ProofReplayBound = proof_replay_bound_for(bounds, left_names[index])
+                    right_bound: ProofReplayBound = proof_replay_bound_for(bounds, right_names[index])
+                    proof_replay_add_lower(bounds, right_names[index], left_bound.lower) if left_bound.has_lower
+                    proof_replay_add_upper(bounds, right_names[index], left_bound.upper) if left_bound.has_upper
+                    proof_replay_add_lower(bounds, left_names[index], right_bound.lower) if right_bound.has_lower
+                    proof_replay_add_upper(bounds, left_names[index], right_bound.upper) if right_bound.has_upper
+                rounds <- rounds + 1
+
+        def proof_replay_names_equal(left_name: sview, right_name: sview, facts: darray[Ast::Expr]&) -> bool:
+            return false if left_name == "" or right_name == ""
+            return true if left_name == right_name
+            left_names: mutable darray[sview] = []
+            right_names: mutable darray[sview] = []
+            for fact in facts |left_names, right_names|:
+                proof_replay_collect_name_equalities(fact, &left_names, &right_names)
+            reachable: mutable darray[sview] = [left_name]
+            cursor: mutable usize = 0
+            while cursor < reachable.count |cursor, reachable, left_names, right_names, right_name|:
+                current: sview = reachable[cursor]
+                for index in 0..<left_names.count |index, left_names, right_names, reachable, current, right_name|:
+                    next_name: mutable sview = ""
+                    next_name <- right_names[index] if left_names[index] == current
+                    next_name <- left_names[index] if right_names[index] == current
+                    if next_name != "":
+                        return true if next_name == right_name
+                        already_seen: bool = any existing in reachable where existing == next_name
+                        reachable.push(next_name) if not already_seen
+                cursor <- cursor + 1
+            return false
+
+        def proof_replay_affine_expression(expression: Ast::Expr) -> ProofReplayAffine:
+            empty: ProofReplayAffine = ProofReplayAffine{known: false, base: "", offset: 0}
+            constant: ProofReplayInt = proof_replay_constant_int(expression)
+            return ProofReplayAffine{known: true, base: "", offset: constant.value} if constant.known
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_affine_expression(inner)
+                Ast::Expr.Ident(name, _):
+                    return ProofReplayAffine{known: name != "", base: name, offset: 0}
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_replay_affine_expression(operand)
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_affine: ProofReplayAffine = proof_replay_affine_expression(left)
+                    right_constant: ProofReplayInt = proof_replay_constant_int(right)
+                    if left_affine.known and left_affine.base != "" and right_constant.known:
+                        if operator == TokenKind.Plus:
+                            combined: ProofReplayInt = proof_replay_add_safe(left_affine.offset, right_constant.value)
+                            return ProofReplayAffine{known: true, base: left_affine.base, offset: combined.value} if combined.known
+                        if operator == TokenKind.Minus:
+                            negated: ProofReplayInt = proof_replay_sub_safe(0, right_constant.value)
+                            return empty if not negated.known
+                            combined: ProofReplayInt = proof_replay_add_safe(left_affine.offset, negated.value)
+                            return ProofReplayAffine{known: true, base: left_affine.base, offset: combined.value} if combined.known
+                    left_constant: ProofReplayInt = proof_replay_constant_int(left)
+                    right_affine: ProofReplayAffine = proof_replay_affine_expression(right)
+                    if left_constant.known and right_affine.known and right_affine.base != "" and operator == TokenKind.Plus:
+                        combined: ProofReplayInt = proof_replay_add_safe(left_constant.value, right_affine.offset)
+                        return ProofReplayAffine{known: true, base: right_affine.base, offset: combined.value} if combined.known
+                _:
+                    pass
+            return empty
+
+        def proof_replay_affine_safe(affine: ProofReplayAffine, bounds: darray[ProofReplayBound]&) -> bool:
+            return false if not affine.known
+            return true if affine.base == "" or affine.offset == 0
+            bound: ProofReplayBound = proof_replay_bound_for(bounds, affine.base)
+            if affine.offset > 0:
+                limit: ProofReplayInt = proof_replay_sub_safe(proof_replay_i64_max(), affine.offset)
+                return limit.known and bound.has_upper and bound.upper <= limit.value
+            limit: ProofReplayInt = proof_replay_sub_safe(proof_replay_i64_min(), affine.offset)
+            return limit.known and bound.has_lower and bound.lower >= limit.value
+
+        def proof_replay_affine_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            left_affine: ProofReplayAffine = proof_replay_affine_expression(left)
+            right_affine: ProofReplayAffine = proof_replay_affine_expression(right)
+            return false if not left_affine.known or not right_affine.known
+            return false if left_affine.base == "" or right_affine.base == ""
+            return false if left_affine.base != right_affine.base and not proof_replay_names_equal(left_affine.base, right_affine.base, facts)
+            bounds: mutable darray[ProofReplayBound] = []
+            for fact in facts |bounds|:
+                proof_replay_collect_bounds(fact, &bounds)
+            proof_replay_close_equalities(facts, &bounds)
+            return false if not proof_replay_affine_safe(left_affine, bounds) or not proof_replay_affine_safe(right_affine, bounds)
+            difference: ProofReplayInt = proof_replay_sub_safe(left_affine.offset, right_affine.offset)
+            return false if not difference.known
+            return difference.value > 0 if operator == TokenKind.Gt
+            return difference.value >= 0 if operator == TokenKind.GtEq
+            return difference.value < 0 if operator == TokenKind.Lt
+            return difference.value <= 0 if operator == TokenKind.LtEq
+            return difference.value != 0 if operator == TokenKind.BangEq
+            return difference.value == 0 if operator == TokenKind.EqEq
+            return false
+
+        def proof_replay_interval(expression: Ast::Expr, bounds: darray[ProofReplayBound]&) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
+            constant: ProofReplayInt = proof_replay_constant_int(expression)
+            return (true, constant.value, constant.value, true, true) if constant.known
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_interval(inner, bounds)
+                Ast::Expr.Ident(name, _):
+                    bound: ProofReplayBound = proof_replay_bound_for(bounds, name)
+                    return (bound.has_lower and bound.has_upper, bound.lower, bound.upper, bound.has_lower, bound.has_upper)
+                Ast::Expr.Unary(TokenKind.Minus, operand, _):
+                    inner: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(operand, bounds)
+                    negated_lower: ProofReplayInt = proof_replay_sub_safe(0, inner.upper)
+                    negated_upper: ProofReplayInt = proof_replay_sub_safe(0, inner.lower)
+                    return (false, 0, 0, false, false) if not negated_lower.known or not negated_upper.known
+                    return (inner.has_lower and inner.has_upper, negated_lower.value, negated_upper.value, inner.has_upper, inner.has_lower)
+                Ast::Expr.Binary(left, TokenKind.Plus, right, _):
+                    a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(left, bounds)
+                    b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(right, bounds)
+                    lower_sum: ProofReplayInt = proof_replay_add_safe(a.lower, b.lower)
+                    upper_sum: ProofReplayInt = proof_replay_add_safe(a.upper, b.upper)
+                    has_lower: bool = a.has_lower and b.has_lower and lower_sum.known
+                    has_upper: bool = a.has_upper and b.has_upper and upper_sum.known
+                    return (has_lower and has_upper, lower_sum.value, upper_sum.value, has_lower, has_upper)
+                Ast::Expr.Binary(left, TokenKind.Minus, right, _):
+                    a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(left, bounds)
+                    b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(right, bounds)
+                    lower_difference: ProofReplayInt = proof_replay_sub_safe(a.lower, b.upper)
+                    upper_difference: ProofReplayInt = proof_replay_sub_safe(a.upper, b.lower)
+                    has_lower: bool = a.has_lower and b.has_upper and lower_difference.known
+                    has_upper: bool = a.has_upper and b.has_lower and upper_difference.known
+                    return (has_lower and has_upper, lower_difference.value, upper_difference.value, has_lower, has_upper)
+                Ast::Expr.Binary(left, TokenKind.Slash, right, _):
+                    divisor: ProofReplayInt = proof_replay_constant_int(right)
+                    dividend: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(left, bounds)
+                    return (false, 0, 0, false, false) if not divisor.known or divisor.value == 0 or not dividend.has_lower or not dividend.has_upper
+                    lower_quotient: ProofReplayInt = proof_replay_div_safe(dividend.lower, divisor.value)
+                    upper_quotient: ProofReplayInt = proof_replay_div_safe(dividend.upper, divisor.value)
+                    return (false, 0, 0, false, false) if not lower_quotient.known or not upper_quotient.known
+                    return (true, lower_quotient.value, upper_quotient.value, true, true) if divisor.value > 0
+                    return (true, upper_quotient.value, lower_quotient.value, true, true)
+                Ast::Expr.Binary(_, TokenKind.Percent, right, _):
+                    divisor: ProofReplayInt = proof_replay_constant_int(right)
+                    return (false, 0, 0, false, false) if not divisor.known or divisor.value == 0
+                    magnitude: mutable i64 = divisor.value
+                    if magnitude < 0:
+                        absolute: ProofReplayInt = proof_replay_sub_safe(0, magnitude)
+                        return (false, 0, 0, false, false) if not absolute.known
+                        magnitude <- absolute.value
+                    limit: ProofReplayInt = proof_replay_sub_safe(magnitude, 1)
+                    return (false, 0, 0, false, false) if not limit.known
+                    negative_limit: ProofReplayInt = proof_replay_sub_safe(0, limit.value)
+                    return (false, 0, 0, false, false) if not negative_limit.known
+                    return (true, negative_limit.value, limit.value, true, true)
+                _:
+                    pass
+            return (false, 0, 0, false, false)
+
+        def proof_replay_interval_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
+            bounds: mutable darray[ProofReplayBound] = []
+            for fact in facts |bounds|:
+                proof_replay_collect_bounds(fact, &bounds)
+            proof_replay_close_equalities(facts, &bounds)
+            a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(left, bounds)
+            b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(right, bounds)
+            return a.has_lower and b.has_upper and a.lower > b.upper if operator == TokenKind.Gt
+            return a.has_lower and b.has_upper and a.lower >= b.upper if operator == TokenKind.GtEq
+            return a.has_upper and b.has_lower and a.upper < b.lower if operator == TokenKind.Lt
+            return a.has_upper and b.has_lower and a.upper <= b.lower if operator == TokenKind.LtEq
+            return a.known and b.known and a.lower == a.upper and b.lower == b.upper and a.lower == b.lower if operator == TokenKind.EqEq
+            return (a.has_upper and b.has_lower and a.upper < b.lower) or (a.has_lower and b.has_upper and a.lower > b.upper) if operator == TokenKind.BangEq
+            return false
+
+        def proof_replay_difference_push(left: ProofReplayAffine, right: ProofReplayAffine, reverse: bool, strict: bool, constraints: mutable darray[ProofReplayDifference]&) -> void:
+            first: ProofReplayAffine = left if not reverse else right
+            second: ProofReplayAffine = right if not reverse else left
+            difference: ProofReplayInt = proof_replay_sub_safe(second.offset, first.offset)
+            return if not difference.known
+            bound: mutable i64 = difference.value
+            if strict:
+                decremented: ProofReplayInt = proof_replay_sub_safe(bound, 1)
+                return if not decremented.known
+                bound <- decremented.value
+            constraints.push(ProofReplayDifference{left: first.base, right: second.base, bound: bound})
+
+        def proof_replay_collect_differences(expression: Ast::Expr, bounds: darray[ProofReplayBound]&, constraints: mutable darray[ProofReplayDifference]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_replay_collect_differences(inner, bounds, constraints)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated_operator: TokenKind = proof_replay_comparison_negation(operator)
+                            proof_replay_collect_differences(Ast::Expr.Binary(left, negated_operator, right, Ast::expr_pos(expression)), bounds, constraints) if negated_operator != TokenKind.Eof
+                        _:
+                            pass
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    proof_replay_collect_differences(left, bounds, constraints)
+                    proof_replay_collect_differences(right, bounds, constraints)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return if operator != TokenKind.EqEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
+                    left_affine: ProofReplayAffine = proof_replay_affine_expression(left)
+                    right_affine: ProofReplayAffine = proof_replay_affine_expression(right)
+                    return if not left_affine.known or not right_affine.known
+                    return if not proof_replay_affine_safe(left_affine, bounds) or not proof_replay_affine_safe(right_affine, bounds)
+                    proof_replay_difference_push(left_affine, right_affine, false, false, constraints) if operator == TokenKind.LtEq
+                    proof_replay_difference_push(left_affine, right_affine, false, true, constraints) if operator == TokenKind.Lt
+                    proof_replay_difference_push(left_affine, right_affine, true, false, constraints) if operator == TokenKind.GtEq
+                    proof_replay_difference_push(left_affine, right_affine, true, true, constraints) if operator == TokenKind.Gt
+                    if operator == TokenKind.EqEq:
+                        proof_replay_difference_push(left_affine, right_affine, false, false, constraints)
+                        proof_replay_difference_push(left_affine, right_affine, true, false, constraints)
+                _:
+                    pass
+
+        def proof_replay_difference_node_index(nodes: darray[sview]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < nodes.count |index, nodes, name|:
+                return index if nodes[index] == name
+                index <- index + 1
+            return nodes.count
+
+        def proof_replay_difference_query(nodes: darray[sview]&, matrix: darray[i64]&, known: darray[bool]&, left: sview, right: sview, bound: i64) -> bool:
+            left_index: usize = proof_replay_difference_node_index(nodes, left)
+            right_index: usize = proof_replay_difference_node_index(nodes, right)
+            return false if left_index >= nodes.count or right_index >= nodes.count
+            slot: usize = left_index * nodes.count + right_index
+            return known[slot] and matrix[slot] <= bound
+
+        def proof_replay_difference_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if operator != TokenKind.EqEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
+            bounds: mutable darray[ProofReplayBound] = []
+            for fact in facts |bounds|:
+                proof_replay_collect_bounds(fact, &bounds)
+            proof_replay_close_equalities(facts, &bounds)
+            left_affine: ProofReplayAffine = proof_replay_affine_expression(left)
+            right_affine: ProofReplayAffine = proof_replay_affine_expression(right)
+            return false if not left_affine.known or not right_affine.known
+            return false if not proof_replay_affine_safe(left_affine, bounds) or not proof_replay_affine_safe(right_affine, bounds)
+            constraints: mutable darray[ProofReplayDifference] = []
+            for fact in facts |bounds, constraints|:
+                proof_replay_collect_differences(fact, bounds, &constraints)
+            return false if constraints.count > 4096
+            nodes: mutable darray[sview] = [""]
+            for constraint in constraints |nodes|:
+                nodes.push(constraint.left) if constraint.left != "" and proof_replay_difference_node_index(nodes, constraint.left) == nodes.count
+                nodes.push(constraint.right) if constraint.right != "" and proof_replay_difference_node_index(nodes, constraint.right) == nodes.count
+            return false if nodes.count > 128
+            matrix: mutable darray[i64] = []
+            known: mutable darray[bool] = []
+            matrix.resize(nodes.count * nodes.count)
+            known.resize(nodes.count * nodes.count)
+            for index in 0..<matrix.count |index, matrix, known|:
+                matrix[index] <- 0
+                known[index] <- false
+            for index in 0..<nodes.count |index, nodes, matrix, known|:
+                slot: usize = index * nodes.count + index
+                matrix[slot] <- 0
+                known[slot] <- true
+            for constraint in constraints |constraint, nodes, matrix, known|:
+                left_index: usize = proof_replay_difference_node_index(nodes, constraint.left)
+                right_index: usize = proof_replay_difference_node_index(nodes, constraint.right)
+                slot: usize = left_index * nodes.count + right_index
+                matrix[slot] <- constraint.bound if not known[slot] or constraint.bound < matrix[slot]
+                known[slot] <- true
+            for pivot in 0..<nodes.count |pivot, nodes, matrix, known|:
+                for source in 0..<nodes.count |source, pivot, nodes, matrix, known|:
+                    first_slot: usize = source * nodes.count + pivot
+                    continue if not known[first_slot]
+                    for target in 0..<nodes.count |target, source, pivot, nodes, matrix, known|:
+                        second_slot: usize = pivot * nodes.count + target
+                        continue if not known[second_slot]
+                        combined: ProofReplayInt = proof_replay_add_safe(matrix[first_slot], matrix[second_slot])
+                        continue if not combined.known
+                        result_slot: usize = source * nodes.count + target
+                        matrix[result_slot] <- combined.value if not known[result_slot] or combined.value < matrix[result_slot]
+                        known[result_slot] <- true
+            if operator == TokenKind.EqEq:
+                forward: ProofReplayInt = proof_replay_sub_safe(right_affine.offset, left_affine.offset)
+                reverse: ProofReplayInt = proof_replay_sub_safe(left_affine.offset, right_affine.offset)
+                return false if not forward.known or not reverse.known
+                return proof_replay_difference_query(nodes, matrix, known, left_affine.base, right_affine.base, forward.value) and proof_replay_difference_query(nodes, matrix, known, right_affine.base, left_affine.base, reverse.value)
+            if operator == TokenKind.LtEq or operator == TokenKind.Lt:
+                target: mutable ProofReplayInt = proof_replay_sub_safe(right_affine.offset, left_affine.offset)
+                return false if not target.known
+                if operator == TokenKind.Lt:
+                    decremented: ProofReplayInt = proof_replay_sub_safe(target.value, 1)
+                    return false if not decremented.known
+                    target <- decremented
+                return proof_replay_difference_query(nodes, matrix, known, left_affine.base, right_affine.base, target.value)
+            target: mutable ProofReplayInt = proof_replay_sub_safe(left_affine.offset, right_affine.offset)
+            return false if not target.known
+            if operator == TokenKind.Gt:
+                decremented: ProofReplayInt = proof_replay_sub_safe(target.value, 1)
+                return false if not decremented.known
+                target <- decremented
+            return proof_replay_difference_query(nodes, matrix, known, right_affine.base, left_affine.base, target.value)
+
+        def proof_replay_interval_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
+            bounds: mutable darray[ProofReplayBound] = []
+            for fact in facts |bounds|:
+                proof_replay_collect_bounds(fact, &bounds)
+            left_name: mutable sview = ""
+            right_name: mutable sview = ""
+            match left:
+                Ast::Expr.Ident(name, _):
+                    left_name <- name
+                Ast::Expr.Paren(inner, _):
+                    match inner:
+                        Ast::Expr.Ident(name, _):
+                            left_name <- name
+                        _:
+                            pass
+                _:
+                    pass
+            match right:
+                Ast::Expr.Ident(name, _):
+                    right_name <- name
+                Ast::Expr.Paren(inner, _):
+                    match inner:
+                        Ast::Expr.Ident(name, _):
+                            right_name <- name
+                        _:
+                            pass
+                _:
+                    pass
+            left_constant: ProofReplayInt = proof_replay_constant_int(left)
+            right_constant: ProofReplayInt = proof_replay_constant_int(right)
+            if left_name != "" and right_constant.known:
+                bound: ProofReplayBound = proof_replay_bound_for(bounds, left_name)
+                return bound.has_lower and bound.has_upper and bound.lower == bound.upper and bound.lower == right_constant.value if operator == TokenKind.EqEq
+                return (bound.has_upper and bound.upper < right_constant.value) or (bound.has_lower and bound.lower > right_constant.value) if operator == TokenKind.BangEq
+                return bound.has_upper and bound.upper < right_constant.value if operator == TokenKind.Lt
+                return bound.has_upper and bound.upper <= right_constant.value if operator == TokenKind.LtEq
+                return bound.has_lower and bound.lower > right_constant.value if operator == TokenKind.Gt
+                return bound.has_lower and bound.lower >= right_constant.value if operator == TokenKind.GtEq
+            if right_name != "" and left_constant.known:
+                bound: ProofReplayBound = proof_replay_bound_for(bounds, right_name)
+                return bound.has_lower and bound.has_upper and bound.lower == bound.upper and bound.lower == left_constant.value if operator == TokenKind.EqEq
+                return (bound.has_upper and bound.upper < left_constant.value) or (bound.has_lower and bound.lower > left_constant.value) if operator == TokenKind.BangEq
+                return bound.has_lower and bound.lower > left_constant.value if operator == TokenKind.Lt
+                return bound.has_lower and bound.lower >= left_constant.value if operator == TokenKind.LtEq
+                return bound.has_upper and bound.upper < left_constant.value if operator == TokenKind.Gt
+                return bound.has_upper and bound.upper <= left_constant.value if operator == TokenKind.GtEq
+            return false
+
+        # These are the total fixed-width identities accepted by the main kernel. Keeping the
+        # rewrite set explicit is important: cancellation, division by a variable, and general
+        # algebra are intentionally not part of this independently replayed fragment.
+        def proof_replay_definitionally_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
+            return true if proof_replay_expr_equal(left, right)
+            match left:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_definitionally_equal(inner, right)
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_replay_definitionally_equal(operand, right)
+                Ast::Expr.Binary(base, operator, amount, _):
+                    amount_constant: ProofReplayInt = proof_replay_constant_int(amount)
+                    if operator == TokenKind.Plus or operator == TokenKind.Minus:
+                        return proof_replay_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 0
+                    if operator == TokenKind.Star:
+                        return proof_replay_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 1
+                        target_constant: ProofReplayInt = proof_replay_constant_int(right)
+                        return target_constant.known and target_constant.value == 0 if amount_constant.known and amount_constant.value == 0
+                        base_constant: ProofReplayInt = proof_replay_constant_int(base)
+                        return proof_replay_definitionally_equal(amount, right) if base_constant.known and base_constant.value == 1
+                        return target_constant.known and target_constant.value == 0 if base_constant.known and base_constant.value == 0
+                    if operator == TokenKind.Slash:
+                        return proof_replay_definitionally_equal(base, right) if amount_constant.known and amount_constant.value == 1
+                    if operator == TokenKind.Percent:
+                        target_constant: ProofReplayInt = proof_replay_constant_int(right)
+                        return target_constant.known and target_constant.value == 0 if amount_constant.known and amount_constant.value == 1
+                _:
+                    pass
+            match right:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_definitionally_equal(left, inner)
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_replay_definitionally_equal(left, operand)
+                Ast::Expr.Binary(base, operator, amount, _):
+                    amount_constant: ProofReplayInt = proof_replay_constant_int(amount)
+                    if operator == TokenKind.Plus or operator == TokenKind.Minus:
+                        return proof_replay_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 0
+                    if operator == TokenKind.Star:
+                        return proof_replay_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 1
+                        left_constant: ProofReplayInt = proof_replay_constant_int(left)
+                        return left_constant.known and left_constant.value == 0 if amount_constant.known and amount_constant.value == 0
+                        base_constant: ProofReplayInt = proof_replay_constant_int(base)
+                        return proof_replay_definitionally_equal(left, amount) if base_constant.known and base_constant.value == 1
+                        return left_constant.known and left_constant.value == 0 if base_constant.known and base_constant.value == 0
+                    if operator == TokenKind.Slash:
+                        return proof_replay_definitionally_equal(left, base) if amount_constant.known and amount_constant.value == 1
+                    if operator == TokenKind.Percent:
+                        left_constant: ProofReplayInt = proof_replay_constant_int(left)
+                        return left_constant.known and left_constant.value == 0 if amount_constant.known and amount_constant.value == 1
+                _:
+                    pass
+            return false
+
+        def proof_replay_expr_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
+            match right:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_expr_equal(left, inner)
+                _:
+                    pass
+            match left:
+                Ast::Expr.IntLit(value):
+                    match right:
+                        Ast::Expr.IntLit(other):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.BoolLit(value):
+                    match right:
+                        Ast::Expr.BoolLit(other):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.Ident(name, _):
+                    match right:
+                        Ast::Expr.Ident(other, _):
+                            return name == other
+                        _:
+                            return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_expr_equal(inner, right)
+                Ast::Expr.Unary(operator, operand, _):
+                    match right:
+                        Ast::Expr.Unary(other_operator, other_operand, _):
+                            return operator == other_operator and proof_replay_expr_equal(operand, other_operand)
+                        _:
+                            return false
+                Ast::Expr.Move(operand, _):
+                    match right:
+                        Ast::Expr.Move(other_operand, _):
+                            return proof_replay_expr_equal(operand, other_operand)
+                        _:
+                            return false
+                Ast::Expr.Binary(left_operand, operator, right_operand, _):
+                    match right:
+                        Ast::Expr.Binary(other_left, other_operator, other_right, _):
+                            return operator == other_operator and proof_replay_expr_equal(left_operand, other_left) and proof_replay_expr_equal(right_operand, other_right)
+                        _:
+                            return false
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    match right:
+                        Ast::Expr.Call(other_callee, other_arguments, other_argument_names, _):
+                            return false if arguments.count != other_arguments.count or argument_names.count != other_argument_names.count
+                            return false if not proof_replay_expr_equal(callee, other_callee)
+                            for index in 0..<arguments.count |index, arguments, other_arguments|:
+                                return false if not proof_replay_expr_equal(arguments[index], other_arguments[index])
+                            for index in 0..<argument_names.count |index, argument_names, other_argument_names|:
+                                return false if argument_names[index] != other_argument_names[index]
+                            return true
+                        _:
+                            return false
+                Ast::Expr.Field(object, field, _):
+                    match right:
+                        Ast::Expr.Field(other_object, other_field, _):
+                            return field == other_field and proof_replay_expr_equal(object, other_object)
+                        _:
+                            return false
+                Ast::Expr.Scope(base, name, _):
+                    match right:
+                        Ast::Expr.Scope(other_base, other_name, _):
+                            return name == other_name and proof_replay_expr_equal(base, other_base)
+                        _:
+                            return false
+                Ast::Expr.Index(object, index, _):
+                    match right:
+                        Ast::Expr.Index(other_object, other_index, _):
+                            return proof_replay_expr_equal(object, other_object) and proof_replay_expr_equal(index, other_index)
+                        _:
+                            return false
+                Ast::Expr.Tuple(elements, _):
+                    match right:
+                        Ast::Expr.Tuple(other_elements, _):
+                            return false if elements.count != other_elements.count
+                            for index in 0..<elements.count |index, elements, other_elements|:
+                                return false if not proof_replay_expr_equal(elements[index], other_elements[index])
+                            return true
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_replay_fact_contains(expression: Ast::Expr, goal: Ast::Expr) -> bool:
+            return true if proof_replay_expr_equal(expression, goal)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_fact_contains(inner, goal)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_replay_fact_contains(left, goal) or proof_replay_fact_contains(right, goal)
+                _:
+                    return false
+
+        def proof_replay_comparison_negation(operator: TokenKind) -> TokenKind:
+            return TokenKind.BangEq if operator == TokenKind.EqEq
+            return TokenKind.EqEq if operator == TokenKind.BangEq
+            return TokenKind.GtEq if operator == TokenKind.Lt
+            return TokenKind.Lt if operator == TokenKind.GtEq
+            return TokenKind.Gt if operator == TokenKind.LtEq
+            return TokenKind.LtEq if operator == TokenKind.Gt
+            return TokenKind.Eof
+
+        def proof_replay_negative_fact(expression: Ast::Expr, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_negative_fact(inner, left, operator, right)
+                Ast::Expr.Binary(and_left, TokenKind.And, and_right, _):
+                    return proof_replay_negative_fact(and_left, left, operator, right) or proof_replay_negative_fact(and_right, left, operator, right)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(inner_left, inner_operator, inner_right, _):
+                            negated_operator: TokenKind = proof_replay_comparison_negation(operator)
+                            return negated_operator != TokenKind.Eof and inner_operator == negated_operator and proof_replay_expr_equal(inner_left, left) and proof_replay_expr_equal(inner_right, right)
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_replay_facts_inconsistent(facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts:
+                match fact:
+                    Ast::Expr.BoolLit(value):
+                        return true if not value
+                    Ast::Expr.Unary(TokenKind.Not, operand, _):
+                        match operand:
+                            Ast::Expr.BoolLit(value):
+                                return true if value
+                            _:
+                                pass
+                    Ast::Expr.Paren(inner, _):
+                        nested_paren: mutable darray[Ast::Expr] = [inner]
+                        return true if proof_replay_facts_inconsistent(nested_paren)
+                    Ast::Expr.Binary(left, TokenKind.And, right, _):
+                        nested_and: mutable darray[Ast::Expr] = [left, right]
+                        return true if proof_replay_facts_inconsistent(nested_and)
+                    _:
+                        pass
+            return false
+
+        def proof_replay_find_disjunction(expression: Ast::Expr) -> (known: bool, left: Ast::Expr, right: Ast::Expr):
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_find_disjunction(inner)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return (true, left, right)
+                Ast::Expr.Binary(left, TokenKind.And, right, position):
+                    left_split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_replay_find_disjunction(left)
+                    if left_split.known:
+                        return (true, Ast::Expr.Binary(left_split.left, TokenKind.And, right, position), Ast::Expr.Binary(left_split.right, TokenKind.And, right, position))
+                    right_split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_replay_find_disjunction(right)
+                    if right_split.known:
+                        return (true, Ast::Expr.Binary(left, TokenKind.And, right_split.left, position), Ast::Expr.Binary(left, TokenKind.And, right_split.right, position))
+                _:
+                    pass
+            return (false, Ast::Expr.Absent, Ast::Expr.Absent)
+
+        def proof_replay_exact_int(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> ProofReplayInt:
+            constant: ProofReplayInt = proof_replay_constant_int(expression)
+            return constant if constant.known
+            bounds: mutable darray[ProofReplayBound] = []
+            for fact in facts |bounds|:
+                proof_replay_collect_bounds(fact, &bounds)
+            proof_replay_close_equalities(facts, &bounds)
+            name: sview = proof_replay_ident_name(expression)
+            return ProofReplayInt{known: false, value: 0} if name == ""
+            bound: ProofReplayBound = proof_replay_bound_for(bounds, name)
+            return ProofReplayInt{known: true, value: bound.lower} if bound.has_lower and bound.has_upper and bound.lower == bound.upper
+            return ProofReplayInt{known: false, value: 0}
+
+        def proof_replay_substitute(expression: Ast::Expr, name: sview, value: Ast::Expr) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Ident(expression_name, _):
+                    return value if expression_name == name
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_replay_substitute(inner, name, value), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_replay_substitute(operand, name, value), position)
+                Ast::Expr.Move(operand, position):
+                    return Ast::Expr.Move(proof_replay_substitute(operand, name, value), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_replay_substitute(left, name, value), operator, proof_replay_substitute(right, name, value), position)
+                _:
+                    pass
+            return expression
+
+        def proof_replay_quantifier_values(kind: sview, facts: darray[Ast::Expr]&, body: Ast::Expr, binder: sview, values: darray[Ast::Expr]&) -> bool:
+            return false if values.count == 0 and kind == "exists"
+            return false if values.count > 65536
+            for candidate in values |candidate, facts, body, binder, kind|:
+                instance: Ast::Expr = proof_replay_substitute(body, binder, candidate)
+                proven: bool = proof_replay_goal_depth(facts, instance, 0)
+                return false if kind == "forall" and not proven
+                return true if kind == "exists" and proven
+            return kind == "forall"
+
+        def proof_replay_quantifier_entries(kind: sview, facts: darray[Ast::Expr]&, body: Ast::Expr, key_binder: sview, value_binder: sview, entries: darray[Ast::DictEntry]&) -> bool:
+            return false if entries.count == 0 and kind == "exists"
+            return false if entries.count > 32768
+            for entry in entries |entry, facts, body, key_binder, value_binder, kind|:
+                key_instance: Ast::Expr = proof_replay_substitute(body, key_binder, entry.key)
+                instance: Ast::Expr = proof_replay_substitute(key_instance, value_binder, entry.value)
+                proven: bool = proof_replay_goal_depth(facts, instance, 0)
+                return false if kind == "forall" and not proven
+                return true if kind == "exists" and proven
+            return kind == "forall"
+
+        def proof_replay_quantifier(kind: sview, facts: darray[Ast::Expr]&, expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_quantifier(kind, facts, inner)
+                Ast::Expr.Block(statements, body, _, _):
+                    return false if statements.count == 0 or statements.count > 2
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, _, range_expression, _):
+                            match range_expression:
+                                Ast::Expr.Binary(lower_expression, range_operator, upper_expression, _):
+                                    return false if range_operator != TokenKind.RangeLt and range_operator != TokenKind.RangeLe
+                                    lower: ProofReplayInt = proof_replay_exact_int(lower_expression, facts)
+                                    upper: ProofReplayInt = proof_replay_exact_int(upper_expression, facts)
+                                    return false if not lower.known or not upper.known
+                                    if range_operator == TokenKind.RangeLt and lower.value >= upper.value:
+                                        return kind == "forall"
+                                    if range_operator == TokenKind.RangeLe and lower.value > upper.value:
+                                        return kind == "forall"
+                                    width: mutable ProofReplayInt = proof_replay_sub_safe(upper.value, lower.value)
+                                    return false if not width.known
+                                    if range_operator == TokenKind.RangeLe:
+                                        width_with_end: ProofReplayInt = proof_replay_add_safe(width.value, 1)
+                                        return false if not width_with_end.known
+                                        width <- width_with_end
+                                    return false if width.value <= 0 or width.value > 65536
+                                    candidate: mutable i64 = lower.value
+                                    offset: mutable i64 = 0
+                                    while offset < width.value |offset, candidate, facts, body, binder, kind|:
+                                        instance: Ast::Expr = proof_replay_substitute(body, binder, Ast::Expr.IntLit(candidate))
+                                        proven: bool = proof_replay_goal_depth(facts, instance, 0)
+                                        return false if kind == "forall" and not proven
+                                        return true if kind == "exists" and proven
+                                        offset <- offset + 1
+                                        if offset < width.value:
+                                            next_candidate: ProofReplayInt = proof_replay_add_safe(candidate, 1)
+                                            return false if not next_candidate.known
+                                            candidate <- next_candidate.value
+                                    return kind == "forall"
+                                _:
+                                    pass
+                            match range_expression:
+                                Ast::Expr.Array(elements, _):
+                                    return false if statements.count != 1
+                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements)
+                                Ast::Expr.Tuple(elements, _):
+                                    return false if statements.count != 1
+                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements)
+                                Ast::Expr.SetLit(elements, _):
+                                    return false if statements.count != 1
+                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements)
+                                Ast::Expr.DictLit(entries, _):
+                                    return false if statements.count != 2
+                                    match statements[1]:
+                                        Ast::Stmt.VarDecl(value_binder, _, _, _):
+                                            return proof_replay_quantifier_entries(kind, facts, body, binder, value_binder, entries)
+                                        _:
+                                            pass
+                                _:
+                                    pass
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        # The lowered AST does not retain whether a contract block came from `forall` or
+        # `exists`. When the source-side rule tag is unavailable, replaying the stronger
+        # universal reading is still sound for either proposition: proving every candidate also
+        # proves the existence of a candidate. It deliberately does not guess an existential
+        # witness, so an `exists` certificate remains a gap unless its kind is preserved.
+        def proof_replay_is_bounded_quantifier_shape(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_is_bounded_quantifier_shape(inner)
+                Ast::Expr.Block(statements, _, _, _):
+                    return false if statements.count != 1
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(_, _, range_expression, _):
+                            match range_expression:
+                                Ast::Expr.Binary(_, operator, _, _):
+                                    return operator == TokenKind.RangeLt or operator == TokenKind.RangeLe
+                                _:
+                                    pass
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_replay_goal_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, split_depth: usize) -> bool:
+            for fact in facts:
+                return true if proof_replay_fact_contains(fact, goal)
+            return true if proof_replay_facts_inconsistent(facts)
+            if split_depth < 4:
+                for index in 0..<facts.count |index, facts, goal, split_depth|:
+                    candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_replay_find_disjunction(facts[index])
+                    if candidate.known:
+                        left_facts: mutable darray[Ast::Expr] = []
+                        right_facts: mutable darray[Ast::Expr] = []
+                        for fact_index in 0..<facts.count |fact_index, facts, index, candidate, left_facts, right_facts|:
+                            if fact_index == index:
+                                left_facts.push(candidate.left)
+                                right_facts.push(candidate.right)
+                            else:
+                                left_facts.push(facts[fact_index])
+                                right_facts.push(facts[fact_index])
+                        return proof_replay_goal_depth(left_facts, goal, split_depth + 1) and proof_replay_goal_depth(right_facts, goal, split_depth + 1)
+            match goal:
+                Ast::Expr.BoolLit(value):
+                    return value
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_goal_depth(facts, inner, split_depth)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.BoolLit(value):
+                            return not value
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated_operator: TokenKind = proof_replay_comparison_negation(operator)
+                            return proof_replay_constant_comparison(left, negated_operator, right) if negated_operator != TokenKind.Eof
+                        _:
+                            pass
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_replay_goal_depth(facts, left, split_depth) and proof_replay_goal_depth(facts, right, split_depth)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_replay_goal_depth(facts, left, split_depth) or proof_replay_goal_depth(facts, right, split_depth)
+                Ast::Expr.Binary(left, TokenKind.FatArrow, right, _):
+                    implication_facts: mutable darray[Ast::Expr] = []
+                    implication_facts.extend(facts)
+                    implication_facts.push(left)
+                    return proof_replay_goal_depth(implication_facts, right, split_depth)
+                Ast::Expr.Binary(left, operator, right, _):
+                    negated_operator: TokenKind = proof_replay_comparison_negation(operator)
+                    if negated_operator != TokenKind.Eof and proof_replay_definitionally_equal(left, right):
+                        return operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+                    return proof_replay_constant_comparison(left, operator, right) if negated_operator != TokenKind.Eof and proof_replay_constant_comparison(left, operator, right)
+                    return true if proof_replay_interval_comparison(left, operator, right, facts)
+                    return true if proof_replay_interval_goal(left, operator, right, facts)
+                    return true if proof_replay_affine_comparison(left, operator, right, facts)
+                    return true if proof_replay_difference_comparison(left, operator, right, facts)
+                    for fact in facts:
+                        return true if proof_replay_negative_fact(fact, left, operator, right)
+                _:
+                    pass
+            return false
+
+        def proof_replay_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            return proof_replay_goal_depth(facts, goal, 0)
+
+        def proof_replay_trace_range_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return trace.premises_start <= report.fact_trace_premises.count and trace.premises_count <= report.fact_trace_premises.count - trace.premises_start
+
+        def proof_replay_dependency_in_stack(names: darray[sview]&, dependency: sview) -> bool:
+            return any existing in names where existing == dependency
+
+        # Replay every certificate owned by a modular dependency before allowing its summary to
+        # support a caller. A dependency already on the stack is an SCC induction edge: the main
+        # checker must have supplied the corresponding termination proof, while replay stops at
+        # that fixed-point boundary instead of recursing forever. Acyclic summary chains therefore
+        # receive full replay, and cyclic summaries remain visibly tied to the main termination
+        # checker rather than being mistaken for ordinary facts.
+        def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
+            return false if dependency == ""
+            found_goal: mutable bool = false
+            found_proven_goal: mutable bool = false
+            for attempt in report.goal_attempts:
+                if attempt.name == dependency:
+                    found_goal <- true
+                    found_proven_goal <- true if attempt.proven
+            for finding in report.findings:
+                return false if finding.name == dependency
+            return false if not found_goal or not found_proven_goal
+            return true if proof_replay_dependency_in_stack(dependency_stack, dependency)
+            return false if dependency_depth >= 64
+            next_stack: mutable darray[sview] = []
+            next_stack.extend(dependency_stack)
+            next_stack.push(dependency)
+            found_certificate: mutable bool = false
+            for certificate in report.certificates |certificate, report, next_stack, dependency_depth, found_certificate|:
+                if certificate.name == dependency:
+                    found_certificate <- true
+                    return false if not proof_replay_certificate_with_stack(report, certificate, next_stack, dependency_depth + 1)
+            return found_certificate
+
+        def proof_replay_kernel_trace_range_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return trace.kernel_expression < report.kernel_nodes.count and trace.kernel_premises_start <= report.kernel_fact_trace_premises.count and trace.kernel_premises_count <= report.kernel_fact_trace_premises.count - trace.kernel_premises_start
+
+        # The source-neutral trace validator mirrors the source trace policy, but its logical
+        # step check is performed entirely by kernel_replay.elisa. Runtime and summary facts are
+        # explicit semantic boundaries; they are still required to have a well-formed lowered
+        # term and summary dependencies are recursively checked by the existing SCC-aware path.
+        def proof_replay_kernel_fact_trace_is_valid_with_stack[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&) -> bool:
+            return false if trace.name != owner or not proof_replay_kernel_trace_range_valid(report, trace)
+            return true if trace.kind == "precondition" or trace.kind == "type-bound" or trace.kind == "runtime-assert" or trace.kind == "runtime-guard" or trace.kind == "branch-condition" or trace.kind == "loop-condition" or trace.kind == "loop-invariant" or trace.kind == "loop-range"
+            if trace.kind == "function-summary" or trace.kind == "lemma-summary":
+                return proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
+            return false if trace.kind != "proof-step" and trace.kind != "lemma-step"
+            return false if depth >= 64
+            premises: mutable darray[usize] = []
+            return false if trace.kernel_premises_count > report.kernel_fact_trace_premises.count - trace.kernel_premises_start
+            for index in 0..<trace.kernel_premises_count |index, premises, report, trace|:
+                premise: usize = report.kernel_fact_trace_premises[trace.kernel_premises_start + index]
+                return false if premise >= report.kernel_nodes.count
+                premises.push(premise)
+            for premise in premises |premise, report, owner, depth, dependency_stack|:
+                found: mutable bool = false
+                for candidate in report.fact_traces |candidate, premise, report, owner, depth, dependency_stack, found|:
+                    if candidate.kernel_expression < report.kernel_nodes.count and ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(report.kernel_nodes, report.kernel_children, candidate.kernel_expression, premise, 0) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, candidate, owner, depth + 1, dependency_stack):
+                        found <- true
+                        break
+                return false if not found
+            return ElisaProofKernelReplay::proof_kernel_replay_goal_report(&report.kernel_nodes, &report.kernel_children, premises, trace.kernel_expression)
+
+        def proof_replay_kernel_fact_root_is_traced_with_stack[@r](report: mutable ProofReport& @r, fact: usize, owner: sview, dependency_stack: darray[sview]&) -> bool:
+            return false if fact >= report.kernel_nodes.count
+            for trace in report.fact_traces |trace, report, fact, owner, dependency_stack|:
+                return true if trace.kernel_expression < report.kernel_nodes.count and ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(report.kernel_nodes, report.kernel_children, trace.kernel_expression, fact, 0) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack)
+            return false
+
+        # A certificate may only replay facts that the source checker explicitly introduced.
+        # Derived proof steps are not accepted as axioms: their captured premises are themselves
+        # traced and the independent logical kernel must re-prove the step from those premises.
+        # The trace payload is deliberately checked with this module's structural equality, not
+        # the main checker helper, so replay does not inherit its implementation by reference.
+        def proof_replay_fact_trace_is_valid_with_stack(report: mutable ProofReport&, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&) -> bool:
+            return false if trace.name != owner or not proof_replay_trace_range_valid(report, trace)
+            return true if trace.kind == "precondition" or trace.kind == "type-bound" or trace.kind == "runtime-assert" or trace.kind == "runtime-guard" or trace.kind == "branch-condition" or trace.kind == "loop-condition" or trace.kind == "loop-invariant" or trace.kind == "loop-range"
+            if trace.kind == "function-summary" or trace.kind == "lemma-summary":
+                return proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
+            return false if trace.kind != "proof-step" and trace.kind != "lemma-step"
+            return false if depth >= 64
+            premises: mutable darray[Ast::Expr] = []
+            for index in 0..<trace.premises_count |index, premises, report, trace|:
+                premises.push(report.fact_trace_premises[trace.premises_start + index])
+            for premise in premises |premise, report, owner, depth, dependency_stack|:
+                found: mutable bool = false
+                for candidate in report.fact_traces |candidate, premise, owner, depth, dependency_stack, found|:
+                    if proof_replay_expr_equal(candidate.expression, premise) and proof_replay_fact_trace_is_valid_with_stack(report, candidate, owner, depth + 1, dependency_stack):
+                        found <- true
+                        break
+                return false if not found
+            return proof_replay_goal(premises, trace.expression)
+
+        def proof_replay_fact_trace_is_valid(report: mutable ProofReport&, trace: ProofFactTrace, owner: sview, depth: usize) -> bool:
+            dependency_stack: mutable darray[sview] = [owner]
+            return proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, depth, dependency_stack)
+
+        def proof_replay_fact_is_traced_with_stack(report: mutable ProofReport&, fact: Ast::Expr, owner: sview, dependency_stack: darray[sview]&) -> bool:
+            for trace in report.fact_traces:
+                return true if proof_replay_expr_equal(trace.expression, fact) and proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack)
+            return false
+
+        def proof_replay_fact_is_traced(report: mutable ProofReport&, fact: Ast::Expr, owner: sview) -> bool:
+            dependency_stack: mutable darray[sview] = [owner]
+            return proof_replay_fact_is_traced_with_stack(report, fact, owner, dependency_stack)
+
+        # Certificates are not standalone propositions: each one must be the exact root emitted
+        # for a successful goal attempt. Check both source-level fields and arena ranges before
+        # replaying the logical claim. This prevents a future serialized certificate from
+        # attaching an otherwise replayable root to an unrelated or fabricated obligation.
+        def proof_replay_certificate_root_is_proven(report: ProofReport&, certificate: ProofGoalCertificate) -> bool:
+            return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
+            for attempt in report.goal_attempts:
+                continue if not attempt.has_certificate or not attempt.proven
+                continue if attempt.facts_start != certificate.facts_start or attempt.facts_count != certificate.facts_count
+                continue if attempt.kernel_goal != certificate.kernel_goal or attempt.kernel_facts_start != certificate.kernel_facts_start or attempt.kernel_facts_count != certificate.kernel_facts_count
+                continue if attempt.line != certificate.line or attempt.name != certificate.name or attempt.rule != certificate.rule
+                # `kernel_goal` is the canonical semantic identity. The source AST mirror is
+                # presentation data and can contain compiler expression forms (for example
+                # quantifier blocks) that the small source diagnostic equality intentionally does
+                # not normalize; the exact arena root/range match above remains authoritative.
+                return true
+            return false
+
+        def proof_replay_certificate_with_stack[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
+            return false if not proof_replay_certificate_root_is_proven(report, certificate)
+            return false if certificate.kernel_facts_start > report.kernel_certificate_facts.count or certificate.kernel_facts_count > report.kernel_certificate_facts.count - certificate.kernel_facts_start
+            return false if certificate.kernel_goal >= report.kernel_nodes.count
+            facts: mutable darray[usize] = []
+            for index in 0..<certificate.kernel_facts_count |index, facts, report, certificate|:
+                fact: usize = report.kernel_certificate_facts[certificate.kernel_facts_start + index]
+                return false if fact >= report.kernel_nodes.count
+                facts.push(fact)
+            for fact in facts |fact, report, certificate, dependency_stack|:
+                return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, certificate.name, dependency_stack)
+            return ElisaProofKernelReplay::proof_kernel_replay_resource_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "resource-safety"
+            return ElisaProofKernelReplay::proof_kernel_replay_checked_index_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-index"
+            return ElisaProofKernelReplay::proof_kernel_replay_checked_get_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-get"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, "forall", facts, certificate.kernel_goal) if certificate.rule == "quantifier-forall"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, "exists", facts, certificate.kernel_goal) if certificate.rule == "quantifier-exists"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, "forall", facts, certificate.kernel_goal) if report.kernel_nodes[certificate.kernel_goal].kind == "quantifier"
+            return ElisaProofKernelReplay::proof_kernel_replay_goal_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal)
+
+        def proof_replay_certificate[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate) -> bool:
+            dependency_stack: mutable darray[sview] = [certificate.name]
+            return proof_replay_certificate_with_stack(report, certificate, dependency_stack, 0)
+
+    public:
+        def proof_replay_fact_origin(report: ProofReport&, fact: Ast::Expr, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
+            for trace in report.fact_traces:
+                if trace.name == owner and proof_replay_expr_equal(trace.expression, fact):
+                    return (true, trace.kind, trace.line, trace.name, trace.dependency, trace.premises_count)
+            return (false, "", 0, "", "", 0)
+
+        def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> void:
+            for index in 0..<report.certificates.count |index, report|:
+                replayed: bool = proof_replay_certificate(report, report.certificates[index])
+                report.certificates[index].replayed <- replayed
+                if replayed:
+                    report.replayed <- report.replayed + 1
+                else:
+                    report.replay_gaps <- report.replay_gaps + 1

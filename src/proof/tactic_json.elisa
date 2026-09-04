@@ -1,0 +1,526 @@
+# Portable proof-state script import for AI/editor clients.
+#
+# The wire format intentionally contains ordinary JSON and the same expression shape already
+# emitted by `--json`.  This module turns that data back into compiler AST values inside a fresh
+# Node.Store, applies the typed Elisa-native actions, and leaves final admission to the normal
+# tactic trace and independent source-neutral kernel checks.  Unknown fields are ignored, but
+# unknown expression kinds, malformed values, and branch actions without child certificates fail
+# closed.
+extend ElisaProof:
+    public:
+        struct ProofTacticJsonResult:
+            valid: mutable bool
+            solved: bool
+            trace_replayed: bool
+            kernel_trace_replayed: bool
+            kernel_replayed: bool
+            certificate_replayed: bool
+            branch_present: bool
+            branch_certificate_replayed: bool
+            action_count: usize
+            accepted_count: usize
+            reason: mutable sview
+            tree_node: usize
+
+        # Branches are stored as a flat postorder tree. A parent is appended after both children,
+        # so the independent verifier can validate arbitrary nesting with a bounded iterative
+        # pass instead of trusting recursive host-language calls or mutable AST-store references.
+        struct ProofTacticJsonTree:
+            states: mutable darray[ProofTacticState]
+            left: mutable darray[usize]
+            right: mutable darray[usize]
+            has_branch: mutable darray[bool]
+
+        def proof_tactic_json_field(value: JsonValue, key: sview) -> (known: bool, value: JsonValue):
+            return (false, JsonValue.Null) if not json_is_object(value) or not json_has(value, key)
+            found: JsonValue = try json_get(value, key) else JsonValue.Null
+            return (true, found)
+
+        def proof_tactic_json_text(value: JsonValue) -> (known: bool, value: sview):
+            match value:
+                JsonValue.String(data_bits, len):
+                    trusted Unsafe.PointerCast:
+                        return (true, StringView{data: data_bits.cast[u8&], len: len})
+                _:
+                    return (false, "")
+            return (false, "")
+
+        def proof_tactic_json_bool(value: JsonValue) -> (known: bool, value: bool):
+            match value:
+                JsonValue.Bool(flag):
+                    return (true, flag)
+                _:
+                    return (false, false)
+            return (false, false)
+
+        def proof_tactic_json_integer(value: JsonValue) -> (known: bool, value: i64):
+            match value:
+                JsonValue.Number(number):
+                    # Convert only inside the exactly representable signed-i64 range. This
+                    # keeps hostile JSON numbers from reaching an out-of-range float-to-int
+                    # conversion before the exactness check below.
+                    return (false, 0) if number < -9223372036854775808.0 or number >= 9223372036854775808.0
+                    integer: i64 = number.i64()
+                    return (true, integer) if integer.f64() == number
+                _:
+                    pass
+            return (false, 0)
+
+        def proof_tactic_json_line(value: JsonValue) -> u32:
+            parsed: (known: bool, value: i64) = proof_tactic_json_integer(value)
+            return parsed.value.u32() if parsed.known and parsed.value >= 0
+            return 0
+
+        def proof_tactic_json_operator(value: JsonValue) -> (known: bool, value: TokenKind):
+            parsed: (known: bool, text: sview) = proof_tactic_json_text(value)
+            return (false, TokenKind.Eof) if not parsed.known
+            operator: mutable TokenKind = TokenKind.Eof
+            operator <- TokenKind.Plus if parsed.text == "+"
+            operator <- TokenKind.Minus if parsed.text == "-"
+            operator <- TokenKind.Star if parsed.text == "*"
+            operator <- TokenKind.Slash if parsed.text == "/"
+            operator <- TokenKind.Percent if parsed.text == "%"
+            operator <- TokenKind.EqEq if parsed.text == "=="
+            operator <- TokenKind.BangEq if parsed.text == "!="
+            operator <- TokenKind.Lt if parsed.text == "<"
+            operator <- TokenKind.Gt if parsed.text == ">"
+            operator <- TokenKind.LtEq if parsed.text == "<="
+            operator <- TokenKind.GtEq if parsed.text == ">="
+            operator <- TokenKind.And if parsed.text == "and"
+            operator <- TokenKind.Or if parsed.text == "or"
+            operator <- TokenKind.FatArrow if parsed.text == "=>"
+            operator <- TokenKind.Not if parsed.text == "not"
+            operator <- TokenKind.In if parsed.text == "in"
+            operator <- TokenKind.Is if parsed.text == "is"
+            operator <- TokenKind.As if parsed.text == "as"
+            operator <- TokenKind.Pipe if parsed.text == "|"
+            operator <- TokenKind.Caret if parsed.text == "^"
+            operator <- TokenKind.Ampersand if parsed.text == "&"
+            operator <- TokenKind.LShift if parsed.text == "<<"
+            operator <- TokenKind.RShift if parsed.text == ">>"
+            operator <- TokenKind.RangeLt if parsed.text == "range_lt"
+            operator <- TokenKind.RangeLe if parsed.text == "range_le"
+            return (operator != TokenKind.Eof, operator)
+
+        def proof_tactic_json_expr_list(value: JsonValue, key: sview, line: u32, output: mutable darray[Ast::Expr]&) -> bool:
+            field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, key)
+            return false if not field.known or not json_is_array(field.value)
+            count: i64 = json_array_len(field.value)
+            return false if count < 0
+            for index in 0..<count |index, field, line, output|:
+                item: JsonValue = try json_at(field.value, index) else JsonValue.Null
+                parsed: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(item)
+                return false if not parsed.known
+                output.push(parsed.value)
+            return true
+
+        def proof_tactic_json_text_list(value: JsonValue, key: sview, output: mutable darray[sview]&) -> bool:
+            field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, key)
+            return false if not field.known or not json_is_array(field.value)
+            count: i64 = json_array_len(field.value)
+            return false if count < 0
+            for index in 0..<count |index, field, output|:
+                item: JsonValue = try json_at(field.value, index) else JsonValue.Null
+                parsed: (known: bool, value: sview) = proof_tactic_json_text(item)
+                return false if not parsed.known
+                output.push(parsed.value)
+            return true
+
+        def proof_tactic_json_fields(value: JsonValue, key: sview, line: u32, output: mutable darray[Ast::FieldInit]&) -> bool:
+            field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, key)
+            return false if not field.known or not json_is_array(field.value)
+            count: i64 = json_array_len(field.value)
+            return false if count < 0
+            for index in 0..<count |index, field, line, output|:
+                item: JsonValue = try json_at(field.value, index) else JsonValue.Null
+                name_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "name")
+                value_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "value")
+                name: (known: bool, text: sview) = proof_tactic_json_text(name_field.value)
+                parsed: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(value_field.value)
+                return false if not name_field.known or not value_field.known or not name.known or not parsed.known
+                output.push(Ast::FieldInit{name: name.text, value: parsed.value})
+            return true
+
+        def proof_tactic_json_entries(value: JsonValue, key: sview, output: mutable darray[Ast::DictEntry]&) -> bool:
+            field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, key)
+            return false if not field.known or not json_is_array(field.value)
+            count: i64 = json_array_len(field.value)
+            return false if count < 0
+            for index in 0..<count |index, field, output|:
+                item: JsonValue = try json_at(field.value, index) else JsonValue.Null
+                key_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "key")
+                value_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "value")
+                parsed_key: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(key_field.value)
+                parsed_value: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(value_field.value)
+                return false if not key_field.known or not value_field.known or not parsed_key.known or not parsed_value.known
+                output.push(Ast::DictEntry{key: parsed_key.value, value: parsed_value.value})
+            return true
+
+        # Reconstruct the expression forms that the source-neutral kernel can consume. The
+        # schema mirrors `proof_push_json_expr`; positions are deliberately reduced to line-only
+        # spans because proof identity is structural and source fingerprints bind the document.
+        def proof_tactic_json_expr(value: JsonValue) -> (known: bool, value: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if not json_is_object(value)
+            kind_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "kind")
+            kind: (known: bool, text: sview) = proof_tactic_json_text(kind_field.value)
+            return (false, Ast::Expr.Invalid) if not kind_field.known or not kind.known
+            line_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "line")
+            line: u32 = proof_tactic_json_line(line_field.value) if line_field.known else 0
+            position: Ast::Pos = Ast::pos_at_line(line)
+            return (true, Ast::Expr.Invalid) if kind.text == "invalid"
+            return (true, Ast::Expr.Absent) if kind.text == "absent"
+            if kind.text == "int":
+                number_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "value")
+                number: (known: bool, value: i64) = proof_tactic_json_integer(number_field.value)
+                return (number_field.known and number.known, Ast::Expr.IntLit(number.value))
+            if kind.text == "float" or kind.text == "string" or kind.text == "char":
+                text_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "text")
+                text: (known: bool, value: sview) = proof_tactic_json_text(text_field.value)
+                return (false, Ast::Expr.Invalid) if not text_field.known or not text.known
+                return (true, Ast::Expr.FloatLit(text.value)) if kind.text == "float"
+                return (true, Ast::Expr.StringLit(text.value)) if kind.text == "string"
+                return (true, Ast::Expr.CharLit(text.value))
+            if kind.text == "bool":
+                bool_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "value")
+                flag: (known: bool, value: bool) = proof_tactic_json_bool(bool_field.value)
+                return (bool_field.known and flag.known, Ast::Expr.BoolLit(flag.value))
+            if kind.text == "ident":
+                name_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "name")
+                name: (known: bool, value: sview) = proof_tactic_json_text(name_field.value)
+                return (name_field.known and name.known, Ast::Expr.Ident(name.value, position))
+            if kind.text == "paren":
+                inner_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "inner")
+                inner: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(inner_field.value)
+                return (inner_field.known and inner.known, Ast::Expr.Paren(inner.value, position))
+            if kind.text == "unary":
+                operator_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "operator")
+                operand_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "operand")
+                operator: (known: bool, value: TokenKind) = proof_tactic_json_operator(operator_field.value)
+                operand: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(operand_field.value)
+                return (false, Ast::Expr.Invalid) if not operator_field.known or not operand_field.known or not operator.known or not operand.known
+                return (true, Ast::Expr.Unary(operator.value, operand.value, position))
+            if kind.text == "binary":
+                operator_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "operator")
+                left_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "left")
+                right_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "right")
+                operator: (known: bool, value: TokenKind) = proof_tactic_json_operator(operator_field.value)
+                left: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(left_field.value)
+                right: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(right_field.value)
+                return (false, Ast::Expr.Invalid) if not operator_field.known or not left_field.known or not right_field.known or not operator.known or not left.known or not right.known
+                return (true, Ast::Expr.Binary(left.value, operator.value, right.value, position))
+            if kind.text == "field" or kind.text == "scope":
+                object_key: sview = "object" if kind.text == "field" else "base"
+                name_key: sview = "field" if kind.text == "field" else "name"
+                object_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, object_key)
+                name_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, name_key)
+                object: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(object_field.value)
+                name: (known: bool, value: sview) = proof_tactic_json_text(name_field.value)
+                return (false, Ast::Expr.Invalid) if not object_field.known or not name_field.known or not object.known or not name.known
+                return (true, Ast::Expr.Field(object.value, name.value, position)) if kind.text == "field"
+                return (true, Ast::Expr.Scope(object.value, name.value, position))
+            if kind.text == "shorthand_member":
+                parts: mutable darray[sview] = []
+                return (false, Ast::Expr.Invalid) if not proof_tactic_json_text_list(value, "parts", &parts)
+                return (true, Ast::Expr.ShorthandMember(parts, position))
+            if kind.text == "index" or kind.text == "slice":
+                object_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "object")
+                object: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(object_field.value)
+                return (false, Ast::Expr.Invalid) if not object_field.known or not object.known
+                if kind.text == "index":
+                    index_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "index")
+                    index: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(index_field.value)
+                    return (index_field.known and index.known, Ast::Expr.Index(object.value, index.value, position))
+                low_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "low")
+                high_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "high")
+                low: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(low_field.value)
+                high: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(high_field.value)
+                return (low_field.known and high_field.known and low.known and high.known, Ast::Expr.Slice(object.value, low.value, high.value, position))
+            if kind.text == "index_n":
+                object_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "object")
+                object: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(object_field.value)
+                arguments: mutable darray[Ast::Expr] = []
+                return (false, Ast::Expr.Invalid) if not object_field.known or not object.known or not proof_tactic_json_expr_list(value, "arguments", line, &arguments)
+                return (true, Ast::Expr.IndexN(object.value, arguments, position))
+            if kind.text == "move" or kind.text == "region_new":
+                operand_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "operand")
+                operand: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(operand_field.value)
+                return (false, Ast::Expr.Invalid) if not operand_field.known or not operand.known
+                if kind.text == "move":
+                    return (true, Ast::Expr.Move(operand.value, position))
+                region_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "region")
+                region: (known: bool, value: sview) = proof_tactic_json_text(region_field.value)
+                return (false, Ast::Expr.Invalid) if not region_field.known or not region.known
+                return (true, Ast::Expr.RegionNew(operand.value, region.value, position))
+            if kind.text == "array" or kind.text == "tuple" or kind.text == "set":
+                elements: mutable darray[Ast::Expr] = []
+                return (false, Ast::Expr.Invalid) if not proof_tactic_json_expr_list(value, "elements", line, &elements)
+                return (true, Ast::Expr.Array(elements, position)) if kind.text == "array"
+                return (true, Ast::Expr.Tuple(elements, position)) if kind.text == "tuple"
+                return (true, Ast::Expr.SetLit(elements, position))
+            if kind.text == "dict":
+                entries: mutable darray[Ast::DictEntry] = []
+                return (false, Ast::Expr.Invalid) if not proof_tactic_json_entries(value, "entries", &entries)
+                return (true, Ast::Expr.DictLit(entries, position))
+            if kind.text == "construct" or kind.text == "record_update":
+                type_key: sview = "type" if kind.text == "construct" else "base"
+                type_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, type_key)
+                base: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(type_field.value)
+                fields: mutable darray[Ast::FieldInit] = []
+                return (false, Ast::Expr.Invalid) if not type_field.known or not base.known or not proof_tactic_json_fields(value, "fields", line, &fields)
+                return (true, Ast::Expr.Construct(base.value, fields, position)) if kind.text == "construct"
+                return (true, Ast::Expr.RecordUpdate(base.value, fields, position))
+            if kind.text == "if":
+                condition_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "condition")
+                then_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "then")
+                else_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "else")
+                condition: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(condition_field.value)
+                then_expr: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(then_field.value)
+                else_expr: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(else_field.value)
+                return (condition_field.known and then_field.known and else_field.known and condition.known and then_expr.known and else_expr.known, Ast::Expr.If(condition.value, then_expr.value, else_expr.value, position))
+            if kind.text == "comprehension" or kind.text == "refinement":
+                if kind.text == "refinement":
+                    base_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "base")
+                    predicate_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "predicate")
+                    base: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(base_field.value)
+                    predicate: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(predicate_field.value)
+                    return (base_field.known and predicate_field.known and base.known and predicate.known, Ast::Expr.Refinement(base.value, predicate.value, position))
+                variable_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "variable")
+                iterable_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "iterable")
+                condition_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "condition")
+                body_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "body")
+                variable: (known: bool, value: sview) = proof_tactic_json_text(variable_field.value)
+                iterable: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(iterable_field.value)
+                condition: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(condition_field.value)
+                body: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(body_field.value)
+                return (variable_field.known and iterable_field.known and condition_field.known and body_field.known and variable.known and iterable.known and condition.known and body.known, Ast::Expr.Comprehension(variable.value, iterable.value, condition.value, body.value, position))
+            if kind.text == "call":
+                callee_field: (known: bool, value: JsonValue) = proof_tactic_json_field(value, "callee")
+                callee: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(callee_field.value)
+                arguments: mutable darray[Ast::Expr] = []
+                names: mutable darray[sview] = []
+                return (false, Ast::Expr.Invalid) if not callee_field.known or not callee.known or not proof_tactic_json_expr_list(value, "arguments", line, &arguments)
+                names_ok: bool = proof_tactic_json_text_list(value, "argument_names", &names) if json_has(value, "argument_names") else true
+                return (false, Ast::Expr.Invalid) if not names_ok or names.count != arguments.count
+                return (true, Ast::Expr.Call(callee.value, arguments, names, position))
+            return (false, Ast::Expr.Invalid)
+
+        def proof_tactic_json_parse_annotations(root: JsonValue, annotations: mutable darray[Ast::EnumAnnotation]&) -> bool:
+            field: (known: bool, value: JsonValue) = proof_tactic_json_field(root, "annotations")
+            return true if not field.known
+            return false if not json_is_array(field.value)
+            count: i64 = json_array_len(field.value)
+            return false if count < 0
+            for index in 0..<count |index, field, annotations|:
+                item: JsonValue = try json_at(field.value, index) else JsonValue.Null
+                name_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "name")
+                line_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "line")
+                name: (known: bool, value: sview) = proof_tactic_json_text(name_field.value)
+                return false if not name_field.known or not name.known
+                annotations.push(Ast::EnumAnnotation{owner: "__contract_quantifier", name: name.value, line: proof_tactic_json_line(line_field.value) if line_field.known else 0})
+            return true
+
+        def proof_tactic_json_action(state: mutable ProofTacticState&, action: sview, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, argument_index: usize, has_argument_index: bool, annotations: mutable darray[Ast::EnumAnnotation]&) -> bool:
+            return false if action == "split" or action == "cases"
+            return proof_tactic_assumption(state, annotations) if action == "assumption"
+            return proof_tactic_exact(state, annotations) if action == "exact"
+            return proof_tactic_decide(state, annotations) if action == "decide"
+            return proof_tactic_intro(state) if action == "intro"
+            return proof_tactic_apply(state, annotations) if action == "apply"
+            return proof_tactic_simplify(state, annotations) if action == "simp"
+            return proof_tactic_have(state, argument, annotations) if action == "have" and has_argument
+            return proof_tactic_instantiate(state, argument_index, argument, annotations) if action == "instantiate" and has_argument and has_argument_index
+            return proof_tactic_rewrite(state, argument, secondary) if action == "rewrite" and has_argument and has_secondary
+            return proof_tactic_left(state) if action == "left"
+            return proof_tactic_right(state) if action == "right"
+            return false
+
+        def proof_tactic_json_branch_scripts(item: JsonValue) -> (known: bool, left: JsonValue, right: JsonValue):
+            field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "branches")
+            return (false, JsonValue.Null, JsonValue.Null) if not field.known or not json_is_array(field.value)
+            count: i64 = json_array_len(field.value)
+            return (false, JsonValue.Null, JsonValue.Null) if count != 2
+            left: JsonValue = try json_at(field.value, 0) else JsonValue.Null
+            right: JsonValue = try json_at(field.value, 1) else JsonValue.Null
+            return (json_is_object(left) and json_is_object(right), left, right)
+
+        # Verify a complete imported proof tree using only source-neutral replay. The tree is
+        # deliberately required to be postorder and rooted at its final node; this makes the
+        # ordering and every child edge part of the certificate rather than an interpreter detail.
+        def proof_tactic_json_tree_certificate_replay(tree: ProofTacticJsonTree&, root: usize) -> bool:
+            return false if tree.states.count == 0
+            return false if tree.left.count != tree.states.count or tree.right.count != tree.states.count or tree.has_branch.count != tree.states.count
+            return false if root != tree.states.count - 1
+            validity: mutable darray[bool] = []
+            validity.resize(tree.states.count)
+            cursor: mutable usize = 0
+            while cursor < tree.states.count |cursor, tree, validity|:
+                if not tree.has_branch[cursor]:
+                    leaf: mutable ProofTacticState = tree.states[cursor]
+                    validity[cursor] <- proof_tactic_kernel_certificate_replay(&leaf)
+                else:
+                    left_index: usize = tree.left[cursor]
+                    right_index: usize = tree.right[cursor]
+                    return false if left_index >= cursor or right_index >= cursor
+                    return false if not validity[left_index] or not validity[right_index]
+                    parent: mutable ProofTacticState = tree.states[cursor]
+                    left: mutable ProofTacticState = tree.states[left_index]
+                    right: mutable ProofTacticState = tree.states[right_index]
+                    validity[cursor] <- proof_tactic_kernel_branch_transition_replay(&parent, &left, &right)
+                cursor <- cursor + 1
+            return validity[root]
+
+        def proof_tactic_json_source_fingerprint(root: JsonValue) -> (present: bool, valid: bool, value: u32):
+            field: (known: bool, value: JsonValue) = proof_tactic_json_field(root, "source_fingerprint")
+            return (false, true, 0) if not field.known
+            parsed: (known: bool, value: i64) = proof_tactic_json_integer(field.value)
+            return (true, parsed.known and parsed.value >= 0 and parsed.value <= 4294967295, parsed.value.u32())
+
+        def proof_tactic_json_target(root: JsonValue) -> (present: bool, valid: bool, goal_id: usize):
+            field: (known: bool, value: JsonValue) = proof_tactic_json_field(root, "target")
+            return (false, true, 0) if not field.known
+            goal_field: (known: bool, value: JsonValue) = proof_tactic_json_field(field.value, "goal_id")
+            parsed: (known: bool, value: i64) = proof_tactic_json_integer(goal_field.value)
+            return (true, parsed.known and parsed.value >= 0, parsed.value.usize())
+
+        def proof_tactic_json_initialize_state[@r](state: mutable ProofTacticState& @r, facts: darray[Ast::Expr]&, goal: Ast::Expr, reason: sview) -> void:
+            state.facts <- []
+            state.facts.extend(facts)
+            state.initial_facts <- []
+            state.initial_facts.extend(facts)
+            state.goal <- goal
+            state.initial_goal <- goal
+            state.solved <- false
+            state.action_count <- 0
+            state.last_action <- "start"
+            state.last_reason <- reason
+            state.trace <- []
+            state.trace_facts <- []
+            state.pending_argument <- Ast::Expr.Absent
+            state.pending_secondary <- Ast::Expr.Absent
+            state.pending_has_argument <- false
+            state.pending_has_secondary <- false
+            state.pending_argument_index <- 0
+            state.pending_has_argument_index <- false
+            state.pending_detail <- ""
+
+        def proof_tactic_json_run_actions[@r](root: JsonValue, annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticState]& @r, depth: usize, allow_branch: bool) -> ProofTacticJsonResult:
+            invalid: ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "invalid proof script", tree_node: 0}
+            actions_field: (known: bool, value: JsonValue) = proof_tactic_json_field(root, "actions")
+            return invalid if not actions_field.known or not json_is_array(actions_field.value)
+            count: i64 = json_array_len(actions_field.value)
+            return invalid if count < 0
+            accepted_count: mutable usize = 0
+            branch_certificate_ok: mutable bool = false
+            branch_present: mutable bool = false
+            branch_trace_ok: mutable bool = true
+            branch_kernel_trace_ok: mutable bool = true
+            branch_kernel_ok: mutable bool = false
+            branch_left_node: mutable usize = 0
+            branch_right_node: mutable usize = 0
+            for index in 0..<count |index, actions_field, state, annotations, accepted_count|:
+                item: JsonValue = try json_at(actions_field.value, index) else JsonValue.Null
+                action_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "action")
+                action: (known: bool, value: sview) = proof_tactic_json_text(action_field.value)
+                return invalid if not action_field.known or not action.known
+                argument_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "argument")
+                secondary_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "secondary")
+                argument: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(argument_field.value) if argument_field.known else (false, Ast::Expr.Absent)
+                secondary: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(secondary_field.value) if secondary_field.known else (false, Ast::Expr.Absent)
+                index_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "argument_index")
+                parsed_index: (known: bool, value: i64) = proof_tactic_json_integer(index_field.value) if index_field.known else (false, 0)
+                expected_field: (known: bool, value: JsonValue) = proof_tactic_json_field(item, "accepted")
+                expected: (known: bool, value: bool) = proof_tactic_json_bool(expected_field.value) if expected_field.known else (true, true)
+                return invalid if (argument_field.known and not argument.known) or (secondary_field.known and not secondary.known) or (index_field.known and (not parsed_index.known or parsed_index.value < 0)) or (expected_field.known and not expected.known)
+                actual: mutable bool = false
+                if action.value == "split" or action.value == "cases":
+                    return invalid if not allow_branch
+                    return invalid if index + 1 != count
+                    return invalid if depth >= 32
+                    branches: (known: bool, left: JsonValue, right: JsonValue) = proof_tactic_json_branch_scripts(item)
+                    return invalid if not branches.known
+                    branch_left_slot: usize = depth * 2
+                    branch_right_slot: usize = branch_left_slot + 1
+                    return invalid if branch_right_slot >= scratch.count
+                    actual <- proof_tactic_split(state, &scratch[branch_left_slot], &scratch[branch_right_slot]) if action.value == "split" and branches.known
+                    actual <- proof_tactic_cases(state, &scratch[branch_left_slot], &scratch[branch_right_slot]) if action.value == "cases" and branches.known
+                    if actual:
+                        branch_present <- true
+                        return invalid if json_has(branches.left, "initial") or json_has(branches.left, "target") or json_has(branches.right, "initial") or json_has(branches.right, "target")
+                        left_result: ProofTacticJsonResult = proof_tactic_json_run_actions(branches.left, annotations, &scratch[branch_left_slot], tree, scratch, depth + 1, true)
+                        right_result: ProofTacticJsonResult = proof_tactic_json_run_actions(branches.right, annotations, &scratch[branch_right_slot], tree, scratch, depth + 1, true)
+                        branch_trace_ok <- left_result.trace_replayed and right_result.trace_replayed
+                        branch_kernel_trace_ok <- left_result.kernel_trace_replayed and right_result.kernel_trace_replayed
+                        branch_kernel_ok <- left_result.kernel_replayed and right_result.kernel_replayed
+                        branch_left_node <- left_result.tree_node
+                        branch_right_node <- right_result.tree_node
+                        branch_certificate_ok <- left_result.valid and right_result.valid and left_result.certificate_replayed and right_result.certificate_replayed and proof_tactic_kernel_branch_transition_replay(state, &scratch[branch_left_slot], &scratch[branch_right_slot])
+                else:
+                    actual <- proof_tactic_json_action(state, action.value, argument.value, argument_field.known, secondary.value, secondary_field.known, parsed_index.value.usize(), index_field.known, annotations)
+                return invalid if actual != expected.value
+                accepted_count <- accepted_count + 1 if actual
+            trace_ok: mutable bool = proof_tactic_replay(state, annotations)
+            kernel_trace_ok: mutable bool = proof_tactic_kernel_trace_replay(state)
+            kernel_ok: mutable bool = proof_tactic_kernel_replay(state)
+            certificate_ok: mutable bool = proof_tactic_kernel_certificate_replay(state)
+            if branch_present:
+                trace_ok <- trace_ok and branch_trace_ok
+                kernel_trace_ok <- kernel_trace_ok and branch_kernel_trace_ok
+                kernel_ok <- branch_kernel_ok
+                certificate_ok <- branch_certificate_ok
+            tree_node: usize = tree.states.count
+            snapshot_facts: mutable darray[Ast::Expr] @r = []
+            snapshot_facts.extend(state.facts)
+            snapshot_initial_facts: mutable darray[Ast::Expr] @r = []
+            snapshot_initial_facts.extend(state.initial_facts)
+            snapshot_trace: mutable darray[ProofTacticStep] @r = []
+            snapshot_trace.extend(state.trace)
+            snapshot_trace_facts: mutable darray[Ast::Expr] @r = []
+            snapshot_trace_facts.extend(state.trace_facts)
+            tree.states.push(ProofTacticState{facts: snapshot_facts, goal: state.goal, solved: state.solved, action_count: state.action_count, last_action: state.last_action, last_reason: state.last_reason, initial_facts: snapshot_initial_facts, initial_goal: state.initial_goal, trace: snapshot_trace, trace_facts: snapshot_trace_facts, pending_argument: state.pending_argument, pending_secondary: state.pending_secondary, pending_has_argument: state.pending_has_argument, pending_has_secondary: state.pending_has_secondary, pending_argument_index: state.pending_argument_index, pending_has_argument_index: state.pending_has_argument_index, pending_detail: state.pending_detail})
+            tree.left.push(branch_left_node)
+            tree.right.push(branch_right_node)
+            tree.has_branch.push(branch_present)
+            tree_certificate_ok: bool = proof_tactic_json_tree_certificate_replay(tree, tree_node)
+            certificate_ok <- tree_certificate_ok
+            branch_certificate_ok <- tree_certificate_ok if branch_present
+            return ProofTacticJsonResult{valid: true, solved: state.solved or branch_certificate_ok, trace_replayed: trace_ok, kernel_trace_replayed: kernel_trace_ok, kernel_replayed: kernel_ok, certificate_replayed: certificate_ok, branch_present: branch_present, branch_certificate_replayed: branch_certificate_ok, action_count: state.action_count, accepted_count: accepted_count, reason: "portable tactic script admitted" if certificate_ok else "portable tactic script did not close an independently replayable goal", tree_node: tree_node}
+
+        # Source-bound scripts start from the exact facts and goal captured by the imported
+        # checker. The JSON document cannot replace that state, which prevents a valid proof of a
+        # different proposition from being relabeled as a proof of a source obligation.
+        def proof_tactic_json_run_source[@r](root: JsonValue, source_state: JsonValue, annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticState]& @r, report: ProofReport&, goal_id: usize) -> ProofTacticJsonResult:
+            invalid: ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "invalid source-bound proof script", tree_node: 0}
+            format_field: (known: bool, value: JsonValue) = proof_tactic_json_field(root, "format")
+            format: (known: bool, value: sview) = proof_tactic_json_text(format_field.value)
+            return invalid if not format_field.known or not format.known or format.value != "elisa-proof-tactics-v1"
+            return invalid if json_has(root, "initial")
+            return invalid if goal_id >= report.goal_attempts.count
+            return invalid if not proof_tactic_json_parse_annotations(root, annotations)
+            attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+            facts: mutable darray[Ast::Expr] = []
+            return invalid if attempt.facts_start > report.certificate_facts.count or attempt.facts_count > report.certificate_facts.count - attempt.facts_start
+            facts_field: (known: bool, value: JsonValue) = proof_tactic_json_field(source_state, "facts")
+            goal_field: (known: bool, value: JsonValue) = proof_tactic_json_field(source_state, "goal")
+            return invalid if not facts_field.known or not goal_field.known
+            return invalid if not proof_tactic_json_expr_list(source_state, "facts", 0, &facts)
+            goal: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(goal_field.value)
+            return invalid if not goal.known or facts.count != attempt.facts_count
+            proof_tactic_json_initialize_state(state, facts, goal.value, "state initialized from imported source goal")
+            return proof_tactic_json_run_actions(root, annotations, state, tree, scratch, 0, true)
+
+        def proof_tactic_json_run[@r](root: JsonValue, annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticState]& @r) -> ProofTacticJsonResult:
+            invalid: ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "invalid proof script", tree_node: 0}
+            format_field: (known: bool, value: JsonValue) = proof_tactic_json_field(root, "format")
+            format: (known: bool, value: sview) = proof_tactic_json_text(format_field.value)
+            return invalid if not format_field.known or not format.known or format.value != "elisa-proof-tactics-v1"
+            initial_field: (known: bool, value: JsonValue) = proof_tactic_json_field(root, "initial")
+            facts_field: (known: bool, value: JsonValue) = proof_tactic_json_field(initial_field.value, "facts")
+            goal_field: (known: bool, value: JsonValue) = proof_tactic_json_field(initial_field.value, "goal")
+            return invalid if not initial_field.known or not facts_field.known or not goal_field.known
+            facts: mutable darray[Ast::Expr] = []
+            return invalid if not proof_tactic_json_expr_list(initial_field.value, "facts", 0, &facts)
+            goal: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(goal_field.value)
+            return invalid if not goal.known
+            return invalid if not proof_tactic_json_parse_annotations(root, annotations)
+            proof_tactic_json_initialize_state(state, facts, goal.value, "state initialized from portable proof script")
+            return proof_tactic_json_run_actions(root, annotations, state, tree, scratch, 0, true)

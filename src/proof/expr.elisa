@@ -1,0 +1,1874 @@
+# Compiler-AST utilities used by the proof kernel. These deliberately operate over the
+# exact parser nodes, so source imports inherit all Elisa expression syntax for free.
+extend ElisaProof:
+    public:
+        def proof_ident_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                _:
+                    return ""
+
+        # Callable references may be bare identifiers or qualified scopes. The proof
+        # tables are intentionally keyed by leaf name: their index functions reject
+        # duplicate names, so a qualified call is usable only when that leaf is
+        # unambiguous. Keep `proof_ident_name` bare-only because frame/alias analysis
+        # must not mistake a qualified value expression for a storage root.
+        def proof_callable_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Scope(_, name, _):
+                    return name
+                _:
+                    return ""
+
+        # Contract quantifiers are lowered by the compiler parser to an Expr.Block. The
+        # parser preserves the erased `forall`/`exists` kind in a line-keyed annotation; require
+        # exactly one matching marker so a collision cannot silently choose a quantifier.
+        def proof_quantifier_kind(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> sview:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_quantifier_kind(inner, annotations)
+                Ast::Expr.Block(_, _, _, position):
+                    found: mutable sview = ""
+                    count: mutable usize = 0
+                    for annotation in annotations |found, count|:
+                        if annotation.owner == "__contract_quantifier" and annotation.line == position.line:
+                            return "" if annotation.name != "forall" and annotation.name != "exists"
+                            found <- annotation.name
+                            count <- count + 1
+                    if count == 1:
+                        return found
+                    return ""
+                _:
+                    return ""
+
+        def proof_quantifier_equal(left: Ast::Expr, right: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            left_kind: sview = proof_quantifier_kind(left, annotations)
+            right_kind: sview = proof_quantifier_kind(right, annotations)
+            return false if left_kind == "" or left_kind != right_kind
+            match left:
+                Ast::Expr.Block(left_statements, left_value, _, _):
+                    match right:
+                        Ast::Expr.Block(right_statements, right_value, _, _):
+                            return false if left_statements.count != right_statements.count
+                            for index in 0..<left_statements.count |left_statements, right_statements, index|:
+                                match left_statements[index]:
+                                    Ast::Stmt.VarDecl(left_name, left_type, left_initializer, _):
+                                        match right_statements[index]:
+                                            Ast::Stmt.VarDecl(right_name, right_type, right_initializer, _):
+                                                return false if left_name != right_name
+                                                return false if not proof_expr_equal(left_type, right_type)
+                                                return false if not proof_expr_equal(left_initializer, right_initializer)
+                                            _:
+                                                return false
+                                    _:
+                                        return false
+                            return proof_expr_equal(left_value, right_value)
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_expr_array_equal(left: darray[Ast::Expr]&, right: darray[Ast::Expr]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_expr_equal(left[index], right[index])
+            return true
+
+        def proof_sview_array_equal(left: darray[sview]&, right: darray[sview]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if left[index] != right[index]
+            return true
+
+        def proof_field_array_equal(left: darray[Ast::FieldInit]&, right: darray[Ast::FieldInit]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if left[index].name != right[index].name
+                return false if not proof_expr_equal(left[index].value, right[index].value)
+            return true
+
+        def proof_dict_array_equal(left: darray[Ast::DictEntry]&, right: darray[Ast::DictEntry]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_expr_equal(left[index].key, right[index].key)
+                return false if not proof_expr_equal(left[index].value, right[index].value)
+            return true
+
+        # Tactic traces compare AST values that may contain matcher/lambda/block children.
+        # Keep this structural and position-insensitive like `proof_expr_equal`; source spans
+        # are provenance, not proposition identity.
+        def proof_pattern_equal(left: Ast::Pattern, right: Ast::Pattern) -> bool:
+            match left:
+                Ast::Pattern.Wildcard:
+                    match right:
+                        Ast::Pattern.Wildcard:
+                            return true
+                        _:
+                            return false
+                Ast::Pattern.Literal(left_text):
+                    match right:
+                        Ast::Pattern.Literal(right_text):
+                            return left_text == right_text
+                        _:
+                            return false
+                Ast::Pattern.Binding(left_name):
+                    match right:
+                        Ast::Pattern.Binding(right_name):
+                            return left_name == right_name
+                        _:
+                            return false
+                Ast::Pattern.Pin(left_name):
+                    match right:
+                        Ast::Pattern.Pin(right_name):
+                            return left_name == right_name
+                        _:
+                            return false
+                Ast::Pattern.Variant(left_path, left_fields):
+                    match right:
+                        Ast::Pattern.Variant(right_path, right_fields):
+                            return left_path == right_path and proof_pattern_array_equal(left_fields, right_fields)
+                        _:
+                            return false
+                Ast::Pattern.Struct(left_path, left_fields):
+                    match right:
+                        Ast::Pattern.Struct(right_path, right_fields):
+                            return left_path == right_path and proof_pattern_array_equal(left_fields, right_fields)
+                        _:
+                            return false
+                Ast::Pattern.Field(left_selector, left_inner):
+                    match right:
+                        Ast::Pattern.Field(right_selector, right_inner):
+                            return left_selector == right_selector and proof_pattern_array_equal(left_inner, right_inner)
+                        _:
+                            return false
+                Ast::Pattern.Tuple(left_elements):
+                    match right:
+                        Ast::Pattern.Tuple(right_elements):
+                            return proof_pattern_array_equal(left_elements, right_elements)
+                        _:
+                            return false
+                Ast::Pattern.Rest(left_name):
+                    match right:
+                        Ast::Pattern.Rest(right_name):
+                            return left_name == right_name
+                        _:
+                            return false
+                Ast::Pattern.Or(left_options):
+                    match right:
+                        Ast::Pattern.Or(right_options):
+                            return proof_pattern_array_equal(left_options, right_options)
+                        _:
+                            return false
+                Ast::Pattern.TypeBind(left_type, left_binder):
+                    match right:
+                        Ast::Pattern.TypeBind(right_type, right_binder):
+                            return left_type == right_type and left_binder == right_binder
+                        _:
+                            return false
+                Ast::Pattern.Range(left_lo, left_hi, left_inclusive):
+                    match right:
+                        Ast::Pattern.Range(right_lo, right_hi, right_inclusive):
+                            return left_lo == right_lo and left_hi == right_hi and left_inclusive == right_inclusive
+                        _:
+                            return false
+                Ast::Pattern.As(left_name, left_inner):
+                    match right:
+                        Ast::Pattern.As(right_name, right_inner):
+                            return left_name == right_name and proof_pattern_array_equal(left_inner, right_inner)
+                        _:
+                            return false
+                Ast::Pattern.Other(left_text):
+                    match right:
+                        Ast::Pattern.Other(right_text):
+                            return left_text == right_text
+                        _:
+                            return false
+            return false
+
+        def proof_pattern_array_equal(left: darray[Ast::Pattern]&, right: darray[Ast::Pattern]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_pattern_equal(left[index], right[index])
+            return true
+
+        def proof_stmt_equal(left: Ast::Stmt, right: Ast::Stmt) -> bool:
+            match left:
+                Ast::Stmt.Invalid:
+                    match right:
+                        Ast::Stmt.Invalid:
+                            return true
+                        _:
+                            return false
+                Ast::Stmt.Expr(left_expression, _):
+                    match right:
+                        Ast::Stmt.Expr(right_expression, _):
+                            return proof_expr_equal(left_expression, right_expression)
+                        _:
+                            return false
+                Ast::Stmt.Block(left_kind, left_clause, left_binding, left_body, _):
+                    match right:
+                        Ast::Stmt.Block(right_kind, right_clause, right_binding, right_body, _):
+                            return left_kind == right_kind and left_binding == right_binding and proof_sview_array_equal(left_clause, right_clause) and proof_stmt_array_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Stmt.VarDecl(left_name, left_type, left_value, _):
+                    match right:
+                        Ast::Stmt.VarDecl(right_name, right_type, right_value, _):
+                            return left_name == right_name and proof_expr_equal(left_type, right_type) and proof_expr_equal(left_value, right_value)
+                        _:
+                            return false
+                Ast::Stmt.Assign(left_target, left_operator, left_value, _):
+                    match right:
+                        Ast::Stmt.Assign(right_target, right_operator, right_value, _):
+                            return left_operator == right_operator and proof_expr_equal(left_target, right_target) and proof_expr_equal(left_value, right_value)
+                        _:
+                            return false
+                Ast::Stmt.If(left_condition, left_then, left_else, _):
+                    match right:
+                        Ast::Stmt.If(right_condition, right_then, right_else, _):
+                            return proof_expr_equal(left_condition, right_condition) and proof_stmt_array_equal(left_then, right_then) and proof_stmt_array_equal(left_else, right_else)
+                        _:
+                            return false
+                Ast::Stmt.While(left_condition, left_body, _):
+                    match right:
+                        Ast::Stmt.While(right_condition, right_body, _):
+                            return proof_expr_equal(left_condition, right_condition) and proof_stmt_array_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Stmt.For(left_bind, left_variables, left_iterable, left_body, _):
+                    match right:
+                        Ast::Stmt.For(right_bind, right_variables, right_iterable, right_body, _):
+                            return left_bind == right_bind and proof_sview_array_equal(left_variables, right_variables) and proof_expr_equal(left_iterable, right_iterable) and proof_stmt_array_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Stmt.Return(left_value, _):
+                    match right:
+                        Ast::Stmt.Return(right_value, _):
+                            if left_value is left_expression:
+                                if right_value is right_expression:
+                                    return proof_expr_equal(left_expression, right_expression)
+                                return false
+                            return false if right_value is right_expression
+                            return true
+                            return false
+                        _:
+                            return false
+                Ast::Stmt.Break(left_label, _):
+                    match right:
+                        Ast::Stmt.Break(right_label, _):
+                            return left_label == right_label
+                        _:
+                            return false
+                Ast::Stmt.Continue(left_label, _):
+                    match right:
+                        Ast::Stmt.Continue(right_label, _):
+                            return left_label == right_label
+                        _:
+                            return false
+                Ast::Stmt.Match(left_scrutinee, left_arms, _):
+                    match right:
+                        Ast::Stmt.Match(right_scrutinee, right_arms, _):
+                            return proof_expr_equal(left_scrutinee, right_scrutinee) and proof_match_arm_array_equal(left_arms, right_arms)
+                        _:
+                            return false
+                Ast::Stmt.Contract(left_kind, left_expression, _):
+                    match right:
+                        Ast::Stmt.Contract(right_kind, right_expression, _):
+                            return left_kind == right_kind and proof_expr_equal(left_expression, right_expression)
+                        _:
+                            return false
+            return false
+
+        def proof_stmt_array_equal(left: darray[Ast::Stmt]&, right: darray[Ast::Stmt]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_stmt_equal(left[index], right[index])
+            return true
+
+        def proof_match_arm_equal(left: Ast::MatchArm, right: Ast::MatchArm) -> bool:
+            return proof_pattern_equal(left.pattern, right.pattern) and proof_stmt_array_equal(left.body, right.body) and proof_expr_equal(left.guard, right.guard)
+
+        def proof_match_arm_array_equal(left: darray[Ast::MatchArm]&, right: darray[Ast::MatchArm]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_match_arm_equal(left[index], right[index])
+            return true
+
+        def proof_expr_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
+            # Parentheses are syntax, not propositions. Strip them from either side so
+            # facts produced by contract parsing compare the same way as their normalized
+            # goals, regardless of which expression was parenthesized.
+            match right:
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_equal(left, inner)
+                _:
+                    pass
+            match left:
+                Ast::Expr.Absent:
+                    match right:
+                        Ast::Expr.Absent:
+                            return true
+                        _:
+                            return false
+                Ast::Expr.IntLit(value):
+                    match right:
+                        Ast::Expr.IntLit(other):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.BoolLit(value):
+                    match right:
+                        Ast::Expr.BoolLit(other):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.FloatLit(value):
+                    match right:
+                        Ast::Expr.FloatLit(other):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.StringLit(value):
+                    match right:
+                        Ast::Expr.StringLit(other):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.CharLit(value):
+                    match right:
+                        Ast::Expr.CharLit(other):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.Ident(name, _):
+                    match right:
+                        Ast::Expr.Ident(other, _):
+                            return name == other
+                        _:
+                            return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_equal(inner, right)
+                Ast::Expr.Block(left_statements, left_value, left_captures, _):
+                    match right:
+                        Ast::Expr.Block(right_statements, right_value, right_captures, _):
+                            return proof_sview_array_equal(left_captures, right_captures) and proof_stmt_array_equal(left_statements, right_statements) and proof_expr_equal(left_value, right_value)
+                        _:
+                            return false
+                Ast::Expr.Match(left_scrutinee, left_arms, _):
+                    match right:
+                        Ast::Expr.Match(right_scrutinee, right_arms, _):
+                            return proof_expr_equal(left_scrutinee, right_scrutinee) and proof_match_arm_array_equal(left_arms, right_arms)
+                        _:
+                            return false
+                Ast::Expr.Catch(left_guarded, left_arms, _):
+                    match right:
+                        Ast::Expr.Catch(right_guarded, right_arms, _):
+                            return proof_expr_equal(left_guarded, right_guarded) and proof_match_arm_array_equal(left_arms, right_arms)
+                        _:
+                            return false
+                Ast::Expr.Comprehension(left_var, left_iterable, left_condition, left_body, _):
+                    match right:
+                        Ast::Expr.Comprehension(right_var, right_iterable, right_condition, right_body, _):
+                            return left_var == right_var and proof_expr_equal(left_iterable, right_iterable) and proof_expr_equal(left_condition, right_condition) and proof_expr_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Expr.Refinement(left_base, left_predicate, _):
+                    match right:
+                        Ast::Expr.Refinement(right_base, right_predicate, _):
+                            return proof_expr_equal(left_base, right_base) and proof_expr_equal(left_predicate, right_predicate)
+                        _:
+                            return false
+                Ast::Expr.GetElse(left_guarded, left_recovery, _):
+                    match right:
+                        Ast::Expr.GetElse(right_guarded, right_recovery, _):
+                            return proof_expr_equal(left_guarded, right_guarded) and proof_stmt_array_equal(left_recovery, right_recovery)
+                        _:
+                            return false
+                Ast::Expr.Lambda(left_params, left_body, _):
+                    match right:
+                        Ast::Expr.Lambda(right_params, right_body, _):
+                            return proof_sview_array_equal(left_params, right_params) and proof_stmt_array_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Expr.Unary(op, operand, _):
+                    match right:
+                        Ast::Expr.Unary(other_op, other_operand, _):
+                            return op == other_op and proof_expr_equal(operand, other_operand)
+                        _:
+                            return false
+                Ast::Expr.Binary(left_operand, op, right_operand, _):
+                    match right:
+                        Ast::Expr.Binary(other_left, other_op, other_right, _):
+                            return op == other_op and proof_expr_equal(left_operand, other_left) and proof_expr_equal(right_operand, other_right)
+                        _:
+                            return false
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    match right:
+                        Ast::Expr.Call(other_callee, other_arguments, other_argument_names, _):
+                            return false if arguments.count != other_arguments.count
+                            return false if not proof_sview_array_equal(argument_names, other_argument_names)
+                            return false if not proof_expr_equal(callee, other_callee)
+                            for index in 0..<arguments.count |arguments, other_arguments, index|:
+                                return false if not proof_expr_equal(arguments[index], other_arguments[index])
+                            return true
+                        _:
+                            return false
+                Ast::Expr.Field(object, field, _):
+                    match right:
+                        Ast::Expr.Field(other_object, other_field, _):
+                            return field == other_field and proof_expr_equal(object, other_object)
+                        _:
+                            return false
+                Ast::Expr.Scope(base, name, _):
+                    match right:
+                        Ast::Expr.Scope(other_base, other_name, _):
+                            return name == other_name and proof_expr_equal(base, other_base)
+                        _:
+                            return false
+                Ast::Expr.ShorthandMember(parts, _):
+                    match right:
+                        Ast::Expr.ShorthandMember(other_parts, _):
+                            return proof_sview_array_equal(parts, other_parts)
+                        _:
+                            return false
+                Ast::Expr.Index(object, index, _):
+                    match right:
+                        Ast::Expr.Index(other_object, other_index, _):
+                            return proof_expr_equal(object, other_object) and proof_expr_equal(index, other_index)
+                        _:
+                            return false
+                Ast::Expr.Slice(object, low, high, _):
+                    match right:
+                        Ast::Expr.Slice(other_object, other_low, other_high, _):
+                            return proof_expr_equal(object, other_object) and proof_expr_equal(low, other_low) and proof_expr_equal(high, other_high)
+                        _:
+                            return false
+                Ast::Expr.IndexN(object, arguments, _):
+                    match right:
+                        Ast::Expr.IndexN(other_object, other_arguments, _):
+                            return proof_expr_equal(object, other_object) and proof_expr_array_equal(arguments, other_arguments)
+                        _:
+                            return false
+                Ast::Expr.Move(operand, _):
+                    match right:
+                        Ast::Expr.Move(other_operand, _):
+                            return proof_expr_equal(operand, other_operand)
+                        _:
+                            return false
+                Ast::Expr.RegionNew(operand, region, _):
+                    match right:
+                        Ast::Expr.RegionNew(other_operand, other_region, _):
+                            return region == other_region and proof_expr_equal(operand, other_operand)
+                        _:
+                            return false
+                Ast::Expr.Array(elements, _):
+                    match right:
+                        Ast::Expr.Array(other_elements, _):
+                            return proof_expr_array_equal(elements, other_elements)
+                        _:
+                            return false
+                Ast::Expr.Tuple(elements, _):
+                    match right:
+                        Ast::Expr.Tuple(other_elements, _):
+                            return proof_expr_array_equal(elements, other_elements)
+                        _:
+                            return false
+                Ast::Expr.SetLit(elements, _):
+                    match right:
+                        Ast::Expr.SetLit(other_elements, _):
+                            return proof_expr_array_equal(elements, other_elements)
+                        _:
+                            return false
+                Ast::Expr.DictLit(entries, _):
+                    match right:
+                        Ast::Expr.DictLit(other_entries, _):
+                            return proof_dict_array_equal(entries, other_entries)
+                        _:
+                            return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    match right:
+                        Ast::Expr.Construct(other_type, other_fields, _):
+                            return proof_expr_equal(type_expression, other_type) and proof_field_array_equal(fields, other_fields)
+                        _:
+                            return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    match right:
+                        Ast::Expr.RecordUpdate(other_base, other_fields, _):
+                            return proof_expr_equal(base, other_base) and proof_field_array_equal(fields, other_fields)
+                        _:
+                            return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    match right:
+                        Ast::Expr.If(other_condition, other_then, other_else, _):
+                            return proof_expr_equal(condition, other_condition) and proof_expr_equal(then_expr, other_then) and proof_expr_equal(else_expr, other_else)
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_is_comparison(operator: TokenKind) -> bool:
+            return operator == TokenKind.EqEq or operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+
+        def proof_is_true_comparison(operator: TokenKind) -> bool:
+            return operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+
+        def proof_i64_max() -> i64:
+            return 9223372036854775807
+
+        def proof_i64_min() -> i64:
+            return 0 - 9223372036854775807 - 1
+
+        def proof_add_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (false, 0) if right > 0 and left > proof_i64_max() - right
+            return (false, 0) if right < 0 and left < proof_i64_min() - right
+            return (true, left + right)
+
+        def proof_sub_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (false, 0) if right > 0 and left < proof_i64_min() + right
+            return (false, 0) if right < 0 and left > proof_i64_max() + right
+            return (true, left - right)
+
+        def proof_mul_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (true, 0) if left == 0 or right == 0
+            return (true, right) if left == 1
+            return (true, left) if right == 1
+            if left == -1:
+                return (false, 0) if right == proof_i64_min()
+                return (true, 0 - right)
+            if right == -1:
+                return (false, 0) if left == proof_i64_min()
+                return (true, 0 - left)
+            if left > 0:
+                return (false, 0) if right > 0 and left > proof_i64_max() / right
+                return (false, 0) if right < 0 and right < proof_i64_min() / left
+            else:
+                return (false, 0) if right > 0 and left < proof_i64_min() / right
+                return (false, 0) if right < 0 and left < proof_i64_max() / right
+            return (true, left * right)
+
+        def proof_div_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (false, 0) if right == 0 or (left == proof_i64_min() and right == -1)
+            return (true, left / right)
+
+        def proof_mod_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (false, 0) if right == 0 or (left == proof_i64_min() and right == -1)
+            return (true, left % right)
+
+        # Elisa's integer bitwise operators use the target's fixed-width representation. The
+        # shift count is still checked by the compiler's semantic pass; keep the same 0..63
+        # boundary here so constant folding never relies on a host-language shift convention.
+        def proof_shift_safe(value: i64, amount: i64, left: bool) -> (known: bool, value: i64):
+            return (false, 0) if amount < 0 or amount > 63
+            return (true, value << amount) if left
+            return (true, value >> amount)
+
+        def proof_constant_int(expression: Ast::Expr) -> (known: bool, value: i64):
+            match expression:
+                Ast::Expr.IntLit(value):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_constant_int(inner)
+                Ast::Expr.Unary(operator, operand, _):
+                    found: (known: bool, value: i64) = proof_constant_int(operand)
+                    if found.known and operator == TokenKind.Minus:
+                        return (true, 0 - found.value) if found.value != proof_i64_min()
+                    if found.known and operator == TokenKind.Plus:
+                        return found
+                    return (false, 0)
+                Ast::Expr.Binary(left, operator, right, _):
+                    a: (known: bool, value: i64) = proof_constant_int(left)
+                    b: (known: bool, value: i64) = proof_constant_int(right)
+                    return (false, 0) if not a.known or not b.known
+                    if operator == TokenKind.Plus:
+                        return proof_add_safe(a.value, b.value)
+                    if operator == TokenKind.Minus:
+                        return proof_sub_safe(a.value, b.value)
+                    if operator == TokenKind.Star:
+                        return proof_mul_safe(a.value, b.value)
+                    if operator == TokenKind.Slash:
+                        return proof_div_safe(a.value, b.value)
+                    if operator == TokenKind.Percent:
+                        return proof_mod_safe(a.value, b.value)
+                    if operator == TokenKind.Ampersand:
+                        return (true, a.value & b.value)
+                    if operator == TokenKind.Pipe:
+                        return (true, a.value | b.value)
+                    if operator == TokenKind.Caret:
+                        return (true, a.value ^ b.value)
+                    if operator == TokenKind.LShift:
+                        return proof_shift_safe(a.value, b.value, true)
+                    if operator == TokenKind.RShift:
+                        return proof_shift_safe(a.value, b.value, false)
+                    return (false, 0)
+                _:
+                    return (false, 0)
+
+        def proof_normalized_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
+            return proof_expr_equal(left, right)
+
+        # Return true when an expression contains a named value. Unsupported expression
+        # forms are treated as containing the name: a lemma with an opaque postcondition
+        # must not be applied to a caller unless a later kernel tier understands that form.
+        def proof_expr_mentions_name(expression: Ast::Expr, target: sview) -> bool:
+            match expression:
+                Ast::Expr.IntLit(_):
+                    return false
+                Ast::Expr.BoolLit(_):
+                    return false
+                Ast::Expr.FloatLit(_):
+                    return false
+                Ast::Expr.StringLit(_):
+                    return false
+                Ast::Expr.CharLit(_):
+                    return false
+                Ast::Expr.Ident(name, _):
+                    return name == target
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_mentions_name(inner, target)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_mentions_name(operand, target)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_mentions_name(left, target) or proof_expr_mentions_name(right, target)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_expr_mentions_name(callee, target)
+                    for argument in arguments:
+                        return true if proof_expr_mentions_name(argument, target)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_mentions_name(object, target)
+                Ast::Expr.Scope(base, scoped_name, _):
+                    # The scope leaf is a binding too. Ignoring it would let a qualified
+                    # mutable global (for example `Config.counter`) evade dependency scans and
+                    # would make unresolved-formal checks unsound across qualified names.
+                    return true if scoped_name == target
+                    return proof_expr_mentions_name(base, target)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_mentions_name(object, target) or proof_expr_mentions_name(index, target)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_mentions_name(object, target) or proof_expr_mentions_name(low, target) or proof_expr_mentions_name(high, target)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_mentions_name(object, target)
+                    for argument in arguments:
+                        return true if proof_expr_mentions_name(argument, target)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_mentions_name(operand, target)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_mentions_name(operand, target)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_name(element, target)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_name(element, target)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_name(element, target)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_mentions_name(entry.key, target) or proof_expr_mentions_name(entry.value, target)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_mentions_name(field.value, target)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_mentions_name(base, target)
+                    for field in fields:
+                        return true if proof_expr_mentions_name(field.value, target)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_mentions_name(condition, target) or proof_expr_mentions_name(then_expr, target) or proof_expr_mentions_name(else_expr, target)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_mentions_name(scrutinee, target)
+                    for arm in arms:
+                        return true if proof_expr_mentions_name(arm.guard, target)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_mentions_name(value, target)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    return true if proof_expr_mentions_name(iterable, target)
+                    return false if variable == target
+                    return proof_expr_mentions_name(condition, target) or proof_expr_mentions_name(body, target)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_mentions_name(base, target) or proof_expr_mentions_name(predicate, target)
+                Ast::Expr.Block(statements, value, _, _):
+                    body_mentions: mutable bool = true
+                    for statement in statements |body_mentions|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                                return true if proof_expr_mentions_name(initializer, target)
+                                body_mentions <- false if local_name == target
+                            _:
+                                return true
+                    return body_mentions and proof_expr_mentions_name(value, target)
+                _:
+                    return true
+
+        # Calls inside an initializer or expression may mutate aliases outside the symbolic
+        # state. Unknown AST forms count as effectful until a kernel tier models them.
+        def proof_expr_has_call(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent:
+                    return false
+                Ast::Expr.IntLit(_):
+                    return false
+                Ast::Expr.BoolLit(_):
+                    return false
+                Ast::Expr.FloatLit(_):
+                    return false
+                Ast::Expr.StringLit(_):
+                    return false
+                Ast::Expr.CharLit(_):
+                    return false
+                Ast::Expr.Ident(_, _):
+                    return false
+                Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_call(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_has_call(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_has_call(left) or proof_expr_has_call(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_call(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_call(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_has_call(object) or proof_expr_has_call(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_call(object) or proof_expr_has_call(low) or proof_expr_has_call(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_has_call(object)
+                    for argument in arguments:
+                        return true if proof_expr_has_call(argument)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_has_call(operand)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_call(operand)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_call(element)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_call(element)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_call(element)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_has_call(entry.key) or proof_expr_has_call(entry.value)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_has_call(field.value)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_call(base)
+                    for field in fields:
+                        return true if proof_expr_has_call(field.value)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_call(condition) or proof_expr_has_call(then_expr) or proof_expr_has_call(else_expr)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_has_call(scrutinee)
+                    for arm in arms:
+                        return true if proof_expr_has_call(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_call(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_expr_has_call(guarded)
+                    for arm in arms:
+                        return true if proof_expr_has_call(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_call(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_call(iterable) or proof_expr_has_call(condition) or proof_expr_has_call(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_call(base) or proof_expr_has_call(predicate)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return true if proof_expr_has_call(initializer)
+                            _:
+                                return true
+                    return proof_expr_has_call(value)
+                _:
+                    return true
+
+        # A move is an executable ownership transition even when its operand is otherwise a
+        # simple symbolic expression. Keep this separate from call detection: a move can be
+        # effectful without invoking a function, and facts must not cross that boundary.
+        def proof_expr_has_move(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Move(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_move(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_has_move(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_has_move(left) or proof_expr_has_move(right)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_expr_has_move(callee)
+                    for argument in arguments:
+                        return true if proof_expr_has_move(argument)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_move(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_move(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_has_move(object) or proof_expr_has_move(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_move(object) or proof_expr_has_move(low) or proof_expr_has_move(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_has_move(object)
+                    for argument in arguments:
+                        return true if proof_expr_has_move(argument)
+                    return false
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_move(operand)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_move(element)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_move(element)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_move(element)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_has_move(entry.key) or proof_expr_has_move(entry.value)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_has_move(field.value)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_move(base)
+                    for field in fields:
+                        return true if proof_expr_has_move(field.value)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_move(condition) or proof_expr_has_move(then_expr) or proof_expr_has_move(else_expr)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_has_move(scrutinee)
+                    for arm in arms:
+                        return true if proof_expr_has_move(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_move(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_expr_has_move(guarded)
+                    for arm in arms:
+                        return true if proof_expr_has_move(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_move(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_move(iterable) or proof_expr_has_move(condition) or proof_expr_has_move(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_move(base) or proof_expr_has_move(predicate)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return true if proof_expr_has_move(initializer)
+                            Ast::Stmt.Assign(_, _, initializer, _):
+                                return true if proof_expr_has_move(initializer)
+                            Ast::Stmt.Expr(statement_expression, _):
+                                return true if proof_expr_has_move(statement_expression)
+                            Ast::Stmt.Return(statement_value, _):
+                                if statement_value is returned:
+                                    return true if proof_expr_has_move(returned)
+                            _:
+                                return true
+                    return proof_expr_has_move(value)
+                _:
+                    return false
+
+        # A call-rooted expression has a stable symbolic result: the whole call node can be
+        # retained while its callee/arguments are checked in evaluation order. Nested calls are
+        # admitted separately only when the purity fixed point proves every call total and
+        # non-mutating; nested effectful calls still require a general expression evaluator and
+        # are rejected at the statement boundary.
+        def proof_expr_is_call_rooted(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_is_call_rooted(inner)
+                _:
+                    return false
+
+        # Detect executable calls inside logical expressions. The checker resolves these calls
+        # against its independently built pure-function table; this helper deliberately remains
+        # syntax-only so an unknown call cannot be mistaken for `old(...)`.
+        def proof_expr_has_executable_call(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    if proof_ident_name(callee) == "old" and arguments.count == 1:
+                        return proof_expr_has_executable_call(arguments[0])
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_executable_call(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_has_executable_call(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_has_executable_call(left) or proof_expr_has_executable_call(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_executable_call(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_executable_call(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_has_executable_call(object) or proof_expr_has_executable_call(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_executable_call(object) or proof_expr_has_executable_call(low) or proof_expr_has_executable_call(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_has_executable_call(object)
+                    for argument in arguments:
+                        return true if proof_expr_has_executable_call(argument)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_has_executable_call(operand)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_executable_call(operand)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_executable_call(element)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_executable_call(element)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_executable_call(element)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_has_executable_call(entry.key) or proof_expr_has_executable_call(entry.value)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_has_executable_call(field.value)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_executable_call(base)
+                    for field in fields:
+                        return true if proof_expr_has_executable_call(field.value)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_executable_call(condition) or proof_expr_has_executable_call(then_expr) or proof_expr_has_executable_call(else_expr)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_has_executable_call(scrutinee)
+                    for arm in arms:
+                        return true if proof_expr_has_executable_call(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_executable_call(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_executable_call(iterable) or proof_expr_has_executable_call(condition) or proof_expr_has_executable_call(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_executable_call(base) or proof_expr_has_executable_call(predicate)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return true if proof_expr_has_executable_call(initializer)
+                            _:
+                                return true
+                    return proof_expr_has_executable_call(value)
+                _:
+                    return false
+
+        # Lower the proof-safe value-match fragment to the kernel's existing conditional form.
+        # This is deliberately narrower than Elisa's runtime matcher: every arm must be a single
+        # value expression, patterns may not bind payloads, and the final arm must be an unguarded
+        # wildcard. That gives the kernel an exact decision tree instead of treating a match as an
+        # opaque oracle. The richer pattern forms stay rejected until their projections and
+        # exhaustiveness evidence have a certificate representation.
+        def proof_match_closed_pattern(pattern: Ast::Pattern) -> bool:
+            match pattern:
+                Ast::Pattern.Wildcard:
+                    return true
+                Ast::Pattern.Literal(_):
+                    return true
+                Ast::Pattern.Range(_, _, _):
+                    return true
+                Ast::Pattern.Variant(_, fields):
+                    for field in fields:
+                        match field:
+                            Ast::Pattern.Wildcard:
+                                pass
+                            Ast::Pattern.Field(selector, inner):
+                                # Named payload selectors are stable compiler syntax. Restrict
+                                # the nested pattern to a single wildcard or binding so the
+                                # lowered arm can use the exact `scrutinee.field` projection;
+                                # positional, nested, and literal payload patterns still need
+                                # richer constructor evidence.
+                                return false if selector == "" or inner.count != 1
+                                match inner[0]:
+                                    Ast::Pattern.Wildcard:
+                                        pass
+                                    Ast::Pattern.Binding(binding):
+                                        return false if binding == ""
+                                    _:
+                                        return false
+                            _:
+                                return false
+                    return true
+                Ast::Pattern.Or(options):
+                    return false if options.count == 0
+                    for option in options:
+                        return false if not proof_match_closed_pattern(option)
+                    return true
+                _:
+                    return false
+
+        def proof_match_pattern_condition(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos) -> Ast::Expr?:
+            match pattern:
+                Ast::Pattern.Wildcard:
+                    return Ast::Expr.BoolLit(true)
+                Ast::Pattern.Or(options):
+                    return null if options.count == 0
+                    first: Ast::Expr? = proof_match_pattern_condition(options[0], scrutinee, position)
+                    condition: mutable Ast::Expr = Ast::Expr.Invalid
+                    if first is first_condition:
+                        condition <- first_condition
+                    else:
+                        return null
+                    index: mutable usize = 1
+                    while index < options.count |index, options, scrutinee, position, condition|:
+                        next: Ast::Expr? = proof_match_pattern_condition(options[index], scrutinee, position)
+                        if next is next_condition:
+                            condition <- Ast::Expr.Binary(condition, TokenKind.Or, next_condition, position)
+                        else:
+                            return null
+                        index <- index + 1
+                    return condition
+                _:
+                    return proof_pattern_condition(pattern, scrutinee, position)
+
+        def proof_lower_value_match(expression: Ast::Expr) -> (known: bool, value: Ast::Expr):
+            match expression:
+                Ast::Expr.Match(scrutinee, arms, position):
+                    return (false, Ast::Expr.Invalid) if arms.count == 0
+                    return (false, Ast::Expr.Invalid) if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee)
+                    return (false, Ast::Expr.Invalid) if not proof_expr_supported(scrutinee)
+                    fallback: mutable Ast::Expr = Ast::Expr.Invalid
+                    index: mutable usize = arms.count
+                    while index > 0 |index, arms, position, fallback|:
+                        index <- index - 1
+                        arm: Ast::MatchArm = arms[index]
+                        return (false, Ast::Expr.Invalid) if arm.body.count != 1
+                        arm_value: mutable Ast::Expr = Ast::Expr.Invalid
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                arm_value <- value
+                            _:
+                                return (false, Ast::Expr.Invalid)
+                        arm_names: mutable darray[sview] = []
+                        arm_values: mutable darray[Ast::Expr] = []
+                        return (false, Ast::Expr.Invalid) if not proof_bind_pattern(arm.pattern, position, scrutinee, &arm_names, &arm_values)
+                        arm_value <- proof_substitute(arm_value, arm_names, arm_values)
+                        # Calls in a value arm are admitted syntactically here. The statement
+                        # boundary applies the stronger transitive-purity gate, and the return
+                        # checker evaluates each arm against its own proof state. Keeping this
+                        # lowering independent of the function table also lets logical helpers
+                        # reuse the same decision-tree shape without treating an arbitrary call
+                        # as a pure proposition.
+                        return (false, Ast::Expr.Invalid) if proof_expr_has_move(arm_value)
+                        return (false, Ast::Expr.Invalid) if not proof_expr_supported(arm_value)
+                        if index == arms.count - 1:
+                            match arm.pattern:
+                                Ast::Pattern.Wildcard:
+                                    pass
+                                _:
+                                    return (false, Ast::Expr.Invalid)
+                            match arm.guard:
+                                Ast::Expr.Absent:
+                                    pass
+                                _:
+                                    return (false, Ast::Expr.Invalid)
+                            fallback <- arm_value
+                        else:
+                            return (false, Ast::Expr.Invalid) if not proof_match_closed_pattern(arm.pattern)
+                            condition: Ast::Expr? = proof_match_pattern_condition(arm.pattern, scrutinee, position)
+                            resolved_condition: mutable Ast::Expr = Ast::Expr.Invalid
+                            if condition is match_condition:
+                                resolved_condition <- match_condition
+                            else:
+                                return (false, Ast::Expr.Invalid)
+                            match arm.guard:
+                                Ast::Expr.Absent:
+                                    pass
+                                _:
+                                    return (false, Ast::Expr.Invalid) if proof_expr_has_call(arm.guard) or proof_expr_has_move(arm.guard)
+                                    return (false, Ast::Expr.Invalid) if not proof_expr_supported(arm.guard)
+                                    resolved_condition <- Ast::Expr.Binary(resolved_condition, TokenKind.And, arm.guard, position)
+                            fallback <- Ast::Expr.If(resolved_condition, arm_value, fallback, position)
+                    return (true, fallback)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        # Runtime expressions outside this modeled fragment are rejected at the statement
+        # boundary. Treating them merely as opaque state havoc is not enough: a future expression
+        # form may contain a hidden call, branch, or assignment that the proof kernel's evaluator
+        # and call graph do not visit.
+        def proof_expr_supported(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent:
+                    return true
+                Ast::Expr.IntLit(_):
+                    return true
+                Ast::Expr.FloatLit(_):
+                    return true
+                Ast::Expr.StringLit(_):
+                    return true
+                Ast::Expr.CharLit(_):
+                    return true
+                Ast::Expr.BoolLit(_):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_expr_supported(callee)
+                    for argument in arguments:
+                        return false if not proof_expr_supported(argument)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_supported(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_supported(operand)
+                Ast::Expr.Binary(left, operator, right, _):
+                    # Calls are admitted here as syntax only. Every proof-state/runtime caller
+                    # applies its stronger effect and purity gate separately; rejecting a call
+                    # merely because it appears under `and`/`or` would also reject short-circuit
+                    # guards in otherwise total pure helper functions.
+                    return proof_expr_supported(left) and proof_expr_supported(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_supported(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_supported(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_supported(object) and proof_expr_supported(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_supported(object) and proof_expr_supported(low) and proof_expr_supported(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_expr_supported(object)
+                    for argument in arguments:
+                        return false if not proof_expr_supported(argument)
+                    return true
+                Ast::Expr.Move(operand, _):
+                    # Runtime ownership transfer is modeled at the statement boundary. The
+                    # checker invalidates the moved root and all facts after the expression has
+                    # evaluated; it is never transparent in a logical contract or pure summary.
+                    return proof_expr_supported(operand)
+                Ast::Expr.RegionNew(operand, _, _):
+                    # Region allocation has lifetime and allocation effects not represented in
+                    # the symbolic state, so it must not enter a verified proof transition.
+                    return false
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return false if not proof_expr_supported(element)
+                    return true
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return false if not proof_expr_supported(element)
+                    return true
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return false if not proof_expr_supported(element)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return false if not proof_expr_supported(entry.key) or not proof_expr_supported(entry.value)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return false if not proof_expr_supported(field.value)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_expr_supported(base)
+                    for field in fields:
+                        return false if not proof_expr_supported(field.value)
+                    return true
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return false if proof_expr_has_call(condition) or proof_expr_has_call(then_expr) or proof_expr_has_call(else_expr)
+                    return proof_expr_supported(condition) and proof_expr_supported(then_expr) and proof_expr_supported(else_expr)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return false if proof_expr_has_call(iterable) or proof_expr_has_call(condition) or proof_expr_has_call(body)
+                    return proof_expr_supported(iterable) and proof_expr_supported(condition) and proof_expr_supported(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if proof_expr_has_call(base) or proof_expr_has_call(predicate)
+                    return proof_expr_supported(base) and proof_expr_supported(predicate)
+                Ast::Expr.Block(statements, value, captures, _):
+                    # Captured value blocks synthesize writes back into their outer bindings.
+                    # The proof state does not model that write-back, so accepting the block as
+                    # a pure expression would let an outer fact survive a hidden mutation.
+                    return false if captures.count > 0
+                    return false if proof_expr_has_call(value)
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return false if proof_expr_has_call(initializer)
+                                return false if not proof_expr_supported(initializer)
+                            _:
+                                return false
+                    return proof_expr_supported(value)
+                Ast::Expr.Match(_, _, _):
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
+                    return lowered.known
+                Ast::Expr.Catch(_, _, _):
+                    return false
+                Ast::Expr.GetElse(_, _, _):
+                    return false
+                Ast::Expr.Lambda(_, _, _):
+                    return false
+                Ast::Expr.ShorthandMember(parts, _):
+                    # A single leading-dot enum member is a closed, pure value atom. Keep
+                    # qualified shorthand paths out until the source type/module identity is
+                    # represented in the certificate term.
+                    return parts.count == 1 and parts[0] != ""
+                _:
+                    return false
+
+        # Collect callable leaves for the proof kernel's call graph. Unsupported expression
+        # forms become an opaque edge so a hidden recursive call cannot be admitted by a summary
+        # lookup. This graph is only used to prevent circular executable postcondition proofs;
+        # it is not a semantic call-resolution replacement for the compiler.
+        def proof_collect_call_names(expression: Ast::Expr, names: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Invalid:
+                    pass
+                Ast::Expr.Absent:
+                    pass
+                Ast::Expr.IntLit(_):
+                    pass
+                Ast::Expr.FloatLit(_):
+                    pass
+                Ast::Expr.StringLit(_):
+                    pass
+                Ast::Expr.CharLit(_):
+                    pass
+                Ast::Expr.BoolLit(_):
+                    pass
+                Ast::Expr.Ident(_, _):
+                    pass
+                Ast::Expr.Call(callee, arguments, _, _):
+                    called: sview = proof_callable_name(callee)
+                    names.push(called) if called != "" and not (any existing in names where existing == called)
+                    proof_collect_call_names(callee, names)
+                    for argument in arguments |names|:
+                        proof_collect_call_names(argument, names)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_call_names(inner, names)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_call_names(operand, names)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_call_names(left, names)
+                    proof_collect_call_names(right, names)
+                Ast::Expr.Field(object, _, _):
+                    proof_collect_call_names(object, names)
+                Ast::Expr.Scope(base, _, _):
+                    proof_collect_call_names(base, names)
+                Ast::Expr.Index(object, index, _):
+                    proof_collect_call_names(object, names)
+                    proof_collect_call_names(index, names)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_collect_call_names(object, names)
+                    proof_collect_call_names(low, names)
+                    proof_collect_call_names(high, names)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_collect_call_names(object, names)
+                    for argument in arguments |names|:
+                        proof_collect_call_names(argument, names)
+                Ast::Expr.Move(operand, _):
+                    proof_collect_call_names(operand, names)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_collect_call_names(operand, names)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |names|:
+                        proof_collect_call_names(element, names)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |names|:
+                        proof_collect_call_names(element, names)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |names|:
+                        proof_collect_call_names(element, names)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |names|:
+                        proof_collect_call_names(entry.key, names)
+                        proof_collect_call_names(entry.value, names)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |names|:
+                        proof_collect_call_names(field.value, names)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_collect_call_names(base, names)
+                    for field in fields |names|:
+                        proof_collect_call_names(field.value, names)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_collect_call_names(condition, names)
+                    proof_collect_call_names(then_expr, names)
+                    proof_collect_call_names(else_expr, names)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_collect_call_names(iterable, names)
+                    proof_collect_call_names(condition, names)
+                    proof_collect_call_names(body, names)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_collect_call_names(base, names)
+                    proof_collect_call_names(predicate, names)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    proof_collect_call_names(scrutinee, names)
+                    for arm in arms |names|:
+                        proof_collect_call_names(arm.guard, names)
+                        proof_collect_body_call_names(arm.body, names)
+                Ast::Expr.Catch(guarded, arms, _):
+                    proof_collect_call_names(guarded, names)
+                    for arm in arms |names|:
+                        proof_collect_call_names(arm.guard, names)
+                        proof_collect_body_call_names(arm.body, names)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_collect_call_names(guarded, names)
+                    proof_collect_body_call_names(recovery, names)
+                Ast::Expr.Lambda(_, _, _):
+                    # A lambda may be invoked through an opaque value later. Treat its body as
+                    # an opaque edge until closure invocation is represented in the graph.
+                    names.push("__opaque_call__") if not (any existing in names where existing == "__opaque_call__")
+                Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Block(statements, value, _, _):
+                    proof_collect_body_call_names(statements, names)
+                    proof_collect_call_names(value, names)
+                _:
+                    names.push("__opaque_call__") if not (any existing in names where existing == "__opaque_call__")
+
+        def proof_collect_body_call_names(body: darray[Ast::Stmt]&, names: mutable darray[sview]&) -> void:
+            for statement in body |names|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        proof_collect_call_names(returned, names) if value is returned
+                    Ast::Stmt.Expr(expression, _):
+                        proof_collect_call_names(expression, names)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        proof_collect_call_names(initializer, names)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        proof_collect_call_names(target, names)
+                        proof_collect_call_names(initializer, names)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_collect_call_names(condition, names)
+                        proof_collect_body_call_names(then_body, names)
+                        proof_collect_body_call_names(else_body, names)
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_collect_call_names(condition, names)
+                        proof_collect_body_call_names(while_body, names)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        proof_collect_call_names(iterable, names)
+                        proof_collect_body_call_names(for_body, names)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_collect_call_names(scrutinee, names)
+                        for arm in arms |names|:
+                            proof_collect_call_names(arm.guard, names)
+                            proof_collect_body_call_names(arm.body, names)
+                    Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                        if block_kind == "assert_by":
+                            # The first contract is the runtime guard; the remaining proof steps
+                            # are erased and must not create executable edges.
+                            if block_body.count > 0:
+                                match block_body[0]:
+                                    Ast::Stmt.Contract(_, goal, _):
+                                        proof_collect_call_names(goal, names)
+                                    _:
+                                        pass
+                        else:
+                            proof_collect_body_call_names(block_body, names)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        # `assert` is a runtime guard. The other contract forms are logical
+                        # declarations and must not create executable call edges.
+                        proof_collect_call_names(expression, names) if kind == "assert"
+                    _:
+                        names.push("__opaque_call__") if not (any existing in names where existing == "__opaque_call__")
+
+        # Substitution for the expression forms currently understood by the proof kernel. The
+        # compiler AST is immutable and region-backed, so rebuilt nodes share source spans.
+        # Names are searched from the innermost binding outward, which is required when a local
+        # shadows a parameter. Unsupported forms remain opaque and therefore cannot be used to
+        # manufacture a new arithmetic fact.
+        def proof_substitute(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Invalid:
+                    return expression
+                Ast::Expr.Absent:
+                    return expression
+                Ast::Expr.IntLit(_):
+                    return expression
+                Ast::Expr.FloatLit(_):
+                    return expression
+                Ast::Expr.StringLit(_):
+                    return expression
+                Ast::Expr.CharLit(_):
+                    return expression
+                Ast::Expr.BoolLit(_):
+                    return expression
+                Ast::Expr.Ident(name, position):
+                    index: mutable usize = names.count
+                    while index > 0 |index, names, values|:
+                        index <- index - 1
+                        if index < values.count and names[index] == name:
+                            # An omitted/default or otherwise unavailable argument is not a
+                            # value. Preserve the identifier so the caller can fail closed on
+                            # an unresolved formal instead of silently turning it into `Absent`.
+                            match values[index]:
+                                Ast::Expr.Absent:
+                                    return expression
+                                _:
+                                    return values[index]
+                    return expression
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_substitute(inner, names, values), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_substitute(operand, names, values), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    substituted_left: Ast::Expr = proof_substitute(left, names, values)
+                    substituted_right: Ast::Expr = proof_substitute(right, names, values)
+                    return Ast::Expr.Binary(substituted_left, operator, substituted_right, position)
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    substituted: mutable darray[Ast::Expr] = []
+                    for argument in arguments |substituted, names, values|:
+                        substituted.push(proof_substitute(argument, names, values))
+                    return Ast::Expr.Call(proof_substitute(callee, names, values), substituted, argument_names, position)
+                Ast::Expr.Field(object, field, position):
+                    substituted_object: Ast::Expr = proof_substitute(object, names, values)
+                    match substituted_object:
+                        # Constructor projection is a definitional reduction, not a solver
+                        # guess: `Box{value: x}.value` is exactly `x`. Positional or unknown
+                        # fields remain opaque.
+                        Ast::Expr.Construct(_, fields, _):
+                            for initializer in fields |names, values|:
+                                return proof_substitute(initializer.value, names, values) if initializer.name == field
+                        Ast::Expr.RecordUpdate(base, fields, _):
+                            for initializer in fields |names, values|:
+                                return proof_substitute(initializer.value, names, values) if initializer.name == field
+                            return proof_substitute(Ast::Expr.Field(base, field, position), names, values)
+                        _:
+                            pass
+                    return Ast::Expr.Field(substituted_object, field, position)
+                Ast::Expr.Scope(base, name, position):
+                    return Ast::Expr.Scope(proof_substitute(base, names, values), name, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_substitute(object, names, values), proof_substitute(index, names, values), position)
+                Ast::Expr.Slice(object, low, high, position):
+                    return Ast::Expr.Slice(proof_substitute(object, names, values), proof_substitute(low, names, values), proof_substitute(high, names, values), position)
+                Ast::Expr.IndexN(object, arguments, position):
+                    substituted_arguments: mutable darray[Ast::Expr] = []
+                    for argument in arguments |substituted_arguments, names, values|:
+                        substituted_arguments.push(proof_substitute(argument, names, values))
+                    return Ast::Expr.IndexN(proof_substitute(object, names, values), substituted_arguments, position)
+                Ast::Expr.Move(operand, position):
+                    return Ast::Expr.Move(proof_substitute(operand, names, values), position)
+                Ast::Expr.RegionNew(operand, region, position):
+                    return Ast::Expr.RegionNew(proof_substitute(operand, names, values), region, position)
+                Ast::Expr.Array(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values|:
+                        substituted_elements.push(proof_substitute(element, names, values))
+                    return Ast::Expr.Array(substituted_elements, position)
+                Ast::Expr.Tuple(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values|:
+                        substituted_elements.push(proof_substitute(element, names, values))
+                    return Ast::Expr.Tuple(substituted_elements, position)
+                Ast::Expr.SetLit(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values|:
+                        substituted_elements.push(proof_substitute(element, names, values))
+                    return Ast::Expr.SetLit(substituted_elements, position)
+                Ast::Expr.DictLit(entries, position):
+                    substituted_entries: mutable darray[Ast::DictEntry] = []
+                    for entry in entries |substituted_entries, names, values|:
+                        substituted_entries.push(Ast::DictEntry{key: proof_substitute(entry.key, names, values), value: proof_substitute(entry.value, names, values)})
+                    return Ast::Expr.DictLit(substituted_entries, position)
+                Ast::Expr.Construct(type_expression, fields, position):
+                    substituted_fields: mutable darray[Ast::FieldInit] = []
+                    for field in fields |substituted_fields, names, values|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute(field.value, names, values)})
+                    # The constructor head is a type expression, not a value binding. Keep it
+                    # lexical so a local with the same spelling cannot rewrite the type head.
+                    return Ast::Expr.Construct(type_expression, substituted_fields, position)
+                Ast::Expr.RecordUpdate(base, fields, position):
+                    substituted_fields: mutable darray[Ast::FieldInit] = []
+                    for field in fields |substituted_fields, names, values|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute(field.value, names, values)})
+                    return Ast::Expr.RecordUpdate(proof_substitute(base, names, values), substituted_fields, position)
+                Ast::Expr.If(condition, then_expr, else_expr, position):
+                    substituted_condition: Ast::Expr = proof_substitute(condition, names, values)
+                    substituted_then: Ast::Expr = proof_substitute(then_expr, names, values)
+                    substituted_else: Ast::Expr = proof_substitute(else_expr, names, values)
+                    return Ast::Expr.If(substituted_condition, substituted_then, substituted_else, position)
+                Ast::Expr.Match(_, _, _):
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
+                    return proof_substitute(lowered.value, names, values) if lowered.known
+                    return Ast::Expr.Invalid
+                Ast::Expr.GetElse(guarded, _, _):
+                    # Control-flow recovery is checked separately on its failure path. On the
+                    # successful path the expression contributes the guarded value, which is the
+                    # exact value type exposed by Elisa's `get` construct.
+                    return proof_substitute(guarded, names, values)
+                Ast::Expr.Comprehension(variable, iterable, condition, body, position):
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    shadow_names.push(variable)
+                    shadow_values.push(Ast::Expr.Ident(variable, position))
+                    return Ast::Expr.Comprehension(variable, proof_substitute(iterable, names, values), proof_substitute(condition, shadow_names, shadow_values), proof_substitute(body, shadow_names, shadow_values), position)
+                Ast::Expr.Refinement(base, predicate, position):
+                    return Ast::Expr.Refinement(proof_substitute(base, names, values), proof_substitute(predicate, names, values), position)
+                Ast::Expr.ShorthandMember(_, _):
+                    return expression
+                Ast::Expr.Block(statements, value, captures, position):
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    substituted_statements: mutable darray[Ast::Stmt] = []
+                    malformed: mutable bool = false
+                    for statement in statements |shadow_names, shadow_values, substituted_statements, names, values, malformed|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
+                                substituted_initializer: Ast::Expr = proof_substitute(initializer, shadow_names, shadow_values)
+                                substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
+                                shadow_names.push(local_name)
+                                shadow_values.push(Ast::Expr.Ident(local_name, statement_position))
+                            _:
+                                malformed <- true
+                    return Ast::Expr.Invalid if malformed
+                    return Ast::Expr.Block(substituted_statements, proof_substitute(value, shadow_names, shadow_values), captures, position)
+                _:
+                    # A future AST form must never leak an uninstantiated formal into a
+                    # caller's proof state. Keep the source node only for modeled leaves above;
+                    # every other form becomes an opaque failure value.
+                    return Ast::Expr.Invalid
+
+        # Contract-aware substitution handles Elisa's pre-state operator before current-state
+        # bindings are substituted. `old(x)` must see the entry value of x; substituting the
+        # mutable local first would incorrectly turn it into the post-state expression.
+        def proof_substitute_contract(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, old_names: darray[sview]&, old_values: darray[Ast::Expr]&) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    if proof_ident_name(callee) == "old" and arguments.count == 1:
+                        local_index: mutable usize = old_names.count
+                        while local_index < names.count |local_index, names, old_names, arguments|:
+                            return Ast::Expr.Invalid if proof_expr_mentions_name(arguments[0], names[local_index])
+                            local_index <- local_index + 1
+                        return proof_substitute(arguments[0], old_names, old_values)
+                    substituted: mutable darray[Ast::Expr] = []
+                    for argument in arguments |substituted, names, values, old_names, old_values|:
+                        substituted.push(proof_substitute_contract(argument, names, values, old_names, old_values))
+                    return Ast::Expr.Call(proof_substitute_contract(callee, names, values, old_names, old_values), substituted, argument_names, position)
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_substitute_contract(inner, names, values, old_names, old_values), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_substitute_contract(operand, names, values, old_names, old_values), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_substitute_contract(left, names, values, old_names, old_values), operator, proof_substitute_contract(right, names, values, old_names, old_values), position)
+                Ast::Expr.Field(object, field, position):
+                    substituted_object: Ast::Expr = proof_substitute_contract(object, names, values, old_names, old_values)
+                    match substituted_object:
+                        Ast::Expr.Construct(_, fields, _):
+                            for initializer in fields |names, values|:
+                                return proof_substitute_contract(initializer.value, names, values, old_names, old_values) if initializer.name == field
+                        Ast::Expr.RecordUpdate(base, fields, _):
+                            for initializer in fields |names, values|:
+                                return proof_substitute_contract(initializer.value, names, values, old_names, old_values) if initializer.name == field
+                            return proof_substitute_contract(Ast::Expr.Field(base, field, position), names, values, old_names, old_values)
+                        _:
+                            pass
+                    return Ast::Expr.Field(substituted_object, field, position)
+                Ast::Expr.Scope(base, name, position):
+                    return Ast::Expr.Scope(proof_substitute_contract(base, names, values, old_names, old_values), name, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_substitute_contract(object, names, values, old_names, old_values), proof_substitute_contract(index, names, values, old_names, old_values), position)
+                Ast::Expr.Slice(object, low, high, position):
+                    return Ast::Expr.Slice(proof_substitute_contract(object, names, values, old_names, old_values), proof_substitute_contract(low, names, values, old_names, old_values), proof_substitute_contract(high, names, values, old_names, old_values), position)
+                Ast::Expr.IndexN(object, arguments, position):
+                    substituted_arguments: mutable darray[Ast::Expr] = []
+                    for argument in arguments |substituted_arguments, names, values, old_names, old_values|:
+                        substituted_arguments.push(proof_substitute_contract(argument, names, values, old_names, old_values))
+                    return Ast::Expr.IndexN(proof_substitute_contract(object, names, values, old_names, old_values), substituted_arguments, position)
+                Ast::Expr.Move(operand, position):
+                    return Ast::Expr.Move(proof_substitute_contract(operand, names, values, old_names, old_values), position)
+                Ast::Expr.RegionNew(operand, region, position):
+                    return Ast::Expr.RegionNew(proof_substitute_contract(operand, names, values, old_names, old_values), region, position)
+                Ast::Expr.Array(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values, old_names, old_values|:
+                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    return Ast::Expr.Array(substituted_elements, position)
+                Ast::Expr.Tuple(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values, old_names, old_values|:
+                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    return Ast::Expr.Tuple(substituted_elements, position)
+                Ast::Expr.SetLit(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values, old_names, old_values|:
+                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    return Ast::Expr.SetLit(substituted_elements, position)
+                Ast::Expr.DictLit(entries, position):
+                    substituted_entries: mutable darray[Ast::DictEntry] = []
+                    for entry in entries |substituted_entries, names, values, old_names, old_values|:
+                        substituted_entries.push(Ast::DictEntry{key: proof_substitute_contract(entry.key, names, values, old_names, old_values), value: proof_substitute_contract(entry.value, names, values, old_names, old_values)})
+                    return Ast::Expr.DictLit(substituted_entries, position)
+                Ast::Expr.Construct(type_expression, fields, position):
+                    substituted_fields: mutable darray[Ast::FieldInit] = []
+                    for field in fields |substituted_fields, names, values, old_names, old_values|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_contract(field.value, names, values, old_names, old_values)})
+                    return Ast::Expr.Construct(type_expression, substituted_fields, position)
+                Ast::Expr.RecordUpdate(base, fields, position):
+                    substituted_fields: mutable darray[Ast::FieldInit] = []
+                    for field in fields |substituted_fields, names, values, old_names, old_values|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_contract(field.value, names, values, old_names, old_values)})
+                    return Ast::Expr.RecordUpdate(proof_substitute_contract(base, names, values, old_names, old_values), substituted_fields, position)
+                Ast::Expr.If(condition, then_expr, else_expr, position):
+                    return Ast::Expr.If(proof_substitute_contract(condition, names, values, old_names, old_values), proof_substitute_contract(then_expr, names, values, old_names, old_values), proof_substitute_contract(else_expr, names, values, old_names, old_values), position)
+                Ast::Expr.Match(_, _, _):
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
+                    return proof_substitute_contract(lowered.value, names, values, old_names, old_values) if lowered.known
+                    return Ast::Expr.Invalid
+                Ast::Expr.Comprehension(variable, iterable, condition, body, position):
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    shadow_names.push(variable)
+                    shadow_values.push(Ast::Expr.Ident(variable, position))
+                    return Ast::Expr.Comprehension(variable, proof_substitute_contract(iterable, names, values, old_names, old_values), proof_substitute_contract(condition, shadow_names, shadow_values, old_names, old_values), proof_substitute_contract(body, shadow_names, shadow_values, old_names, old_values), position)
+                Ast::Expr.Refinement(base, predicate, position):
+                    return Ast::Expr.Refinement(proof_substitute_contract(base, names, values, old_names, old_values), proof_substitute_contract(predicate, names, values, old_names, old_values), position)
+                Ast::Expr.ShorthandMember(_, _):
+                    return expression
+                Ast::Expr.Block(statements, value, captures, position):
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    substituted_statements: mutable darray[Ast::Stmt] = []
+                    malformed: mutable bool = false
+                    for statement in statements |shadow_names, shadow_values, substituted_statements, names, values, old_names, old_values, malformed|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
+                                substituted_initializer: Ast::Expr = proof_substitute_contract(initializer, shadow_names, shadow_values, old_names, old_values)
+                                substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
+                                shadow_names.push(local_name)
+                                shadow_values.push(Ast::Expr.Ident(local_name, statement_position))
+                            _:
+                                malformed <- true
+                    return Ast::Expr.Invalid if malformed
+                    return Ast::Expr.Block(substituted_statements, proof_substitute_contract(value, shadow_names, shadow_values, old_names, old_values), captures, position)
+                Ast::Expr.Invalid:
+                    return expression
+                Ast::Expr.Absent:
+                    return expression
+                Ast::Expr.IntLit(_):
+                    return expression
+                Ast::Expr.FloatLit(_):
+                    return expression
+                Ast::Expr.StringLit(_):
+                    return expression
+                Ast::Expr.CharLit(_):
+                    return expression
+                Ast::Expr.BoolLit(_):
+                    return expression
+                Ast::Expr.Ident(_, _):
+                    return proof_substitute(expression, names, values)
+                _:
+                    # Do not preserve an unmodeled contract expression: in particular, an
+                    # unsupported node may contain `old(...)` or a formal that was not bound.
+                    return Ast::Expr.Invalid
+
+        # Substitute a contract in a lexical scope whose live bindings occupy the first
+        # `scope_count` slots of the symbolic environment. Runtime bodies may append shadowing
+        # locals to the same arrays, but those locals are not in scope for a loop invariant or
+        # other header contract. Missing slots become Invalid so malformed state fails closed.
+        def proof_substitute_scoped_contract(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, scope_count: usize, old_names: darray[sview]&, old_values: darray[Ast::Expr]&) -> Ast::Expr:
+            scoped_names: mutable darray[sview] = []
+            scoped_values: mutable darray[Ast::Expr] = []
+            for index in 0..<scope_count |index, names, values, scoped_names, scoped_values|:
+                if index < names.count:
+                    scoped_names.push(names[index])
+                    scoped_values.push(values[index]) if index < values.count
+                    scoped_values.push(Ast::Expr.Invalid) if index >= values.count
+            return proof_substitute_contract(expression, scoped_names, scoped_values, old_names, old_values)
+
+        # Function-level contracts are lexically outside the function body. They may refer to
+        # formals and `result`, but a local declared later in the body must not shadow a formal
+        # name inside `ensure`/`old(...)`. Build a parameter-only current environment from the
+        # stable prefix of the symbolic state; missing slots become Invalid so malformed state
+        # cannot turn into a proof.
+        def proof_substitute_function_contract(expression: Ast::Expr, parameter_names: darray[sview]&, values: darray[Ast::Expr]&, old_values: darray[Ast::Expr]&) -> Ast::Expr:
+            return proof_substitute_scoped_contract(expression, parameter_names, values, parameter_names.count, parameter_names, old_values)
+
+        # `old(...)` can occur below expression-level match/catch/lambda/block nodes. Keep this
+        # traversal separate from call detection: an unsupported call is already conservative
+        # there, but missing an old-state reference would let a callee export a pre-state fact as
+        # if it were a post-state summary.
+        def proof_body_has_old(body: darray[Ast::Stmt]&) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_expr_has_old(expression)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        return true if proof_expr_has_old(type_expression) or proof_expr_has_old(initializer)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return true if proof_expr_has_old(target) or proof_expr_has_old(initializer)
+                    Ast::Stmt.Return(value, _):
+                        return true if value is returned and proof_expr_has_old(returned)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_expr_has_old(condition) or proof_body_has_old(then_body) or proof_body_has_old(else_body)
+                    Ast::Stmt.While(condition, while_body, _):
+                        return true if proof_expr_has_old(condition) or proof_body_has_old(while_body)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        return true if proof_expr_has_old(iterable) or proof_body_has_old(for_body)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_expr_has_old(scrutinee)
+                        for arm in arms:
+                            return true if proof_expr_has_old(arm.guard) or proof_body_has_old(arm.body)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        return true if proof_body_has_old(block_body)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_expr_has_old(expression)
+                    _:
+                        pass
+            return false
+
+        def proof_expr_has_old(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_ident_name(callee) == "old"
+                    return true if proof_expr_has_old(callee)
+                    for argument in arguments:
+                        return true if proof_expr_has_old(argument)
+                    return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_old(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_has_old(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_has_old(left) or proof_expr_has_old(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_old(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_old(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_has_old(object) or proof_expr_has_old(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_old(object) or proof_expr_has_old(low) or proof_expr_has_old(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_has_old(object)
+                    for argument in arguments:
+                        return true if proof_expr_has_old(argument)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_has_old(operand)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_old(operand)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_old(element)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_old(element)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_old(element)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_has_old(entry.key) or proof_expr_has_old(entry.value)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_has_old(field.value)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_old(base)
+                    for field in fields:
+                        return true if proof_expr_has_old(field.value)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_old(condition) or proof_expr_has_old(then_expr) or proof_expr_has_old(else_expr)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_old(iterable) or proof_expr_has_old(condition) or proof_expr_has_old(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_old(base) or proof_expr_has_old(predicate)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_has_old(scrutinee)
+                    for arm in arms:
+                        return true if proof_expr_has_old(arm.guard) or proof_body_has_old(arm.body)
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_expr_has_old(guarded)
+                    for arm in arms:
+                        return true if proof_expr_has_old(arm.guard) or proof_body_has_old(arm.body)
+                    return false
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_expr_has_old(guarded) or proof_body_has_old(recovery)
+                Ast::Expr.Lambda(_, body, _):
+                    return proof_body_has_old(body)
+                Ast::Expr.Block(statements, value, _, _):
+                    return proof_body_has_old(statements) or proof_expr_has_old(value)
+                _:
+                    return false

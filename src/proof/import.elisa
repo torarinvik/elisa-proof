@@ -1,0 +1,134 @@
+# Textual import support for the proof front end. Elisa's compiler treats `include` as a
+# source-level splice, so the proof assistant follows the same rule before parsing. Keeping
+# this in Elisa means imported files go through exactly the same parser and AST kernel as the
+# root file; there is no second parser or host-language import model.
+extend ElisaProof:
+    private:
+        def proof_path_directory(path: darray[u8]&) -> darray[u8]:
+            directory: mutable darray[u8] = []
+            last_slash: mutable i64 = -1
+            for index in 0..<path.count |last_slash, path|:
+                last_slash <- index.i64() if path[index] == 47
+            return directory if last_slash < 0
+            prefix_end: usize = (last_slash + 1).usize()
+            index: mutable usize = 0
+            while index < prefix_end |directory, index, path|:
+                directory.push(path[index])
+                index <- index + 1
+            return directory
+
+        def proof_resolve_include(base_directory: darray[u8]&, relative: darray[u8]&) -> darray[u8]:
+            resolved: mutable darray[u8] = []
+            if relative.count > 0 and relative[0] == 47:
+                resolved.extend(relative)
+                return proof_normalize_path(resolved)
+            resolved.extend(base_directory)
+            resolved.extend(relative)
+            return proof_normalize_path(resolved)
+
+        # Match the compiler's include rule for `./` segments. This keeps the NUL-separated
+        # seen set stable when the same module is reached through `x.elisa` and `./x.elisa`.
+        def proof_normalize_path(path: darray[u8]&) -> darray[u8]:
+            normalized: mutable darray[u8] = []
+            index: mutable usize = 0
+            while index < path.count |index, normalized, path|:
+                at_segment_start: bool = normalized.count == 0 or normalized[normalized.count - 1] == 47
+                if at_segment_start and path[index] == 46 and index + 1 < path.count and path[index + 1] == 47:
+                    index <- index + 2
+                    continue
+                normalized.push(path[index])
+                index <- index + 1
+            return normalized
+
+        # The compiler's source reader keeps a flat NUL-separated path set. Reuse that shape
+        # here so imports remain region-simple and deduplicate diamond include graphs.
+        def proof_path_seen(seen: darray[u8]&, path: darray[u8]&) -> bool:
+            start: mutable usize = 0
+            index: mutable usize = 0
+            while index < seen.count |start, index, seen, path|:
+                if seen[index] == 0:
+                    if index - start == path.count:
+                        matched: mutable bool = true
+                        for offset in 0..<path.count |matched, offset, seen, path, start|:
+                            matched <- false if seen[start + offset] != path[offset]
+                        return true if matched
+                    start <- index + 1
+                index <- index + 1
+            return false
+
+        def proof_record_path(seen: mutable darray[u8]&, path: darray[u8]&) -> void:
+            for byte in path |seen|:
+                seen.push(byte)
+            seen.push(0)
+
+        # Parse one physical line as an include directive. Both `include "x"` and the
+        # compiler-compatible `#include "x"` spelling are accepted.
+        def proof_include_path(line: darray[u8]&) -> darray[u8]:
+            empty: mutable darray[u8] = []
+            cursor: mutable usize = 0
+            while cursor < line.count |cursor, line|:
+                break if line[cursor] != 32 and line[cursor] != 9
+                cursor <- cursor + 1
+            cursor <- cursor + 1 if cursor < line.count and line[cursor] == 35
+            while cursor < line.count |cursor, line|:
+                break if line[cursor] != 32 and line[cursor] != 9
+                cursor <- cursor + 1
+            keyword: sview = "include"
+            return empty if cursor + 7 > line.count
+            for keyword_index in 0..<7 |empty, line, cursor, keyword|:
+                return empty if line[cursor + keyword_index] != sview_at(keyword, keyword_index)
+            cursor <- cursor + 7
+            return empty if cursor >= line.count or (line[cursor] != 32 and line[cursor] != 9)
+            while cursor < line.count |cursor, line|:
+                break if line[cursor] != 32 and line[cursor] != 9
+                cursor <- cursor + 1
+            return empty if cursor >= line.count or line[cursor] != 34
+            cursor <- cursor + 1
+            captured: mutable darray[u8] = []
+            while cursor < line.count |cursor, line, captured|:
+                break if line[cursor] == 34
+                captured.push(line[cursor])
+                cursor <- cursor + 1
+            return empty if cursor >= line.count or line[cursor] != 34
+            return captured
+
+        def proof_expand_file(path: darray[u8]&, output: mutable darray[u8]&, seen: mutable darray[u8]&, depth: i64, failed: mutable bool&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            if depth > 64:
+                failed <- true
+                return
+            return if proof_path_seen(seen, path)
+            proof_record_path(seen, path)
+            path_storage: mutable darray[u8] = []
+            path_storage.extend(path)
+            path_storage.push(0)
+            path_cstr: cstr = (&path_storage[0]).cast[cstr] can Unsafe.PointerCast
+            contents: darray[u8] = proof_read_file(path_cstr)
+            if contents.count == 0:
+                failed <- true
+                return
+            directory: darray[u8] = proof_path_directory(path)
+            line: mutable darray[u8] = []
+            index: mutable usize = 0
+            while index <= contents.count |index, contents, line, output, seen, directory, path, depth, failed|:
+                at_end: bool = index == contents.count
+                byte: u8 = 10 if at_end else contents[index]
+                if byte == 10:
+                    included: darray[u8] = proof_include_path(line)
+                    if included.count > 0:
+                        resolved: darray[u8] = proof_resolve_include(directory, included)
+                        proof_expand_file(resolved, output, seen, depth + 1, failed)
+                    else:
+                        output.extend(line)
+                        output.push(10)
+                    line <- line.truncate(0)
+                else:
+                    line.push(byte)
+                index <- index + 1
+
+        public:
+            def proof_import_source(path: darray[u8]&, failed: mutable bool&) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+                output: mutable darray[u8] = []
+                seen: mutable darray[u8] = []
+                normalized: mutable darray[u8] = proof_normalize_path(path)
+                proof_expand_file(normalized, &output, &seen, 0, failed)
+                return output
