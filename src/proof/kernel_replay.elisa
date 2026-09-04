@@ -2107,12 +2107,16 @@ module ElisaProofKernelReplay:
             borrow_present: mutable darray[bool]
             disjoint_left: mutable darray[usize]
             disjoint_right: mutable darray[usize]
+            # Result events must name calls already replayed in this trace. Fresh region call
+            # arguments must likewise name allocations already consumed before the call.
+            resource_call_events: mutable darray[usize]
+            resource_call_allocations: mutable darray[usize]
             # Empty origin means body-local storage. A non-empty origin is a formal external
             # capability, possibly reached through one or more local borrow aliases.
             binding_origin_places: mutable darray[ProofKernelReplayResourcePlace]
 
         def proof_kernel_replay_resource_empty() -> ProofKernelReplayResourceState:
-            return ProofKernelReplayResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], active_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], binding_origin_places: []}
+            return ProofKernelReplayResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], active_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], resource_call_events: [], resource_call_allocations: [], binding_origin_places: []}
 
         def proof_kernel_replay_resource_copy(source: ProofKernelReplayResourceState&, target: mutable ProofKernelReplayResourceState&) -> void:
             target.binding_names.clear()
@@ -2130,6 +2134,8 @@ module ElisaProofKernelReplay:
             target.borrow_present.clear()
             target.disjoint_left.clear()
             target.disjoint_right.clear()
+            target.resource_call_events.clear()
+            target.resource_call_allocations.clear()
             target.binding_origin_places.clear()
             target.binding_names.extend(source.binding_names)
             target.binding_reference.extend(source.binding_reference)
@@ -2146,6 +2152,8 @@ module ElisaProofKernelReplay:
             target.borrow_present.extend(source.borrow_present)
             target.disjoint_left.extend(source.disjoint_left)
             target.disjoint_right.extend(source.disjoint_right)
+            target.resource_call_events.extend(source.resource_call_events)
+            target.resource_call_allocations.extend(source.resource_call_allocations)
             target.binding_origin_places.extend(source.binding_origin_places)
 
         # A lexical resource scope may introduce and discharge its own region, but it cannot
@@ -2315,6 +2323,7 @@ module ElisaProofKernelReplay:
                     # must consume this exact event before any callee effect is accepted.
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
                     return false if not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
+                    state.resource_call_allocations.push(root)
                     continue
                 if node.kind == "resource-region-return":
                     return false if not proof_kernel_replay_resource_region_external(state, node.name) or not proof_kernel_replay_resource_region_active(state, node.name)
@@ -2325,6 +2334,8 @@ module ElisaProofKernelReplay:
                     target_slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
                     return false if target_slot >= state.binding_names.count or target_slot >= state.binding_moved.count or state.binding_moved[target_slot]
                     return false if target_slot >= state.borrow_present.count or state.borrow_present[target_slot]
+                    target_place: ProofKernelReplayResourcePlace = ProofKernelReplayResourcePlace{root: node.name, path_root: 0, depth: 0, whole: true}
+                    return false if proof_kernel_replay_resource_has_borrow_overlap(nodes, state, target_place, state.binding_names.count)
                     state.binding_region[target_slot] <- node.secondary_name
                     state.binding_region_live[target_slot] <- true
                     continue
@@ -2357,6 +2368,11 @@ module ElisaProofKernelReplay:
                     return false if source_slot >= state.binding_names.count or target_slot >= state.binding_names.count
                     return false if proof_kernel_replay_resource_binding_region(state, source_slot) != node.secondary_name
                     return false if not proof_kernel_replay_resource_binding_region_is_live(state, source_slot)
+                    return false if source_slot >= state.binding_moved.count or state.binding_moved[source_slot]
+                    return false if target_slot >= state.binding_moved.count or state.binding_moved[target_slot]
+                    return false if target_slot < state.borrow_present.count and state.borrow_present[target_slot]
+                    target_place: ProofKernelReplayResourcePlace = ProofKernelReplayResourcePlace{root: node.name, path_root: 0, depth: 0, whole: true}
+                    return false if proof_kernel_replay_resource_has_borrow_overlap(nodes, state, target_place, state.binding_names.count)
                     state.binding_region[target_slot] <- node.secondary_name
                     state.binding_region_live[target_slot] <- true
                     continue
@@ -2447,6 +2463,7 @@ module ElisaProofKernelReplay:
                     state.binding_moved[slot] <- true
                     continue
                 if node.kind == "resource-call-result":
+                    return false if not any prior_call in state.resource_call_events where prior_call == node.left
                     call_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
                     return false if not call_located.known or call_located.node.kind != "resource-call" or call_located.node.name == ""
                     call: ElisaProofKernelCore::ProofKernelNode = call_located.node
@@ -2490,6 +2507,7 @@ module ElisaProofKernelReplay:
                     continue
                 if node.kind == "resource-call":
                     return false if not proof_kernel_replay_resource_call(nodes, children, state, effects, node, depth + 1)
+                    state.resource_call_events.push(root)
                     continue
                 return false
             return true
@@ -2524,6 +2542,7 @@ module ElisaProofKernelReplay:
             if argument.operator == "region-new":
                 allocation: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, argument.left)
                 return (false, empty, state.binding_names.count, false, false) if not allocation.known or allocation.node.kind != "resource-region-call-alloc" or allocation.node.secondary_name != argument.secondary_name
+                return (false, empty, state.binding_names.count, false, false) if not any prior_allocation in state.resource_call_allocations where prior_allocation == argument.left
                 return (false, empty, state.binding_names.count, false, false) if not proof_kernel_replay_resource_region_active(state, argument.secondary_name)
                 return (false, empty, state.binding_names.count, false, false) if not proof_kernel_replay_arena_valid(nodes, children, [], allocation.node.left)
                 # A fresh allocation has no pre-existing caller place and is writable for the
