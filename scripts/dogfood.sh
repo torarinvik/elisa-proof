@@ -298,7 +298,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 assert report["status"] == "proved"
-assert report["source_goal_binding"] == {"bound": True, "goal_id": 1}
+assert report["source_goal_binding"] == {"bound": True, "goal_id": 1, "previously_proven": True}
 assert report["tactic"]["certificate_replayed"] is True
 assert report["branches"]["left"]["branches"]["right"]["solved"] is True
 print("dogfood tactic_script_target_nested_branch: source-bound tree certificate passed")
@@ -343,12 +343,37 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 binding = report["source_goal_binding"]
 assert report["status"] == "proved"
-assert binding == {"bound": True, "goal_id": 7}
+assert binding == {"bound": True, "goal_id": 7, "previously_proven": True}
 assert report["tactic"]["status"] == "proved"
 assert report["tactic"]["certificate_replayed"] is True
 assert len(report["state"]["initial_facts"]) == 1
 assert report["state"]["initial_goal"] == report["state"]["goal"]
 print("dogfood tactic_script_target: imported goal and facts were bound before replay")
+PY
+repair_target_output="$REPORT_DIR/tactic-script-repair-target.json"
+set +e
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" >"$repair_target_output"
+repair_target_status=$?
+set -e
+if [[ "$repair_target_status" -ne 0 ]]; then
+    printf 'dogfood failed: source-bound tactic did not repair an open goal (exit %s)\n' "$repair_target_status" >&2
+    exit 1
+fi
+python3 - "$repair_target_output" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["admission_scope"] == "target"
+assert report["source"]["status"] == "failed"
+assert report["source"]["complete"] is False
+assert report["source"]["admissible"] is True
+assert report["source_goal_binding"] == {"bound": True, "goal_id": 1, "previously_proven": False}
+assert report["tactic"]["certificate_replayed"] is True
+assert [step["action"] for step in report["state"]["trace"]] == ["rewrite", "decide"]
+print("dogfood tactic_script_repair_target: an open imported goal was independently repaired")
 PY
 forged_target_output="$REPORT_DIR/tactic-script-target-forged.json"
 set +e
@@ -366,7 +391,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 assert report["status"] == "failed"
-assert report["source_goal_binding"] == {"bound": True, "goal_id": 7}
+assert report["source_goal_binding"] == {"bound": True, "goal_id": 7, "previously_proven": True}
 assert report["tactic"]["valid"] is False
 assert report["state"]["initial_goal"] == {"kind": "invalid"}
 assert "source-bound" in report["tactic"]["reason"]

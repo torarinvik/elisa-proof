@@ -74,6 +74,12 @@ source proof. The command imports and checks the Elisa source, then requires the
 transition trace and final certificate to replay independently; an optional unsigned
 `source_fingerprint` makes stale scripts fail closed. The result is a compact
 `elisa-proof-tactic-result-v1` document containing the source-goal binding, final state, and trace.
+For a source-bound script, top-level `status: "proved"` means the selected target was admitted; it
+does not claim that every source obligation is closed. The nested `source.complete` field retains
+that whole-program verdict, `admission_scope` is `target`, and `source_goal_binding.previously_proven`
+distinguishes replay of an existing certificate from repair of an open goal. Target repair remains
+blocked by import failures, compiler semantic errors, or any certificate replay gap. Portable
+scripts with an explicit `initial` state still require the complete imported source to pass.
 A branch action is the final parent action and carries exactly two child action scripts under
 `branches`; each child starts from the state produced by `split`/`cases`, and the independent
 `proof_tactic_json_tree_certificate_replay` checks every nested child certificate and parent-to-

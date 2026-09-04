@@ -1118,16 +1118,41 @@ if [[ "$portable_nested_cases_status" -ne 0 ]]; then
     printf 'proof test matrix failed: nested portable cases tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target_nested_branch.json" "$ROOT_DIR/examples/verified_branch.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source_goal_binding"] == {"bound": True, "goal_id": 1}; assert report["tactic"]["certificate_replayed"] is True; assert report["branches"]["left"]["branches"]["right"]["solved"] is True'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target_nested_branch.json" "$ROOT_DIR/examples/verified_branch.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source_goal_binding"] == {"bound": True, "goal_id": 1, "previously_proven": True}; assert report["tactic"]["certificate_replayed"] is True; assert report["branches"]["left"]["branches"]["right"]["solved"] is True'
 source_nested_branch_status=${PIPESTATUS[0]}
 if [[ "$source_nested_branch_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound nested branch tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source_goal_binding"] == {"bound": True, "goal_id": 7}; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 1'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source_goal_binding"] == {"bound": True, "goal_id": 7, "previously_proven": True}; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 1'
 source_bound_script_status=${PIPESTATUS[0]}
 if [[ "$source_bound_script_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic script\n' >&2
+    exit 1
+fi
+
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert report["source_goal_binding"] == {"bound": True, "goal_id": 1, "previously_proven": False}; assert report["tactic"]["certificate_replayed"] is True'
+repair_target_status=${PIPESTATUS[0]}
+if [[ "$repair_target_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: source-bound tactic could not repair an open target\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/rejected_tactic_repair_semantic.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is False; assert report["tactic"]["certificate_replayed"] is True'
+semantic_repair_status=${PIPESTATUS[0]}
+set -e
+if [[ "$semantic_repair_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: target tactic laundered a semantic source error\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_forged_resource_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["goal_id"] == 0; assert report["tactic"]["valid"] is False; assert report["tactic"]["certificate_replayed"] is False'
+resource_target_status=${PIPESTATUS[0]}
+set -e
+if [[ "$resource_target_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: proposition tactic replaced a resource certificate\n' >&2
     exit 1
 fi
 

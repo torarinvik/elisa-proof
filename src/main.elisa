@@ -917,17 +917,31 @@ def proof_push_json_tactic_tree_state(buffer: mutable darray[u8]&, tree: ProofTa
             proof_push(buffer, "}")
     proof_push(buffer, "}")
 
-def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTacticJsonResult, state: ProofTacticState&, tree: ProofTacticJsonTree&, source_bytes: usize, source_fingerprint: u32, source_status: sview, source_match: bool, target_bound: bool, target_goal_id: usize) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_tactic_result_admitted(result: ProofTacticJsonResult, source_status: sview, source_admissible: bool, source_match: bool, target_bound: bool) -> bool:
     tactic_admitted: bool = result.valid and result.certificate_replayed and source_match
-    admitted: bool = tactic_admitted and source_status == "proved"
+    return tactic_admitted and (source_status == "proved" or target_bound and source_admissible)
+
+def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTacticJsonResult, state: ProofTacticState&, tree: ProofTacticJsonTree&, source_bytes: usize, source_fingerprint: u32, source_status: sview, source_admissible: bool, source_match: bool, target_bound: bool, target_goal_id: usize, target_previously_proven: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    tactic_admitted: bool = result.valid and result.certificate_replayed and source_match
+    # A source-bound script proves exactly one imported obligation. It may therefore repair that
+    # obligation while other logical goals remain open, but parse/import failures, semantic errors,
+    # and replay gaps still poison the source boundary. An unbound portable script retains the
+    # stricter whole-source gate because it has no proposition-level link to the imported program.
+    admitted: bool = proof_tactic_result_admitted(result, source_status, source_admissible, source_match, target_bound)
     proof_push(buffer, "{\"format\":\"elisa-proof-tactic-result-v1\",\"status\":")
     proof_push_json_string(buffer, "proved" if admitted else "failed")
+    proof_push(buffer, ",\"admission_scope\":")
+    proof_push_json_string(buffer, "target" if target_bound else "portable")
     proof_push(buffer, ",\"source\":{\"bytes\":")
     proof_push_number(buffer, source_bytes.u32())
     proof_push(buffer, ",\"fingerprint\":")
     proof_push_number(buffer, source_fingerprint)
     proof_push(buffer, ",\"status\":")
     proof_push_json_string(buffer, source_status)
+    proof_push(buffer, ",\"complete\":")
+    proof_push(buffer, "true" if source_status == "proved" else "false")
+    proof_push(buffer, ",\"admissible\":")
+    proof_push(buffer, "true" if source_admissible else "false")
     proof_push(buffer, ",\"fingerprint_match\":")
     proof_push(buffer, "true" if source_match else "false")
     proof_push(buffer, "},\"source_goal_binding\":{\"bound\":")
@@ -937,6 +951,8 @@ def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTact
         proof_push_number(buffer, target_goal_id.u32())
     else:
         proof_push(buffer, "null")
+    proof_push(buffer, ",\"previously_proven\":")
+    proof_push(buffer, "true" if target_previously_proven else "false")
     proof_push(buffer, "},\"tactic\":{\"status\":")
     proof_push_json_string(buffer, "proved" if tactic_admitted else "failed")
     proof_push(buffer, ",\"valid\":")
@@ -1050,6 +1066,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
     if tactic_json_output:
         source_status: mutable sview = "proved"
         source_status <- "failed" if report.failed > 0 or report.replay_gaps > 0 or semantic_errors > 0
+        source_admissible: bool = not import_failed and semantic_errors == 0 and report.replay_gaps == 0
         script_source: mutable darray[u8] = proof_read_file(slots[script_slot].cast[cstr])
         # A source-bound tactic state must be rebuilt in the tactic store. AST values are opaque
         # handles tied to the imported parser store, so export the selected attempt to the same
@@ -1079,6 +1096,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
                 source_match: mutable bool = false
                 target_bound: mutable bool = false
                 target_goal_id: mutable usize = 0
+                target_previously_proven: mutable bool = false
                 script_arena: mutable Arena = zeroed
                 scratch_empty: mutable darray[Ast::Expr] = []
                 scratch_states: mutable darray[ProofTacticState] = []
@@ -1092,6 +1110,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
                         target: (present: bool, valid: bool, goal_id: usize) = proof_tactic_json_target(parsed_script.value)
                         target_bound <- target.present
                         target_goal_id <- target.goal_id
+                        target_previously_proven <- report.goal_attempts[target.goal_id].proven if target.present and target.valid and target.goal_id < report.goal_attempts.count
                         if target.present:
                             if target.valid:
                                 if source_target_state.count > 0:
@@ -1116,9 +1135,9 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
                         source_match <- false
                         tactic_result.reason <- "proof script is not valid JSON"
                 output: mutable darray[u8] = []
-                proof_push_json_tactic_result(&output, tactic_result, &tactic_state, &tactic_tree, source_bytes, source_fingerprint, source_status, source_match, target_bound, target_goal_id)
+                proof_push_json_tactic_result(&output, tactic_result, &tactic_state, &tactic_tree, source_bytes, source_fingerprint, source_status, source_admissible, source_match, target_bound, target_goal_id, target_previously_proven)
                 proof_write(output)
-                admitted: bool = tactic_result.valid and tactic_result.certificate_replayed and source_match and source_status == "proved"
+                admitted: bool = proof_tactic_result_admitted(tactic_result, source_status, source_admissible, source_match, target_bound)
                 return 0 if admitted else 1
     if json_output:
         json: mutable darray[u8] = []
