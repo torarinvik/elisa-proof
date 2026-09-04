@@ -2246,6 +2246,48 @@ module ElisaProofKernelReplay:
                 return true if state.active_regions[index] == region
             return false
 
+        # Allocation operands are source expressions, not resource-transition roots. A region
+        # value copied into a fresh allocation would otherwise smuggle a shorter lifetime into the
+        # destination region. Keep this check independent of the AST producer: tracked identifiers
+        # are the only values whose region provenance is known here, while an untracked scalar name
+        # remains an opaque value for the source semantic checker to resolve.
+        def proof_kernel_replay_resource_value_term_has_no_region(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, state: ProofKernelReplayResourceState&, root: usize, depth: usize) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= 127 or root >= nodes.count
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "int" or node.kind == "bool" or node.kind == "float" or node.kind == "string" or node.kind == "char" or node.kind == "shorthand" or node.kind == "absent":
+                return true
+            if node.kind == "ident":
+                slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
+                return slot >= state.binding_names.count or proof_kernel_replay_resource_binding_region(state, slot) == ""
+            # The neutral `checked-get` node does not retain its recovery expression. Treating it
+            # as a unary expression here could hide a region value in that recovery branch.
+            return false if node.kind == "checked-get"
+            if node.kind == "unary" or node.kind == "move" or node.kind == "field" or node.kind == "scope" or node.kind == "call_arg" or node.kind == "field-init":
+                return proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1)
+            if node.kind == "binary" or node.kind == "index" or node.kind == "dict_entry" or node.kind == "checked-index":
+                return proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1) and proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.right, depth + 1)
+            if node.kind == "slice" or node.kind == "if":
+                return proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1) and proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.right, depth + 1) and proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.auxiliary, depth + 1)
+            if node.kind == "quantifier":
+                return proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1) and proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.right, depth + 1)
+            if node.kind == "index-n" or node.kind == "call" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "construct" or node.kind == "record-update":
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                if node.kind == "index-n" or node.kind == "call" or node.kind == "construct" or node.kind == "record-update":
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1)
+                for index in 0..<node.children_count |index, node, children, nodes, state, depth|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, child.value, depth + 1)
+                return true
+            # Resource transitions are never valid as expression operands. This also makes a
+            # malformed certificate fail closed instead of treating an ignored node kind as a
+            # scalar value.
+            return false
+
         def proof_kernel_replay_resource_region_external(state: ProofKernelReplayResourceState&, region: sview) -> bool:
             return any external in state.external_regions where external == region
 
@@ -2365,6 +2407,7 @@ module ElisaProofKernelReplay:
                 if node.kind == "resource-region-alloc":
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
                     return false if not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, 0)
                     return false if not proof_kernel_replay_resource_binding_name_available(state, node.name)
                     state.binding_names.push(node.name)
                     state.binding_scope_depth.push(state.scope_depth)
@@ -2385,10 +2428,12 @@ module ElisaProofKernelReplay:
                 if node.kind == "resource-region-alloc-discard":
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
                     return false if not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, 0)
                     continue
                 if node.kind == "resource-region-return-alloc":
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
                     return false if not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, 0)
                     return false if not proof_kernel_replay_resource_region_external(state, node.secondary_name)
                     state.resource_return_alloc_regions.push(node.secondary_name)
                     state.resource_return_witnesses.push(root)
@@ -2399,6 +2444,7 @@ module ElisaProofKernelReplay:
                     # must consume this exact event before any callee effect is accepted.
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
                     return false if not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, 0)
                     state.resource_call_allocations.push(root)
                     continue
                 if node.kind == "resource-region-return":
@@ -2420,6 +2466,7 @@ module ElisaProofKernelReplay:
                 if node.kind == "resource-region-rebind-alloc":
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
                     return false if not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, 0)
                     target_slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
                     return false if target_slot >= state.binding_names.count or target_slot >= state.binding_moved.count or state.binding_moved[target_slot]
                     return false if not proof_kernel_replay_resource_binding_is_writable(state, target_slot)
