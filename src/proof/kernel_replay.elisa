@@ -2091,6 +2091,8 @@ module ElisaProofKernelReplay:
 
         struct ProofKernelReplayResourceState:
             binding_names: mutable darray[sview]
+            binding_scope_depth: mutable darray[usize]
+            scope_depth: mutable usize
             binding_reference: mutable darray[bool]
             binding_mutable_reference: mutable darray[bool]
             binding_writable: mutable darray[bool]
@@ -2125,10 +2127,11 @@ module ElisaProofKernelReplay:
             binding_origin_places: mutable darray[ProofKernelReplayResourcePlace]
 
         def proof_kernel_replay_resource_empty() -> ProofKernelReplayResourceState:
-            return ProofKernelReplayResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], active_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], resource_call_events: [], resource_call_allocations: [], resource_call_allocations_used: [], resource_call_results: [], resource_return_alloc_regions: [], pending_join_moves: [], binding_origin_places: []}
+            return ProofKernelReplayResourceState{binding_names: [], binding_scope_depth: [], scope_depth: 0, binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], active_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], resource_call_events: [], resource_call_allocations: [], resource_call_allocations_used: [], resource_call_results: [], resource_return_alloc_regions: [], pending_join_moves: [], binding_origin_places: []}
 
         def proof_kernel_replay_resource_copy(source: ProofKernelReplayResourceState&, target: mutable ProofKernelReplayResourceState&) -> void:
             target.binding_names.clear()
+            target.binding_scope_depth.clear()
             target.binding_reference.clear()
             target.binding_mutable_reference.clear()
             target.binding_writable.clear()
@@ -2151,6 +2154,8 @@ module ElisaProofKernelReplay:
             target.pending_join_moves.clear()
             target.binding_origin_places.clear()
             target.binding_names.extend(source.binding_names)
+            target.binding_scope_depth.extend(source.binding_scope_depth)
+            target.scope_depth <- source.scope_depth
             target.binding_reference.extend(source.binding_reference)
             target.binding_mutable_reference.extend(source.binding_mutable_reference)
             target.binding_writable.extend(source.binding_writable)
@@ -2192,6 +2197,12 @@ module ElisaProofKernelReplay:
                 index <- index - 1
                 return index if state.binding_names[index] == name
             return state.binding_names.count
+
+        def proof_kernel_replay_resource_binding_name_available(state: ProofKernelReplayResourceState&, name: sview) -> bool:
+            return false if name == ""
+            for index in 0..<state.binding_names.count |index, state, name|:
+                return false if index >= state.binding_scope_depth.count or state.binding_scope_depth[index] == state.scope_depth and state.binding_names[index] == name
+            return true
 
         def proof_kernel_replay_resource_has_pending_join(state: ProofKernelReplayResourceState&) -> bool:
             for pending in state.pending_join_moves:
@@ -2309,6 +2320,7 @@ module ElisaProofKernelReplay:
                         child_roots.push(child.value)
                     child_state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
                     proof_kernel_replay_resource_copy(state, &child_state)
+                    child_state.scope_depth <- state.scope_depth + 1
                     return false if not proof_kernel_replay_resource_events(nodes, children, child_roots, &child_state, effects, depth + 1)
                     return false if not proof_kernel_replay_resource_scope_preserves_parent(state, child_state)
                     for index in 0..<state.binding_moved.count |index, state, child_state|:
@@ -2334,7 +2346,9 @@ module ElisaProofKernelReplay:
                 if node.kind == "resource-region-alloc":
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
                     return false if not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
+                    return false if not proof_kernel_replay_resource_binding_name_available(state, node.name)
                     state.binding_names.push(node.name)
+                    state.binding_scope_depth.push(state.scope_depth)
                     state.binding_reference.push((node.auxiliary & 2) != 0)
                     state.binding_mutable_reference.push((node.auxiliary & 4) != 0)
                     state.binding_writable.push((node.auxiliary & 1) != 0)
@@ -2394,7 +2408,9 @@ module ElisaProofKernelReplay:
                     source_slot: usize = proof_kernel_replay_resource_lookup(state, source.place.root)
                     return false if source_slot >= state.binding_names.count or proof_kernel_replay_resource_binding_region(state, source_slot) != node.secondary_name
                     return false if not proof_kernel_replay_resource_binding_region_is_live(state, source_slot) or not proof_kernel_replay_resource_region_active(state, node.secondary_name)
+                    return false if not proof_kernel_replay_resource_binding_name_available(state, node.name)
                     state.binding_names.push(node.name)
+                    state.binding_scope_depth.push(state.scope_depth)
                     state.binding_reference.push((node.auxiliary & 2) != 0)
                     state.binding_mutable_reference.push((node.auxiliary & 4) != 0)
                     state.binding_writable.push((node.auxiliary & 1) != 0)
@@ -2455,7 +2471,9 @@ module ElisaProofKernelReplay:
                         origin_place <- ProofKernelReplayResourcePlace{root: node.name, path_root: 0, depth: 0, whole: true}
                     external_region: sview = node.secondary_name if node.operator == "external-shared" or node.operator == "external-mutable" else ""
                     return false if external_region != "" and not proof_kernel_replay_resource_region_active(state, external_region)
+                    return false if not proof_kernel_replay_resource_binding_name_available(state, node.name)
                     state.binding_names.push(node.name)
+                    state.binding_scope_depth.push(state.scope_depth)
                     state.binding_reference.push(is_reference)
                     state.binding_mutable_reference.push(is_mutable_reference)
                     state.binding_writable.push(node.auxiliary == 1)
@@ -2548,7 +2566,9 @@ module ElisaProofKernelReplay:
                             mapped_region <- call_child_node.node.secondary_name
                     return false if mapped_region == "" or mapped_region != node.secondary_name or not proof_kernel_replay_resource_region_active(state, mapped_region)
                     return false if (node.auxiliary & 2) == 0
+                    return false if not proof_kernel_replay_resource_binding_name_available(state, node.name)
                     state.binding_names.push(node.name)
+                    state.binding_scope_depth.push(state.scope_depth)
                     state.binding_reference.push(true)
                     state.binding_mutable_reference.push((node.auxiliary & 4) != 0)
                     state.binding_writable.push((node.auxiliary & 1) != 0)
