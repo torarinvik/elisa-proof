@@ -1089,6 +1089,8 @@ default_theorem_catalog_status=${PIPESTATUS[0]}
 theorem_suggestion_status=${PIPESTATUS[0]}
 "$ROOT_DIR/build/elisa-proof" --suggest 1 "$ROOT_DIR/examples/rejected_lemma.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["source"]["admissible"] is False; assert result["candidates"] == []'
 unverified_theorem_suggestion_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --suggest 8 "$ROOT_DIR/examples/theorem_suggestion_defaults.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["source"]["complete"] is True; assert [candidate["theorem"] for candidate in result["candidates"]] == ["safe_default"]; candidate = result["candidates"][0]; assert candidate["bindings"][1] == {"parameter": "amount", "value": {"kind": "int", "value": 7}}; assert candidate["applicable"] is True'
+theorem_suggestion_default_status=${PIPESTATUS[0]}
 python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/theorem_suggestions.elisa" <<'PY'
 import subprocess, sys
 first = subprocess.check_output([sys.argv[1], "--suggest", "4", sys.argv[2]])
@@ -1101,7 +1103,7 @@ missing_theorem_suggestion_statuses=("${PIPESTATUS[@]}")
 missing_theorem_suggestion_status=${missing_theorem_suggestion_statuses[0]}
 missing_theorem_suggestion_json_status=${missing_theorem_suggestion_statuses[1]}
 set -e
-if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$focused_open_goal_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 || "$stable_goal_fingerprint_status" -ne 0 || "$theorem_catalog_status" -ne 0 || "$rejected_theorem_catalog_status" -ne 0 || "$default_theorem_catalog_status" -ne 0 || "$theorem_suggestion_status" -ne 0 || "$unverified_theorem_suggestion_status" -ne 0 || "$deterministic_theorem_suggestion_status" -ne 0 || "$missing_theorem_suggestion_status" -ne 2 || "$missing_theorem_suggestion_json_status" -ne 0 ]]; then
+if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$focused_open_goal_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 || "$stable_goal_fingerprint_status" -ne 0 || "$theorem_catalog_status" -ne 0 || "$rejected_theorem_catalog_status" -ne 0 || "$default_theorem_catalog_status" -ne 0 || "$theorem_suggestion_status" -ne 0 || "$unverified_theorem_suggestion_status" -ne 0 || "$theorem_suggestion_default_status" -ne 0 || "$deterministic_theorem_suggestion_status" -ne 0 || "$missing_theorem_suggestion_status" -ne 2 || "$missing_theorem_suggestion_json_status" -ne 0 ]]; then
     printf 'proof test matrix failed: repair diagnostics were not bound to exact goals\n' >&2
     exit 1
 fi
