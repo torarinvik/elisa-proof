@@ -1079,8 +1079,14 @@ stable_goal_fingerprint_status=$?
 focused_overflow_goal_status=$?
 "$ROOT_DIR/build/elisa-proof" --goal -1 "$ROOT_DIR/examples/verified.elisa" >/dev/null
 focused_negative_goal_status=$?
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["format"] == "elisa-proof-theorems-v1"; assert catalog["source"]["complete"] is True; assert [item["name"] for item in catalog["theorems"]] == ["nonnegative", "named_nonnegative"]; assert all(item["verified"] and item["signature_valid"] for item in catalog["theorems"]); assert catalog["theorems"][0]["parameters"] == ["x"]; assert len(catalog["theorems"][1]["requires"]) == 2; assert len(catalog["theorems"][1]["ensures"]) == 1'
+theorem_catalog_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/rejected_lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["source"]["complete"] is False; assert len(catalog["theorems"]) == 1; theorem = catalog["theorems"][0]; assert theorem["name"] == "unsound"; assert theorem["verified"] is False; assert theorem["verification_reason"] == "body-unverified"; assert theorem["signature_valid"] is True'
+rejected_theorem_catalog_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma_default_catalog.elisa" | python3 -c 'import json, sys; theorem = json.load(sys.stdin)["theorems"][0]; assert theorem["verified"] is True; assert theorem["parameters"] == ["x", "amount"]; assert theorem["parameter_defaults"] == [None, {"kind": "int", "value": 7}]'
+default_theorem_catalog_status=${PIPESTATUS[0]}
 set -e
-if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$focused_open_goal_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 || "$stable_goal_fingerprint_status" -ne 0 ]]; then
+if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$focused_open_goal_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 || "$stable_goal_fingerprint_status" -ne 0 || "$theorem_catalog_status" -ne 0 || "$rejected_theorem_catalog_status" -ne 0 || "$default_theorem_catalog_status" -ne 0 ]]; then
     printf 'proof test matrix failed: repair diagnostics were not bound to exact goals\n' >&2
     exit 1
 fi

@@ -693,6 +693,70 @@ def proof_push_json_declaration(buffer: mutable darray[u8]&, report: ProofReport
     proof_push(buffer, "true" if declaration.structural else "false")
     proof_push(buffer, "}")
 
+def proof_push_json_theorem(buffer: mutable darray[u8]&, report: ProofReport&, theorem: ProofTheoremSummary) -> void can[Memory.Allocate, Abort.Panic]:
+    valid_parameters: bool = theorem.parameters_start <= report.theorem_parameters.count and theorem.parameters_count <= report.theorem_parameters.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_has_defaults.count and theorem.parameters_count <= report.theorem_parameter_has_defaults.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_defaults.count and theorem.parameters_count <= report.theorem_parameter_defaults.count - theorem.parameters_start
+    valid_requires: bool = theorem.requires_start <= report.theorem_requires.count and theorem.requires_count <= report.theorem_requires.count - theorem.requires_start
+    valid_ensures: bool = theorem.ensures_start <= report.theorem_ensures.count and theorem.ensures_count <= report.theorem_ensures.count - theorem.ensures_start
+    valid_decreases: bool = theorem.decreases_start <= report.theorem_decreases.count and theorem.decreases_count <= report.theorem_decreases.count - theorem.decreases_start
+    signature_valid: bool = valid_parameters and valid_requires and valid_ensures and valid_decreases
+    proof_push(buffer, "{\"name\":")
+    proof_push_json_string(buffer, theorem.name)
+    proof_push(buffer, ",\"line\":")
+    proof_push_number(buffer, theorem.line)
+    proof_push(buffer, ",\"verified\":")
+    proof_push(buffer, "true" if theorem.verified else "false")
+    proof_push(buffer, ",\"verification_reason\":")
+    proof_push_json_string(buffer, theorem.verification_reason)
+    proof_push(buffer, ",\"recursive\":")
+    proof_push(buffer, "true" if theorem.recursive else "false")
+    proof_push(buffer, ",\"signature_valid\":")
+    proof_push(buffer, "true" if signature_valid else "false")
+    proof_push(buffer, ",\"parameters\":[")
+    if valid_parameters:
+        for index in 0..<theorem.parameters_count |index, theorem, report, buffer|:
+            proof_push(buffer, ",") if index > 0
+            proof_push_json_string(buffer, report.theorem_parameters[theorem.parameters_start + index])
+    proof_push(buffer, "],\"parameter_defaults\":[")
+    if valid_parameters:
+        for index in 0..<theorem.parameters_count |index, theorem, report, buffer|:
+            proof_push(buffer, ",") if index > 0
+            parameter_index: usize = theorem.parameters_start + index
+            if report.theorem_parameter_has_defaults[parameter_index]:
+                proof_push_json_expr(buffer, report.theorem_parameter_defaults[parameter_index])
+            else:
+                proof_push(buffer, "null")
+    proof_push(buffer, "],\"requires\":[")
+    if valid_requires:
+        for index in 0..<theorem.requires_count |index, theorem, report, buffer|:
+            proof_push(buffer, ",") if index > 0
+            proof_push_json_expr(buffer, report.theorem_requires[theorem.requires_start + index])
+    proof_push(buffer, "],\"ensures\":[")
+    if valid_ensures:
+        for index in 0..<theorem.ensures_count |index, theorem, report, buffer|:
+            proof_push(buffer, ",") if index > 0
+            proof_push_json_expr(buffer, report.theorem_ensures[theorem.ensures_start + index])
+    proof_push(buffer, "],\"decreases\":[")
+    if valid_decreases:
+        for index in 0..<theorem.decreases_count |index, theorem, report, buffer|:
+            proof_push(buffer, ",") if index > 0
+            proof_push_json_expr(buffer, report.theorem_decreases[theorem.decreases_start + index])
+    proof_push(buffer, "]}")
+
+def proof_push_json_theorem_catalog(buffer: mutable darray[u8]&, report: ProofReport&, source_bytes: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"format\":\"elisa-proof-theorems-v1\",\"source\":{\"bytes\":")
+    proof_push_number(buffer, source_bytes.u32())
+    proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, "},\"complete\":")
+    proof_push(buffer, "true" if source_complete else "false")
+    proof_push(buffer, ",\"admissible\":")
+    proof_push(buffer, "true" if source_admissible else "false")
+    proof_push(buffer, "},\"theorems\":[")
+    for index in 0..<report.theorem_summaries.count |index, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_json_theorem(buffer, report, report.theorem_summaries[index])
+    proof_push(buffer, "]}\n")
+
 def proof_report_has_open_goals(report: ProofReport&) -> bool:
     for attempt in report.goal_attempts:
         return true if not attempt.proven
@@ -1184,12 +1248,13 @@ def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTact
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
-        proof_push(&usage, "usage: elisa-proof [--json] <file.elisa> | --goal <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
+        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
         proof_write(usage)
         return 2
     slots: mutable cstr&& = argv.cast[mutable cstr&&]
     json_output: mutable bool = false
     goal_json_output: mutable bool = false
+    theorem_json_output: mutable bool = false
     focused_goal_id: mutable usize = 0
     tactic_json_output: mutable bool = false
     script_slot: mutable usize = 0
@@ -1227,6 +1292,14 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
             return 2
         focused_goal_id <- parsed_goal.parsed.usize()
         path_slot <- 3
+    elif proof_cstr_equals(first_argument, "--theorems"):
+        theorem_json_output <- true
+        if argc < 3:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --theorems <file.elisa>\n")
+            proof_write(usage)
+            return 2
+        path_slot <- 2
     path: cstr = slots[path_slot].cast[cstr]
     root_path: mutable darray[u8] = []
     path_index: mutable usize = 0
@@ -1281,6 +1354,13 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
         proof_push_json_focused_goal(&focused, report, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible)
         proof_write(focused)
         return 0 if focused_goal_id < report.goal_attempts.count else 2
+    if theorem_json_output:
+        source_complete: bool = report.failed == 0 and not proof_report_has_open_goals(report) and report.replay_gaps == 0 and semantic_errors == 0 and not import_failed
+        source_admissible: bool = not import_failed and semantic_errors == 0 and report.replay_gaps == 0
+        catalog: mutable darray[u8] = []
+        proof_push_json_theorem_catalog(&catalog, report, source_bytes, source_fingerprint, source_complete, source_admissible)
+        proof_write(catalog)
+        return 0
     if tactic_json_output:
         source_status: mutable sview = "proved"
         source_status <- "failed" if report.failed > 0 or proof_report_has_open_goals(report) or report.replay_gaps > 0 or semantic_errors > 0

@@ -42,6 +42,11 @@ goal exists—including an unresolved goal—and `2` for an invalid or missing I
 carried explicitly as `proved`, `disproved`, `unsupported`, or `unknown` in the response.
 `dependency_index` provides the reverse mapping from theorem/function-summary dependency names to
 the stable goal IDs that consume them, making downstream invalidation direct and deterministic.
+`build/elisa-proof --theorems file.elisa` emits a compact `elisa-proof-theorems-v1` catalog for
+proof search. Each Elisa lemma includes its structured parameters, preconditions, postconditions,
+termination measure, recursion flag, verification state, and rejection reason. Unverified lemmas
+remain discoverable for repair but are never presented as usable theorems; the catalog also carries
+the source completeness and semantic-admissibility gates.
 Goal-generated entries in `findings` also expose their exact `goal_id`; non-goal diagnostics use
 `null`.
 The `action_protocol` capability declaration identifies the Elisa-native `elisa-proof-tactics-v1`
