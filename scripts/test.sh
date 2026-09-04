@@ -28,6 +28,14 @@ if [[ "$region_allocation_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected valid new[r] allocation\n' >&2
     exit 1
 fi
+if [[ "$(basename "$SELF_HOST_COMPILER")" == "elisac-stage1" ]]; then
+    "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/region-generic-allocation.o" "$ROOT_DIR/examples/region_generic_allocation.elisa" >/dev/null 2>&1
+    region_generic_compiler_status=$?
+    if [[ "$region_generic_compiler_status" -ne 0 ]]; then
+        printf 'proof test matrix failed: stage1 rejected region-polymorphic new[r] allocation\n' >&2
+        exit 1
+    fi
+fi
 "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/region-statement.o" "$ROOT_DIR/examples/region_statement.elisa" >/dev/null 2>&1
 region_statement_compiler_status=$?
 if [[ "$region_statement_compiler_status" -ne 0 ]]; then
@@ -60,6 +68,12 @@ if [[ "$region_allocation_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: new[r] allocation/binding/discard transitions were not replayed\n' >&2
     exit 1
 fi
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_generic_allocation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert "resource-region-param" in kinds and "resource-region-return-alloc" in kinds and "resource-region-return" in kinds and "resource-call-region" in kinds and "resource-call-result" in kinds'
+region_generic_probe_status=${PIPESTATUS[1]}
+if [[ "$region_generic_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: region-polymorphic new[r] call/result was not replayed\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert kinds.count("resource-region-open") == 1 and kinds.count("resource-region-close") == 1 and "resource-region-alloc" in kinds and "resource-region-bind" in kinds and "resource-region-alloc-discard" in kinds'
 region_statement_probe_status=${PIPESTATUS[1]}
 if [[ "$region_statement_probe_status" -ne 0 ]]; then
@@ -82,6 +96,18 @@ if [[ "$rejected_region_use_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-region-use.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-use-after-destroy" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: rejected region use report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_generic_unmapped.elisa" >/tmp/elisa-proof-rejected-region-generic.json
+rejected_region_generic_status=$?
+set -e
+if [[ "$rejected_region_generic_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: unmapped region-polymorphic call was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-region-generic.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-call-opaque" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+    printf 'proof test matrix failed: unmapped region-polymorphic call report was incomplete\n' >&2
     exit 1
 fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/pattern_scalar_literals.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "char" for node in report["kernel"]["nodes"])'

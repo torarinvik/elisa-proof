@@ -338,7 +338,11 @@ kernel now also models the sound local region subset: `region r(size)` and `regi
 introduce tracked lifetimes, `new[r] value` records allocation into `@r` whether its result is
 bound or discarded, aliases/reassignments retain the region identity, and explicit or implicit
 region close transitions are replayed. Region-owned values in logical contracts, opaque calls,
-and richer returned-reference expressions remain rejected until their provenance is summarized.
+and opaque calls remain rejected until their provenance is summarized. Exact region-polymorphic
+calls are supported when a pinned reference formal witnesses each `[@r]` parameter: the callee
+summary records the region return and the kernel replays the mapped `resource-call-result` against
+the caller's live region. Scalar-only calls to a region-polymorphic function remain rejected
+because an ambient arena is not a proof of a lifetime mapping.
 The proof checker now carries a separate lexical resource state for a useful ownership slice:
 bounded named places (`&x`, `&box.inner`, and arbitrary named-field paths within the kernel depth
 bound) have stable structural identities,
@@ -358,9 +362,9 @@ therefore makes the inherited root unavailable after the join. Region allocation
 only through the explicit local lifetime transitions described above; richer returned-reference
 forms remain an explicit unsupported boundary. Return and assignment boundaries now distinguish a
 temporary borrow passed to a verified value-returning call from the value that actually escapes;
-direct reference-formal returns may also compose when the actual reference is externally owned,
-while field/conditional/aggregate reference results remain conservative until their source
-provenance is summarized. The
+direct region-polymorphic reference results with an exact mapped `@r` are also replayed, while
+field/conditional/aggregate reference results remain conservative until their source provenance is
+summarized. The
   logical expression engine now accepts verified total-pure calls inside value-match arms while
   retaining the independent rejection of effectful or unresolved calls.
 The architecture leaves those as later proof engines behind the same AST-level obligation interface.

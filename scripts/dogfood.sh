@@ -111,6 +111,8 @@ run_probe for_loop_control_invariant examples/for_loop_control_invariant.elisa 0
 run_probe region_allocation examples/region_allocation.elisa 0
 run_probe region_statement examples/region_statement.elisa 0
 run_probe region_auto_close examples/region_auto_close.elisa 0
+run_probe region_generic_allocation examples/region_generic_allocation.elisa 0
+run_probe rejected_region_generic_unmapped examples/rejected_region_generic_unmapped.elisa 1
 run_probe rejected_region_use_after_destroy examples/rejected_region_use_after_destroy.elisa 1
 run_probe rejected_for_invariant examples/rejected_for_invariant.elisa 1
 run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.elisa 1

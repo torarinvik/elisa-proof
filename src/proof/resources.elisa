@@ -38,6 +38,9 @@ extend ElisaProof:
             # merely because a same-named region was opened again.
             binding_region_live: mutable darray[bool]
             active_regions: mutable darray[sview]
+            # Region parameters are caller-owned capabilities. They remain active across the
+            # callee's return and therefore must not be closed by proof_resource_finish.
+            external_regions: mutable darray[sview]
             borrow_target_slots: mutable darray[usize]
             borrow_target_places: mutable darray[ProofResourcePlace]
             borrow_mutable: mutable darray[bool]
@@ -51,7 +54,7 @@ extend ElisaProof:
             trace_events: mutable darray[usize]
 
         def proof_resource_empty() -> ProofResourceState:
-            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], active_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
+            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], active_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
 
         # Copy into an already-created state. Returning a struct that owns several darrays would
         # hide their allocation region from the self-hosting compiler, so all branch snapshots
@@ -65,6 +68,7 @@ extend ElisaProof:
             target.binding_region.clear()
             target.binding_region_live.clear()
             target.active_regions.clear()
+            target.external_regions.clear()
             target.borrow_target_slots.clear()
             target.borrow_target_places.clear()
             target.borrow_mutable.clear()
@@ -79,6 +83,7 @@ extend ElisaProof:
             target.binding_region.extend(source.binding_region)
             target.binding_region_live.extend(source.binding_region_live)
             target.active_regions.extend(source.active_regions)
+            target.external_regions.extend(source.external_regions)
             target.borrow_target_slots.extend(source.borrow_target_slots)
             target.borrow_target_places.extend(source.borrow_target_places)
             target.borrow_mutable.extend(source.borrow_mutable)
@@ -123,6 +128,25 @@ extend ElisaProof:
                 return true if state.active_regions[index] == region
             return false
 
+        def proof_resource_region_is_external(state: ProofResourceState&, region: sview) -> bool:
+            return any external in state.external_regions where external == region
+
+        # Attach the explicit `@r` lifetime of a formal reference parameter to both the source
+        # state and its serialized bind node. Keeping it on the bind node lets independent replay
+        # validate the same region relation without consulting the AST or the producer tables.
+        def proof_resource_set_binding_region(state: mutable ProofResourceState&, report: mutable ProofReport&, name: sview, region: sview) -> void:
+            return if name == "" or region == ""
+            slot: usize = proof_resource_lookup(state, name)
+            return if slot >= state.binding_names.count
+            state.binding_region[slot] <- region
+            state.binding_region_live[slot] <- proof_resource_region_is_active(state, region)
+            return if state.trace_events.count == 0
+            event: usize = state.trace_events[state.trace_events.count - 1]
+            return if event >= report.kernel_nodes.count
+            return if report.kernel_nodes[event].kind != "resource-bind"
+            return if report.kernel_nodes[event].name != name
+            report.kernel_nodes[event].secondary_name <- region
+
         def proof_resource_binding_region(state: ProofResourceState&, slot: usize) -> sview:
             return state.binding_region[slot] if slot < state.binding_region.count
             return ""
@@ -139,7 +163,7 @@ extend ElisaProof:
         # `region r(size)` form keeps the owner live across following statements, so its close
         # must be a real stack transition rather than the end of a synthetic child scope.
         def proof_resource_close_named_region[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            valid: bool = region != "" and state.active_regions.count > 0 and state.active_regions[state.active_regions.count - 1] == region
+            valid: bool = region != "" and not proof_resource_region_is_external(state, region) and state.active_regions.count > 0 and state.active_regions[state.active_regions.count - 1] == region
             proof_resource_add_failing_obligation(report, "region-destroy-unsupported", position, function_name, "destroy must name the innermost active tracked region") if not valid
             if valid:
                 state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
@@ -167,6 +191,12 @@ extend ElisaProof:
             valid: bool = proof_resource_region_is_active(state, region) and encoded < report.kernel_nodes.count and report.kernel_nodes[encoded].kind != "unsupported"
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "region allocation requires an active lexical region and a kernel-replayable operand") if not valid
             proof_resource_record_event(state, report, "resource-region-alloc-discard", "", encoded, "", region, 0) if valid
+
+        def proof_resource_add_region_return_alloc[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
+            encoded: usize = proof_kernel_encode_expression(operand, &report.kernel_nodes, &report.kernel_children)
+            valid: bool = proof_resource_region_is_active(state, region) and encoded < report.kernel_nodes.count and report.kernel_nodes[encoded].kind != "unsupported"
+            proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "a returned region allocation requires an active lifetime and a kernel-replayable operand") if not valid
+            proof_resource_record_event(state, report, "resource-region-return-alloc", "", encoded, "", region, 0) if valid
 
         def proof_resource_rebind_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
             target_name: sview = proof_resource_direct_binding_name(target)
@@ -202,8 +232,9 @@ extend ElisaProof:
             while state.active_regions.count > 0 |state, report, function_name, line|:
                 region: sview = state.active_regions[state.active_regions.count - 1]
                 state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
-                proof_resource_invalidate_region_bindings(state, region)
-                proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", 0)
+                if not proof_resource_region_is_external(state, region):
+                    proof_resource_invalidate_region_bindings(state, region)
+                    proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", 0)
             start: usize = report.kernel_children.count
             for event in state.trace_events |event, report|:
                 report.kernel_children.push(event)
@@ -540,6 +571,28 @@ extend ElisaProof:
                 index <- index + 1
             return functions.names.count
 
+        def proof_resource_function_region_param_count(functions: ProofFunctionTable&, function_index: usize) -> usize:
+            return functions.region_param_counts[function_index] if function_index < functions.region_param_counts.count
+            return 0
+
+        def proof_resource_function_region_param_at(functions: ProofFunctionTable&, function_index: usize, region_index: usize) -> sview:
+            return "" if function_index >= functions.region_param_starts.count or function_index >= functions.region_param_counts.count
+            return "" if region_index >= functions.region_param_counts[function_index]
+            slot: usize = functions.region_param_starts[function_index] + region_index
+            return functions.all_region_params[slot] if slot < functions.all_region_params.count
+            return ""
+
+        def proof_resource_function_parameter_region(functions: ProofFunctionTable&, function_index: usize, parameter_index: usize) -> sview:
+            return "" if function_index >= functions.all_param_region_starts.count or function_index >= functions.param_counts.count
+            return "" if parameter_index >= functions.param_counts[function_index]
+            slot: usize = functions.all_param_region_starts[function_index] + parameter_index
+            return functions.all_param_regions[slot] if slot < functions.all_param_regions.count
+            return ""
+
+        def proof_resource_function_return_region(functions: ProofFunctionTable&, function_index: usize) -> sview:
+            return functions.return_regions[function_index] if function_index < functions.return_regions.count
+            return ""
+
         # A resource summary is usable only after the callee's complete executable summary has
         # converged. In particular, a provisional recursive SCC must not consume one of its own
         # members' traces: doing so would turn a cyclic assumption into a certificate.
@@ -667,19 +720,36 @@ extend ElisaProof:
         # This mirrors only the call-site permission preconditions. The kernel repeats the same
         # checks from the serialized nodes; keeping the producer-side diagnostic here avoids
         # turning an obvious alias conflict into a bare replay gap.
-        def proof_resource_call_source_compatible(state: mutable ProofResourceState&, report: mutable ProofReport&, callee_root: usize, mapped: darray[Ast::Expr]&) -> bool:
+        def proof_resource_callee_parameter_node(report: ProofReport&, callee: ElisaProofKernelCore::ProofKernelNode, parameter_index: usize) -> (known: bool, node: ElisaProofKernelCore::ProofKernelNode):
+            empty: ElisaProofKernelCore::ProofKernelNode = ElisaProofKernelCore::ProofKernelNode{kind: "", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
+            return (false, empty) if callee.children_start > report.kernel_children.count or callee.children_count > report.kernel_children.count - callee.children_start
+            bind_index: mutable usize = 0
+            for offset in 0..<callee.children_count |offset, callee, report, parameter_index, bind_index|:
+                child: usize = report.kernel_children[callee.children_start + offset]
+                continue if child >= report.kernel_nodes.count
+                candidate: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[child]
+                continue if candidate.kind != "resource-bind"
+                if bind_index == parameter_index:
+                    return (true, candidate)
+                bind_index <- bind_index + 1
+            return (false, empty)
+
+        def proof_resource_call_source_compatible(state: mutable ProofResourceState&, report: mutable ProofReport&, callee_root: usize, function_index: usize, mapped: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> bool:
             return false if callee_root >= report.kernel_nodes.count
             callee: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[callee_root]
             return false if callee.kind != "resource-safety" or callee.auxiliary != mapped.count
             return false if callee.children_start > report.kernel_children.count or callee.children_count > report.kernel_children.count - callee.children_start
             for parameter_index in 0..<mapped.count |parameter_index, mapped, report, callee, state|:
-                child_root: usize = report.kernel_children[callee.children_start + parameter_index]
-                return false if child_root >= report.kernel_nodes.count
-                formal: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[child_root]
-                return false if formal.kind != "resource-bind"
+                formal_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_resource_callee_parameter_node(report, callee, parameter_index)
+                return false if not formal_node.known
+                formal: ElisaProofKernelCore::ProofKernelNode = formal_node.node
                 formal_reference: bool = formal.operator == "external-shared" or formal.operator == "external-mutable"
                 actual_kind: sview = proof_resource_call_argument_kind(mapped[parameter_index], state, report)
                 actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_source_actual(mapped[parameter_index], state, report)
+                formal_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
+                actual_region: sview = proof_resource_expr_region(mapped[parameter_index], state)
+                return false if formal_region != "" and (actual_region == "" or not proof_resource_region_is_active(state, actual_region))
+                return false if formal_region == "" and actual_region != ""
                 if formal_reference:
                     return false if actual_kind != "borrow" and actual_kind != "reference" or not actual.known or actual.place.root == ""
                     if formal.operator == "external-mutable":
@@ -692,10 +762,43 @@ extend ElisaProof:
                     return false if actual_kind != "value"
             return true
 
+        # Infer a symbolic callee region only from an explicitly region-pinned formal and a
+        # directly tracked caller value carrying that same region. A scalar argument cannot infer
+        # `@r`; accepting the ambient region in that case would make a generic allocation summary
+        # depend on an unstated call-site fact. Every region parameter must have a witness, and
+        # every region-owned actual must be consumed by a matching pinned formal.
+        def proof_resource_collect_call_regions(state: ProofResourceState&, functions: ProofFunctionTable&, function_index: usize, mapped: darray[Ast::Expr]&, formal_regions: mutable darray[sview]&, actual_regions: mutable darray[sview]&) -> bool:
+            formal_regions.clear()
+            actual_regions.clear()
+            region_count: usize = proof_resource_function_region_param_count(functions, function_index)
+            for region_index in 0..<region_count |region_index, functions, function_index, mapped, formal_regions, actual_regions, state|:
+                formal_region: sview = proof_resource_function_region_param_at(functions, function_index, region_index)
+                return false if formal_region == ""
+                actual_region: mutable sview = ""
+                for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, function_index, formal_region, actual_region, state|:
+                    parameter_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
+                    continue if parameter_region != formal_region
+                    candidate: sview = proof_resource_expr_region(mapped[parameter_index], state)
+                    return false if candidate == "" or not proof_resource_region_is_active(state, candidate)
+                    actual_region <- candidate if actual_region == ""
+                    return false if actual_region != candidate
+                return false if actual_region == ""
+                formal_regions.push(formal_region)
+                actual_regions.push(actual_region)
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, function_index, formal_regions, state|:
+                candidate: sview = proof_resource_expr_region(mapped[parameter_index], state)
+                parameter_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
+                return false if candidate != "" and parameter_region == ""
+                return false if candidate != "" and not any formal_region in formal_regions where formal_region == parameter_region
+            return true
+
         def proof_resource_record_call[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, callee_name: sview, callee_root: usize, function_index: usize, mapped: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> bool:
             return false if function_index >= functions.param_counts.count or function_index >= functions.param_starts.count
             return false if mapped.count != functions.param_counts[function_index]
-            return false if not proof_resource_call_source_compatible(state, report, callee_root, mapped)
+            formal_regions: mutable darray[sview] = []
+            actual_regions: mutable darray[sview] = []
+            return false if not proof_resource_collect_call_regions(state, functions, function_index, mapped, &formal_regions, &actual_regions)
+            return false if not proof_resource_call_source_compatible(state, report, callee_root, function_index, mapped, functions)
             param_start: usize = functions.param_starts[function_index]
             encoded_arguments: mutable darray[usize] = []
             argument_kinds: mutable darray[sview] = []
@@ -722,7 +825,10 @@ extend ElisaProof:
             for parameter_index in 0..<mapped.count |parameter_index, encoded_arguments, argument_kinds, functions, param_start, report|:
                 child: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-arg", argument_kinds[parameter_index], encoded_arguments[parameter_index], 0, 0, 0, 0, 0, functions.all_params[param_start + parameter_index], "")
                 report.kernel_children.push(child)
-            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call", "", callee_root, 0, mapped.count, start, mapped.count, 0, callee_name, "")
+            for region_index in 0..<formal_regions.count |region_index, formal_regions, actual_regions, report|:
+                region_child: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-region", "param", 0, 0, 0, 0, 0, 0, formal_regions[region_index], actual_regions[region_index])
+                report.kernel_children.push(region_child)
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call", "", callee_root, formal_regions.count, mapped.count, start, mapped.count + formal_regions.count, 0, callee_name, "")
             state.trace_events.push(event)
             return true
 
@@ -1404,23 +1510,28 @@ extend ElisaProof:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     proof_resource_check_expression(callee, state, report, function_name, functions)
                     resource_argument: mutable bool = false
-                    for argument in arguments |argument, state, report, function_name, functions, position, resource_argument|:
+                    region_argument: mutable bool = false
+                    for argument in arguments |argument, state, report, function_name, functions, position, resource_argument, region_argument|:
                         proof_resource_check_expression(argument, state, report, function_name, functions)
                         resource_argument <- true if proof_resource_expr_carries_resource(argument, state, report)
-                        proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a call receives a region-owned value without a verified lifetime summary") if proof_resource_expr_contains_region_value(argument, state)
-                    if resource_argument:
-                        callee_name: sview = proof_callable_name(callee)
-                        callee_index: usize = proof_resource_function_index(functions, callee_name)
+                        region_argument <- true if proof_resource_expr_contains_region_value(argument, state)
+                    callee_name: sview = proof_callable_name(callee)
+                    callee_index: usize = proof_resource_function_index(functions, callee_name)
+                    region_polymorphic_call: bool = callee_index < functions.region_param_counts.count and functions.region_param_counts[callee_index] > 0
+                    if resource_argument or region_argument or region_polymorphic_call:
                         summary: (known: bool, root: usize) = proof_resource_summary_is_ready(functions, report, function_name, callee_name)
                         mapped: mutable darray[Ast::Expr] = []
                         mapped_ok: bool = summary.known and callee_index < functions.names.count and proof_resource_map_call_arguments(functions, callee_index, arguments, argument_names, &mapped)
                         if summary.known and mapped_ok:
                             recorded: bool = proof_resource_record_call(state, report, callee_name, summary.root, callee_index, mapped, functions)
-                            proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "the checked callee resource summary could not be encoded for this call") if not recorded
+                            proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call is not mapped to a verified caller region") if (region_argument or region_polymorphic_call) and not recorded
+                            proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "the checked callee resource summary could not be encoded for this call") if resource_argument and not recorded
                         elif summary.known:
-                            proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "borrow-carrying call requires an exact argument mapping with no unresolved defaults")
+                            proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call requires an exact verified region summary") if region_argument or region_polymorphic_call
+                            proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "borrow-carrying call requires an exact argument mapping with no unresolved defaults") if resource_argument
                         else:
-                            proof_resource_add_failing_obligation(report, "borrow-call-opaque", position, function_name, "a call argument carries a resource, but no converged callee resource summary is available")
+                            proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call has no converged lifetime summary") if region_argument or region_polymorphic_call
+                            proof_resource_add_failing_obligation(report, "borrow-call-opaque", position, function_name, "a call argument carries a resource, but no converged callee resource summary is available") if resource_argument
                 Ast::Expr.Move(operand, position):
                     root: sview = proof_resource_place_root(operand)
                     slot: usize = proof_resource_lookup(state, root)
@@ -1578,6 +1689,103 @@ extend ElisaProof:
                     return ""
             return ""
 
+        # A call returning `T& @r` carries the caller's concrete region only when the callee has
+        # a verified resource summary and its explicit `@r` witness is mapped at this call site.
+        # This is intentionally separate from proof_resource_expr_region: that helper handles
+        # direct tracked paths, while this one is the summary-backed result rule.
+        def proof_resource_call_result_region(expression: Ast::Expr, state: ProofResourceState&, functions: ProofFunctionTable&, report: ProofReport&) -> sview:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    callee_name: sview = proof_callable_name(callee)
+                    function_index: usize = proof_resource_function_index(functions, callee_name)
+                    return "" if function_index >= functions.return_references.count or not functions.return_references[function_index]
+                    return_region: sview = proof_resource_function_return_region(functions, function_index)
+                    return "" if return_region == ""
+                    region_count: usize = proof_resource_function_region_param_count(functions, function_index)
+                    formal_region_index: mutable usize = region_count
+                    for candidate in 0..<region_count |candidate, functions, function_index, return_region, formal_region_index|:
+                        formal_region_index <- candidate if proof_resource_function_region_param_at(functions, function_index, candidate) == return_region
+                    return "" if formal_region_index >= region_count
+                    return "" if function_index >= functions.verified.count or not functions.verified[function_index]
+                    summary_root: mutable usize = report.kernel_nodes.count
+                    for candidate_root in 0..<report.kernel_nodes.count |candidate_root, report, callee_name, summary_root|:
+                        candidate: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[candidate_root]
+                        summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.secondary_name == "resource-v1"
+                    return "" if summary_root >= report.kernel_nodes.count
+                    mapped: mutable darray[Ast::Expr] = []
+                    return "" if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
+                    formal_regions: mutable darray[sview] = []
+                    actual_regions: mutable darray[sview] = []
+                    return "" if not proof_resource_collect_call_regions(state, functions, function_index, mapped, &formal_regions, &actual_regions)
+                    return actual_regions[formal_region_index] if formal_region_index < actual_regions.count
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_call_result_region(inner, state, functions, report)
+                _:
+                    pass
+            return ""
+
+        def proof_resource_expr_result_region(expression: Ast::Expr, state: ProofResourceState&, functions: ProofFunctionTable&, report: ProofReport&) -> sview:
+            direct: sview = proof_resource_expr_region(expression, state)
+            return direct if direct != ""
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    return proof_resource_call_result_region(expression, state, functions, report)
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_result_region(inner, state, functions, report)
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_result_region(object, state, functions, report)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_result_region(base, state, functions, report)
+                Ast::Expr.Index(object, _, _):
+                    return proof_resource_expr_result_region(object, state, functions, report)
+                Ast::Expr.IndexN(object, _, _):
+                    return proof_resource_expr_result_region(object, state, functions, report)
+                Ast::Expr.Slice(object, _, _, _):
+                    return proof_resource_expr_result_region(object, state, functions, report)
+                _:
+                    pass
+            return ""
+
+        # A region-polymorphic callee may return/use values tied to an EXTERNAL caller region. A
+        # local region remains forbidden at return, so keep that distinction explicit instead of
+        # weakening the general region-value predicate used at opaque boundaries.
+        def proof_resource_expr_contains_local_region_value(expression: Ast::Expr, state: ProofResourceState&) -> bool:
+            match expression:
+                Ast::Expr.RegionNew(_, region, _):
+                    return region != "" and not proof_resource_region_is_external(state, region)
+                Ast::Expr.Ident(name, _):
+                    slot: usize = proof_resource_lookup(state, name)
+                    region: sview = proof_resource_binding_region(state, slot)
+                    return slot < state.binding_names.count and region != "" and not proof_resource_region_is_external(state, region)
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_contains_local_region_value(inner, state)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_resource_expr_contains_local_region_value(operand, state)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_resource_expr_contains_local_region_value(left, state) or proof_resource_expr_contains_local_region_value(right, state)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_resource_expr_contains_local_region_value(callee, state)
+                    for argument in arguments |argument, state|:
+                        return true if proof_resource_expr_contains_local_region_value(argument, state)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_contains_local_region_value(object, state)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_contains_local_region_value(base, state)
+                Ast::Expr.Index(object, index, _):
+                    return proof_resource_expr_contains_local_region_value(object, state) or proof_resource_expr_contains_local_region_value(index, state)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_resource_expr_contains_local_region_value(object, state)
+                    for argument in arguments |argument, state|:
+                        return true if proof_resource_expr_contains_local_region_value(argument, state)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_resource_expr_contains_local_region_value(object, state) or proof_resource_expr_contains_local_region_value(low, state) or proof_resource_expr_contains_local_region_value(high, state)
+                Ast::Expr.Move(operand, _):
+                    return proof_resource_expr_contains_local_region_value(operand, state)
+                _:
+                    return false
+
         # This is deliberately a conservative taint walk. Once a region value enters a call,
         # arithmetic expression, conditional, aggregate, lambda, or other opaque transformer,
         # the proof system does not have a lifetime summary for that operation and must reject
@@ -1710,7 +1918,7 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_resource_handle_region_assignment[@s, @r](target: Ast::Expr, initializer: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos) -> void:
+        def proof_resource_handle_region_assignment[@s, @r](target: Ast::Expr, initializer: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos, functions: ProofFunctionTable&) -> void:
             match initializer:
                 Ast::Expr.RegionNew(operand, region, _):
                     proof_resource_add_region_discard(state, report, operand, region, position, function_name) if proof_resource_is_discard_target(target)
@@ -1718,7 +1926,7 @@ extend ElisaProof:
                     return
                 _:
                     pass
-            assigned_region: sview = proof_resource_expr_region(initializer, state)
+            assigned_region: sview = proof_resource_expr_result_region(initializer, state, functions, report)
             if assigned_region != "":
                 target_name: sview = proof_resource_direct_binding_name(target)
                 target_slot: usize = proof_resource_lookup(state, target_name)
@@ -1749,9 +1957,28 @@ extend ElisaProof:
                 proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region allocation operand contains a value whose lifetime is not summarized") if proof_resource_expr_contains_region_value(direct_region_operand, state)
                 proof_resource_add_region_allocation(state, report, statement_name, type_expression, direct_region_operand, direct_region, position, function_name)
                 return
-            source_region: sview = proof_resource_expr_region(initializer, state)
+            source_region: sview = proof_resource_expr_result_region(initializer, state, functions, report)
             if source_region != "":
                 proof_resource_check_expression(initializer, state, report, function_name, functions)
+                callee_name: mutable sview = ""
+                match initializer:
+                    Ast::Expr.Call(callee, _, _, _):
+                        callee_name <- proof_callable_name(callee)
+                    _:
+                        pass
+                result_function_index: usize = proof_resource_function_index(functions, callee_name) if callee_name != "" else functions.names.count
+                result_is_reference: bool = result_function_index < functions.return_references.count and functions.return_references[result_function_index]
+                if result_is_reference and callee_name != "":
+                    is_mutable_result: bool = result_function_index < functions.return_mutable_references.count and functions.return_mutable_references[result_function_index]
+                    writable_result: bool = is_mutable_result or proof_resource_type_has_marker(type_expression, TokenKind.Mutable)
+                    proof_resource_add_binding(state, statement_name, true, is_mutable_result, writable_result, state.binding_names.count, false, proof_resource_empty_place())
+                    state.binding_region[state.binding_region.count - 1] <- source_region
+                    state.binding_region_live[state.binding_region_live.count - 1] <- proof_resource_region_is_active(state, source_region)
+                    call_event: usize = state.trace_events[state.trace_events.count - 1] if state.trace_events.count > 0 else report.kernel_nodes.count
+                    valid_call_event: bool = call_event < report.kernel_nodes.count and report.kernel_nodes[call_event].kind == "resource-call"
+                    proof_resource_record_event(state, report, "resource-call-result", "", call_event, statement_name, source_region, (1 if writable_result else 0) + 2 + (4 if is_mutable_result else 0)) if valid_call_event
+                    proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a region-returning call did not leave a replayable call transition") if not valid_call_event
+                    return
                 proof_resource_add_region_binding(state, report, statement_name, type_expression, initializer, source_region, position, function_name)
                 return
             if proof_resource_expr_contains_region_value(initializer, state):
@@ -1832,7 +2059,7 @@ extend ElisaProof:
                         proof_resource_check_write(target, state, report, function_name, position, functions)
                         proof_resource_check_expression(target, state, report, function_name, functions)
                         proof_resource_check_expression(initializer, state, report, function_name, functions)
-                        proof_resource_handle_region_assignment(target, initializer, state, report, function_name, position)
+                        proof_resource_handle_region_assignment(target, initializer, state, report, function_name, position, functions)
                         state.facts.clear()
                     Ast::Stmt.Expr(expression, position):
                         match expression:
@@ -1850,7 +2077,14 @@ extend ElisaProof:
                         if value is returned:
                             if proof_resource_expr_returns_local_borrow(returned, state, functions, report):
                                 proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a borrow cannot escape this lexical proof resource state")
-                            proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "a region-owned value cannot escape the region that owns its storage") if proof_resource_expr_contains_region_value(returned, state)
+                            proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "a region-owned value cannot escape the region that owns its storage") if proof_resource_expr_contains_local_region_value(returned, state)
+                            returned_region: sview = proof_resource_expr_result_region(returned, state, functions, report)
+                            match returned:
+                                Ast::Expr.RegionNew(operand, allocated_region, _):
+                                    proof_resource_add_region_return_alloc(state, report, operand, allocated_region, position, function_name) if allocated_region != "" and proof_resource_region_is_external(state, allocated_region)
+                                _:
+                                    pass
+                            proof_resource_record_event(state, report, "resource-region-return", "param", 0, returned_region, "", 0) if returned_region != "" and proof_resource_region_is_external(state, returned_region)
                             proof_resource_check_expression(returned, state, report, function_name, functions)
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         proof_resource_check_expression(condition, state, report, function_name, functions)
@@ -1948,10 +2182,23 @@ extend ElisaProof:
             failed_before: u32 = report.failed
             state: mutable ProofResourceState = proof_resource_empty()
             state.facts.extend(facts)
+            function_index: usize = proof_resource_function_index(functions, function_name)
+            region_parameter_count: usize = proof_resource_function_region_param_count(functions, function_index)
+            for region_index in 0..<region_parameter_count |region_index, functions, function_index, state, report|:
+                region: sview = proof_resource_function_region_param_at(functions, function_index, region_index)
+                valid_region: bool = region != "" and not proof_resource_region_is_active(state, region)
+                proof_resource_add_failing_obligation(report, "region-scope-unsupported", Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}, function_name, "region-polymorphic parameters must be distinct lifetime capabilities") if not valid_region
+                if valid_region:
+                    state.active_regions.push(region)
+                    state.external_regions.push(region)
+                    proof_resource_record_event(&state, report, "resource-region-param", "external", 0, region, "", 0)
             for parameter in parameters |state, report|:
                 is_reference: bool = proof_resource_is_reference_type(parameter.type_expression)
                 is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(parameter.type_expression)
                 writable: bool = parameter.is_mutable or proof_resource_type_has_marker(parameter.type_expression, TokenKind.Mutable) or is_mutable_reference
                 proof_resource_add_binding_traced(&state, report, parameter.name, is_reference, is_mutable_reference, writable, state.binding_names.count, false, "", proof_resource_empty_place(), 0)
+                parameter_index: usize = state.binding_names.count - 1
+                parameter_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
+                proof_resource_set_binding_region(&state, report, parameter.name, parameter_region) if is_reference and parameter_region != ""
             proof_resource_check_statements(body, &state, report, function_name, functions)
             proof_resource_finish(&state, report, function_name, line, failed_before, parameters.count)

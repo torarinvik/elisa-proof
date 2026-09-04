@@ -102,9 +102,13 @@ The proof kernel is intentionally fail-closed:
    exact formal/actual mapping and a verified callee `resource-safety` root; the kernel replays
    that callee trace from an empty state, checks shared/mutable permissions at the call site, and
    propagates only summarized external writes back to the caller. Recursive-SCC, defaulted,
-   dynamic, and opaque resource calls remain unsupported. Interprocedural region propagation and
-   richer returned-reference expressions remain outside the resource kernel until their replayable
-   identities and lifetime summaries are explicit.
+   dynamic, and opaque resource calls remain unsupported. Region-polymorphic calls additionally
+   require one exact pinned-reference witness for every `[@r]` parameter; scalar-only calls cannot
+   infer an ambient arena. A callee's `resource-region-return` and the caller's
+   `resource-call-result` are replayed against that formal/actual map, so `T& @r` results from
+   direct `new[r]` or direct region paths remain live only while the mapped caller region is live.
+   Field, conditional, aggregate, and other richer returned-reference expressions remain outside
+   the resource kernel until their identities and lifetime summaries are explicit.
    Continuing control-flow joins emit explicit move-join transitions for inherited bindings moved
    on any branch. The source state and replay kernel both treat those bindings as unavailable
    afterward, while purely lexical child bindings remain scoped and are discarded at the join.
