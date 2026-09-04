@@ -1049,6 +1049,21 @@ if [[ "$rejected_checked_index_nested_status" -ne 1 ]]; then
     exit 1
 fi
 
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_checked_index_nested.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); repairs = report["repair_queue"]; assert [(item["rule"], item["failure"]["kind"]) for item in repairs] == [("index-lower", "index-lower-unproven"), ("index-upper", "index-upper-unproven")]; assert all(item["goal_id"] == item["failure"]["goal_id"] for item in repairs)'
+checked_index_diagnostics_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_call_multiple_preconditions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); repairs = [item for item in report["repair_queue"] if item["failure"]["kind"] == "call-requires-unproven"]; assert len(repairs) == 2; assert all(item["goal_id"] == item["failure"]["goal_id"] for item in repairs); assert repairs[0]["goal_id"] != repairs[1]["goal_id"]; assert report["replay"]["gaps"] == 0'
+multiple_preconditions_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/lexicographic_decreases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["repair_queue"] == []; assert report["replay"]["gaps"] == 0'
+lexicographic_repair_queue_status=${PIPESTATUS[0]}
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_void_postcondition.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); repairs = report["repair_queue"]; assert len(repairs) == 1; assert repairs[0]["failure"]["kind"] == "ensure-unproven"; assert repairs[0]["goal_id"] == repairs[0]["failure"]["goal_id"]'
+void_postcondition_goal_status=${PIPESTATUS[0]}
+set -e
+if [[ "$checked_index_diagnostics_status" -ne 1 || "$multiple_preconditions_status" -ne 1 || "$lexicographic_repair_queue_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: repair diagnostics were not bound to exact goals\n' >&2
+    exit 1
+fi
+
 if [[ "$rejected_index_bounds_status" -ne 1 ]]; then
     printf 'proof test matrix failed: rejected_index_bounds=%s\n' "$rejected_index_bounds_status" >&2
     exit 1

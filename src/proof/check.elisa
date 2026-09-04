@@ -295,14 +295,22 @@ extend ElisaProof:
         # fixed-width naturals rather than an unchecked tuple comparison.
         def proof_lexicographic_smaller(current_components: darray[Ast::Expr]&, next_components: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos, report: mutable ProofReport&, name: sview) -> bool:
             return false if current_components.count == 0 or current_components.count != next_components.count
-            prefix_equal: mutable bool = true
-            for index in 0..<current_components.count |index, current_components, next_components, facts, annotations, prefix_equal, position|:
-                return false if not prefix_equal
-                smaller: Ast::Expr = Ast::Expr.Binary(next_components[index], TokenKind.Lt, current_components[index], position)
-                return true if proof_certify_goal(facts, smaller, report, position.line, name, annotations)
-                equal: Ast::Expr = Ast::Expr.Binary(next_components[index], TokenKind.EqEq, current_components[index], position)
-                prefix_equal <- proof_certify_goal(facts, equal, report, position.line, name, annotations)
-            return false
+            # Build one proposition instead of emitting speculative component goals while
+            # searching for the first decrease. For (a,b), this is a'<a || (a'==a && b'<b).
+            # Consequently every exported goal attempt is a real obligation and a successful
+            # lexicographic proof cannot leave abandoned failures in the repair queue.
+            relation: mutable Ast::Expr = Ast::Expr.Invalid
+            cursor: mutable usize = current_components.count
+            while cursor > 0 |cursor, current_components, next_components, position, relation|:
+                cursor <- cursor - 1
+                smaller: Ast::Expr = Ast::Expr.Binary(next_components[cursor], TokenKind.Lt, current_components[cursor], position)
+                if proof_expr_is_invalid(relation):
+                    relation <- smaller
+                else:
+                    equal: Ast::Expr = Ast::Expr.Binary(next_components[cursor], TokenKind.EqEq, current_components[cursor], position)
+                    suffix: Ast::Expr = Ast::Expr.Binary(equal, TokenKind.And, relation, position)
+                    relation <- Ast::Expr.Binary(smaller, TokenKind.Or, suffix, position)
+            return proof_certify_goal(facts, relation, report, position.line, name, annotations)
 
         # A branch/loop join may have changed a local on only some paths. Retaining its old
         # symbolic value would let a later return silently use the pre-join expression. Forget
@@ -1620,11 +1628,11 @@ extend ElisaProof:
                     requires_count: usize = lemmas.requires_counts[lemma_index]
                     for requires_index in 0..<requires_count |requires_ok, facts, parameter_names, argument_values, lemmas, requires_start|:
                         required: Ast::Expr = proof_substitute(lemmas.all_requires[requires_start + requires_index], parameter_names, argument_values)
-                        requires_ok <- false if not proof_certify_goal(facts, required, report, position.line, name, annotations)
-                    report.proof_obligation(requires_ok)
-                    if not requires_ok:
-                        proof_add_finding(report, "lemma-requires-unproven", position.line, name, "lemma precondition is not established at the call")
-                        return false
+                        required_proven: bool = proof_certify_goal(facts, required, report, position.line, name, annotations)
+                        report.proof_obligation(required_proven)
+                        requires_ok <- false if not required_proven
+                        proof_add_latest_goal_finding(report, "lemma-requires-unproven", position.line, name, "lemma precondition is not established at the call") if not required_proven
+                    return false if not requires_ok
                     if lemma_index < lemmas.recursive.count and lemmas.recursive[lemma_index]:
                         caller_lemma_index: usize = proof_lemma_index(lemmas, name)
                         same_recursive_component: bool = caller_lemma_index < lemmas.names.count and proof_lemmas_same_recursive_component(lemmas, caller_lemma_index, lemma_index)
@@ -1659,16 +1667,16 @@ extend ElisaProof:
                                 component_proven: bool = proof_certify_goal(facts, current_nonnegative, report, position.line, name, annotations)
                                 report.proof_obligation(component_proven)
                                 current_nonnegative_proven <- false if not component_proven
-                                proof_add_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma decreases component is not proven nonnegative") if not component_proven
+                                proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma decreases component is not proven nonnegative") if not component_proven
                             for component in recursive_components |facts, annotations, report, name, position, recursive_nonnegative_proven|:
                                 recursive_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0), position)
                                 component_proven: bool = proof_certify_goal(facts, recursive_nonnegative, report, position.line, name, annotations)
                                 report.proof_obligation(component_proven)
                                 recursive_nonnegative_proven <- false if not component_proven
-                                proof_add_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma callee measure is not proven nonnegative") if not component_proven
+                                proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma callee measure is not proven nonnegative") if not component_proven
                             smaller_proven: bool = proof_lexicographic_smaller(current_components, recursive_components, facts, annotations, position, report, name)
                             report.proof_obligation(smaller_proven)
-                            proof_add_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma lexicographic measure is not proven to strictly decrease") if not smaller_proven
+                            proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma lexicographic measure is not proven to strictly decrease") if not smaller_proven
                             return false if not current_nonnegative_proven or not recursive_nonnegative_proven or not smaller_proven
                     ensures_start: usize = lemmas.ensure_starts[lemma_index]
                     ensures_count: usize = lemmas.ensure_counts[lemma_index]
@@ -2863,11 +2871,11 @@ extend ElisaProof:
                     requires_count: usize = functions.requires_counts[function_index]
                     for requires_index in 0..<requires_count |requires_ok, facts, parameter_names, argument_values, functions, requires_start|:
                         required: Ast::Expr = proof_substitute(functions.all_requires[requires_start + requires_index], parameter_names, argument_values)
-                        requires_ok <- false if not proof_certify_goal(facts, required, report, position.line, name, annotations)
-                    report.proof_obligation(requires_ok) if requires_count > 0
-                    if not requires_ok:
-                        proof_add_finding(report, "call-requires-unproven", position.line, name, "callee precondition is not established at the call")
-                        return false
+                        required_proven: bool = proof_certify_goal(facts, required, report, position.line, name, annotations)
+                        report.proof_obligation(required_proven)
+                        requires_ok <- false if not required_proven
+                        proof_add_latest_goal_finding(report, "call-requires-unproven", position.line, name, "callee precondition is not established at the call") if not required_proven
+                    return false if not requires_ok
                     caller_index: usize = proof_function_index(functions, name)
                     if function_index < functions.recursive.count and functions.recursive[function_index] and proof_functions_same_recursive_component(functions, caller_index, function_index):
                         # A structural shape in the function table is only a candidate. The
@@ -2906,16 +2914,16 @@ extend ElisaProof:
                                 component_proven: bool = proof_certify_goal(facts, current_nonnegative, report, position.line, name, annotations)
                                 report.proof_obligation(component_proven)
                                 nonnegative_proven <- false if not component_proven
-                                proof_add_finding(report, "recursive-decreases-unproven", position.line, name, "recursive decreases component is not proven nonnegative") if not component_proven
+                                proof_add_latest_goal_finding(report, "recursive-decreases-unproven", position.line, name, "recursive decreases component is not proven nonnegative") if not component_proven
                             for component in recursive_components |facts, annotations, report, name, position, recursive_nonnegative_proven|:
                                 recursive_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0), position)
                                 component_proven: bool = proof_certify_goal(facts, recursive_nonnegative, report, position.line, name, annotations)
                                 report.proof_obligation(component_proven)
                                 recursive_nonnegative_proven <- false if not component_proven
-                                proof_add_finding(report, "recursive-decreases-unproven", position.line, name, "callee decreases component is not proven nonnegative") if not component_proven
+                                proof_add_latest_goal_finding(report, "recursive-decreases-unproven", position.line, name, "callee decreases component is not proven nonnegative") if not component_proven
                             smaller_proven: bool = proof_lexicographic_smaller(current_components, recursive_components, facts, annotations, position, report, name)
                             report.proof_obligation(smaller_proven)
-                            proof_add_finding(report, "recursive-decreases-unproven", position.line, name, "recursive lexicographic measure is not proven to strictly decrease") if not smaller_proven
+                            proof_add_latest_goal_finding(report, "recursive-decreases-unproven", position.line, name, "recursive lexicographic measure is not proven to strictly decrease") if not smaller_proven
                             return false if not nonnegative_proven or not recursive_nonnegative_proven or not smaller_proven
                     changes_start: usize = functions.changes_starts[function_index] if function_index < functions.changes_starts.count else functions.all_changes.count
                     changes_count: usize = functions.changes_counts[function_index] if function_index < functions.changes_counts.count else 0
@@ -3117,7 +3125,7 @@ extend ElisaProof:
                 proven: bool = proof_certify_goal(facts, goal, report, line, name, annotations)
                 report.proof_obligation(proven)
                 result <- false if not proven
-                proof_add_finding(report, "invariant-not-preserved", line, name, "loop control path does not re-establish the loop invariant") if not proven
+                proof_add_latest_goal_finding(report, "invariant-not-preserved", line, name, "loop control path does not re-establish the loop invariant") if not proven
             return result
 
         # A `for` binder is live only inside the body scope. It cannot occur in invariant facts
@@ -4142,7 +4150,7 @@ extend ElisaProof:
             upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, count, position)
             lower_proven: bool = proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "index-lower")
             report.proof_obligation(lower_proven)
-            proof_add_finding(report, "index-lower-unproven", position.line, name, "indexed access may use a negative position") if not lower_proven
+            proof_add_latest_goal_finding(report, "index-lower-unproven", position.line, name, "indexed access may use a negative position") if not lower_proven
             # A fixed-array parameter has an exact runtime count. We first prove the
             # source index below that literal extent, then import the corresponding
             # `.count` fact with explicit type-bound provenance. If that proof fails,
@@ -4155,7 +4163,7 @@ extend ElisaProof:
                 proof_add_traced_fact(checked_facts, report, upper, "type-bound", position.line, name) if fixed_upper_proven
             upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "index-upper")
             report.proof_obligation(upper_proven)
-            proof_add_finding(report, "index-upper-unproven", position.line, name, "indexed access may exceed the collection bound") if not upper_proven
+            proof_add_latest_goal_finding(report, "index-upper-unproven", position.line, name, "indexed access may exceed the collection bound") if not upper_proven
 
         # A compiler `IndexN` can denote nested fixed-array access (`matrix[row, column]`).
         # Check each argument against the corresponding literal dimension. This is deliberately
@@ -4190,10 +4198,10 @@ extend ElisaProof:
                         upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, Ast::Expr.IntLit(extent), position)
                         lower_proven: bool = proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "index-lower")
                         report.proof_obligation(lower_proven)
-                        proof_add_finding(report, "index-lower-unproven", position.line, name, "multi-index position may be negative") if not lower_proven
+                        proof_add_latest_goal_finding(report, "index-lower-unproven", position.line, name, "multi-index position may be negative") if not lower_proven
                         upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "index-upper")
                         report.proof_obligation(upper_proven)
-                        proof_add_finding(report, "index-upper-unproven", position.line, name, "multi-index position may exceed its fixed dimension") if not upper_proven
+                        proof_add_latest_goal_finding(report, "index-upper-unproven", position.line, name, "multi-index position may exceed its fixed dimension") if not upper_proven
                 dimension <- dimension + 1
 
         # The checked-index operator is a compiler/runtime boundary, not an arithmetic claim:
@@ -4250,7 +4258,7 @@ extend ElisaProof:
                     lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0), TokenKind.LtEq, checked_low, position)
                     lower_proven: bool = proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "slice-lower")
                     report.proof_obligation(lower_proven)
-                    proof_add_finding(report, "slice-lower-unproven", position.line, name, "slice may begin before the collection") if not lower_proven
+                    proof_add_latest_goal_finding(report, "slice-lower-unproven", position.line, name, "slice may begin before the collection") if not lower_proven
             match checked_high:
                 Ast::Expr.Absent:
                     pass
@@ -4268,7 +4276,7 @@ extend ElisaProof:
                             proof_add_traced_fact(checked_facts, report, upper, "type-bound", position.line, name)
                     upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "slice-upper")
                     report.proof_obligation(upper_proven)
-                    proof_add_finding(report, "slice-upper-unproven", position.line, name, "slice may end beyond the collection") if not upper_proven
+                    proof_add_latest_goal_finding(report, "slice-upper-unproven", position.line, name, "slice may end beyond the collection") if not upper_proven
             match checked_low:
                 Ast::Expr.Absent:
                     pass
@@ -4280,7 +4288,7 @@ extend ElisaProof:
                             ordered: Ast::Expr = Ast::Expr.Binary(checked_low, TokenKind.LtEq, checked_high, position)
                             ordered_proven: bool = proof_certify_goal_with_rule(checked_facts, ordered, report, position.line, name, annotations, "slice-order")
                             report.proof_obligation(ordered_proven)
-                            proof_add_finding(report, "slice-order-unproven", position.line, name, "slice bounds may be reversed") if not ordered_proven
+                            proof_add_latest_goal_finding(report, "slice-order-unproven", position.line, name, "slice bounds may be reversed") if not ordered_proven
 
         def proof_check_index_safety_value(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, line: u32, functions: ProofFunctionTable&) -> void:
             match expression:
@@ -4630,10 +4638,13 @@ extend ElisaProof:
                 next_component_proven: bool = proof_certify_goal(next_facts, next_measure_nonnegative, report, position.line, name, annotations)
                 report.proof_obligation(next_component_proven)
                 next_nonnegative_proven <- false if not next_component_proven
-                proof_add_finding(report, "loop-decreases-unproven", position.line, name, "decreases component is not proven nonnegative after one loop step") if not next_component_proven
-            decreasing_proven: bool = proof_lexicographic_smaller(measure_components, next_components, next_facts, annotations, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0}, report, name) if next_nonnegative_proven else false
+                proof_add_latest_goal_finding(report, "loop-decreases-unproven", position.line, name, "decreases component is not proven nonnegative after one loop step") if not next_component_proven
+            # Emit the descent goal even when a separate nonnegativity premise failed. Every
+            # counted failure must have its own repairable goal rather than borrowing the ID of
+            # the preceding component obligation.
+            decreasing_proven: bool = proof_lexicographic_smaller(measure_components, next_components, next_facts, annotations, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0}, report, name)
             report.proof_obligation(decreasing_proven)
-            proof_add_finding(report, "loop-decreases-unproven", position.line, name, "decreases lexicographic measure is not proven to strictly decrease") if not decreasing_proven
+            proof_add_latest_goal_finding(report, "loop-decreases-unproven", position.line, name, "decreases lexicographic measure is not proven to strictly decrease") if not decreasing_proven
             return next_nonnegative_proven and decreasing_proven
 
         def proof_check_returns(body: darray[Ast::Stmt]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> void:
@@ -4891,7 +4902,13 @@ extend ElisaProof:
                             # result-dependent ensure fails closed rather than disappearing.
                             for ensure in ensures |report, name, facts, names, values, frame_parameters, old_values, annotations, position|:
                                 goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
-                                proven: bool = not proof_expr_mentions_name(goal, "result") and proof_certify_goal_with_rule(facts, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
+                                proven: mutable bool = false
+                                if proof_expr_mentions_name(goal, "result"):
+                                    failed_rule: mutable sview = proof_quantifier_rule(ensure, annotations)
+                                    failed_rule <- "goal" if failed_rule == ""
+                                    proof_add_goal_attempt(report, facts, goal, position.line, name, failed_rule, false)
+                                else:
+                                    proven <- proof_certify_goal_with_rule(facts, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
                                 report.proof_obligation(proven)
                                 proof_add_goal_failure(report, "ensure-unproven", position.line, name, "void return does not establish ensure", facts, goal) if not proven
                             proof_invalidate_moved_roots(moved_roots, names, values, facts, position)
@@ -4982,7 +4999,7 @@ extend ElisaProof:
                                 entry: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
                                 established: bool = proof_certify_goal(facts, entry, report, position.line, name, annotations)
                                 report.proof_obligation(established)
-                                proof_add_finding(report, "invariant-unproven", position.line, name, "loop invariant is not established") if not established
+                                proof_add_latest_goal_finding(report, "invariant-unproven", position.line, name, "loop invariant is not established") if not established
                                 loop_exit_valid <- false if not established
                                 proof_add_traced_fact(loop_facts, report, entry, "loop-invariant", position.line, name) if not proof_expr_has_call(condition) and established
                             proof_add_traced_fact(loop_facts, report, loop_condition_value, "loop-condition", position.line, name)
@@ -4995,7 +5012,7 @@ extend ElisaProof:
                                     preserved: Ast::Expr = proof_substitute_scoped_contract(invariant, loop_names, loop_values, loop_scope_count, frame_parameters, old_values)
                                     preservation_proven: bool = proof_certify_goal(loop_facts, preserved, report, position.line, name, annotations)
                                     report.proof_obligation(preservation_proven)
-                                    proof_add_finding(report, "invariant-not-preserved", position.line, name, "loop body does not re-establish the invariant") if not preservation_proven
+                                    proof_add_latest_goal_finding(report, "invariant-not-preserved", position.line, name, "loop body does not re-establish the invariant") if not preservation_proven
                                     loop_exit_valid <- false if not preservation_proven
                             elif not loop_body_flow.breaks and not loop_body_flow.continues:
                                 # A body with no path to another iteration may still return, but
@@ -5031,7 +5048,7 @@ extend ElisaProof:
                                 component_proven: bool = proof_certify_goal(termination_facts, measure_nonnegative, report, position.line, name, annotations)
                                 report.proof_obligation(component_proven)
                                 nonnegative_proven <- false if not component_proven
-                                proof_add_finding(report, "loop-decreases-unproven", position.line, name, "decreases component is not proven nonnegative at loop entry") if not component_proven
+                                proof_add_latest_goal_finding(report, "loop-decreases-unproven", position.line, name, "decreases component is not proven nonnegative at loop entry") if not component_proven
                             termination_names: mutable darray[sview] = proof_copy_names(names)
                             termination_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
                             empty_control_invariants: mutable darray[Ast::Expr] = []
@@ -5172,7 +5189,7 @@ extend ElisaProof:
                                     established: bool = proof_certify_goal(facts, entry, report, position.line, name, annotations)
                                     report.proof_obligation(established)
                                     loop_exit_valid <- false if not established
-                                    proof_add_finding(report, "invariant-unproven", position.line, name, "for-loop invariant is not established") if not established
+                                    proof_add_latest_goal_finding(report, "invariant-unproven", position.line, name, "for-loop invariant is not established") if not established
                                     proof_add_traced_fact(loop_facts, report, entry, "loop-invariant", position.line, name) if established
                             for_body_flow: mutable ProofFlow = proof_empty_flow()
                             proof_check_returns(for_body, &for_names, &for_values, &loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &for_body_flow)
@@ -5182,7 +5199,7 @@ extend ElisaProof:
                                     preserved: Ast::Expr = proof_substitute_scoped_contract(invariant, for_names, for_values, loop_scope_count, frame_parameters, old_values)
                                     preservation_proven: bool = proof_certify_goal(loop_facts, preserved, report, position.line, name, annotations)
                                     report.proof_obligation(preservation_proven)
-                                    proof_add_finding(report, "invariant-not-preserved", position.line, name, "for-loop body does not re-establish the invariant") if not preservation_proven
+                                    proof_add_latest_goal_finding(report, "invariant-not-preserved", position.line, name, "for-loop body does not re-establish the invariant") if not preservation_proven
                                     loop_exit_valid <- false if not preservation_proven
                             if loop_exit_valid:
                                 # Any outer local may have changed on an arbitrary number of
