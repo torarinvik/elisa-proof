@@ -219,7 +219,8 @@ The native checker currently supports:
 - checked loop lexicographic `decreases` measures (tuple or repeated clauses) for component
   nonnegativity at loop entry and after each fall-through step, plus strict progress; a
   straight-line update followed by an unlabeled `continue` is also checked at its exact back edge,
-  and branch-local continuation edges are checked from their own captured states;
+  and branch-local continuation edges are checked from their own captured states. Established
+  while/for invariant entry facts replay as derived logical steps rather than trusted transitions;
 - entry-state `old(...)` substitution for local postconditions;
 - compiler-marked `lemma` summaries, including dependency-ordered proof checking, call-site
   precondition checking, and postcondition propagation; lemmas are proof-only, cannot enter
