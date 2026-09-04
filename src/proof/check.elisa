@@ -375,10 +375,17 @@ extend ElisaProof:
             kernel_expression: usize = proof_kernel_encode_expression(expression, &report.kernel_nodes, &report.kernel_children)
             report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
 
-        def proof_add_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview, dependency: sview) -> void:
+        def proof_add_function_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, result_value: Ast::Expr, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
             facts.push(expression)
+            bindings_start: usize = report.fact_trace_summary_names.count
+            report.fact_trace_summary_names.extend(parameter_names)
+            report.fact_trace_summary_values.extend(argument_values)
+            report.fact_trace_summary_names.push("result")
+            report.fact_trace_summary_values.push(result_value)
+            requires_start: usize = report.fact_trace_summary_require_goal_ids.count
+            report.fact_trace_summary_require_goal_ids.extend(require_goal_ids)
             kernel_expression: usize = proof_kernel_encode_expression(expression, &report.kernel_nodes, &report.kernel_children)
-            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: "function-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count + 1, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index})
 
         def proof_add_lemma_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
             facts.push(expression)
@@ -2880,11 +2887,13 @@ extend ElisaProof:
                     return false if not proof_map_runtime_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions)
                     argument_values.extend(mapped_arguments)
                     requires_ok: mutable bool = true
+                    require_goal_ids: mutable darray[usize] = []
                     requires_start: usize = functions.requires_starts[function_index]
                     requires_count: usize = functions.requires_counts[function_index]
-                    for requires_index in 0..<requires_count |requires_ok, facts, parameter_names, argument_values, functions, requires_start|:
+                    for requires_index in 0..<requires_count |requires_ok, require_goal_ids, facts, parameter_names, argument_values, functions, requires_start, report, position, name, annotations|:
                         required: Ast::Expr = proof_substitute(functions.all_requires[requires_start + requires_index], parameter_names, argument_values)
                         required_proven: bool = proof_certify_goal(facts, required, report, position.line, name, annotations)
+                        require_goal_ids.push(report.goal_attempts.count - 1) if report.goal_attempts.count > 0
                         report.proof_obligation(required_proven)
                         requires_ok <- false if not required_proven
                         proof_add_latest_goal_finding(report, "call-requires-unproven", position.line, name, "callee precondition is not established at the call") if not required_proven
@@ -3011,7 +3020,7 @@ extend ElisaProof:
                                     return false
                             _:
                                 ensured <- proof_substitute(ensured, result_names, result_values)
-                        proof_add_summary_fact(facts, report, ensured, "function-summary", position.line, name, function_name)
+                        proof_add_function_summary_fact(facts, report, ensured, position.line, name, function_name, parameter_names, argument_values, result_value, require_goal_ids, ensure_index)
                     return true
                 _:
                     return false
@@ -4095,10 +4104,10 @@ extend ElisaProof:
         # not prove that the returned position is safe. Admit the call only when its verified
         # executable summary contains an exact, call-free result equation; the caller's ordinary
         # arithmetic facts then prove the bounds for that returned expression.
-        def proof_index_call_result(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&) -> (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview):
+        def proof_index_call_result(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, summary_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview) -> (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview):
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_index_call_result(inner, facts, functions, annotations)
+                    return proof_index_call_result(inner, facts, functions, annotations, summary_facts, report, owner)
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     function_name: sview = proof_callable_name(callee)
                     function_index: usize = proof_function_index(functions, function_name)
@@ -4120,9 +4129,13 @@ extend ElisaProof:
                     requires_start: usize = functions.requires_starts[function_index] if function_index < functions.requires_starts.count else functions.all_requires.count
                     requires_count: usize = functions.requires_counts[function_index] if function_index < functions.requires_counts.count else 0
                     return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if requires_start > functions.all_requires.count or requires_count > functions.all_requires.count - requires_start
-                    for requires_index in 0..<requires_count |requires_index, functions, requires_start, parameter_names, mapped_arguments, facts, annotations|:
+                    require_goal_ids: mutable darray[usize] = []
+                    for requires_index in 0..<requires_count |requires_index, functions, requires_start, parameter_names, mapped_arguments, facts, annotations, report, position, owner, require_goal_ids|:
                         required: Ast::Expr = proof_substitute(functions.all_requires[requires_start + requires_index], parameter_names, mapped_arguments)
-                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_has_old(required) or not proof_goal(facts, required, annotations)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_has_old(required)
+                        required_proven: bool = proof_certify_goal(facts, required, report, position.line, owner, annotations)
+                        require_goal_ids.push(report.goal_attempts.count - 1) if report.goal_attempts.count > 0
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if not required_proven
                     ensures_start: usize = functions.ensure_starts[function_index] if function_index < functions.ensure_starts.count else functions.all_ensures.count
                     ensures_count: usize = functions.ensure_counts[function_index] if function_index < functions.ensure_counts.count else 0
                     return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if ensures_start > functions.all_ensures.count or ensures_count > functions.all_ensures.count - ensures_start
@@ -4136,6 +4149,7 @@ extend ElisaProof:
                             Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                                 candidate: Ast::Expr = right if proof_expr_equal(left, expression) else (left if proof_expr_equal(right, expression) else Ast::Expr.Invalid)
                                 if not proof_expr_is_invalid(candidate) and proof_expr_supported(candidate) and not proof_expr_has_call(candidate) and not proof_expr_has_move(candidate):
+                                    proof_add_function_summary_fact(summary_facts, report, instantiated, position.line, owner, function_name, parameter_names, mapped_arguments, expression, require_goal_ids, ensures_index)
                                     return (true, candidate, instantiated, function_name)
                             _:
                                 pass
@@ -4148,10 +4162,9 @@ extend ElisaProof:
             checked_index: mutable Ast::Expr = index
             checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
             if proof_expr_has_call(index):
-                resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(index, facts, functions, annotations)
+                resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name)
                 if resolved.known:
                     checked_index <- resolved.value
-                    proof_add_summary_fact(checked_facts, report, resolved.summary, "function-summary", position.line, name, resolved.dependency)
                 else:
                     checked_index <- Ast::Expr.Invalid
             if not proof_indexable_object(object) or proof_expr_has_call(object) or proof_expr_has_move(object) or proof_expr_is_invalid(checked_index) or proof_expr_has_call(checked_index) or proof_expr_has_move(checked_index):
@@ -4192,10 +4205,9 @@ extend ElisaProof:
                 checked_index: mutable Ast::Expr = index
                 checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                 if proof_expr_has_call(index):
-                    resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(index, facts, functions, annotations)
+                    resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name)
                     if resolved.known:
                         checked_index <- resolved.value
-                        proof_add_summary_fact(checked_facts, report, resolved.summary, "function-summary", position.line, name, resolved.dependency)
                     else:
                         checked_index <- Ast::Expr.Invalid
                 if proof_expr_is_invalid(checked_index) or proof_expr_has_call(checked_index) or proof_expr_has_move(checked_index):
@@ -4247,17 +4259,15 @@ extend ElisaProof:
             checked_high: mutable Ast::Expr = high
             checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
             if proof_expr_has_call(low):
-                resolved_low: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(low, facts, functions, annotations)
+                resolved_low: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(low, facts, functions, annotations, &checked_facts, report, name)
                 if resolved_low.known:
                     checked_low <- resolved_low.value
-                    proof_add_summary_fact(checked_facts, report, resolved_low.summary, "function-summary", position.line, name, resolved_low.dependency)
                 else:
                     checked_low <- Ast::Expr.Invalid
             if proof_expr_has_call(high):
-                resolved_high: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(high, facts, functions, annotations)
+                resolved_high: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(high, facts, functions, annotations, &checked_facts, report, name)
                 if resolved_high.known:
                     checked_high <- resolved_high.value
-                    proof_add_summary_fact(checked_facts, report, resolved_high.summary, "function-summary", position.line, name, resolved_high.dependency)
                 else:
                     checked_high <- Ast::Expr.Invalid
             if not proof_indexable_object(object) or proof_expr_has_call(object) or proof_expr_has_move(object) or proof_expr_is_invalid(checked_low) or proof_expr_has_move(checked_low) or proof_expr_is_invalid(checked_high) or proof_expr_has_move(checked_high):
@@ -5507,6 +5517,17 @@ extend ElisaProof:
                             summary.verified <- function_index < functions.verified.count and functions.verified[function_index]
                             summary.verification_reason <- functions.verification_reasons[function_index] if function_index < functions.verification_reasons.count else "not-checked"
                             summary.structural <- functions.structural[function_index]
+                            executable: ProofExecutableSummary = ProofExecutableSummary{name: name, line: position.line, parameters_start: report.executable_parameters.count, parameters_count: functions.param_counts[function_index], requires_start: report.executable_requires.count, requires_count: functions.requires_counts[function_index], ensures_start: report.executable_ensures.count, ensures_count: functions.ensure_counts[function_index], verified: summary.verified, verification_reason: summary.verification_reason}
+                            parameter_start: usize = functions.param_starts[function_index]
+                            for index in 0..<executable.parameters_count |index, parameter_start, functions, report|:
+                                report.executable_parameters.push(functions.all_params[parameter_start + index])
+                            requires_start: usize = functions.requires_starts[function_index]
+                            for index in 0..<executable.requires_count |index, requires_start, functions, report|:
+                                report.executable_requires.push(functions.all_requires[requires_start + index])
+                            ensures_start: usize = functions.ensure_starts[function_index]
+                            for index in 0..<executable.ensures_count |index, ensures_start, functions, report|:
+                                report.executable_ensures.push(functions.all_ensures[ensures_start + index])
+                            report.executable_summaries.push(executable)
                 Ast::Decl.Struct(name, _, _, _, _, _, position):
                     summary <- proof_declaration_summary("struct", name, position.line)
                 Ast::Decl.Enum(name, _, _, _, position):

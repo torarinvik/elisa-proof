@@ -51,10 +51,11 @@ the source completeness and semantic-admissibility gates.
 Every theorem also identifies its owned proof goals and their certificate/replay status.
 `proof_replay_complete` is true only for a verified theorem with at least one owned obligation and
 a replayed certificate for every one, making the evidence behind theorem search directly auditable.
-Every consumed `lemma-summary` fact is additionally bound to its normalized formal-argument
-mapping, selected postcondition index, and exact caller certificates for all instantiated
-preconditions. Independent replay reconstructs that postcondition and rejects a mismatched fact;
-lemma summaries therefore no longer count as trusted-boundary facts.
+Every consumed lemma or executable-function summary fact is additionally bound to its normalized
+formal-argument mapping, selected postcondition index, and exact caller certificates for all
+instantiated preconditions. Function summaries also bind the concrete `result` term. Independent
+replay reconstructs each postcondition and rejects a mismatched fact; summaries therefore no
+longer count as trusted-boundary facts.
 The replay-side substitution is separately implemented across the kernel term language—including
 calls, fields, indexing, aggregates, constructors, conditionals, comprehensions, and scoped
 quantifier blocks—and preserves binder shadowing instead of reusing the elaborator's substitution.
@@ -230,7 +231,9 @@ The native checker currently supports:
   callers consume the verified summary without re-proving induction;
 - executable function summaries, with dependency-ordered callee verification, fail-closed
   `function-summary-unverified` boundaries, callee `requires` checking, named-argument mapping,
-  `ensure` propagation, and
+  `ensure` propagation, and independent replay that reconstructs the exact selected contract from
+  report-owned executable signatures, normalized arguments, concrete result binding, and replayed
+  precondition certificates; plus
   conservative bounded nested-path `changes`/`preserves` frames with subtree permissions,
   overlap-aware alias mapping, and direct-write checking,
   interprocedural frame conformance, nested-call checking, and disjoint fact preservation;
