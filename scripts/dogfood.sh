@@ -178,7 +178,7 @@ if [[ "$lemma_summary_replay_status" -ne 0 ]]; then
     printf 'dogfood failed: forged lemma summary survived replay (exit %s)\n' "$lemma_summary_replay_status" >&2
     exit 1
 fi
-printf 'dogfood lemma_summary_replay: mismatched theorem instantiation rejected\n'
+printf 'dogfood lemma_summary_replay: mismatched theorem instantiation and AST/kernel drift rejected\n'
 
 # Portable proof scripts are parsed and executed by the Elisa implementation itself. The
 # script's source fingerprint is optional for reusable theorem states, but when present a stale
