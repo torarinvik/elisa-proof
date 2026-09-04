@@ -4,8 +4,9 @@
 # not silently treat that analysis as a proof axiom, so this pass owns an independent, source
 # backed subset: lexical borrows, bounded static places, shared-vs-mutable exclusivity, writes to
 # borrowed places, moves, and reference escapes. Closed literal indexes, including every component
-# of a bounded multi-index, are exact path components;
-# dynamic indexes remain conservative whole-root accesses and are never guessed to be disjoint.
+# of a bounded multi-index, are exact path components. Small symbolic +/- index expressions are
+# retained as path components only when an explicit replayed inequality proves them disjoint;
+# unsupported dynamic indexes remain conservative whole-root accesses and are never guessed apart.
 # Borrow-carrying calls require a verified,
 # replayed callee resource summary with exact argument mapping; direct reference-formal returns
 # may compose only when caller ownership is externally established. Recursive-SCC, defaulted,
@@ -32,12 +33,16 @@ extend ElisaProof:
             borrow_target_places: mutable darray[ProofResourcePlace]
             borrow_mutable: mutable darray[bool]
             borrow_present: mutable darray[bool]
+            # The resource pass receives a snapshot of the logical entry facts. It may use those
+            # facts only for explicit symbolic-index separation; assignments and calls clear the
+            # snapshot before it can become stale.
+            facts: mutable darray[Ast::Expr]
             # The trace is a flat list of source-neutral transition roots. Nested lexical states
             # are wrapped in resource-scope nodes when their snapshots are closed.
             trace_events: mutable darray[usize]
 
         def proof_resource_empty() -> ProofResourceState:
-            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], trace_events: []}
+            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
 
         # Copy into an already-created state. Returning a struct that owns several darrays would
         # hide their allocation region from the self-hosting compiler, so all branch snapshots
@@ -52,6 +57,7 @@ extend ElisaProof:
             target.borrow_target_places.clear()
             target.borrow_mutable.clear()
             target.borrow_present.clear()
+            target.facts.clear()
             target.trace_events.clear()
             target.binding_names.extend(source.binding_names)
             target.binding_reference.extend(source.binding_reference)
@@ -62,6 +68,7 @@ extend ElisaProof:
             target.borrow_target_places.extend(source.borrow_target_places)
             target.borrow_mutable.extend(source.borrow_mutable)
             target.borrow_present.extend(source.borrow_present)
+            target.facts.extend(source.facts)
 
         def proof_resource_record_event[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, kind: sview, operator: sview, left: usize, name: sview, secondary_name: sview, auxiliary: usize) -> void:
             event: usize = proof_kernel_add_node(&report.kernel_nodes, kind, operator, left, 0, auxiliary, 0, 0, 0, name, secondary_name)
@@ -143,6 +150,79 @@ extend ElisaProof:
             path_root: usize = proof_kernel_add_node(&report.kernel_nodes, "index", "", parent.path_root, index_root, 0, 0, 0, 0, "", "")
             return (true, ProofResourcePlace{root: parent.root, path_root: path_root, depth: parent.depth + 1, whole: false})
 
+        # Symbolic selectors are deliberately small: a name, a parenthesized name, or bounded
+        # affine +/- arithmetic. Calls, fields, and arbitrary expressions remain conservative
+        # whole-root accesses until their semantics are represented in the resource kernel.
+        def proof_resource_symbolic_index_supported(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name != ""
+                Ast::Expr.IntLit(_):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_symbolic_index_supported(inner)
+                Ast::Expr.Unary(operator, operand, _):
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_resource_symbolic_index_supported(operand)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_resource_symbolic_index_supported(left) and proof_resource_symbolic_index_supported(right)
+                _:
+                    return false
+
+        def proof_resource_default_position() -> Ast::Pos:
+            return Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+
+        # Decode only the symbolic-index sublanguage back into source AST terms. This is used by
+        # the producer to ask the same arithmetic prover that checks contracts; replay consumes
+        # the corresponding canonical arena roots independently.
+        def proof_resource_decode_index_expression(report: ProofReport&, root: usize, depth: usize) -> (known: bool, expression: Ast::Expr):
+            invalid: Ast::Expr = Ast::Expr.Invalid
+            return (false, invalid) if depth >= 127 or root >= report.kernel_nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[root]
+            position: Ast::Pos = proof_resource_default_position()
+            return (true, Ast::Expr.IntLit(node.value)) if node.kind == "int" and node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == "" and node.secondary_name == ""
+            return (true, Ast::Expr.Ident(node.name, position)) if node.kind == "ident" and node.name != "" and node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.secondary_name == ""
+            if node.kind == "unary" and (node.operator == "+" or node.operator == "-"):
+                operand: (known: bool, expression: Ast::Expr) = proof_resource_decode_index_expression(report, node.left, depth + 1)
+                return (true, Ast::Expr.Unary(TokenKind.Plus if node.operator == "+" else TokenKind.Minus, operand.expression, position)) if operand.known and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == "" and node.secondary_name == ""
+            if node.kind == "binary" and (node.operator == "+" or node.operator == "-"):
+                left: (known: bool, expression: Ast::Expr) = proof_resource_decode_index_expression(report, node.left, depth + 1)
+                right: (known: bool, expression: Ast::Expr) = proof_resource_decode_index_expression(report, node.right, depth + 1)
+                return (true, Ast::Expr.Binary(left.expression, TokenKind.Plus if node.operator == "+" else TokenKind.Minus, right.expression, position)) if left.known and right.known and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == "" and node.secondary_name == ""
+            return (false, invalid)
+
+        def proof_resource_index_is_closed(report: ProofReport&, root: usize) -> bool:
+            return false if root >= report.kernel_nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[root]
+            return node.kind == "int" and node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == "" and node.secondary_name == ""
+
+        def proof_resource_symbolic_index_supported_kernel(report: ProofReport&, root: usize, depth: usize) -> bool:
+            decoded: (known: bool, expression: Ast::Expr) = proof_resource_decode_index_expression(report, root, depth)
+            return decoded.known
+
+        # A successful symbolic separation always emits a replayable resource-disjoint event.
+        # The event carries the exact index roots and a closed logical context, so replay does
+        # not need to trust this source-side call into the arithmetic prover.
+        def proof_resource_record_disjoint[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, left_root: usize, right_root: usize) -> void:
+            return if left_root >= report.kernel_nodes.count or right_root >= report.kernel_nodes.count
+            goal_root: usize = proof_kernel_add_node(&report.kernel_nodes, "binary", "!=", left_root, right_root, 0, 0, 0, 0, "", "")
+            start: usize = report.kernel_children.count
+            for fact in state.facts |fact, report|:
+                if proof_kernel_expression_supported(fact):
+                    report.kernel_children.push(proof_kernel_encode_expression(fact, &report.kernel_nodes, &report.kernel_children))
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-disjoint", "!=", left_root, right_root, goal_root, start, report.kernel_children.count - start, 0, "", "")
+            state.trace_events.push(event)
+
+        def proof_resource_symbolic_indices_disjoint[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, left_root: usize, right_root: usize) -> bool:
+            return false if proof_resource_index_is_closed(report, left_root) and proof_resource_index_is_closed(report, right_root)
+            left: (known: bool, expression: Ast::Expr) = proof_resource_decode_index_expression(report, left_root, 0)
+            right: (known: bool, expression: Ast::Expr) = proof_resource_decode_index_expression(report, right_root, 0)
+            return false if not left.known or not right.known
+            goal: Ast::Expr = Ast::Expr.Binary(left.expression, TokenKind.BangEq, right.expression, proof_resource_default_position())
+            annotations: darray[Ast::EnumAnnotation] = []
+            proven: bool = proof_goal(state.facts, goal, annotations)
+            proof_resource_record_disjoint(state, report, left_root, right_root) if proven
+            return proven
+
         # Resource identities cover a root and an exact named-field/literal-index path up to the
         # same bounded expression depth as the independent kernel. Dynamic selectors are lowered
         # to a conservative whole-root place below.
@@ -164,6 +244,9 @@ extend ElisaProof:
                             index_root: usize = proof_kernel_encode_expression(index, &report.kernel_nodes, &report.kernel_children)
                             return proof_resource_place_add_index(report, parent.place, index_root)
                         _:
+                            if proof_resource_symbolic_index_supported(index):
+                                index_root: usize = proof_kernel_encode_expression(index, &report.kernel_nodes, &report.kernel_children)
+                                return proof_resource_place_add_index(report, parent.place, index_root)
                             return (false, empty)
                 Ast::Expr.IndexN(object, arguments, _):
                     decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place(object, report)
@@ -177,6 +260,12 @@ extend ElisaProof:
                                 return (false, empty) if not next.known
                                 parent <- next.place
                             _:
+                                if proof_resource_symbolic_index_supported(argument):
+                                    index_root: usize = proof_kernel_encode_expression(argument, &report.kernel_nodes, &report.kernel_children)
+                                    next: (known: bool, place: ProofResourcePlace) = proof_resource_place_add_index(report, parent, index_root)
+                                    return (false, empty) if not next.known
+                                    parent <- next.place
+                                    continue
                                 return (false, empty)
                     return (true, parent)
                 Ast::Expr.Paren(inner, _):
@@ -188,7 +277,18 @@ extend ElisaProof:
             empty: ProofResourcePlace = proof_resource_empty_place()
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
-                    return proof_resource_place(operand, report) if operator == TokenKind.Ampersand
+                    if operator == TokenKind.Ampersand:
+                        exact: (known: bool, place: ProofResourcePlace) = proof_resource_place(operand, report)
+                        return exact if exact.known
+                        # An unsupported dynamic selector cannot identify an element in the v1
+                        # resource language, but its receiver root is still a sound capability identity.
+                        # Widening to that whole root lets shared dynamic borrows participate in
+                        # ordinary read reasoning while ensuring every write or mutable borrow
+                        # of the root conflicts conservatively.
+                        root: sview = proof_resource_place_root(operand)
+                        return (false, empty) if root == ""
+                        root_node: usize = proof_kernel_add_node(&report.kernel_nodes, "ident", "", 0, 0, 0, 0, 0, 0, root, "")
+                        return (true, ProofResourcePlace{root: root, path_root: root_node, depth: 0, whole: true})
                     return (false, empty)
                 Ast::Expr.Paren(inner, _):
                     return proof_resource_borrow_place(inner, report)
@@ -198,39 +298,44 @@ extend ElisaProof:
         # Recover one exact path component in root-to-leaf order. Index components carry their
         # closed integer value; an explicit kind keeps fields and indexes disjoint even when their
         # spellings happen to match.
-        def proof_resource_path_component(report: ProofReport&, path_root: usize, position: usize, depth: usize) -> (known: bool, kind: sview, field: sview, value: i64):
+        def proof_resource_path_component(report: ProofReport&, path_root: usize, position: usize, depth: usize) -> (known: bool, kind: sview, field: sview, value: i64, expression_root: usize):
             requires depth <= 127
             decreases depth
-            return (false, "", "", 0) if depth == 0 or path_root >= report.kernel_nodes.count
+            return (false, "", "", 0, 0) if depth == 0 or path_root >= report.kernel_nodes.count
             node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[path_root]
             if position + 1 == depth:
-                return (true, "field", node.name, 0) if node.kind == "field" and node.name != ""
+                return (true, "field", node.name, 0, 0) if node.kind == "field" and node.name != ""
                 if node.kind == "index" and node.operator == "" and node.name == "" and node.secondary_name == "" and node.right < report.kernel_nodes.count:
                     index_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[node.right]
-                    return (true, "index", "", index_node.value) if index_node.kind == "int" and index_node.operator == "" and index_node.left == 0 and index_node.right == 0 and index_node.auxiliary == 0 and index_node.children_start == 0 and index_node.children_count == 0 and index_node.name == "" and index_node.secondary_name == ""
-                return (false, "", "", 0)
-            return (false, "", "", 0) if position >= depth - 1
+                    return (true, "index", "", index_node.value, node.right) if proof_resource_index_is_closed(report, node.right)
+                    return (true, "index", "", 0, node.right) if proof_resource_symbolic_index_supported_kernel(report, node.right, 0)
+                return (false, "", "", 0, 0)
+            return (false, "", "", 0, 0) if position >= depth - 1
             return proof_resource_path_component(report, node.left, position, depth - 1) if node.kind == "field" or node.kind == "index"
-            return (false, "", "", 0)
+            return (false, "", "", 0, 0)
 
-        def proof_resource_place_is_prefix(report: ProofReport&, prefix: ProofResourcePlace, target: ProofResourcePlace) -> bool:
+        def proof_resource_place_is_prefix[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, prefix: ProofResourcePlace, target: ProofResourcePlace) -> bool:
             return false if prefix.root == "" or target.root == "" or prefix.root != target.root
             return true if prefix.whole
             return false if target.whole or prefix.depth > target.depth or prefix.depth > 127 or target.depth > 127
             for index in 0..<prefix.depth:
-                prefix_component: (known: bool, kind: sview, field: sview, value: i64) = proof_resource_path_component(report, prefix.path_root, index, prefix.depth)
-                target_component: (known: bool, kind: sview, field: sview, value: i64) = proof_resource_path_component(report, target.path_root, index, target.depth)
+                prefix_component: (known: bool, kind: sview, field: sview, value: i64, expression_root: usize) = proof_resource_path_component(report, prefix.path_root, index, prefix.depth)
+                target_component: (known: bool, kind: sview, field: sview, value: i64, expression_root: usize) = proof_resource_path_component(report, target.path_root, index, target.depth)
                 return false if not prefix_component.known or not target_component.known or prefix_component.kind != target_component.kind
                 return false if prefix_component.kind == "field" and prefix_component.field != target_component.field
-                return false if prefix_component.kind == "index" and prefix_component.value != target_component.value
+                if prefix_component.kind == "index":
+                    if proof_resource_index_is_closed(report, prefix_component.expression_root) and proof_resource_index_is_closed(report, target_component.expression_root):
+                        return false if prefix_component.value != target_component.value
+                    else:
+                        return false if proof_resource_symbolic_indices_disjoint(state, report, prefix_component.expression_root, target_component.expression_root)
             return true
 
-        def proof_resource_places_overlap(report: ProofReport&, left: ProofResourcePlace, right: ProofResourcePlace) -> bool:
-            return proof_resource_place_is_prefix(report, left, right) or proof_resource_place_is_prefix(report, right, left)
+        def proof_resource_places_overlap[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, left: ProofResourcePlace, right: ProofResourcePlace) -> bool:
+            return proof_resource_place_is_prefix(state, report, left, right) or proof_resource_place_is_prefix(state, report, right, left)
 
-        # Field/index roots and calls now have a stable root identity. A dynamic selector is
-        # intentionally widened to the whole root, retaining soundness without pretending that
-        # two runtime indexes are disjoint.
+        # Field/index roots and calls now have a stable root identity. Unsupported dynamic
+        # selectors are intentionally widened to the whole root, retaining soundness without
+        # pretending that two runtime indexes are disjoint.
         def proof_resource_direct_borrow_root(expression: Ast::Expr) -> sview:
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
@@ -280,7 +385,8 @@ extend ElisaProof:
             return decoded
 
         def proof_resource_encode_access_place[@r](expression: Ast::Expr, report: mutable ProofReport& @r) -> usize:
-            return proof_kernel_encode_expression(expression, &report.kernel_nodes, &report.kernel_children) if proof_resource_place_shape_known(expression)
+            decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place(expression, report)
+            return decoded.place.path_root if decoded.known
             root: sview = proof_resource_place_root(expression)
             return proof_kernel_add_node(&report.kernel_nodes, "ident", "", 0, 0, 0, 0, 0, 0, root, "") if root != ""
             return 0
@@ -297,7 +403,7 @@ extend ElisaProof:
                         Ast::Expr.IntLit(_):
                             return true
                         _:
-                            return false
+                            return proof_resource_symbolic_index_supported(index)
                 Ast::Expr.IndexN(object, arguments, _):
                     return false if not proof_resource_place_shape_known(object) or arguments.count == 0
                     for argument in arguments:
@@ -305,7 +411,7 @@ extend ElisaProof:
                             Ast::Expr.IntLit(_):
                                 pass
                             _:
-                                return false
+                                return false if not proof_resource_symbolic_index_supported(argument)
                     return true
                 Ast::Expr.Paren(inner, _):
                     return proof_resource_place_shape_known(inner)
@@ -538,21 +644,88 @@ extend ElisaProof:
                 return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and state.borrow_target_slots[index] == target_slot and index < state.borrow_mutable.count and state.borrow_mutable[index]
             return false
 
-        def proof_resource_has_borrow_overlap(state: ProofResourceState&, report: ProofReport&, target: ProofResourcePlace, except_slot: usize) -> bool:
+        def proof_resource_has_borrow_overlap[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: ProofResourcePlace, except_slot: usize) -> bool:
             return false if target.root == ""
             for index in 0..<state.borrow_target_places.count |index, state, report, target, except_slot|:
-                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and proof_resource_places_overlap(report, state.borrow_target_places[index], target)
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and proof_resource_places_overlap(state, report, state.borrow_target_places[index], target)
             return false
 
-        def proof_resource_has_mutable_borrow_overlap(state: ProofResourceState&, report: ProofReport&, target: ProofResourcePlace, except_slot: usize) -> bool:
+        def proof_resource_has_mutable_borrow_overlap[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: ProofResourcePlace, except_slot: usize) -> bool:
             return false if target.root == ""
             for index in 0..<state.borrow_target_places.count |index, state, report, target, except_slot|:
-                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and index < state.borrow_mutable.count and state.borrow_mutable[index] and proof_resource_places_overlap(report, state.borrow_target_places[index], target)
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and index < state.borrow_mutable.count and state.borrow_mutable[index] and proof_resource_places_overlap(state, report, state.borrow_target_places[index], target)
+            return false
+
+        # Read-only callers such as contract escape diagnostics must not emit resource proof
+        # events. Root equality is intentionally conservative here; the permission transitions
+        # above use the fact-aware mutable relation when they decide acceptance.
+        def proof_resource_has_borrow_overlap_readonly(state: ProofResourceState&, target: ProofResourcePlace, except_slot: usize) -> bool:
+            return false if target.root == ""
+            for index in 0..<state.borrow_target_places.count |index, state, target, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and state.borrow_target_places[index].root == target.root
             return false
 
         def proof_resource_add_failing_obligation(report: mutable ProofReport&, kind: sview, position: Ast::Pos, function_name: sview, message: sview) -> void:
             report.proof_obligation(false)
             proof_add_finding(report, kind, position.line, function_name, message)
+
+        def proof_resource_expr_has_call(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_has_call(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_resource_expr_has_call(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_resource_expr_has_call(left) or proof_resource_expr_has_call(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_has_call(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_has_call(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_resource_expr_has_call(object) or proof_resource_expr_has_call(index)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_resource_expr_has_call(object)
+                    for argument in arguments:
+                        return true if proof_resource_expr_has_call(argument)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_resource_expr_has_call(object) or proof_resource_expr_has_call(low) or proof_resource_expr_has_call(high)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_resource_expr_has_call(condition) or proof_resource_expr_has_call(then_expression) or proof_resource_expr_has_call(else_expression)
+                Ast::Expr.Move(operand, _):
+                    return proof_resource_expr_has_call(operand)
+                _:
+                    return false
+
+        def proof_resource_expr_has_move(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Move(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_has_move(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_resource_expr_has_move(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_resource_expr_has_move(left) or proof_resource_expr_has_move(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_has_move(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_has_move(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_resource_expr_has_move(object) or proof_resource_expr_has_move(index)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_resource_expr_has_move(object)
+                    for argument in arguments:
+                        return true if proof_resource_expr_has_move(argument)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_resource_expr_has_move(object) or proof_resource_expr_has_move(low) or proof_resource_expr_has_move(high)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_resource_expr_has_move(condition) or proof_resource_expr_has_move(then_expression) or proof_resource_expr_has_move(else_expression)
+                _:
+                    return false
 
         def proof_resource_add_binding[@s](state: mutable ProofResourceState& @s, name: sview, is_reference: bool, is_mutable_reference: bool, is_writable: bool, target_slot: usize, borrow_is_mutable: bool, target_place: ProofResourcePlace) -> void:
             borrow_is_present: bool = target_slot < state.binding_names.count
@@ -994,7 +1167,7 @@ extend ElisaProof:
                 slot: usize = proof_resource_lookup(state, accessed.place.root)
                 return false if slot >= state.binding_names.count
                 return true if slot < state.borrow_present.count and state.borrow_present[slot]
-                return proof_resource_has_borrow_overlap(state, report, accessed.place, state.binding_names.count)
+                return proof_resource_has_borrow_overlap_readonly(state, accessed.place, state.binding_names.count)
             match expression:
                 Ast::Expr.Ident(name, _):
                     slot: usize = proof_resource_lookup(state, name)
@@ -1288,7 +1461,11 @@ extend ElisaProof:
                         proof_resource_add_failing_obligation(report, "borrow-alias-conflict", position, function_name, "mutable borrow conflicts with another live borrow of the same root")
                     elif not borrow_is_mutable and proof_resource_has_mutable_borrow_overlap(state, report, borrowed.place, state.binding_names.count):
                         proof_resource_add_failing_obligation(report, "borrow-alias-conflict", position, function_name, "shared borrow conflicts with a live mutable borrow of the same root")
-                    source_place_root <- proof_resource_encode_borrow_place(initializer, report)
+                    # Reuse the exact path already stored in the resource state. Re-encoding the
+                    # same AST would create structurally equal but numerically different roots,
+                    # which would make replayed resource-disjoint evidence unable to identify the
+                    # path component it justified.
+                    source_place_root <- borrowed.place.path_root
             if borrowed.known and target_slot < state.binding_names.count and borrow_is_mutable:
                 source_writable: bool = target_slot < state.binding_writable.count and (state.binding_writable[target_slot] or (target_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[target_slot]))
                 proof_resource_add_failing_obligation(report, "borrow-mutable-source", position, function_name, "mutable borrow requires a writable source binding") if not source_writable
@@ -1327,15 +1504,19 @@ extend ElisaProof:
             for statement in statements |state, report, function_name|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                        shadowed: bool = proof_resource_lookup(state, local_name) < state.binding_names.count
                         proof_resource_check_var(local_name, type_expression, initializer, state, report, function_name, position, functions)
+                        state.facts.clear() if shadowed or proof_resource_expr_has_call(initializer) or proof_resource_expr_has_move(initializer)
                     Ast::Stmt.Assign(target, _, initializer, position):
                         if not proof_resource_is_discard_target(target) and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
                             proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a newly created borrow is assigned across a binding boundary")
                         proof_resource_check_write(target, state, report, function_name, position, functions)
                         proof_resource_check_expression(target, state, report, function_name, functions)
                         proof_resource_check_expression(initializer, state, report, function_name, functions)
+                        state.facts.clear()
                     Ast::Stmt.Expr(expression, _):
                         proof_resource_check_expression(expression, state, report, function_name, functions)
+                        state.facts.clear() if proof_resource_expr_has_call(expression) or proof_resource_expr_has_move(expression)
                     Ast::Stmt.Return(value, position):
                         if value is returned:
                             if proof_resource_expr_returns_local_borrow(returned, state, functions, report):
@@ -1351,12 +1532,14 @@ extend ElisaProof:
                         proof_resource_check_statements(else_body, &else_state, report, function_name, functions)
                         proof_resource_close_child(state, then_state, report, true)
                         proof_resource_close_child(state, else_state, report, true)
+                        state.facts.clear()
                     Ast::Stmt.While(condition, while_body, _):
                         proof_resource_check_expression(condition, state, report, function_name, functions)
                         while_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &while_state)
                         proof_resource_check_statements(while_body, &while_state, report, function_name, functions)
                         proof_resource_close_child(state, while_state, report, true)
+                        state.facts.clear()
                     Ast::Stmt.For(_, variables, iterable, for_body, _):
                         proof_resource_check_expression(iterable, state, report, function_name, functions)
                         for_state: mutable ProofResourceState = proof_resource_empty()
@@ -1365,6 +1548,7 @@ extend ElisaProof:
                             proof_resource_add_binding_traced(&for_state, report, variable, false, false, false, for_state.binding_names.count, false, "", proof_resource_empty_place(), 0) if variable != ""
                         proof_resource_check_statements(for_body, &for_state, report, function_name, functions)
                         proof_resource_close_child(state, for_state, report, true)
+                        state.facts.clear()
                     Ast::Stmt.Match(scrutinee, arms, _):
                         proof_resource_check_expression(scrutinee, state, report, function_name, functions)
                         for arm in arms |arm, state, report, function_name|:
@@ -1378,12 +1562,14 @@ extend ElisaProof:
                                     proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions)
                             proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions)
                             proof_resource_close_child(state, arm_state, report, true)
+                        state.facts.clear()
                     Ast::Stmt.Block(_, _, binding, block_body, _):
                         block_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &block_state)
                         proof_resource_add_binding_traced(&block_state, report, binding, false, false, false, block_state.binding_names.count, false, "", proof_resource_empty_place(), 0) if binding != ""
                         proof_resource_check_statements(block_body, &block_state, report, function_name, functions)
                         proof_resource_close_child(state, block_state, report, true)
+                        state.facts.clear()
                     Ast::Stmt.Contract(kind, expression, position):
                         if kind == "assert" or kind == "requires" or kind == "ensure":
                             proof_resource_check_expression(expression, state, report, function_name, functions)
@@ -1391,9 +1577,10 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_check_resource_safety[@r](parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, report: mutable ProofReport& @r, function_name: sview, line: u32, functions: ProofFunctionTable&) -> void:
+        def proof_check_resource_safety[@r](parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, facts: darray[Ast::Expr]&, report: mutable ProofReport& @r, function_name: sview, line: u32, functions: ProofFunctionTable&) -> void:
             failed_before: u32 = report.failed
             state: mutable ProofResourceState = proof_resource_empty()
+            state.facts.extend(facts)
             for parameter in parameters |state, report|:
                 is_reference: bool = proof_resource_is_reference_type(parameter.type_expression)
                 is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(parameter.type_expression)

@@ -192,8 +192,10 @@ The native checker currently supports:
   interprocedural frame conformance, nested-call checking, and disjoint fact preservation;
 - compositional resource summaries for exact borrow-carrying calls: a callee's independently
   replayed lexical resource trace is instantiated at the caller with formal/actual permission
-  checks and bounded external-write propagation; named fields and closed literal indexes are
-  preserved as exact path components, while recursive-SCC, defaulted, dynamic, and opaque
+  checks and bounded external-write propagation; named fields, closed literal indexes, and
+  closed literal multi-index paths are preserved as exact path components; small symbolic index
+  paths may be separated only by explicit replayed inequality facts, while recursive-SCC, defaulted,
+  dynamic, and opaque
   resource calls remain explicitly unsupported;
 - pure parameter-default materialization, including defaults that call verified total-pure
   functions; unresolved, effectful, later-formal, or `old(...)` defaults fail closed, and pure
@@ -283,6 +285,11 @@ The native checker currently supports:
 - counting-range loops add traced lower/upper bounds for their binders, allowing later indexed
   collection obligations to consume the same semantic facts without treating loop syntax as an
   unchecked axiom; and
+- ordinary `for` loops may carry replayable `invariant` contracts. Each invariant is checked at
+  entry and after one arbitrary body iteration, including unlabeled `break`/`continue` paths;
+  only invariants over bindings that remain in scope after the loop are exported at the join.
+  A missing invariant keeps the existing conservative body-only behavior, while a binder-scoped
+  invariant is rejected explicitly rather than emitting a certificate with a free variable; and
 - direct single-index reads and writes over tracked collection-like places emit explicit lower and
   strict-upper bound obligations, while exclusive slices emit lower, upper, and endpoint-order
   obligations. Compiler cast syntax (`value.cast[Type]`) is classified as a type operation rather
@@ -293,8 +300,10 @@ The native checker currently supports:
   executable summary proves an exact call-free result expression; purity alone, missing summaries,
   and result expressions that still exceed the bound remain rejected rather than being treated as
   safe. Resource places preserve arbitrary named-field paths and closed literal index selectors
-  for exact disjointness and borrow-summary composition, but dynamic index selectors widen to the
-  whole root; and
+  for exact disjointness and borrow-summary composition, including each component of a literal
+  multi-index path. Small symbolic +/- index terms are retained as paths only when an explicit
+  inequality is emitted and independently replayed; unsupported dynamic selectors still widen to
+  the whole root; and
 - compiler-defined lower bounds for bare unsigned primitive types (`u8`, `u16`, `u32`, `u64`,
   `usize`, and `uint`) enter the proof context as traced `type-bound` facts. This narrow typing
   fact survives call, assignment, and control-flow havoc, while shadowed loop/pattern/scoped
@@ -333,8 +342,9 @@ bound) have stable structural identities,
 shared aliases may coexist, mutable aliases are exclusive, and writes/moves are checked with
 prefix-overlap semantics. Named uses and ownership transfers are also emitted as replayable
 resource transitions, so use-after-move is rejected by the resource checker and the independent
-kernel. Dynamic indexes conservatively widen to their whole root rather than being guessed
-disjoint. Borrow handles cannot escape. Borrow-carrying calls are admitted only when exact
+kernel. Unsupported dynamic indexes conservatively widen to their whole root; small symbolic
+ +/- index terms are disjoint only when an explicit inequality is recorded and independently
+replayed, rather than guessed. Borrow handles cannot escape. Borrow-carrying calls are admitted only when exact
 formal/actual mapping succeeds and the callee has a verified, independently replayed resource
 summary; the kernel then replays the callee trace and propagates only checked external writes.
 Recursive-SCC, defaulted, dynamic, and opaque calls remain unsupported.

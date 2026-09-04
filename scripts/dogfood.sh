@@ -21,12 +21,20 @@ fi
 # sync with build.sh so the executable dogfood harness exercises the same product
 # configuration as the proof binary itself.
 RUNTIME_OBJ="${ELISA_RUNTIME_OBJ:-}"
+COMPILER_IS_STAGE1=0
 if [[ -z "$RUNTIME_OBJ" ]]; then
     driver="$(grep -o '/[^\"]*/scripts/elisac_stage1\.sh' "$COMPILER" 2>/dev/null | head -1 || true)"
     if [[ -n "$driver" ]]; then
+        COMPILER_IS_STAGE1=1
         candidate="${driver%/scripts/elisac_stage1.sh}/build/runtime/elisacore_runtime.o"
         [[ -f "$candidate" ]] && RUNTIME_OBJ="$candidate"
     fi
+fi
+if [[ "$(basename "$COMPILER")" == "elisac-stage1" ]]; then
+    COMPILER_IS_STAGE1=1
+fi
+if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/elisacore_runtime.o" ]]; then
+    RUNTIME_OBJ="${HOME}/.elisac/elisacore_runtime.o"
 fi
 
 "$ROOT_DIR/scripts/build.sh"
@@ -90,6 +98,18 @@ run_probe borrow_four_nested_fields examples/borrow_four_nested_fields.elisa 0
 run_probe rejected_borrow_four_nested_alias examples/rejected_borrow_four_nested_alias.elisa 1
 run_probe borrow_indexed_places examples/borrow_indexed_places.elisa 0
 run_probe rejected_borrow_index_alias examples/rejected_borrow_index_alias.elisa 1
+run_probe borrow_multi_indexed_places examples/borrow_multi_indexed_places.elisa 0
+run_probe rejected_borrow_multi_index_alias examples/rejected_borrow_multi_index_alias.elisa 1
+run_probe borrow_dynamic_whole_root examples/borrow_dynamic_whole_root.elisa 0
+run_probe rejected_borrow_dynamic_alias examples/rejected_borrow_dynamic_alias.elisa 1
+run_probe borrow_dynamic_multi_whole_root examples/borrow_dynamic_multi_whole_root.elisa 0
+run_probe rejected_borrow_dynamic_multi_alias examples/rejected_borrow_dynamic_multi_alias.elisa 1
+run_probe borrow_symbolic_disjoint examples/borrow_symbolic_disjoint.elisa 0
+run_probe rejected_borrow_symbolic_alias examples/rejected_borrow_symbolic_alias.elisa 1
+run_probe for_invariant examples/for_invariant.elisa 0
+run_probe for_loop_control_invariant examples/for_loop_control_invariant.elisa 0
+run_probe rejected_for_invariant examples/rejected_for_invariant.elisa 1
+run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.elisa 1
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.

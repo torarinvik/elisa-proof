@@ -80,14 +80,20 @@ The proof kernel is intentionally fail-closed:
    `parallel for` is checked in a cloned worker state, but is then a hard proof-state barrier:
    sequential facts, symbolic values, and worker transfers are not allowed to cross its join until
    the kernel models worker isolation, reduction ownership, and structured-concurrency joins.
+   Ordinary `for` loops are different: an explicit `invariant` is established at the iterable
+   boundary, checked over one arbitrary body iteration, and exported as the only post-loop fact.
+   Invariants mentioning a loop binder are rejected because that binder is out of scope at the
+   join; missing invariants retain the older body-only, no-post-state behavior.
    Resource checking is a separate lexical state machine, not an imported compiler verdict. It
    resolves bounded named places (`&x` and arbitrary named-field paths within the kernel depth
    bound) to exact structural identities, permits
    disjoint shared borrows, requires mutable exclusivity, and rejects writes/moves whose places
    overlap a live borrow. Named uses and moves are explicit transitions, and the resource state
-   rejects use-after-move. Dynamic indexes conservatively widen to whole-root places. Successful
-   transitions are lowered to a source-neutral resource trace with explicit place terms and scope
-   nodes, then independently replayed by the kernel. A borrow-carrying call is admitted only with
+   rejects use-after-move. Unsupported dynamic indexes conservatively widen to whole-root places;
+   small symbolic +/- index terms are separated only by explicit inequality events whose premises
+   are independently replayed and source-traced. Successful transitions are lowered to a
+   source-neutral resource trace with explicit place terms and scope nodes, then independently
+   replayed by the kernel. A borrow-carrying call is admitted only with
    exact formal/actual mapping and a verified callee `resource-safety` root; the kernel replays
    that callee trace from an empty state, checks shared/mutable permissions at the call site, and
    propagates only summarized external writes back to the caller. Recursive-SCC, defaulted,
@@ -205,7 +211,8 @@ The proof kernel is intentionally fail-closed:
     `array[T, N]` forms accept any element expression with a literal nonnegative extent; the
     shorthand `T[N]` is restricted to primitive scalar element heads. Aliases, dependent extents,
     arbitrary paths, and dynamic arrays remain explicit obligations. Resource traces additionally
-    retain closed literal index components for exact disjointness; symbolic/dynamic heap aliases
+    retain closed literal index components, including all components of a bounded multi-index path,
+    for exact disjointness; symbolic/dynamic heap aliases
     and element-level validity remain future work.
     The compiler's `value.cast[Type]` form is an AST `Index` only because its type argument uses
     brackets; the checker recognizes the reserved `.cast` selector and excludes it from runtime

@@ -28,17 +28,22 @@ fi
 # needs elisacore_runtime.o on the link line. Set ELISA_RUNTIME_OBJ to override;
 # otherwise it is read out of the stage1 wrapper, which names its worktree.
 RUNTIME_OBJ="${ELISA_RUNTIME_OBJ:-}"
+COMPILER_IS_STAGE1=0
 if [[ -z "$RUNTIME_OBJ" ]]; then
     driver="$(grep -o '/[^"]*/scripts/elisac_stage1\.sh' "$COMPILER" 2>/dev/null | head -1 || true)"
     if [[ -n "$driver" ]]; then
+        COMPILER_IS_STAGE1=1
         candidate="${driver%/scripts/elisac_stage1.sh}/build/runtime/elisacore_runtime.o"
         [[ -f "$candidate" ]] && RUNTIME_OBJ="$candidate"
     fi
 fi
+if [[ "$(basename "$COMPILER")" == "elisac-stage1" ]]; then
+    COMPILER_IS_STAGE1=1
+fi
 # The installed compiler publishes its runtime object beside itself. Used only as
 # a fallback: the copy that belongs to the compiler which emitted the object is
 # the one that is guaranteed to match it.
-if [[ -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/elisacore_runtime.o" ]]; then
+if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/elisacore_runtime.o" ]]; then
     RUNTIME_OBJ="${HOME}/.elisac/elisacore_runtime.o"
 fi
 

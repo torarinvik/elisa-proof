@@ -1376,6 +1376,8 @@ module ElisaProofKernelReplay:
                 return node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name == ""
             if node.kind == "resource-safety":
                 return node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary < 65536 and node.value == 0 and node.name != "" and node.secondary_name == "resource-v1"
+            if node.kind == "resource-disjoint":
+                return node.operator == "!=" and node.value == 0 and node.name == "" and node.secondary_name == "" and node.children_count <= 4096
             return false
 
         def proof_kernel_replay_arena_child_valid(validity: darray[bool]&, root: usize) -> bool:
@@ -1447,6 +1449,20 @@ module ElisaProofKernelReplay:
                     child_validity: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, child.value)
                     return false if not child_validity.known or not child_validity.value
                 return true
+            if node.kind == "resource-disjoint":
+                left_child: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
+                return false if not left_child.known or not left_child.value
+                right_child: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.right)
+                return false if not right_child.known or not right_child.value
+                goal_child: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.auxiliary)
+                return false if not goal_child.known or not goal_child.value
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, validity|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known
+                    child_validity: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, child.value)
+                    return false if not child_validity.known or not child_validity.value
+                return true
             if node.kind == "resource-bind":
                 return true if node.operator == "value" or node.operator == "external-shared" or node.operator == "external-mutable"
                 source: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
@@ -1489,6 +1505,16 @@ module ElisaProofKernelReplay:
                     work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
                 return true
             if node.kind == "resource-scope" or node.kind == "resource-safety":
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known
+                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "resource-disjoint":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
+                work.push(ProofKernelReplayArenaWork{root: node.auxiliary, depth: next_depth, exiting: false})
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 for index in 0..<node.children_count |index, node, children, work, next_depth|:
                     child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
@@ -1874,22 +1900,34 @@ module ElisaProofKernelReplay:
         # Field chains are stored outermost-first in the arena (`a.b.c` points at `c`, whose
         # left edge points at `a.b`). Recovering a component by ordinal keeps prefix checking
         # exact without hashing or putting an owned container in every place value.
-        def proof_kernel_replay_resource_path_component(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, path_root: usize, position: usize, depth: usize) -> (known: bool, kind: sview, field: sview, value: i64):
+        def proof_kernel_replay_resource_index_expression_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> bool:
+            return false if depth >= 127 or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return true if node.kind == "int" and node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == "" and node.secondary_name == ""
+            return true if node.kind == "ident" and node.name != "" and node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.secondary_name == ""
+            if node.kind == "unary" and (node.operator == "+" or node.operator == "-"):
+                return node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name == "" and node.secondary_name == "" and proof_kernel_replay_resource_index_expression_valid(nodes, node.left, depth + 1)
+            if node.kind == "binary" and (node.operator == "+" or node.operator == "-"):
+                return node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name == "" and node.secondary_name == "" and proof_kernel_replay_resource_index_expression_valid(nodes, node.left, depth + 1) and proof_kernel_replay_resource_index_expression_valid(nodes, node.right, depth + 1)
+            return false
+
+        def proof_kernel_replay_resource_path_component(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, path_root: usize, position: usize, depth: usize) -> (known: bool, kind: sview, field: sview, value: i64, expression_root: usize):
             requires depth <= 127
             decreases depth
-            return (false, "", "", 0) if depth == 0 or path_root >= nodes.count or not proof_kernel_replay_valid(nodes, path_root)
+            return (false, "", "", 0, 0) if depth == 0 or path_root >= nodes.count or not proof_kernel_replay_valid(nodes, path_root)
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, path_root)
-            return (false, "", "", 0) if not located.known
+            return (false, "", "", 0, 0) if not located.known
             node: ElisaProofKernelCore::ProofKernelNode = located.node
             if position + 1 == depth:
-                return (true, "field", node.name, 0) if node.kind == "field" and node.name != ""
+                return (true, "field", node.name, 0, 0) if node.kind == "field" and node.name != ""
                 if node.kind == "index" and node.right < nodes.count:
                     index_value: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, node.right, 0)
-                    return (true, "index", "", index_value.value) if index_value.known
-                return (false, "", "", 0)
-            return (false, "", "", 0) if position >= depth - 1
+                    return (true, "index", "", index_value.value, node.right) if index_value.known
+                    return (true, "index", "", 0, node.right) if proof_kernel_replay_resource_index_expression_valid(nodes, node.right, 0)
+                return (false, "", "", 0, 0)
+            return (false, "", "", 0, 0) if position >= depth - 1
             return proof_kernel_replay_resource_path_component(nodes, node.left, position, depth - 1) if node.kind == "field" or node.kind == "index"
-            return (false, "", "", 0)
+            return (false, "", "", 0, 0)
 
         # Compose a source place relative to an origin place. This is the small piece that lets
         # a callee's `parameter.field` effect become the caller's `argument.field` effect while
@@ -1899,15 +1937,14 @@ module ElisaProofKernelReplay:
             assert(relative.depth <= 127)
             result: mutable ProofKernelReplayResourcePlace = parent
             for index in 0..<relative.depth |index, nodes, result, relative|:
-                component: (known: bool, kind: sview, field: sview, value: i64) = proof_kernel_replay_resource_path_component(nodes, relative.path_root, index, relative.depth)
+                component: (known: bool, kind: sview, field: sview, value: i64, expression_root: usize) = proof_kernel_replay_resource_path_component(nodes, relative.path_root, index, relative.depth)
                 return (false, proof_kernel_replay_resource_empty_place()) if not component.known
                 next: mutable (known: bool, place: ProofKernelReplayResourcePlace) = (false, proof_kernel_replay_resource_empty_place())
                 if component.kind == "field":
                     field_root: usize = ElisaProofKernelCore::add_node(nodes, "field", "", result.path_root if result.depth > 0 else 0, 0, 0, 0, 0, 0, component.field, "")
                     next <- proof_kernel_replay_resource_place_add_field(result, component.field, field_root)
                 elif component.kind == "index":
-                    index_value: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, component.value, "", "")
-                    index_root: usize = ElisaProofKernelCore::add_node(nodes, "index", "", result.path_root if result.depth > 0 else 0, index_value, 0, 0, 0, 0, "", "")
+                    index_root: usize = ElisaProofKernelCore::add_node(nodes, "index", "", result.path_root if result.depth > 0 else 0, component.expression_root, 0, 0, 0, 0, "", "")
                     next <- proof_kernel_replay_resource_place_add_index(result, index_root)
                 else:
                     return (false, proof_kernel_replay_resource_empty_place())
@@ -1915,7 +1952,7 @@ module ElisaProofKernelReplay:
                 result <- next.place
             return (true, result)
 
-        def proof_kernel_replay_resource_place(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> (known: bool, place: ProofKernelReplayResourcePlace):
+        def proof_kernel_replay_resource_place(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> (known: bool, place: ProofKernelReplayResourcePlace):
             empty: ProofKernelReplayResourcePlace = proof_kernel_replay_resource_empty_place()
             return (false, empty) if depth >= 128 or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
@@ -1924,30 +1961,52 @@ module ElisaProofKernelReplay:
             if node.kind == "ident":
                 return (node.name != "", ProofKernelReplayResourcePlace{root: node.name, path_root: 0, depth: 0, whole: true})
             if node.kind == "field":
-                parent: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, node.left, depth + 1)
+                parent: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, depth + 1)
                 return proof_kernel_replay_resource_place_add_field(parent.place, node.name, root) if parent.known
             if node.kind == "index":
-                parent: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, node.left, depth + 1)
+                parent: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, depth + 1)
                 return (false, empty) if not parent.known
-                index_value: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, node.right, 0)
-                return (false, empty) if not index_value.known
+                return (false, empty) if not proof_kernel_replay_resource_index_expression_valid(nodes, node.right, 0)
                 return proof_kernel_replay_resource_place_add_index(parent.place, root)
+            if node.kind == "index-n":
+                return (false, empty) if node.children_start > children.count or node.children_count == 0 or node.children_count > children.count - node.children_start
+                parent: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, depth + 1)
+                return (false, empty) if not parent.known
+                result: mutable ProofKernelReplayResourcePlace = parent.place
+                for offset in 0..<node.children_count |offset, node, children, nodes, result|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + offset)
+                    return (false, empty) if not child.known
+                    index_root: usize = ElisaProofKernelCore::add_node(nodes, "index", "", result.path_root if result.depth > 0 else 0, child.value, 0, 0, 0, 0, "", "")
+                    next: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place_add_index(result, index_root)
+                    return (false, empty) if not next.known
+                    result <- next.place
+                return (true, result)
             return (false, empty)
 
-        def proof_kernel_replay_resource_place_is_prefix(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, prefix: ProofKernelReplayResourcePlace, target: ProofKernelReplayResourcePlace) -> bool:
+        def proof_kernel_replay_resource_index_disjoint(state: ProofKernelReplayResourceState&, left_root: usize, right_root: usize) -> bool:
+            for index in 0..<state.disjoint_left.count |index, state, left_root, right_root|:
+                return true if index < state.disjoint_right.count and ((state.disjoint_left[index] == left_root and state.disjoint_right[index] == right_root) or (state.disjoint_left[index] == right_root and state.disjoint_right[index] == left_root))
+            return false
+
+        def proof_kernel_replay_resource_place_is_prefix(state: ProofKernelReplayResourceState&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, prefix: ProofKernelReplayResourcePlace, target: ProofKernelReplayResourcePlace) -> bool:
             return false if prefix.root == "" or target.root == "" or prefix.root != target.root
             return true if prefix.whole
             return false if target.whole or prefix.depth > target.depth or prefix.depth > 127 or target.depth > 127
             for index in 0..<prefix.depth:
-                prefix_component: (known: bool, kind: sview, field: sview, value: i64) = proof_kernel_replay_resource_path_component(nodes, prefix.path_root, index, prefix.depth)
-                target_component: (known: bool, kind: sview, field: sview, value: i64) = proof_kernel_replay_resource_path_component(nodes, target.path_root, index, target.depth)
+                prefix_component: (known: bool, kind: sview, field: sview, value: i64, expression_root: usize) = proof_kernel_replay_resource_path_component(nodes, prefix.path_root, index, prefix.depth)
+                target_component: (known: bool, kind: sview, field: sview, value: i64, expression_root: usize) = proof_kernel_replay_resource_path_component(nodes, target.path_root, index, target.depth)
                 return false if not prefix_component.known or not target_component.known or prefix_component.kind != target_component.kind
                 return false if prefix_component.kind == "field" and prefix_component.field != target_component.field
-                return false if prefix_component.kind == "index" and prefix_component.value != target_component.value
+                if prefix_component.kind == "index":
+                    if proof_kernel_replay_resource_index_expression_valid(nodes, prefix_component.expression_root, 0) and proof_kernel_replay_resource_index_expression_valid(nodes, target_component.expression_root, 0):
+                        prefix_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, prefix_component.expression_root, 0)
+                        target_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, target_component.expression_root, 0)
+                        return false if prefix_constant.known and target_constant.known and prefix_constant.value != target_constant.value
+                    return false if proof_kernel_replay_resource_index_disjoint(state, prefix_component.expression_root, target_component.expression_root)
             return true
 
-        def proof_kernel_replay_resource_places_overlap(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left: ProofKernelReplayResourcePlace, right: ProofKernelReplayResourcePlace) -> bool:
-            return proof_kernel_replay_resource_place_is_prefix(nodes, left, right) or proof_kernel_replay_resource_place_is_prefix(nodes, right, left)
+        def proof_kernel_replay_resource_places_overlap(state: ProofKernelReplayResourceState&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left: ProofKernelReplayResourcePlace, right: ProofKernelReplayResourcePlace) -> bool:
+            return proof_kernel_replay_resource_place_is_prefix(state, nodes, left, right) or proof_kernel_replay_resource_place_is_prefix(state, nodes, right, left)
 
         struct ProofKernelReplayResourceState:
             binding_names: mutable darray[sview]
@@ -1959,12 +2018,14 @@ module ElisaProofKernelReplay:
             borrow_target_places: mutable darray[ProofKernelReplayResourcePlace]
             borrow_mutable: mutable darray[bool]
             borrow_present: mutable darray[bool]
+            disjoint_left: mutable darray[usize]
+            disjoint_right: mutable darray[usize]
             # Empty origin means body-local storage. A non-empty origin is a formal external
             # capability, possibly reached through one or more local borrow aliases.
             binding_origin_places: mutable darray[ProofKernelReplayResourcePlace]
 
         def proof_kernel_replay_resource_empty() -> ProofKernelReplayResourceState:
-            return ProofKernelReplayResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], binding_origin_places: []}
+            return ProofKernelReplayResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], binding_origin_places: []}
 
         def proof_kernel_replay_resource_copy(source: ProofKernelReplayResourceState&, target: mutable ProofKernelReplayResourceState&) -> void:
             target.binding_names.clear()
@@ -1976,6 +2037,8 @@ module ElisaProofKernelReplay:
             target.borrow_target_places.clear()
             target.borrow_mutable.clear()
             target.borrow_present.clear()
+            target.disjoint_left.clear()
+            target.disjoint_right.clear()
             target.binding_origin_places.clear()
             target.binding_names.extend(source.binding_names)
             target.binding_reference.extend(source.binding_reference)
@@ -1986,6 +2049,8 @@ module ElisaProofKernelReplay:
             target.borrow_target_places.extend(source.borrow_target_places)
             target.borrow_mutable.extend(source.borrow_mutable)
             target.borrow_present.extend(source.borrow_present)
+            target.disjoint_left.extend(source.disjoint_left)
+            target.disjoint_right.extend(source.disjoint_right)
             target.binding_origin_places.extend(source.binding_origin_places)
 
         def proof_kernel_replay_resource_lookup(state: ProofKernelReplayResourceState&, name: sview) -> usize:
@@ -2008,13 +2073,13 @@ module ElisaProofKernelReplay:
         def proof_kernel_replay_resource_has_borrow_overlap(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, target: ProofKernelReplayResourcePlace, except_slot: usize) -> bool:
             return false if target.root == ""
             for index in 0..<state.borrow_target_places.count |index, state, target, except_slot|:
-                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and proof_kernel_replay_resource_places_overlap(nodes, state.borrow_target_places[index], target)
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and proof_kernel_replay_resource_places_overlap(state, nodes, state.borrow_target_places[index], target)
             return false
 
         def proof_kernel_replay_resource_has_mutable_borrow_overlap(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, target: ProofKernelReplayResourcePlace, except_slot: usize) -> bool:
             return false if target.root == ""
             for index in 0..<state.borrow_target_places.count |index, state, target, except_slot|:
-                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and index < state.borrow_mutable.count and state.borrow_mutable[index] and proof_kernel_replay_resource_places_overlap(nodes, state.borrow_target_places[index], target)
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and index < state.borrow_mutable.count and state.borrow_mutable[index] and proof_kernel_replay_resource_places_overlap(state, nodes, state.borrow_target_places[index], target)
             return false
 
         def proof_kernel_replay_resource_origin_for(state: ProofKernelReplayResourceState&, slot: usize) -> (known: bool, place: ProofKernelReplayResourcePlace):
@@ -2045,6 +2110,22 @@ module ElisaProofKernelReplay:
                 located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
                 return false if not located.known
                 node: ElisaProofKernelCore::ProofKernelNode = located.node
+                if node.kind == "resource-disjoint":
+                    return false if node.operator != "!=" or node.left >= nodes.count or node.right >= nodes.count or node.auxiliary >= nodes.count
+                    return false if not proof_kernel_replay_resource_index_expression_valid(nodes, node.left, 0) or not proof_kernel_replay_resource_index_expression_valid(nodes, node.right, 0)
+                    goal_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.auxiliary)
+                    return false if not goal_located.known or goal_located.node.kind != "binary" or goal_located.node.operator != "!=" or goal_located.node.left != node.left or goal_located.node.right != node.right
+                    return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                    proof_facts: mutable darray[usize] = []
+                    for index in 0..<node.children_count |index, node, children, proof_facts|:
+                        child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                        return false if not child.known or child.value >= nodes.count
+                        proof_facts.push(child.value)
+                    return false if not proof_kernel_replay_arena_valid(nodes, children, proof_facts, node.auxiliary)
+                    return false if not proof_kernel_replay_goal_depth(nodes, children, proof_facts, node.auxiliary, 0, 0)
+                    state.disjoint_left.push(node.left)
+                    state.disjoint_right.push(node.right)
+                    continue
                 if node.kind == "resource-scope":
                     return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                     child_roots: mutable darray[usize] = []
@@ -2066,7 +2147,7 @@ module ElisaProofKernelReplay:
                     if node.operator == "shared" or node.operator == "mutable":
                         target_slot <- proof_kernel_replay_resource_lookup(state, node.secondary_name)
                         return false if target_slot >= state.binding_names.count
-                        decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, node.left, 0)
+                        decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
                         return false if not decoded.known or decoded.place.root != node.secondary_name
                         source_place <- decoded.place
                         borrow_is_present <- true
@@ -2093,14 +2174,14 @@ module ElisaProofKernelReplay:
                     state.binding_origin_places.push(origin_place)
                     continue
                 if node.kind == "resource-use":
-                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, node.left, 0)
+                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
                     return false if not decoded.known or not decoded.place.whole or decoded.place.root != node.name
                     slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
                     return false if slot >= state.binding_names.count
                     return false if slot >= state.binding_moved.count or state.binding_moved[slot]
                     continue
                 if node.kind == "resource-write":
-                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, node.left, 0)
+                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
                     return false if not decoded.known or decoded.place.root != node.name
                     slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
                     return false if slot >= state.binding_names.count
@@ -2113,7 +2194,7 @@ module ElisaProofKernelReplay:
                     effects.push(ProofKernelReplayResourceEffect{kind: "write", place: resolved_origin.place}) if resolved_origin.known
                     continue
                 if node.kind == "resource-move":
-                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, node.left, 0)
+                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
                     return false if not decoded.known or decoded.place.root != node.name
                     slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
                     return false if slot >= state.binding_names.count
@@ -2153,11 +2234,11 @@ module ElisaProofKernelReplay:
                 mutable_references.push(bind.operator == "external-mutable")
             return true
 
-        def proof_kernel_replay_resource_call_actual(state: ProofKernelReplayResourceState&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, argument: ElisaProofKernelCore::ProofKernelNode) -> (known: bool, place: ProofKernelReplayResourcePlace, slot: usize, has_slot: bool, mutable_reference: bool):
+        def proof_kernel_replay_resource_call_actual(state: ProofKernelReplayResourceState&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, argument: ElisaProofKernelCore::ProofKernelNode) -> (known: bool, place: ProofKernelReplayResourcePlace, slot: usize, has_slot: bool, mutable_reference: bool):
             empty: ProofKernelReplayResourcePlace = proof_kernel_replay_resource_empty_place()
             if argument.operator == "value":
                 return (true, empty, state.binding_names.count, false, false)
-            decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, argument.left, 0)
+            decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, argument.left, 0)
             return (false, empty, state.binding_names.count, false, false) if not decoded.known
             slot: usize = proof_kernel_replay_resource_lookup(state, decoded.place.root)
             if argument.operator == "reference":
@@ -2216,7 +2297,7 @@ module ElisaProofKernelReplay:
                     formal_index <- candidate if formal_names[candidate] == argument.name
                 return false if formal_index >= formal_names.count or seen[formal_index]
                 seen[formal_index] <- true
-                actual: (known: bool, place: ProofKernelReplayResourcePlace, slot: usize, has_slot: bool, mutable_reference: bool) = proof_kernel_replay_resource_call_actual(state, nodes, argument)
+                actual: (known: bool, place: ProofKernelReplayResourcePlace, slot: usize, has_slot: bool, mutable_reference: bool) = proof_kernel_replay_resource_call_actual(state, nodes, children, argument)
                 return false if not actual.known
                 if formal_references[formal_index]:
                     return false if argument.operator != "borrow" and argument.operator != "reference"
