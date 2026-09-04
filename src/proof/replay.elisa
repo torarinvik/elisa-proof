@@ -1014,14 +1014,14 @@ extend ElisaProof:
         def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
             return false if dependency == ""
             found_goal: mutable bool = false
-            found_proven_goal: mutable bool = false
-            for attempt in report.goal_attempts:
+            all_goals_proven: mutable bool = true
+            for attempt in report.goal_attempts |found_goal, all_goals_proven, dependency|:
                 if attempt.name == dependency:
                     found_goal <- true
-                    found_proven_goal <- true if attempt.proven
+                    all_goals_proven <- false if not attempt.proven
             for finding in report.findings:
                 return false if finding.name == dependency
-            return false if not found_goal or not found_proven_goal
+            return false if not found_goal or not all_goals_proven
             return true if proof_replay_dependency_in_stack(dependency_stack, dependency)
             return false if dependency_depth >= 64
             next_stack: mutable darray[sview] = []
@@ -1034,6 +1034,46 @@ extend ElisaProof:
                     return false if not proof_replay_certificate_with_stack(report, certificate, next_stack, dependency_depth + 1)
             return found_certificate
 
+        # A reusable lemma fact is valid only when it is the recorded postcondition instance for
+        # the exact normalized arguments and every instantiated precondition is tied to a caller
+        # certificate. Merely finding some replayable certificate with the same lemma name is not
+        # enough: that would allow a buggy elaborator to manufacture an unrelated summary fact.
+        def proof_replay_lemma_summary_is_valid[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
+            return false if trace.kind != "lemma-summary" or trace.dependency == ""
+            return false if trace.summary_bindings_start > report.fact_trace_summary_names.count or trace.summary_bindings_count > report.fact_trace_summary_names.count - trace.summary_bindings_start
+            return false if trace.summary_bindings_start > report.fact_trace_summary_values.count or trace.summary_bindings_count > report.fact_trace_summary_values.count - trace.summary_bindings_start
+            return false if trace.summary_requires_start > report.fact_trace_summary_require_goal_ids.count or trace.summary_requires_count > report.fact_trace_summary_require_goal_ids.count - trace.summary_requires_start
+            theorem_found: mutable bool = false
+            theorem: mutable ProofTheoremSummary = ProofTheoremSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, decreases_start: 0, decreases_count: 0, proof_goals_start: 0, proof_goals_count: 0, recursive: false, verified: false, verification_reason: ""}
+            for candidate in report.theorem_summaries |candidate, trace, theorem_found, theorem|:
+                if candidate.name == trace.dependency:
+                    return false if theorem_found
+                    theorem_found <- true
+                    theorem <- candidate
+            return false if not theorem_found or not theorem.verified
+            return false if theorem.parameters_start > report.theorem_parameters.count or theorem.parameters_count > report.theorem_parameters.count - theorem.parameters_start
+            return false if theorem.requires_start > report.theorem_requires.count or theorem.requires_count > report.theorem_requires.count - theorem.requires_start
+            return false if theorem.ensures_start > report.theorem_ensures.count or theorem.ensures_count > report.theorem_ensures.count - theorem.ensures_start
+            return false if trace.summary_bindings_count != theorem.parameters_count or trace.summary_requires_count != theorem.requires_count or trace.summary_ensure_index >= theorem.ensures_count
+            instance: mutable Ast::Expr = report.theorem_ensures[theorem.ensures_start + trace.summary_ensure_index]
+            for index in 0..<theorem.parameters_count |index, theorem, report, trace, instance|:
+                expected_name: sview = report.theorem_parameters[theorem.parameters_start + index]
+                actual_name: sview = report.fact_trace_summary_names[trace.summary_bindings_start + index]
+                return false if expected_name != actual_name
+                instance <- proof_replay_substitute(instance, expected_name, report.fact_trace_summary_values[trace.summary_bindings_start + index])
+            return false if not proof_replay_expr_equal(instance, trace.expression)
+            for require_index in 0..<theorem.requires_count |require_index, theorem, report, trace, dependency_stack, dependency_depth|:
+                required: mutable Ast::Expr = report.theorem_requires[theorem.requires_start + require_index]
+                for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, trace, required|:
+                    required <- proof_replay_substitute(required, report.theorem_parameters[theorem.parameters_start + parameter_index], report.fact_trace_summary_values[trace.summary_bindings_start + parameter_index])
+                goal_id: usize = report.fact_trace_summary_require_goal_ids[trace.summary_requires_start + require_index]
+                return false if goal_id >= report.goal_attempts.count
+                attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+                return false if attempt.name != trace.name or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
+                return false if not proof_replay_expr_equal(attempt.goal, required)
+                return false if not proof_replay_certificate_with_stack(report, report.certificates[attempt.certificate_index], dependency_stack, dependency_depth + 1)
+            return true
+
         def proof_replay_kernel_trace_range_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             return trace.kernel_expression < report.kernel_nodes.count and trace.kernel_premises_start <= report.kernel_fact_trace_premises.count and trace.kernel_premises_count <= report.kernel_fact_trace_premises.count - trace.kernel_premises_start
 
@@ -1044,7 +1084,9 @@ extend ElisaProof:
         def proof_replay_kernel_fact_trace_is_valid_with_stack[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&) -> bool:
             return false if trace.name != owner or not proof_replay_kernel_trace_range_valid(report, trace)
             return true if trace.kind == "precondition" or trace.kind == "type-bound" or trace.kind == "runtime-assert" or trace.kind == "runtime-guard" or trace.kind == "branch-condition" or trace.kind == "loop-condition" or trace.kind == "loop-invariant" or trace.kind == "loop-range"
-            if trace.kind == "function-summary" or trace.kind == "lemma-summary":
+            if trace.kind == "lemma-summary":
+                return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
+            if trace.kind == "function-summary":
                 return proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
             return false if trace.kind != "proof-step" and trace.kind != "lemma-step"
             return false if depth >= 64
@@ -1103,7 +1145,9 @@ extend ElisaProof:
         def proof_replay_fact_trace_is_valid_with_stack(report: mutable ProofReport&, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&) -> bool:
             return false if trace.name != owner or not proof_replay_trace_range_valid(report, trace)
             return true if trace.kind == "precondition" or trace.kind == "type-bound" or trace.kind == "runtime-assert" or trace.kind == "runtime-guard" or trace.kind == "branch-condition" or trace.kind == "loop-condition" or trace.kind == "loop-invariant" or trace.kind == "loop-range"
-            if trace.kind == "function-summary" or trace.kind == "lemma-summary":
+            if trace.kind == "lemma-summary":
+                return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
+            if trace.kind == "function-summary":
                 return proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
             return false if trace.kind != "proof-step" and trace.kind != "lemma-step"
             return false if depth >= 64
@@ -1175,6 +1219,15 @@ extend ElisaProof:
             return proof_replay_certificate_with_stack(report, certificate, dependency_stack, 0)
 
     public:
+        # Standalone provenance entry point for auditors and adversarial harnesses. A trace must
+        # pass both the independently implemented AST reconstruction and source-neutral kernel
+        # validation; callers cannot validate only the presentation mirror.
+        def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool:
+            return false if trace_index >= report.fact_traces.count
+            trace: ProofFactTrace = report.fact_traces[trace_index]
+            dependency_stack: mutable darray[sview] = [trace.name]
+            return proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack)
+
         def proof_replay_fact_origin(report: ProofReport&, fact: Ast::Expr, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
             for trace in report.fact_traces:
                 if trace.name == owner and proof_replay_expr_equal(trace.expression, fact):

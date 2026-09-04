@@ -162,6 +162,24 @@ if [[ "$tactic_status" -ne 0 ]]; then
 fi
 printf 'dogfood tactic_runtime: kernel-backed state actions and branch obligations passed\n'
 
+# Corrupt a checked lemma-summary binding in memory and require independent replay to reject every
+# caller certificate that tries to consume the now-mismatched instantiated postcondition.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/lemma-summary-replay.o" "$ROOT_DIR/examples/lemma_summary_replay_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    clang -Wl,-dead_strip -o "$runtime_dir/lemma-summary-replay" "$runtime_dir/lemma-summary-replay.o" "$RUNTIME_OBJ"
+else
+    clang -Wl,-dead_strip -o "$runtime_dir/lemma-summary-replay" "$runtime_dir/lemma-summary-replay.o"
+fi
+set +e
+"$runtime_dir/lemma-summary-replay"
+lemma_summary_replay_status=$?
+set -e
+if [[ "$lemma_summary_replay_status" -ne 0 ]]; then
+    printf 'dogfood failed: forged lemma summary survived replay (exit %s)\n' "$lemma_summary_replay_status" >&2
+    exit 1
+fi
+printf 'dogfood lemma_summary_replay: mismatched theorem instantiation rejected\n'
+
 # Portable proof scripts are parsed and executed by the Elisa implementation itself. The
 # script's source fingerprint is optional for reusable theorem states, but when present a stale
 # script must fail even if its proposition is independently true.

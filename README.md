@@ -51,6 +51,10 @@ the source completeness and semantic-admissibility gates.
 Every theorem also identifies its owned proof goals and their certificate/replay status.
 `proof_replay_complete` is true only for a verified theorem with at least one owned obligation and
 a replayed certificate for every one, making the evidence behind theorem search directly auditable.
+Every consumed `lemma-summary` fact is additionally bound to its normalized formal-argument
+mapping, selected postcondition index, and exact caller certificates for all instantiated
+preconditions. Independent replay reconstructs that postcondition and rejects a mismatched fact;
+lemma summaries therefore no longer count as trusted-boundary facts.
 `theorem_fingerprint` canonically hashes the theorem name, typed parameters, defaults, ordered
 preconditions, postconditions, termination measures, and recursion mode using source-neutral kernel
 terms. It survives unrelated declarations and line shifts but changes with the theorem statement.
