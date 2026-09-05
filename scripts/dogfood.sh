@@ -432,6 +432,49 @@ assert report["state"]["initial_goal"] == {"kind": "invalid"}
 assert "source-bound" in report["tactic"]["reason"]
 print("dogfood tactic_script_target_forged: imported state could not be replaced")
 PY
+forged_quantifier_output="$REPORT_DIR/tactic-script-source-bound-forged-quantifier.json"
+set +e
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_forged_quantifier.json" "$ROOT_DIR/examples/rejected_source_bound_exists.elisa" >"$forged_quantifier_output"
+forged_quantifier_status=$?
+set -e
+if [[ "$forged_quantifier_status" -ne 1 ]]; then
+    printf 'dogfood failed: source-bound tactic weakened a universal quantifier (exit %s)\n' "$forged_quantifier_status" >&2
+    exit 1
+fi
+python3 - "$forged_quantifier_output" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "failed"
+assert report["source"]["status"] == "failed"
+assert report["source"]["admissible"] is True
+assert report["tactic"]["valid"] is False
+assert report["tactic"]["solved"] is False
+assert report["state"]["action_count"] == 1
+assert report["state"]["trace"][0]["accepted"] is False
+assert report["state"]["initial_goal"]["kind"] == "block"
+print("dogfood tactic_script_source_bound_forged_quantifier: compiler quantifier kind remained authoritative")
+PY
+forged_instantiation_output="$REPORT_DIR/forged-instantiation.json"
+if "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_forged_instantiation.json" "$ROOT_DIR/examples/source_bound_exists.elisa" >"$forged_instantiation_output"; then
+    printf 'dogfood failed: existential source hypothesis admitted universal instantiation\n' >&2
+    exit 1
+fi
+python3 - "$forged_instantiation_output" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "failed"
+assert report["source"]["admissible"] is True
+assert report["tactic"]["certificate_replayed"] is False
+assert report["state"]["initial_facts"][0]["kind"] == "block"
+assert report["state"]["trace"][0]["action"] == "instantiate"
+assert report["state"]["trace"][0]["accepted"] is False
+print("dogfood forged_instantiation: existential hypothesis cannot be relabeled universal")
+PY
 stale_output="$REPORT_DIR/tactic-script-stale.json"
 set +e
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_stale.json" "$ROOT_DIR/examples/verified.elisa" >"$stale_output"
