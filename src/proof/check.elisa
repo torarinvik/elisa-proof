@@ -153,6 +153,53 @@ extend ElisaProof:
                 _:
                     return 0
 
+        def proof_find_type_alias(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> (count: usize, target: Ast::Expr):
+            return (2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            target: mutable Ast::Expr = Ast::Expr.Absent
+            for declaration in declarations |name, depth, count, target|:
+                match declaration:
+                    Ast::Decl.Alias(alias_name, alias_target, _):
+                        if alias_name == name:
+                            count <- count + 1
+                            target <- alias_target
+                    Ast::Decl.Module(_, body, _):
+                        nested: (count: usize, target: Ast::Expr) = proof_find_type_alias(body, name, depth + 1)
+                        count <- count + nested.count
+                        target <- nested.target if nested.count > 0
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, target: Ast::Expr) = proof_find_type_alias(body, name, depth + 1)
+                        count <- count + nested.count
+                        target <- nested.target if nested.count > 0
+                    _:
+                        pass
+                return (2, Ast::Expr.Invalid) if count > 1
+            return (count, target)
+
+        # Zero means a non-unsigned type; -1 means alias resolution is ambiguous or too
+        # deep. Never silently treat a failed resolution as ordinary signed arithmetic.
+        def proof_unsigned_type_width(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            primitive: i64 = proof_unsigned_primitive_width(expression)
+            return primitive if primitive > 0
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_type_width(inner, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_unsigned_type_width(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return -1 if alias.count > 1
+                    return proof_unsigned_type_width(alias.target, declarations, depth + 1) if alias.count == 1
+                Ast::Expr.Scope(_, name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    # A bare-name search cannot establish a qualified alias's owner.
+                    return -1 if alias.count > 0
+                _:
+                    pass
+            return 0
+
         def proof_unsigned_type_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, width: i64, line: u32, owner: sview, position: Ast::Pos) -> void:
             return if name == "" or width == 0
             proof_add_traced_fact(facts, report, proof_unsigned_type_marker(name, width, position), "type-bound", line, owner)
@@ -4850,8 +4897,11 @@ extend ElisaProof:
                         names <- names.push(local_name)
                         values <- values.push(value)
                         values[prior_value_count] <- value if proof_expr_has_call(initializer) and prior_value_count < values.count
-                        unsigned_width: i64 = proof_unsigned_primitive_width(type_expression)
-                        if unsigned_width != 0:
+                        unsigned_width: i64 = proof_unsigned_type_width(type_expression, report.source_declarations, 0)
+                        if unsigned_width < 0:
+                            values[prior_value_count] <- Ast::Expr.Invalid
+                            proof_add_finding(report, "contract-expression-unsupported", position.line, name, "local numeric type alias cannot be resolved uniquely")
+                        if unsigned_width > 0:
                             lower_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0), TokenKind.LtEq, Ast::Expr.Ident(local_name, position), position)
                             proof_add_traced_fact(facts, report, lower_bound, "type-bound", position.line, name)
                             proof_unsigned_type_facts(facts, report, local_name, unsigned_width, position.line, name, position)
@@ -5532,6 +5582,10 @@ extend ElisaProof:
             # would make even x == x an unsound theorem. Stop before publishing obligations
             # that a source-bound tactic could otherwise repair under the wrong semantics.
             for parameter in parameters |report, function_name, position|:
+                if proof_unsigned_type_width(parameter.type_expression, file.top_decls, 0) < 0:
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "parameter numeric type alias cannot be resolved uniquely")
+                    return
                 if proof_type_may_contain_float(parameter.type_expression, file.top_decls, file.top_decls, 0):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "floating-point parameter verification requires IEEE floating-point semantics")
@@ -5594,7 +5648,7 @@ extend ElisaProof:
             proof_check_header_frame_specs(header_changes, header_preserves, frame_parameters, report, function_name)
             facts: mutable darray[Ast::Expr] = []
             for parameter in parameters |facts, report, function_name, position|:
-                unsigned_width: i64 = proof_unsigned_primitive_width(parameter.type_expression)
+                unsigned_width: i64 = proof_unsigned_type_width(parameter.type_expression, report.source_declarations, 0)
                 if unsigned_width != 0:
                     lower_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0), TokenKind.LtEq, Ast::Expr.Ident(parameter.name, position), position)
                     proof_add_traced_fact(facts, report, lower_bound, "type-bound", position.line, function_name)
@@ -5891,6 +5945,8 @@ extend ElisaProof:
                     scheduled_count <- scheduled_count + 1
     public:
         def proof_check(file: Ast::File&, report: mutable ProofReport&) -> void:
+            report.source_declarations.clear()
+            report.source_declarations.extend(file.top_decls)
             # Contract quantifier syntax is erased from the AST and recovered through this
             # compiler-owned side table. Preserve the exact source annotations in the report so
             # a source-bound tactic store cannot substitute script-supplied quantifier kinds.
