@@ -89,10 +89,11 @@ The proof kernel is intentionally fail-closed:
    transfers that token rather than copying it. A whole-binding region assignment is the same
    move-like transfer for an existing target binding; self-assignment is the only no-op. This
    permits one controlled shared-to-mutable exposure while rejecting duplicate mutable capabilities
-   and use of the consumed owner. Region aliases and region assignments currently carry no
-   source-path metadata, so field/index sources are rejected rather than widened to whole-root
-   capabilities. Borrowed or external references have no such token and cannot be upgraded by
-   alias metadata.
+   and use of the consumed owner. Region-returning call results also receive the token from a
+   fresh return allocation or transfer it from a returned direct owner; borrowed results receive
+   no token. Region aliases and region assignments currently carry no source-path metadata, so
+   field/index sources are rejected rather than widened to whole-root capabilities. Borrowed or
+   external references have no such token and cannot be upgraded by alias metadata.
    Child resource snapshots additionally mark inherited region identities as protected, so a nested
    `destroy r` followed by a same-named reopen cannot be hidden by the child join even when no
    binding currently carries `r`.

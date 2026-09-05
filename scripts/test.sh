@@ -60,6 +60,14 @@ if [[ "$rejected_region_assign_duplicate_owner_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate-owner assignment fixture\n' >&2
     exit 1
 fi
+if [[ "$(basename "$SELF_HOST_COMPILER")" == "elisac-stage1" ]]; then
+    "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-call-result-duplicate-owner.o" "$ROOT_DIR/examples/rejected_region_call_result_duplicate_owner.elisa" >/dev/null 2>&1
+    rejected_region_call_result_duplicate_owner_compiler_status=$?
+    if [[ "$rejected_region_call_result_duplicate_owner_compiler_status" -ne 0 ]]; then
+        printf 'proof test matrix failed: stage1 rejected the runtime-valid duplicate-owner call-result fixture\n' >&2
+        exit 1
+    fi
+fi
 "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/nested-region-destroy.o" "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/dev/null 2>&1
 nested_region_destroy_compiler_status=$?
 if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
@@ -166,6 +174,19 @@ if [[ "$rejected_region_assign_duplicate_owner_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "resource-use-after-move" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_region_assign_duplicate_owner_report"; then
     printf 'proof test matrix failed: duplicate mutable region owner assignment report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+rejected_region_call_result_duplicate_owner_report="$standalone_probe_dir/rejected-region-call-result-duplicate-owner.json"
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_call_result_duplicate_owner.elisa" >"$rejected_region_call_result_duplicate_owner_report"
+rejected_region_call_result_duplicate_owner_status=$?
+set -e
+if [[ "$rejected_region_call_result_duplicate_owner_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: duplicate mutable owner through a call result was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "resource-use-after-move" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_region_call_result_duplicate_owner_report"; then
+    printf 'proof test matrix failed: duplicate mutable owner through a call result report was incomplete\n' >&2
     exit 1
 fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_auto_close.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert kinds.count("resource-region-open") == 1 and kinds.count("resource-region-close") == 1'
