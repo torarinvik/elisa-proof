@@ -48,6 +48,12 @@ if [[ "$region_statement_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected canonical region statement form\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-duplicate-alias.o" "$ROOT_DIR/examples/rejected_region_duplicate_mutable_alias.elisa" >/dev/null 2>&1
+rejected_region_duplicate_alias_compiler_status=$?
+if [[ "$rejected_region_duplicate_alias_compiler_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate-alias proof fixture\n' >&2
+    exit 1
+fi
 "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/nested-region-destroy.o" "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/dev/null 2>&1
 nested_region_destroy_compiler_status=$?
 if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
