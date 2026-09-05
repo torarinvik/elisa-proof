@@ -7,8 +7,13 @@ that Elisa compilation checks; it does not translate Elisa into a second host-la
 
 ## Build and run
 
-The compiler source include is relative to the sibling checkout used by this workspace. Put the
-stage wrappers on `PATH`; `build.sh` tries the self-hosted `elisac-stage1` first and falls back to
+The compiler source include is relative to the sibling `Elisa-compiler` checkout, but the build
+never compiles that working tree directly. `scripts/compiler_snapshot.sh` exports the commit
+recorded in `ELISA_COMPILER_REV` with `git archive` into `build/snapshot/` and compiles a copy of
+`src/` and `examples/` beside it, so in-progress edits in the compiler checkout cannot enter a
+proof build. To move to a newer compiler, write the new commit hash to `ELISA_COMPILER_REV`
+(`ELISA_COMPILER_SRC` points at a checkout elsewhere; `ELISA_COMPILER_REV` in the environment
+overrides the file for a one-off build). Put the stage wrappers on `PATH`; `build.sh` tries the self-hosted `elisac-stage1` first and falls back to
 `elisac-stage0`:
 
 ```sh

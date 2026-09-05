@@ -91,6 +91,21 @@ Standalone attempts to isolate the pattern outside the replay module are rejecte
 replay trace is the reproducer. Dogfood now builds the reduced trace and the full arena harness
 with stage0 whenever it is installed.
 
+### Repaired: builds compiled the live compiler working tree
+
+`src/main.elisa` and the executable examples include the compiler's semantic layer through
+`../../Elisa-compiler/...`. `build.sh` compiled that path directly, so a half-typed edit in the
+sibling checkout entered the proof build; one build in this audit failed on a mid-edit compiler
+source and passed on retry, which made the suites depend on an unversioned input.
+
+Repair: `scripts/compiler_snapshot.sh` exports the commit pinned in `ELISA_COMPILER_REV` with
+`git archive` into `build/snapshot/Elisa-compiler` and copies `src/` and `examples/` beside it;
+`build.sh` and the dogfood harnesses that include compiler sources compile from that snapshot
+only. The export is keyed by commit hash and rebuilt when the pin changes; a missing pin,
+missing repository, or unknown commit fails the build instead of falling back to the checkout.
+Verified by appending a syntax error to the checkout's `semantic.elisa` and rebuilding: the build
+succeeded, and both suites pass.
+
 ### Repaired: scalar copies out of region-owned references were treated as region aliases
 
 Unmasked by the repair above: once `proof_kernel_replay_resource_events` and

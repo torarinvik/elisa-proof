@@ -49,7 +49,10 @@ fi
 
 mkdir -p "$ROOT_DIR/build"
 cd "$ROOT_DIR"
-"$COMPILER" -emit obj -O0 -o "build/elisa-proof-stage.o" "src/main.elisa"
+# Compile against the pinned compiler export, never the live sibling checkout.
+# shellcheck source=scripts/compiler_snapshot.sh
+source "$ROOT_DIR/scripts/compiler_snapshot.sh"
+"$COMPILER" -emit obj -O0 -o "build/elisa-proof-stage.o" "$SNAPSHOT_ROOT/src/main.elisa"
 if [[ -n "$RUNTIME_OBJ" ]]; then
     clang -Wl,-dead_strip -o "build/elisa-proof" "build/elisa-proof-stage.o" "$RUNTIME_OBJ"
 else

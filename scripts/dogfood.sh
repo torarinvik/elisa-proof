@@ -38,6 +38,10 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
 fi
 
 "$ROOT_DIR/scripts/build.sh"
+# build.sh has just refreshed the snapshot; the executable harnesses below that
+# include compiler sources must compile from the same pinned export.
+# shellcheck source=scripts/compiler_snapshot.sh
+source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 
 REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-dogfood.XXXXXX")"
 trap 'rm -rf "$REPORT_DIR"' EXIT
@@ -199,7 +203,7 @@ run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.eli
 # checker: malformed input must be rejected by the compiled source-neutral module too.
 runtime_dir="$REPORT_DIR/runtime-arena"
 mkdir -p "$runtime_dir"
-runtime_source="$ROOT_DIR/../Elisa-compiler/elisacore_std/native_runtime_support.elisa"
+runtime_source="$SNAPSHOT_COMPILER/elisacore_std/native_runtime_support.elisa"
 if [[ ! -f "$runtime_source" ]]; then
     printf 'dogfood failed: Elisa runtime source is missing for executable arena harness\n' >&2
     exit 1
@@ -258,7 +262,7 @@ fi
 # Exercise the Elisa-native proof-state action layer itself. This is intentionally an
 # executable harness rather than a report-only probe: both branches of split/cases must solve,
 # rewrite requires an explicit equality, and a rejected action must leave the state unsolved.
-"$COMPILER" -emit obj -O0 -o "$runtime_dir/tactic-runtime.o" "$ROOT_DIR/examples/tactic_runtime.elisa" >/dev/null 2>&1
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/tactic-runtime.o" "$SNAPSHOT_ROOT/examples/tactic_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
     clang -Wl,-dead_strip -o "$runtime_dir/tactic-runtime" "$runtime_dir/tactic-runtime.o" "$RUNTIME_OBJ"
 else
@@ -276,7 +280,7 @@ printf 'dogfood tactic_runtime: kernel-backed state actions and branch obligatio
 
 # Corrupt a checked lemma-summary binding in memory and require independent replay to reject every
 # caller certificate that tries to consume the now-mismatched instantiated postcondition.
-"$COMPILER" -emit obj -O0 -o "$runtime_dir/lemma-summary-replay.o" "$ROOT_DIR/examples/lemma_summary_replay_runtime.elisa" >/dev/null 2>&1
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/lemma-summary-replay.o" "$SNAPSHOT_ROOT/examples/lemma_summary_replay_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
     clang -Wl,-dead_strip -o "$runtime_dir/lemma-summary-replay" "$runtime_dir/lemma-summary-replay.o" "$RUNTIME_OBJ"
 else
