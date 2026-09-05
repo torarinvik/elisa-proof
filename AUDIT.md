@@ -673,12 +673,11 @@ Closing that needs the callee's parameter header in the arena, keyed so it canno
 converged summary; for a self-recursive call, which is the case the rule exists to serve, the
 header is already present as the resource root being replayed.
 
-## Open defect: a region-polymorphic callee summary replays as a gap
+## Fixed: a constructed type read as a runtime value
 
-Found while writing the lifetime lend fixtures, and present before that work. A call to a
-region-polymorphic callee that *does* have a converged summary is admitted by the producer and
-refused by the replay kernel, so the caller's certificate is reported as a replay gap. Minimal
-reproducer:
+A call to a region-polymorphic callee that *did* have a converged summary was admitted by the
+producer and refused by the replay kernel, so the caller's certificate came back as a replay gap
+and the verdict degraded to `proved_with_replay_gaps`. Minimal reproducer:
 
 ```elisa
 struct Cell:
@@ -693,18 +692,32 @@ def region_reader() -> i64 can[Memory.Allocate, Abort.Panic]:
         return peek(cell)
 ```
 
-`peek` proves and replays; `region_reader` proves and does not, giving
-`proved_with_replay_gaps` with `replay.gaps == 1`. The caller trace is well formed — region open,
-`resource-region-alloc` binding `cell` into `r`, a `resource-call` carrying one
-`resource-call-region` pinning `r` to `r`, region close — and `peek`'s own certificate carries the
-expected `resource-region-param`, `resource-bind external-shared`, `resource-use` and
-`resource-region-return`. The refusal is somewhere in `proof_kernel_replay_resource_call`
-composing that callee, and it was previously unreachable because almost no region-polymorphic
-callee ever obtained a summary to compose.
+The cause was not in the call composition at all. `resource-region-alloc` requires the allocated
+value to carry no lifetime of its own, and `proof_kernel_replay_resource_value_term_has_no_region`
+walked a `construct` node's left edge as a value term. That edge is the constructed *type*: the
+encoder puts the type expression there, unlike a `record-update`, whose left edge really is the
+base record being copied. So the walk looked the type name `Cell` up as a binding, found none, and
+refused — meaning every struct literal allocated into a region was unreplayable. It stayed hidden
+because almost no region-polymorphic callee ever obtained a summary for a caller to compose, and
+because the shape only fails at the *caller*: the callee's own certificate replays.
 
-This is a producer/kernel disagreement, not a false claim: the gap is counted and the verdict
-degrades accordingly. The lifetime lend fixtures stay clear of it deliberately, so it is not
-masked by them.
+`proof_kernel_replay_resource_type_term` now decides that edge instead. A type expression denotes
+no runtime value and so carries no lifetime; the constructed value's lifetime comes from the
+allocation holding it. Only a plain or qualified type name is accepted, so a region-parameterized
+or otherwise unrecognized form is refused rather than assumed lifetime-free. The field values,
+where a foreign lifetime could actually hide, are still walked one by one, and `record-update`
+still checks its base as the value it is. A `call` node's left edge is deliberately left alone:
+it is refused today because a callee name is not a binding, and loosening it without the callee's
+return region in hand would admit `new[r] f(x)` where `f` returns a longer-lived reference.
+
+Coverage. `examples/region_call_summary.elisa` proves the reproducer and a record update allocated
+into the same region, with replay gaps at zero and `construct`, `record-update`,
+`resource-region-alloc` and `resource-call` all present in the arena.
+`examples/kernel_resource_bootstrap_runtime.elisa` adds three cases: a struct literal allocated
+into a region is admitted, the same literal with a field value belonging to another region is
+refused, and a construction whose left edge is not a type name is refused. Removing the type-term
+rule or the field walk each makes it exit with the matching code. On the kernel's own source the
+proven count moved from 885 to 891, with replay gaps unchanged at zero.
 
 ## Coverage still required
 

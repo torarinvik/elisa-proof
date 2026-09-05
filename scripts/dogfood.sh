@@ -210,6 +210,7 @@ run_probe writable_lend_calls examples/writable_lend_calls.elisa 0
 run_probe rejected_writable_lend_calls examples/rejected_writable_lend_calls.elisa 1
 run_probe region_lend_calls examples/region_lend_calls.elisa 0
 run_probe rejected_region_lend_calls examples/rejected_region_lend_calls.elisa 1
+run_probe region_call_summary examples/region_call_summary.elisa 0
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -523,6 +524,25 @@ if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or 
 if any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"]):
     raise SystemExit("dogfood failed: an unpinned lifetime was recorded as a lend")
 print("dogfood region_lend_calls: a lifetime parameter is pinned, never assumed")
+PY
+
+# A region-polymorphic callee that does have a summary must compose into its caller. This replayed
+# as a gap while the kernel read a construction's type name as a runtime value.
+python3 - "$REPORT_DIR/region_call_summary.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: a region-polymorphic callee summary did not compose")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a region certificate was left unreplayed")
+kinds = {node["kind"] for node in report["kernel"]["nodes"]}
+for kind in ("resource-region-alloc", "construct", "record-update", "resource-call"):
+    if kind not in kinds:
+        raise SystemExit("dogfood failed: %s never reached the arena" % kind)
+print("dogfood region_call_summary: a constructed type is not a value, a record base still is")
 PY
 
 
