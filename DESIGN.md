@@ -80,7 +80,8 @@ The proof kernel is intentionally fail-closed:
    until the evaluator can retain their exact post-call value.
    Runtime ownership-transfer expressions are modeled as conservative state transitions: a moved
    root becomes unavailable and all symbolic facts are discarded across the move. The resource
-   state also models local region identities: both block and statement-form region declarations,
+   state rejects use-after-move before either a use or a new borrow can be established. It also
+   models local region identities: both block and statement-form region declarations,
    bound/discarded `new[r]` allocations, same-region aliases, explicit `destroy r`, and implicit
    function-scope close are source-neutral transitions independently replayed by the kernel. Replay
    tracks region liveness separately from its source spelling, invalidating owned bindings and

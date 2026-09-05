@@ -68,6 +68,12 @@ if [[ "$(basename "$SELF_HOST_COMPILER")" == "elisac-stage1" ]]; then
         exit 1
     fi
 fi
+"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-after-move.o" "$ROOT_DIR/examples/rejected_borrow_after_move.elisa" >/dev/null 2>&1
+rejected_borrow_after_move_compiler_status=$?
+if [[ "$rejected_borrow_after_move_compiler_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: compiler rejected the runtime-valid borrow-after-move fixture\n' >&2
+    exit 1
+fi
 "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/nested-region-destroy.o" "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/dev/null 2>&1
 nested_region_destroy_compiler_status=$?
 if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
@@ -1349,6 +1355,15 @@ resource_target_status=${PIPESTATUS[0]}
 set -e
 if [[ "$resource_target_status" -ne 1 ]]; then
     printf 'proof test matrix failed: proposition tactic replaced a resource certificate\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_borrow_after_move.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "resource-use-after-move" and finding["message"] == "a borrow cannot be created from a moved resource binding" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
+rejected_borrow_after_move_probe_status=${PIPESTATUS[0]}
+set -e
+if [[ "$rejected_borrow_after_move_probe_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: borrow-after-move was not rejected with replayable evidence\n' >&2
     exit 1
 fi
 
