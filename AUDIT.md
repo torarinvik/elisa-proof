@@ -316,11 +316,88 @@ between two struct parameters, and reflexive `==` on a struct local.
 and additionally requires that the three true comparisons are refused without it, so the kernel
 is exercised directly. A mutation making the witness unconditional is caught by that harness.
 
-Not covered. The witness follows declared types, so a comparison whose operand is a synthesized
-symbol the producer never typed — an unresolved call result, for instance — is still admitted by
-these tiers. That is a strictly smaller surface than before and it fails toward admission rather
-than refusal, so it remains an open item: closing it needs the callee return type recorded in the
-function table.
+Left open at the time. The gate covered only a bare identifier; any other operand shape was
+admitted without a witness. That residue is closed in the next section.
+
+## Repaired: non-identifier operands admitted without a type witness
+
+The reflexivity gate above asked for a witness only when the operand was a bare identifier;
+every other shape passed. `examples/kernel_comparison_runtime.elisa` and the adversarial
+fixture only pinned the identifier case, so the residue was recorded rather than caught by a
+test. Probing it directly showed `h.part == h.part`, `h.parts[0] == h.parts[0]` and
+`h.part <= h.part` proved with kernel-backed certificates for a struct-typed `part`, and
+`examples/quantifier_structural_terms.elisa` had been asserting `[value] == [value]`,
+`Pair{...} == Pair{...}`, tuple and dictionary equalities as theorems. Compiling such a
+comparison confirmed the language's position: "aggregate values do not support ==; compare
+their contents explicitly". Those obligations were not merely unproven propositions; they were
+propositions no Elisa program can state.
+
+Repair, kernel side. `proof_kernel_replay_primitive_comparison` now requires both operands of
+the identity, definitional, affine and difference tiers to satisfy
+`proof_kernel_replay_scalar_term_witnessed`, and the congruence closure admits an atom only
+under the same relation. The relation is closed: a scalar literal; a `__elisa_primitive_scalar_type`
+marker whose argument is structurally equal to the term; an `index`/`index-n` term reaching
+exactly the depth of a `__elisa_primitive_scalar_element(container, depth)` marker over
+witnessed subscripts; or a former with a primitive operator over witnessed operands. There is no
+default case. The marker readers validate the call shape, the argument arity, and the depth
+literal's range.
+
+Repair, producer side. The gap could not be closed by refusal alone without losing legitimate
+proofs, so the producer now resolves expression-level types from the compiler's declarations:
+each scalar field of a struct-typed parameter or local (recursively through struct-typed
+fields to depth three, under a per-binding budget of twelve witnesses), the `count` of a
+built-in container, and the container's element depth from `darray[T]`, `view[T]`,
+`array[T, N]` and `T[N]` spellings — never from a struct, whose subscript is an `__index__`
+call. A `const enum` resolves as a scalar; a plain enum does not. A call is witnessed only for
+a verified total-pure callee whose declared return type is a scalar, over witnessed arguments,
+because that classification is what makes two occurrences of the call one value. Retention
+follows the root symbol of the witnessed place, so a field witness dies with its binding and
+survives the havoc points that keep type bounds.
+
+Two adjacent defects surfaced while restoring completeness and were fixed in the same change.
+The error arm of an expression-position `catch` cleared every fact, including type bounds, and
+so did a value arm whose expression contained an unapplied call; both now keep type bounds like
+every other havoc point. A signed scalar local bound to an opaque initializer substituted
+`invalid` for its own name, so `reading == reading` was decided over two copies of nothing; it
+is now kept as its own symbol, exactly as an unsigned local already was, with no binding fact.
+That made `examples/rejected_unknown_assert_reuse.elisa` prove: a local bound once to an opaque
+call, asserted, and returned unchanged is one execution, and the unsigned spelling of the same
+program was already accepted. The fixture now pins the two genuine hazards — reusing the call
+term itself, and a binding reassigned after the assertion — and the accepted shape moved to
+`expression_witness.elisa`.
+
+Consequences. Aggregate equality is refused everywhere; `examples/constructor_kernel.elisa`
+and `examples/quantifier_structural_terms.elisa` were rewritten to project a scalar out of the
+aggregate or to pass it to a verified pure function, where only an exact child graph lets the
+hypothesis contain the goal; `examples/slice_kernel.elisa` now asserts that its slice forms
+lower into the arena and are refused; and the refused aggregate forms live in
+`examples/rejected_aggregate_equality.elisa`. The projection is reduced before lowering, so
+quantified substitution through `construct`, `field-init` and `record-update` nodes lost its
+end-to-end fixture; `examples/kernel_arena_runtime.elisa` now covers it natively by containment,
+with a wrong field value, a wrong field name, and a wrong update base each required to fail, and
+its nested-call case was likewise moved from call reflexivity to containment with a negative
+control. `call_result_operand` moved from
+`rejected_congruence.elisa` to `congruence.elisa`: an equated pair of verified pure call
+results over witnessed arguments legitimately travels through arithmetic, which is a different
+claim from carrying an equality *through* a call, still refused as `call_congruence`.
+
+Coverage. `examples/expression_witness.elisa` proves twenty-nine obligations across struct
+fields, nested fields, a field through a reference, elements, `count`, two-dimensional
+subscripts in both spellings, field and element congruence, a struct local, a `const enum`, a
+verified pure call, and an opaque-call-bound local. `examples/rejected_reflexivity.elisa` adds
+a struct field under `==` and `<=`, a struct element, and an opaque call. The native harness
+gained twelve cases: an unwitnessed field, a witnessed field, a witness on a different field of
+the same root, an unwitnessed element, a witnessed element, an unwitnessed subscript, a depth-1
+marker against a depth-2 subscript and the reverse, a call with and without its exact witness,
+and a former with and without operand witnesses. Five deliberate kernel mutations — an
+unconditional gate, a marker matching any term, a subscript ignoring depth, a subscript not
+collected, and a former admitted without operand witnesses — each make the harness exit with a
+distinct code.
+
+Not covered. Type resolution stops at what the producer can see: a loop binder over a container
+(`for x in values`) is not witnessed, nor is a pattern binder from a struct pattern except
+through its substituted place, nor a field of a call result. Those decline. The witness budget
+and depth are fixed constants and their exhaustion is silent.
 
 ## Added: exhausted searches are reported as timeouts
 

@@ -122,7 +122,7 @@ if [[ "$json_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: JSON report is not a valid structured proof state\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds slice_kernel indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
+for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
     "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -362,8 +362,11 @@ if [[ "$constructor_kernel_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: constructor/update terms were not encoded for independent replay\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/slice_kernel.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 9; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = {node["kind"] for node in report["kernel"]["nodes"]}; assert "slice" in kinds; assert "absent" in kinds'
+# The report exits 1: every slice equality is refused.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/slice_kernel.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 9; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert not any(goal["proven"] for goal in report["goals"] if goal["rule"] != "resource-safety"); kinds = {node["kind"] for node in report["kernel"]["nodes"]}; assert "slice" in kinds; assert "absent" in kinds'
 slice_kernel_probe_status=${PIPESTATUS[1]}
+set -e
 if [[ "$slice_kernel_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: slice terms were not encoded for independent replay\n' >&2
     exit 1
@@ -374,7 +377,7 @@ if [[ "$indexn_kernel_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: bounded multi-index terms were not checked and replayed\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/quantifier_structural_terms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 12; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = {node["kind"] for node in report["kernel"]["nodes"]}; assert {"quantifier", "array", "tuple", "dict", "dict_entry", "if", "construct", "field-init"} <= kinds'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/quantifier_structural_terms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 6; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = {node["kind"] for node in report["kernel"]["nodes"]}; assert {"quantifier", "array", "if"} <= kinds; assert "construct" not in kinds'
 quantifier_structural_probe_status=${PIPESTATUS[1]}
 if [[ "$quantifier_structural_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: structured quantifier substitution was not replayed\n' >&2
@@ -1462,7 +1465,7 @@ if [[ "$rejected_borrow_after_move_probe_status" -ne 1 ]]; then
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; assert report["findings"] == []; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"congruence_sum", "congruence_difference", "congruence_product", "congruence_nested", "congruence_chain", "congruence_boolean", "congruence_bitwise", "congruence_conditional", "congruence_character", "congruence_boolean_parameters", "congruence_bounded_unsigned"} <= names'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; assert report["findings"] == []; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"congruence_sum", "congruence_difference", "congruence_product", "congruence_nested", "congruence_chain", "congruence_boolean", "congruence_bitwise", "congruence_conditional", "congruence_character", "congruence_boolean_parameters", "congruence_bounded_unsigned", "congruence_pure_call_result"} <= names'
 congruence_status=${PIPESTATUS[1]}
 if [[ "$congruence_status" -ne 0 ]]; then
     printf 'proof test matrix failed: ground congruence closure did not carry equalities through deterministic formers\n' >&2
@@ -1470,7 +1473,7 @@ if [[ "$congruence_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "indexed_element", "constructed_aggregate", "call_congruence", "call_result_operand", "cross_width", "wrapping_operand"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "indexed_element", "constructed_aggregate", "call_congruence", "cross_width", "wrapping_operand"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
 rejected_congruence_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_congruence_status" -ne 0 ]]; then
@@ -1479,11 +1482,33 @@ if [[ "$rejected_congruence_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_reflexivity.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"reflexive_equality", "reflexive_order", "reflexive_reverse_order", "symmetric_equality", "local_reflexive_equality"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_reflexivity.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"reflexive_equality", "reflexive_order", "reflexive_reverse_order", "symmetric_equality", "local_reflexive_equality", "field_reflexive_equality", "field_reflexive_order", "element_reflexive_equality", "opaque_call_reflexive_equality"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
 rejected_reflexivity_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_reflexivity_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a user-defined equality was assumed reflexive, symmetric, or coherent with ordering\n' >&2
+    exit 1
+fi
+
+# Expression-level type witnesses: struct fields, container counts and elements to the declared
+# depth, const-enum values, and verified total-pure call results are witnessed by exact term.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/expression_witness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 31; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"asserted_opaque_binding", "field_reflexive", "nested_field_reflexive", "field_through_reference", "element_reflexive", "count_reflexive", "multi_index_reflexive", "nested_index_reflexive", "field_congruence", "element_congruence", "local_field_reflexive", "const_enum_reflexive", "pure_call_reflexive", "bound_opaque_call"} <= names; witnesses = [fact for certificate in report["certificates"] for fact in certificate["facts"] if fact["kind"] == "call" and fact["callee"]["name"] in ("__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element")]; assert any(fact["arguments"][0]["kind"] == "field" for fact in witnesses); assert any(fact["callee"]["name"] == "__elisa_primitive_scalar_element" for fact in witnesses)'
+expression_witness_status=${PIPESTATUS[1]}
+set -e
+if [[ "$expression_witness_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: expression-level type witnesses\n' >&2
+    exit 1
+fi
+
+# Elisa admits no `==` between aggregates, and struct `==` is a user `__eq__`; every such goal
+# must be refused without a certificate while its form still lowers into the arena.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_aggregate_equality.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"array_equality", "nested_array_equality", "tuple_equality", "dictionary_equality", "construct_equality", "update_equality", "quantified_array_equality", "quantified_tuple_equality", "quantified_dictionary_equality", "quantified_construct_equality"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not claimed; assert refused <= {finding["name"] for finding in report["findings"]}; kinds = {node["kind"] for node in report["kernel"]["nodes"]}; assert {"array", "tuple", "dict", "dict_entry", "construct", "record-update", "field-init", "quantifier"} <= kinds'
+rejected_aggregate_equality_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_aggregate_equality_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an aggregate equality was admitted\n' >&2
     exit 1
 fi
 

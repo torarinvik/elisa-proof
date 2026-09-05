@@ -206,16 +206,22 @@ The native checker currently supports:
   relations between distinct identifiers;
 - explicit identifier equality closure (`x == y`, including short chains) with safe bound
   propagation;
-- a primitive-type witness on every rule that concludes a comparison because its operands denote
-  the same value. Elisa's `==`, `!=` and the four ordering operators dispatch to a user
-  `__eq__`/`__cmp__` whenever an operand's type is a struct, and no protocol method is required to
-  be reflexive, symmetric, or coherent with ordering, so `p == p`, `p <= p` and `q == p` from
-  `p == q` are not theorems for an arbitrary type. Reflexivity, the definitional-identity test,
-  the identifier-alias rule, the cancellation tier, and the affine and difference-constraint tiers
-  all require a bare identifier operand to carry the declared primitive scalar type the producer
-  recorded. Parameters, scalar locals and counting-range loop binders carry it, an unsigned width
-  marker counts as the same witness, and it survives call, assignment, move and control-flow
-  havoc. See `examples/rejected_reflexivity.elisa`;
+- a primitive-type witness on both operands of every rule that concludes a comparison because
+  its operands denote the same value. Elisa's `==`, `!=` and the four ordering operators
+  dispatch to a user `__eq__`/`__cmp__` whenever an operand's type is a struct, no protocol
+  method is required to be reflexive, symmetric, or coherent with ordering, and an aggregate
+  has no `==` at all, so `p == p`, `p <= p`, `q == p` from `p == q`, and `[x] == [x]` are not
+  theorems. Reflexivity, the definitional-identity test, the identifier-alias rule, the
+  cancellation tier, and the affine and difference-constraint tiers all require both operands
+  to be witnessed; an unwitnessed shape declines. Witnesses are expression-level: the producer
+  resolves the declared type of every place reachable from a binding — a bare name, struct
+  fields to a fixed depth, a built-in container's `count`, and its elements to the declared
+  subscript depth — plus `const enum` values and the result of a verified total-pure call over
+  witnessed arguments, and records each against the exact term for the kernel to match
+  structurally. Opaque calls, struct subscripts, plain enums, and aggregates are never
+  witnessed. See `examples/expression_witness.elisa`, `examples/rejected_reflexivity.elisa`,
+  `examples/rejected_aggregate_equality.elisa`, and the native kernel harness
+  `examples/kernel_comparison_runtime.elisa`;
 - ground congruence closure over the primitive scalar fragment of the source-neutral term
   language: a positive equality premise is carried through every former whose operator is the
   language's own, so `a == b` proves `a + c == b + c`, `(a < 5) == (b < 5)`, `(a & c) == (b & c)`,
@@ -229,10 +235,12 @@ The native checker currently supports:
   Boolean and character literals plus identifiers the producer witnessed as having a declared
   primitive scalar type, recorded through the same traced-fact channel as unsigned widths. A goal
   outside that fragment declines and a premise outside it contributes nothing.
-  Field selection, indexing, slicing, aggregate construction, and `call` are consequently not
-  congruent formers; neither are `move`, unary `&`, `is`/`as`, `::`, `get … else`, or a
-  quantifier, whose body is never entered so a bound occurrence can never join a free term's
-  class. The rule also runs only after the fixed-width safety guards have rejected every wrapping
+  A witnessed field selection, container element, or verified total-pure call result joins the
+  closure as an atom, so `h.weight == x` proves `h.weight + 1 == x + 1`. Field selection,
+  indexing, slicing, aggregate construction, and `call` are never congruent formers — no
+  equality travels *through* them; neither are `move`, unary `&`, `is`/`as`, `::`, `get … else`,
+  or a quantifier, whose body is never entered so a bound occurrence can never join a free
+  term's class. The rule also runs only after the fixed-width safety guards have rejected every wrapping
   premise and goal, so an equality between operands of different widths cannot travel through
   arithmetic. The producer does not own the rule: it lowers the premises and goal into a scratch
   arena and calls the same kernel routine that re-derives the certificate during replay. See

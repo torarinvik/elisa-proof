@@ -182,18 +182,29 @@ The proof kernel is intentionally fail-closed:
 13a. Reflexivity, symmetry, and coherence between equality and ordering are properties of the
     language's own operators, not of every type. Elisa rewrites `==`, `!=`, `+`, `-`, `*`, `/`
     and the four ordering operators to a user `__eq__`/`__add__`/`__cmp__` whenever an operand's
-    type is a struct, and there is no built-in struct equality to fall back on. Every rule that
-    concludes a comparison because its operands denote the same value therefore requires the
-    operand's primitive-type witness when that operand is a bare identifier: the reflexive
-    identity shortcut, the definitional-identity test, the identifier-alias rule, the
+    type is a struct, there is no built-in struct equality to fall back on, and an aggregate
+    value has no `==` at all. Every rule that concludes a comparison because its operands denote
+    the same value therefore requires both operands to be witnessed as primitive scalars: the
+    reflexive identity shortcut, the definitional-identity test, the identifier-alias rule, the
     cancellation tier's zero difference, and the affine and difference-constraint closures, in
-    both the producer and the replay kernel. A richer operand shape is left to the numeric tiers,
-    which cannot construct an interval for a struct value. The witness is the same traced
-    `__elisa_primitive_scalar_type` type-bound marker used by congruence; it is recorded from
-    declared parameter, local and counting-range binder types, an unsigned width marker is
-    accepted in its place, and it survives every havoc point that keeps type bounds. A comparison
-    whose operand is a symbol the producer never typed remains admitted by these tiers and is
-    tracked in AUDIT.md.
+    both the producer and the replay kernel. An unwitnessed operand shape declines; nothing is
+    admitted by default.
+    A term is witnessed in exactly four ways. A scalar literal (an integer, Boolean, character,
+    or one-segment `const enum` value) is self-evident. A term the producer resolved a declared
+    primitive scalar type for carries a `__elisa_primitive_scalar_type` marker keyed by that
+    exact term, matched structurally — a bare name, a struct field, or the `count` of a built-in
+    container; an unsigned width marker is accepted for a name. An element of a built-in
+    container carries a `__elisa_primitive_scalar_element(container, depth)` marker and is a
+    scalar only when exactly `depth` subscripts, each over a witnessed term, reach it. A former
+    whose operator is the language's own is a scalar when all of its operands are.
+    The producer records these from declared parameter and local types, following struct fields
+    to a fixed depth and built-in container spellings (`darray[T]`, `view[T]`, `array[T, N]`,
+    `T[N]`) to their element, and from counting-range binders; each witness is retained and
+    invalidated with its root symbol. A call is witnessed only when the callee is a verified
+    total-pure function with a scalar declared return type and every argument is witnessed: that
+    classification is what makes two occurrences of the call text one value. An opaque call, a
+    subscript on a struct (an `__index__` protocol call), a plain enum, a reference to a scalar,
+    and every aggregate stay unwitnessed.
 13b. Ground congruence closure is a separate, kernel-owned equality rule over the primitive
     scalar fragment. Its universe is the set of subterms of the premises and the goal, its
     relation is seeded only by positive equalities (`and` is transparent and `not (a != b)` is

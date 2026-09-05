@@ -137,15 +137,83 @@ extend ElisaProof:
         # can only lose completeness, because the source trace still has to identify it as a
         # type-bound fact of the owning declaration.
         def proof_scalar_type_marker(name: sview, position: Ast::Pos) -> Ast::Expr:
-            arguments: darray[Ast::Expr] = [Ast::Expr.Ident(name, position)]
+            return proof_scalar_term_marker(Ast::Expr.Ident(name, position), position)
+
+        # The declared type of a term, not only of a name. The producer resolves a field
+        # selection's declared type through the owning struct declaration, so the witness has to
+        # be keyed by the exact term rather than by a symbol.
+        def proof_scalar_term_marker(term: Ast::Expr, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term]
             return Ast::Expr.Call(Ast::Expr.Ident("__elisa_primitive_scalar_type", position), arguments, [], position)
 
-        def proof_scalar_marker_name(expression: Ast::Expr) -> sview:
+        # A container whose declared element type is a primitive scalar. The index set is not
+        # enumerable, so the witness is recorded once against the container term and says only
+        # that every element of it is a primitive scalar.
+        # The depth is how many subscripts reach the scalar: 1 for `darray[i64]`, 2 for
+        # `array[array[i64, 4], 4]`, so a nested or multi-argument subscript is witnessed only
+        # when it goes exactly that deep.
+        def proof_scalar_element_marker(term: Ast::Expr, depth: i64, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term, Ast::Expr.IntLit(depth)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_primitive_scalar_element", position), arguments, [], position)
+
+        def proof_element_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, depth: i64):
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, _):
-                    return "" if argument_names.count != 0 and argument_names.count != arguments.count
-                    return "" if proof_ident_name(callee) != "__elisa_primitive_scalar_type" or arguments.count != 1
-                    return proof_ident_name(arguments[0])
+                    return (false, Ast::Expr.Invalid, 0) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, Ast::Expr.Invalid, 0) if proof_ident_name(callee) != "__elisa_primitive_scalar_element" or arguments.count != 2
+                    depth: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    return (false, Ast::Expr.Invalid, 0) if not depth.known or depth.value < 1 or depth.value > 8
+                    return (true, arguments[0], depth.value)
+                _:
+                    return (false, Ast::Expr.Invalid, 0)
+
+        def proof_marker_argument(expression: Ast::Expr, callee_name: sview) -> (known: bool, term: Ast::Expr):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, Ast::Expr.Invalid) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, Ast::Expr.Invalid) if proof_ident_name(callee) != callee_name or arguments.count != 1
+                    return (true, arguments[0])
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        # True for either compiler type marker, whatever its payload looks like. A marker states a
+        # declared type; it constrains no model and proves no proposition on its own.
+        def proof_type_marker_callee(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, _, _, _):
+                    name: sview = proof_ident_name(callee)
+                    return name == "__elisa_unsigned_type_bound" or name == "__elisa_primitive_scalar_type" or name == "__elisa_primitive_scalar_element"
+                _:
+                    return false
+
+        # The bare-name form of the scalar witness. A term-shaped witness answers "" here and is
+        # matched structurally by `proof_scalar_term_witnessed` instead.
+        def proof_scalar_marker_name(expression: Ast::Expr) -> sview:
+            argument: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+            return "" if not argument.known
+            return proof_ident_name(argument.term)
+
+        # The symbol a type witness hangs off: the root of its argument place. Retention and
+        # invalidation follow that symbol, so a field or element witness dies exactly when the
+        # binding it was resolved against does.
+        def proof_type_marker_root_name(expression: Ast::Expr) -> sview:
+            scalar: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+            return proof_place_root_name(scalar.term, 0) if scalar.known
+            element: (known: bool, term: Ast::Expr, depth: i64) = proof_element_marker_info(expression)
+            return proof_place_root_name(element.term, 0) if element.known
+            return ""
+
+        def proof_place_root_name(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= 64
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_place_root_name(inner, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_place_root_name(object, depth + 1)
+                Ast::Expr.Index(object, _, _):
+                    return proof_place_root_name(object, depth + 1)
                 _:
                     return ""
 
@@ -307,17 +375,98 @@ extend ElisaProof:
                 return true if proof_unsigned_marker_name(fact) == name
             return false
 
-        def proof_primitive_comparison_operand(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            name: sview = proof_ident_name(expression)
-            return true if name == ""
-            return proof_scalar_witnessed(facts, name)
+        # Ground congruence and the identity tiers admit only the language's own operators; a
+        # struct operand would dispatch to a user protocol method instead. This mirrors the
+        # kernel's list exactly, including the deliberate exclusion of unary `&`: an address is
+        # not a function of the value stored at it.
+        def proof_congruent_binary_operator(operator: TokenKind) -> bool:
+            return true if operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent
+            return true if operator == TokenKind.EqEq or operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+            return true if operator == TokenKind.And or operator == TokenKind.Or or operator == TokenKind.FatArrow
+            return true if operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret or operator == TokenKind.LShift or operator == TokenKind.RShift
+            return false
+
+        def proof_congruent_unary_operator(operator: TokenKind) -> bool:
+            return operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Not
+
+        # How many further subscripts this term needs to reach a primitive scalar: the marker's
+        # depth for a witnessed container, one less per subscript over a witnessed index term,
+        # and -1 when nothing is known. A term is a scalar element exactly when this reaches 0.
+        def proof_scalar_element_remaining(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> i64:
+            return -1 if depth >= 64
+            for fact in facts |expression|:
+                marker: (known: bool, term: Ast::Expr, depth: i64) = proof_element_marker_info(fact)
+                return marker.depth if marker.known and proof_expr_equal(marker.term, expression)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_element_remaining(inner, facts, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    remaining: i64 = proof_scalar_element_remaining(object, facts, depth + 1)
+                    return -1 if remaining < 1 or not proof_scalar_term_witnessed(index, facts, depth + 1)
+                    return remaining - 1
+                Ast::Expr.IndexN(object, arguments, _):
+                    remaining: i64 = proof_scalar_element_remaining(object, facts, depth + 1)
+                    return -1 if remaining < arguments.count.i64()
+                    for argument in arguments |facts, depth|:
+                        return -1 if not proof_scalar_term_witnessed(argument, facts, depth + 1)
+                    return remaining - arguments.count.i64()
+                _:
+                    return -1
+
+        # Whether this term is known to denote a primitive scalar value. The producer mirror of
+        # `proof_kernel_replay_scalar_term_witnessed`; the kernel re-derives the same judgement
+        # from the certificate and owns the decision.
+        #
+        # A witness is a scalar literal, a term whose declared primitive scalar type the producer
+        # resolved and recorded, an element of a container whose element type it resolved indexed
+        # by a witnessed term, or a former built from the language's own operators over witnessed
+        # operands. A call result is deliberately not witnessed: its return type is not resolved
+        # here, and a function need not be deterministic, so two occurrences of the same call text
+        # need not denote one value.
+        def proof_scalar_term_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.IntLit(_):
+                    return true
+                Ast::Expr.BoolLit(_):
+                    return true
+                Ast::Expr.CharLit(_):
+                    return true
+                Ast::Expr.ShorthandMember(parts, _):
+                    # A one-segment leading-dot value is a `const enum` member: an integer.
+                    return parts.count == 1 and parts[0] != ""
+                _:
+                    pass
+            for fact in facts |expression|:
+                argument: (known: bool, term: Ast::Expr) = proof_marker_argument(fact, "__elisa_primitive_scalar_type")
+                return true if argument.known and proof_expr_equal(argument.term, expression)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_term_witnessed(inner, facts, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    return proof_scalar_witnessed(facts, name)
+                Ast::Expr.Index(_, _, _):
+                    return proof_scalar_element_remaining(expression, facts, depth + 1) == 0
+                Ast::Expr.IndexN(_, _, _):
+                    return proof_scalar_element_remaining(expression, facts, depth + 1) == 0
+                Ast::Expr.Unary(operator, operand, _):
+                    return proof_congruent_unary_operator(operator) and proof_scalar_term_witnessed(operand, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_congruent_binary_operator(operator) and proof_scalar_term_witnessed(left, facts, depth + 1) and proof_scalar_term_witnessed(right, facts, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_scalar_term_witnessed(condition, facts, depth + 1) and proof_scalar_term_witnessed(then_expression, facts, depth + 1) and proof_scalar_term_witnessed(else_expression, facts, depth + 1)
+                _:
+                    return false
+
+        def proof_primitive_comparison(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return proof_scalar_term_witnessed(left, facts, 0) and proof_scalar_term_witnessed(right, facts, 0)
 
         def proof_unsigned_goal_identity(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             match expression:
                 Ast::Expr.Paren(inner, _):
                     return proof_unsigned_goal_identity(inner, facts)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return proof_primitive_comparison_operand(left, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
+                    return proof_primitive_comparison(left, right, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
                 _:
                     return false
 
@@ -1059,20 +1208,20 @@ extend ElisaProof:
             return false
 
         def proof_linear_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            return true if proof_primitive_comparison_operand(left, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
+            return true if proof_primitive_comparison(left, right, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
             left_name: sview = proof_ident_name(left)
             right_name: sview = proof_ident_name(right)
             if proof_names_equal_from_facts(left_name, right_name, facts):
                 # Denoting the same value is not the same as satisfying the operator. A negative
                 # answer stays available, since refusing to conclude is always sound.
-                return true if proof_primitive_comparison_operand(left, facts) and (operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq)
+                return true if proof_primitive_comparison(left, right, facts) and (operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq)
                 return false if operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt
             delta: (known: bool, value: i64) = proof_delta_constant(left, right)
             if delta.known:
                 # A zero difference says the two terms denote the same value, so concluding a
                 # comparison on them needs the operator to be reflexive. The numeric tiers below
                 # cannot help either without a bound on the operand, so declining here is sound.
-                return false if delta.value == 0 and not proof_primitive_comparison_operand(left, facts) and (operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq)
+                return false if delta.value == 0 and not proof_primitive_comparison(left, right, facts) and (operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq)
                 return delta.value > 0 if operator == TokenKind.Gt
                 return delta.value >= 0 if operator == TokenKind.GtEq
                 return delta.value < 0 if operator == TokenKind.Lt
@@ -1083,12 +1232,10 @@ extend ElisaProof:
             for fact in facts |bounds|:
                 proof_collect_bounds(fact, &bounds)
             proof_close_equalities(facts, &bounds)
-            # The affine and difference tiers close over `==` premises between identifiers, so a
-            # bare identifier operand carries the same requirement as the rules above.
-            # The affine and difference tiers close over `==` premises between identifiers, so a
-            # bare identifier operand carries the same requirement as the rules above.
-            return true if proof_primitive_comparison_operand(left, facts) and proof_affine_goal(left, operator, right, bounds, facts)
-            return true if proof_primitive_comparison_operand(left, facts) and proof_difference_goal(left, operator, right, facts)
+            # The affine and difference tiers close over `==` premises between identifiers, so
+            # their operands carry the same requirement as the rules above.
+            return true if proof_primitive_comparison(left, right, facts) and proof_affine_goal(left, operator, right, bounds, facts)
+            return true if proof_primitive_comparison(left, right, facts) and proof_difference_goal(left, operator, right, facts)
             a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(left, bounds)
             b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
             return a.has_lower and b.has_upper and a.lower > b.upper if operator == TokenKind.Gt
@@ -1173,7 +1320,7 @@ extend ElisaProof:
             # A compiler type marker states a declared type, not a constraint on the model. It
             # holds at every point of the domain, so bounded enumeration must read it as true
             # rather than as an unknown fact that abandons the search.
-            return (true, true) if proof_unsigned_marker_name(expression) != "" or proof_scalar_marker_name(expression) != ""
+            return (true, true) if proof_type_marker_callee(expression)
             match expression:
                 Ast::Expr.BoolLit(value):
                     return (true, value)

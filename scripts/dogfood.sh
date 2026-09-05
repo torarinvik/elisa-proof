@@ -201,6 +201,8 @@ run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.eli
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
+run_probe expression_witness examples/expression_witness.elisa 0
+run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
 run_probe rejected_effect_containment examples/rejected_effect_containment.elisa 1
@@ -282,6 +284,10 @@ refused = {
     "reflexive_reverse_order",
     "symmetric_equality",
     "local_reflexive_equality",
+    "field_reflexive_equality",
+    "field_reflexive_order",
+    "element_reflexive_equality",
+    "opaque_call_reflexive_equality",
 }
 claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}
 if refused & claimed:
@@ -321,7 +327,6 @@ refused = {
     "indexed_element",
     "constructed_aggregate",
     "call_congruence",
-    "call_result_operand",
     "cross_width",
     "wrapping_operand",
 }
@@ -330,6 +335,37 @@ if refused & claimed:
     raise SystemExit("dogfood failed: congruence admitted %s" % sorted(refused & claimed))
 if refused - {finding["name"] for finding in report["findings"]}:
     raise SystemExit("dogfood failed: an adversarial congruence goal produced no diagnostic")
+PY
+
+# A comparison concluded from two terms denoting the same value needs both operands witnessed as
+# primitive scalars. The producer witnesses struct fields, container counts and elements, and
+# verified total-pure call results by exact term; an aggregate comparison has no witness at all.
+python3 - "$REPORT_DIR/expression_witness.json" "$REPORT_DIR/rejected_aggregate_equality.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["summary"]["proven"] == report["summary"]["obligations"]
+assert report["replay"]["gaps"] == 0
+assert report["findings"] == []
+witnesses = [fact for certificate in report["certificates"] for fact in certificate["facts"] if fact["kind"] == "call" and fact["callee"]["name"] in ("__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element")]
+if not any(fact["arguments"][0]["kind"] == "field" for fact in witnesses):
+    raise SystemExit("dogfood failed: no field witness reached a certificate")
+if not any(fact["arguments"][0]["kind"] == "call" for fact in witnesses):
+    raise SystemExit("dogfood failed: no verified pure call witness reached a certificate")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
+    raise SystemExit("dogfood failed: aggregate equality fixture did not fail cleanly")
+if report["replay"]["gaps"] != 0:
+    raise SystemExit("dogfood failed: aggregate equality fixture left a replay gap")
+claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}
+if claimed:
+    raise SystemExit("dogfood failed: aggregate equality admitted for %s" % sorted(claimed))
+print("dogfood expression_witness: term-keyed type witnesses admit exactly the primitive scalar places")
 PY
 
 

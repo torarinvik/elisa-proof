@@ -175,6 +175,11 @@ extend ElisaProof:
                     alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
                     return -1 if alias.count > 1
                     return proof_scalar_type_kind(alias.target, declarations, depth + 1) if alias.count == 1
+                    # A `const enum` is an integer-backed value; its `==` is the integer compare.
+                    # A plain enum is a tagged union and is deliberately not a scalar here.
+                    const_enums: usize = proof_count_const_enums(declarations, name, 0)
+                    return -1 if const_enums > 1
+                    return 1 if const_enums == 1
                     return 0
                 Ast::Expr.Paren(inner, _):
                     return proof_scalar_type_kind(inner, declarations, depth + 1)
@@ -214,6 +219,200 @@ extend ElisaProof:
                         pass
                 return (2, Ast::Expr.Invalid) if count > 1
             return (count, target)
+
+        def proof_count_const_enums(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
+            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |name, depth, count|:
+                match declaration:
+                    Ast::Decl.Enum(enum_name, _, is_const, _, _):
+                        count <- count + 1 if enum_name == name and is_const
+                    Ast::Decl.Module(_, body, _):
+                        count <- count + proof_count_const_enums(body, name, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_count_const_enums(body, name, depth + 1)
+                    _:
+                        pass
+            return count
+
+        # The declared type of one field of a named struct. The count reports how many struct
+        # declarations answer to the name; anything but exactly one is refused by the caller.
+        def proof_struct_field_type(declarations: darray[Ast::Decl]&, struct_name: sview, field_name: sview, depth: usize) -> (count: usize, type_expression: Ast::Expr):
+            return (2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            found: mutable Ast::Expr = Ast::Expr.Invalid
+            for declaration in declarations |struct_name, field_name, depth, count, found|:
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        if name == struct_name:
+                            count <- count + 1
+                            for member in members |field_name, found|:
+                                found <- member.type_expression if member.name == field_name
+                    Ast::Decl.Module(_, body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(body, struct_name, field_name, depth + 1)
+                        count <- count + nested.count
+                        found <- nested.type_expression if nested.count > 0
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(body, struct_name, field_name, depth + 1)
+                        count <- count + nested.count
+                        found <- nested.type_expression if nested.count > 0
+                    _:
+                        pass
+            return (count, found)
+
+        def proof_struct_field_names(declarations: darray[Ast::Decl]&, struct_name: sview, depth: usize, names: mutable darray[sview]&) -> usize:
+            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |struct_name, depth, count, names|:
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        if name == struct_name:
+                            count <- count + 1
+                            for member in members |names|:
+                                names.push(member.name)
+                    Ast::Decl.Module(_, body, _):
+                        count <- count + proof_struct_field_names(body, struct_name, depth + 1, names)
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_struct_field_names(body, struct_name, depth + 1, names)
+                    _:
+                        pass
+            return count
+
+        # The struct a declared type names, after stripping storage qualifiers, references,
+        # parentheses, refinements, and a unique alias. A reference is followed here because a
+        # field read through `p: Pair&` still has the field's declared type; what is refused for
+        # a scalar (`&T` compares by address) does not arise for a projection out of it.
+        def proof_type_head_name(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return "" if proof_scalar_primitive_type_name(name)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return "" if alias.count > 1
+                    return proof_type_head_name(alias.target, declarations, depth + 1) if alias.count == 1
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_type_head_name(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_type_head_name(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_type_head_name(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return ""
+                _:
+                    return ""
+
+        # The element type of a built-in container spelling: `darray[T]`, `view[T]`,
+        # `array[T, N]`, or `T[N]`. Only built-in containers are recognized, because a subscript
+        # on a struct is an `__index__` protocol call whose result is whatever the author chose.
+        def proof_container_element_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> (known: bool, element: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_container_element_type(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_container_element_type(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_container_element_type(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return proof_container_element_type(alias.target, declarations, depth + 1) if alias.count == 1
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Index(head, argument, _):
+                    head_name: sview = proof_ident_name(head)
+                    return (true, argument) if head_name == "darray" or head_name == "view"
+                    match argument:
+                        Ast::Expr.IntLit(_):
+                            return (true, head)
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                Ast::Expr.IndexN(head, arguments, _):
+                    return (false, Ast::Expr.Invalid) if proof_ident_name(head) != "array" or arguments.count != 2
+                    match arguments[1]:
+                        Ast::Expr.IntLit(_):
+                            return (true, arguments[0])
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        # How many subscripts separate a container from a primitive scalar element: 1 for
+        # `darray[i64]`, 2 for `array[array[i64, 4], 4]`, and 0 when the innermost element is not
+        # a scalar or the spelling is not a built-in container.
+        def proof_scalar_element_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
+            return 0 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            element: (known: bool, element: Ast::Expr) = proof_container_element_type(expression, declarations, depth)
+            return 0 if not element.known
+            return 1 if proof_scalar_type_kind(element.element, declarations, 0) == 1
+            inner: i64 = proof_scalar_element_depth(element.element, declarations, depth + 1)
+            return inner + 1 if inner > 0
+            return 0
+
+        const PROOF_SCALAR_WITNESS_BUDGET: usize = 12
+        const PROOF_SCALAR_WITNESS_DEPTH: usize = 3
+
+        # Expression-level type witnesses for a binding. The bare name of a scalar binding is
+        # witnessed by the caller; this records what the declared type says about the places
+        # reachable from the binding: each scalar field of a struct, recursively through
+        # struct-typed fields to a fixed depth, the `count` of a built-in container, and the
+        # container itself when its elements are scalars. Every witness is a type statement about
+        # a place and is retained and invalidated with the binding's root symbol.
+        def proof_add_scalar_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos, budget: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_SCALAR_WITNESS_DEPTH or budget == 0
+            element_depth: i64 = proof_scalar_element_depth(type_expression, report.source_declarations, 0)
+            container: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, report.source_declarations, 0)
+            if container.known:
+                budget <- budget - 1
+                proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(Ast::Expr.Field(root, "count", position), position), line, owner)
+                if element_depth > 0 and budget > 0:
+                    budget <- budget - 1
+                    proof_add_type_bound_fact(facts, report, proof_scalar_element_marker(root, element_depth, position), line, owner)
+                return
+            struct_name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
+            return if struct_name == ""
+            field_names: mutable darray[sview] = []
+            return if proof_struct_field_names(report.source_declarations, struct_name, 0, &field_names) != 1
+            for field_name in field_names |facts, report, root, struct_name, line, owner, position, budget, depth|:
+                return if budget == 0
+                field: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(report.source_declarations, struct_name, field_name, 0)
+                continue if field.count != 1
+                place: Ast::Expr = Ast::Expr.Field(root, field_name, position)
+                if proof_scalar_type_kind(field.type_expression, report.source_declarations, 0) == 1:
+                    budget <- budget - 1
+                    proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(place, position), line, owner)
+                else:
+                    proof_add_scalar_witnesses(facts, report, place, field.type_expression, line, owner, position, budget, depth + 1)
+
+        # A call to a verified total-pure function with a primitive scalar return type denotes
+        # one value: the classification proves it reads nothing but its arguments and always
+        # returns, so two occurrences of the same call text over witnessed arguments are the same
+        # value. Record that witness for each such call in the goal before it is decided. Any
+        # other call stays unwitnessed.
+        def proof_add_pure_call_witnesses(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize) -> void:
+            return if depth >= 32
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_add_pure_call_witnesses(inner, facts, functions, report, line, owner, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_add_pure_call_witnesses(operand, facts, functions, report, line, owner, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_add_pure_call_witnesses(left, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses(right, facts, functions, report, line, owner, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    proof_add_pure_call_witnesses(condition, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses(then_expression, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses(else_expression, facts, functions, report, line, owner, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, position):
+                    for argument in arguments |facts, functions, report, line, owner, depth|:
+                        proof_add_pure_call_witnesses(argument, facts, functions, report, line, owner, depth + 1)
+                    return if not proof_contract_calls_are_pure(expression, functions)
+                    called: usize = proof_function_index(functions, proof_callable_name(callee))
+                    return if called >= functions.return_scalar.count or not functions.return_scalar[called]
+                    for argument in arguments |facts|:
+                        return if not proof_scalar_term_witnessed(argument, facts, 0)
+                    proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(expression, position), line, owner)
+                _:
+                    pass
 
         # Zero means a non-unsigned type; -1 means alias resolution is ambiguous or too
         # deep. Never silently treat a failed resolution as ordinary signed arithmetic.
@@ -566,8 +765,10 @@ extend ElisaProof:
         def proof_type_bound_name(expression: Ast::Expr) -> sview:
             marker_name: sview = proof_unsigned_marker_name(expression)
             return marker_name if marker_name != ""
-            scalar_name: sview = proof_scalar_marker_name(expression)
-            return scalar_name if scalar_name != ""
+            # A type witness may be keyed by a place rather than a name. Retention follows the
+            # root symbol of that place, so `h.part`'s witness lives and dies with `h`.
+            root_name: sview = proof_type_marker_root_name(expression)
+            return root_name if root_name != ""
             match expression:
                 Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
                     match left:
@@ -712,6 +913,20 @@ extend ElisaProof:
             return if not proof_unsigned_expression_safe(value, facts)
             binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.EqEq, value, position)
             proof_add_traced_fact(facts, report, binding, "local-binding", position.line, owner)
+
+        # A scalar local whose initializer is opaque still denotes one value. Keep its own name as
+        # the symbol instead of the unexpressible initializer, so `reading == reading` is decided
+        # over the witnessed binding rather than over two copies of an unknown. Nothing about the
+        # value is assumed: an opaque initializer contributes no binding fact.
+        def proof_bind_scalar_symbol(names: darray[sview]&, values: mutable darray[Ast::Expr]&, slot: usize, position: Ast::Pos) -> void:
+            return if slot >= names.count or slot >= values.count
+            match values[slot]:
+                Ast::Expr.Invalid:
+                    values[slot] <- Ast::Expr.Ident(names[slot], position)
+                Ast::Expr.Absent:
+                    values[slot] <- Ast::Expr.Ident(names[slot], position)
+                _:
+                    pass
 
         def proof_statement_declared_name(statement: Ast::Stmt) -> sview:
             match statement:
@@ -3076,10 +3291,12 @@ extend ElisaProof:
                                 parameter_region <- annotation.region if annotation.name == parameter.name and annotation.line == position.line
                             functions.all_param_regions <- functions.all_param_regions.push(parameter_region)
                         if return_type is declared_return_type:
+                            functions.return_scalar <- functions.return_scalar.push(proof_scalar_type_kind(declared_return_type, declarations, 0) == 1)
                             functions.return_references <- functions.return_references.push(proof_resource_is_reference_type(declared_return_type))
                             functions.return_mutable_references <- functions.return_mutable_references.push(proof_resource_is_mutable_reference_type(declared_return_type))
                             functions.return_reference_parameters <- functions.return_reference_parameters.push(proof_resource_reference_return_parameter(parameters, return_type, body))
                         else:
+                            functions.return_scalar <- functions.return_scalar.push(false)
                             functions.return_references <- functions.return_references.push(false)
                             functions.return_mutable_references <- functions.return_mutable_references.push(false)
                             functions.return_reference_parameters <- functions.return_reference_parameters.push(parameters.count)
@@ -4883,7 +5100,7 @@ extend ElisaProof:
                 error_names <- proof_copy_names(names)
                 error_values <- proof_copy_exprs(values)
             else:
-                error_facts.clear()
+                proof_clear_facts_keep_type_bounds(error_facts, error_names, frame_parameters, report, name)
                 proof_forget_values(error_names, error_values, position)
             result_names: darray[sview] = ["result"]
             for arm_index in 0..<arms.count |arm_index, arms, success_names, success_values, success_facts, error_names, error_values, error_facts, success_call, ensures, frame_parameters, old_values, report, name, annotations, position|:
@@ -4915,12 +5132,13 @@ extend ElisaProof:
                             proof_check_frame_calls_in_expression(arm_value.value, arm_facts, arm_names, arm_values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(arm_value.value)
                             returned_value <- proof_substitute(arm_value.value, arm_names, arm_values) if proof_expr_has_call(arm_value.value)
                     returned_value <- proof_rewrite_pure_call_summaries(returned_value, arm_facts, functions, 0) if proof_expr_has_call(returned_value)
-                    arm_facts.clear() if proof_expr_has_call(returned_value) and not arm_call_applied
+                    proof_clear_facts_keep_type_bounds(arm_facts, arm_names, frame_parameters, report, name) if proof_expr_has_call(returned_value) and not arm_call_applied
                     result_values: darray[Ast::Expr] = [returned_value]
                     for ensure in ensures |ensure, arm_values, old_values, frame_parameters, result_names, result_values, arm_facts, report, name, annotations, position|:
                         current_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, arm_values, old_values)
                         goal: mutable Ast::Expr = proof_substitute(current_goal, result_names, result_values)
                         goal <- proof_rewrite_pure_call_summaries(goal, arm_facts, functions, 0) if proof_expr_has_call(goal)
+                        proof_add_pure_call_witnesses(goal, arm_facts, functions, report, position.line, name, 0) if proof_expr_has_call(goal)
                         proven: bool = proof_certify_goal(arm_facts, goal, report, position.line, name, annotations)
                         report.proof_obligation(proven)
                         proof_add_goal_failure(report, "ensure-unproven", position.line, name, "catch arm value does not establish ensure", arm_facts, goal) if not proven
@@ -5091,6 +5309,9 @@ extend ElisaProof:
                         # unsigned width marker already witnesses the same thing.
                         local_scalar_kind: i64 = proof_scalar_type_kind(type_expression, report.source_declarations, 0)
                         proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(local_name, position), position.line, name) if local_scalar_kind == 1 and unsigned_width <= 0
+                        proof_bind_scalar_symbol(names, values, prior_value_count, position) if local_scalar_kind == 1 and unsigned_width <= 0
+                        local_witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
+                        proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(local_name, position), type_expression, position.line, name, position, &local_witness_budget, 0) if local_scalar_kind != 1
                     Ast::Stmt.Assign(target, operator, initializer, position):
                         target_name: sview = proof_ident_name(target)
                         if target_name != "":
@@ -5269,6 +5490,7 @@ extend ElisaProof:
                                 current_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
                                 goal: mutable Ast::Expr = proof_substitute(current_goal, result_name, result_value)
                                 goal <- proof_rewrite_pure_call_summaries(goal, facts, functions, 0) if proof_expr_has_call(goal)
+                                proof_add_pure_call_witnesses(goal, facts, functions, report, position.line, name, 0) if proof_expr_has_call(goal)
                                 proven: bool = proof_certify_goal_with_rule(facts, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
                                 report.proof_obligation(proven)
                                 proof_add_goal_failure(report, "ensure-unproven", position.line, name, "return value does not establish ensure", facts, goal) if not proven
@@ -5842,6 +6064,8 @@ extend ElisaProof:
                 # establish that this name's operators cannot be a user protocol implementation.
                 scalar_kind: i64 = proof_scalar_type_kind(parameter.type_expression, report.source_declarations, 0)
                 proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(parameter.name, position), position.line, function_name) if scalar_kind == 1 and unsigned_width <= 0
+                witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
+                proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position.line, function_name, position, &witness_budget, 0) if scalar_kind != 1
             for requirement in preconditions |facts, names, values, report, function_name, position|:
                 proof_add_traced_fact(facts, report, proof_substitute(requirement, names, values), "precondition", position.line, function_name)
             # Resource transitions are checked after entry facts are established so the source
@@ -5858,6 +6082,7 @@ extend ElisaProof:
             if function_flow.normal:
                 for ensure in postconditions |facts, report, function_name, names, values|:
                     normal_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
+                    proof_add_pure_call_witnesses(normal_goal, facts, functions, report, position.line, function_name, 0) if proof_expr_has_call(normal_goal)
                     proven: bool = proof_certify_goal_with_rule(facts, normal_goal, report, position.line, function_name, file.enum_annotations, proof_quantifier_rule(ensure, file.enum_annotations))
                     report.proof_obligation(proven)
                     proof_add_goal_failure(report, "ensure-unproven", position.line, function_name, "normal completion does not establish ensure", facts, normal_goal) if not proven

@@ -1145,7 +1145,7 @@ module ElisaProofKernelReplay:
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
             return false if not located.known or located.node.kind != "call"
             callee: sview = proof_kernel_replay_ident_name(nodes, located.node.left)
-            return callee == "__elisa_unsigned_type_bound" or callee == "__elisa_primitive_scalar_type"
+            return callee == "__elisa_unsigned_type_bound" or callee == "__elisa_primitive_scalar_type" or callee == "__elisa_primitive_scalar_element"
 
         def proof_kernel_replay_model_bool(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, names: darray[sview]&, values: darray[i64]&, depth: usize) -> ProofKernelReplayBool:
             requires depth <= 127
@@ -2207,23 +2207,38 @@ module ElisaProofKernelReplay:
         # aggregates: a string is not a primitive scalar and its equality is not known to be the
         # language's own.
         def proof_kernel_replay_congruent_scalar_literal(node: ElisaProofKernelCore::ProofKernelNode) -> bool:
-            return node.kind == "int" or node.kind == "bool" or node.kind == "char"
+            # A one-segment leading-dot value is a `const enum` member, an integer-backed
+            # constant; the encoder admits no other shorthand.
+            return node.kind == "int" or node.kind == "bool" or node.kind == "char" or (node.kind == "shorthand" and node.name != "")
+
+        # A compiler type marker is a one-argument call whose callee names the marker. The
+        # argument is an arbitrary term, not necessarily a bare name: the producer resolves the
+        # declared type of a field selection or of a container element and records the witness
+        # against that exact term. Read the argument root so the witness relation below can match
+        # it structurally.
+        def proof_kernel_replay_marker_argument(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, callee: sview) -> (known: bool, root: usize):
+            return (false, 0) if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0) if not located.known or located.node.kind != "call"
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (false, 0) if node.children_count != 1
+            return (false, 0) if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+            return (false, 0) if proof_kernel_replay_ident_name(nodes, node.left) != callee
+            argument: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start)
+            return (false, 0) if not argument.known
+            argument_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, argument.value)
+            return (false, 0) if not argument_node.known or argument_node.node.kind != "call_arg"
+            return (false, 0) if not proof_kernel_replay_valid(nodes, argument_node.node.left)
+            return (true, argument_node.node.left)
 
         # The producer records declared primitive scalar types through the traced-fact channel.
-        # An unsigned width marker witnesses the same thing, so either marker is accepted.
+        # An unsigned width marker witnesses the same thing, so either marker is accepted. This
+        # reader answers only for the bare-name form; a term-shaped witness is matched by
+        # `proof_kernel_replay_scalar_term_witnessed`, never by name.
         def proof_kernel_replay_scalar_marker_name(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize) -> sview:
-            return "" if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
-            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
-            return "" if not located.known or located.node.kind != "call"
-            node: ElisaProofKernelCore::ProofKernelNode = located.node
-            return "" if node.children_count != 1
-            return "" if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
-            return "" if proof_kernel_replay_ident_name(nodes, node.left) != "__elisa_primitive_scalar_type"
-            argument: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start)
+            argument: (known: bool, root: usize) = proof_kernel_replay_marker_argument(nodes, children, root, "__elisa_primitive_scalar_type")
             return "" if not argument.known
-            argument_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, argument.value)
-            return "" if not argument_node.known or argument_node.node.kind != "call_arg"
-            return proof_kernel_replay_ident_name(nodes, argument_node.node.left)
+            return proof_kernel_replay_ident_name(nodes, argument.root)
 
         def proof_kernel_replay_scalar_witnessed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], name: sview) -> bool:
             return false if name == ""
@@ -2232,6 +2247,108 @@ module ElisaProofKernelReplay:
                 marker: (known: bool, name: sview, width: i64) = proof_kernel_replay_unsigned_marker_info(nodes, children, fact, 0)
                 return true if marker.known and marker.name == name
             return false
+
+        # A container whose declared element type the producer resolved to a primitive scalar.
+        # The witness is recorded against the container term itself because the index set is not
+        # enumerable; it says every element of this container is a primitive scalar, and nothing
+        # about which elements exist.
+        # The marker's second argument is how many subscripts reach the scalar: 1 for
+        # `darray[i64]`, 2 for `array[array[i64, 4], 4]`.
+        def proof_kernel_replay_element_marker(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize) -> (known: bool, root: usize, depth: i64):
+            return (false, 0, 0) if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0, 0) if not located.known or located.node.kind != "call"
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (false, 0, 0) if node.children_count != 2
+            return (false, 0, 0) if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+            return (false, 0, 0) if proof_kernel_replay_ident_name(nodes, node.left) != "__elisa_primitive_scalar_element"
+            term_argument: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start)
+            depth_argument: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start + 1)
+            return (false, 0, 0) if not term_argument.known or not depth_argument.known
+            term_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, term_argument.value)
+            depth_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, depth_argument.value)
+            return (false, 0, 0) if not term_node.known or term_node.node.kind != "call_arg" or not depth_node.known or depth_node.node.kind != "call_arg"
+            return (false, 0, 0) if not proof_kernel_replay_valid(nodes, term_node.node.left)
+            depth: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, depth_node.node.left, 0)
+            return (false, 0, 0) if not depth.known or depth.value < 1 or depth.value > 8
+            return (true, term_node.node.left, depth.value)
+
+        # How many further subscripts this term needs to reach a primitive scalar: the marker's
+        # depth for a witnessed container, one less per subscript, and -1 when nothing is known.
+        # The subscript terms met on the way are collected for the caller to witness; a term is a
+        # scalar element exactly when this reaches 0 and every collected subscript is witnessed.
+        def proof_kernel_replay_scalar_element_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, subscripts: mutable darray[usize]&, depth: usize) -> i64:
+            requires depth <= 127
+            decreases 127 - depth
+            return -1 if not ElisaProofKernelCore::depth_valid(depth)
+            return -1 if depth >= 127
+            return -1 if not proof_kernel_replay_valid(nodes, root)
+            for fact in facts |fact, nodes, children, root|:
+                marker: (known: bool, root: usize, depth: i64) = proof_kernel_replay_element_marker(nodes, children, fact)
+                return marker.depth if marker.known and proof_kernel_replay_expr_equal(nodes, children, marker.root, root, 0)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return -1 if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return -1 if not proof_kernel_replay_arena_shape_valid(node)
+            if node.kind == "index":
+                remaining: i64 = proof_kernel_replay_scalar_element_remaining(nodes, children, facts, node.left, subscripts, depth + 1)
+                return -1 if remaining < 1
+                subscripts.push(node.right)
+                return remaining - 1
+            if node.kind == "index-n":
+                return -1 if node.children_count == 0 or not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                remaining: i64 = proof_kernel_replay_scalar_element_remaining(nodes, children, facts, node.left, subscripts, depth + 1)
+                return -1 if remaining < node.children_count.i64()
+                for offset in 0..<node.children_count |offset, children, node, subscripts|:
+                    argument: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start + offset)
+                    return -1 if not argument.known
+                    subscripts.push(argument.value)
+                return remaining - node.children_count.i64()
+            return -1
+
+        # Whether this term is known to denote a primitive scalar value. Every rule that concludes
+        # a comparison because two terms denote the same value needs this: `==`, `!=` and the four
+        # ordering operators dispatch to a user `__eq__`/`__cmp__` for a struct operand, and no
+        # protocol method is required to be reflexive, symmetric, or coherent with ordering.
+        #
+        # A witness is one of four things and nothing else. A scalar literal is self-evident. A
+        # term the producer resolved a declared primitive scalar type for carries a marker matched
+        # structurally, which covers a bare name, a field selection, and a container element. An
+        # element of a container whose element type was resolved is a scalar when the index term
+        # is itself witnessed, which keeps the index deterministic. A former whose operator is the
+        # language's own is a scalar when all of its operands are, because primitive operators
+        # cannot dispatch to a protocol method.
+        #
+        # Everything else, a call result above all, is unwitnessed. A call is excluded for two
+        # independent reasons: its return type is not resolved here, and a function need not be
+        # deterministic, so two occurrences of the same call text need not denote one value.
+        def proof_kernel_replay_scalar_term_witnessed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, depth: usize) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth)
+            return false if depth >= 127
+            return false if not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return false if not proof_kernel_replay_arena_shape_valid(node)
+            return true if proof_kernel_replay_congruent_scalar_literal(node)
+            for fact in facts |fact, nodes, children, root|:
+                argument: (known: bool, root: usize) = proof_kernel_replay_marker_argument(nodes, children, fact, "__elisa_primitive_scalar_type")
+                return true if argument.known and proof_kernel_replay_expr_equal(nodes, children, argument.root, root, 0)
+            return proof_kernel_replay_scalar_witnessed(nodes, children, facts, node.name) if node.kind == "ident"
+            if node.kind == "index" or node.kind == "index-n":
+                subscripts: mutable darray[usize] = []
+                return false if proof_kernel_replay_scalar_element_remaining(nodes, children, facts, root, &subscripts, depth + 1) != 0
+                for subscript in subscripts |subscript, nodes, children, facts, depth|:
+                    return false if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, subscript, depth + 1)
+                return true
+            return false if not proof_kernel_replay_congruent_former(node)
+            operands: mutable darray[usize] = []
+            return false if not proof_kernel_replay_congruence_operands(nodes, children, root, &operands)
+            for operand in operands |operand, nodes, children, facts, depth|:
+                return false if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, operand, depth + 1)
+            return true
 
         # Operand roots of a participating former, in a fixed order. A malformed or
         # non-participating node yields no operands and is therefore treated as an atom.
@@ -2283,12 +2400,15 @@ module ElisaProofKernelReplay:
                 return false if terms.count >= proof_kernel_replay_congruence_term_limit()
                 terms.push(root)
                 return true
-            if node.kind == "ident":
-                return false if not proof_kernel_replay_scalar_witnessed(nodes, children, facts, node.name)
+            if not proof_kernel_replay_congruent_former(node):
+                # An atom joins the closure only with its own primitive-type witness: a name the
+                # producer typed, a field selection or container element whose declared type it
+                # resolved. Without one, the term's `==` may be a user protocol method that is
+                # not an equivalence, and its class would be meaningless.
+                return false if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, root, depth + 1)
                 return false if terms.count >= proof_kernel_replay_congruence_term_limit()
                 terms.push(root)
                 return true
-            return false if not proof_kernel_replay_congruent_former(node)
             operands: mutable darray[usize] = []
             return false if not proof_kernel_replay_congruence_operands(nodes, children, root, &operands)
             for operand in operands |operand, nodes, children, facts, terms, depth|:
@@ -2401,14 +2521,11 @@ module ElisaProofKernelReplay:
 
         # Reflexivity, symmetry, and coherence with arithmetic are not universal in Elisa: `==`
         # and the ordering operators dispatch to a user `__eq__`/`__cmp__` for a struct operand,
-        # and no protocol method is required to have those properties. A bare identifier is the
-        # operand shape whose declared type the producer witnesses, so require the witness there
-        # before any rule concludes a comparison from two terms denoting the same value.
-        def proof_kernel_replay_primitive_comparison_operand(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> bool:
-            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
-            return false if not located.known
-            return true if located.node.kind != "ident"
-            return proof_kernel_replay_scalar_witnessed(nodes, children, facts, located.node.name)
+        # and no protocol method is required to have those properties. Both operands of a
+        # comparison concluded from two terms denoting the same value must therefore be witnessed
+        # as primitive scalars. An unwitnessed shape declines; it is never admitted by default.
+        def proof_kernel_replay_primitive_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, right: usize) -> bool:
+            return proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, left, 0) and proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, right, 0)
 
         def proof_kernel_replay_congruence_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
@@ -2507,7 +2624,7 @@ module ElisaProofKernelReplay:
             for fact in facts |fact, nodes, children, goal_root|:
                 return true if proof_kernel_replay_fact_contains(nodes, children, fact, goal_root, depth + 1)
             goal_identity: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
-            if goal_identity.known and goal_identity.node.kind == "binary" and proof_kernel_replay_primitive_comparison_operand(nodes, children, facts, goal_identity.node.left):
+            if goal_identity.known and goal_identity.node.kind == "binary" and proof_kernel_replay_primitive_comparison(nodes, children, facts, goal_identity.node.left, goal_identity.node.right):
                 # Having a comparison negation does not make an operator reflexive:
                 # strict orders and disequality are false on identical operands.
                 match goal_identity.node.operator:
@@ -2597,12 +2714,12 @@ module ElisaProofKernelReplay:
                     return true if proof_kernel_replay_goal_depth(nodes, children, then_facts, then_goal, split_depth + 1, depth + 1) and proof_kernel_replay_goal_depth(nodes, children, else_facts, else_goal, split_depth + 1, depth + 1)
             if node.kind == "binary":
                 negated: sview = proof_kernel_replay_negation(node.operator)
-                if negated != "" and proof_kernel_replay_primitive_comparison_operand(nodes, children, facts, node.left) and proof_kernel_replay_definitionally_equal(nodes, children, node.left, node.right, 0):
+                if negated != "" and proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right) and proof_kernel_replay_definitionally_equal(nodes, children, node.left, node.right, 0):
                     return node.operator == "==" or node.operator == "<=" or node.operator == ">="
                 return true if negated != "" and proof_kernel_replay_constant_comparison(nodes, node.left, node.operator, node.right)
                 return true if proof_kernel_replay_interval_goal(nodes, node.left, node.operator, node.right, facts)
-                return true if proof_kernel_replay_primitive_comparison_operand(nodes, children, facts, node.left) and proof_kernel_replay_affine_comparison(nodes, node.left, node.operator, node.right, facts)
-                return true if proof_kernel_replay_primitive_comparison_operand(nodes, children, facts, node.left) and proof_kernel_replay_difference_comparison(nodes, node.left, node.operator, node.right, facts)
+                return true if proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right) and proof_kernel_replay_affine_comparison(nodes, node.left, node.operator, node.right, facts)
+                return true if proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right) and proof_kernel_replay_difference_comparison(nodes, node.left, node.operator, node.right, facts)
                 # Ground congruence closure is the last equality tier. It runs only after the
                 # fixed-width safety guards above have rejected every wrapping premise and goal,
                 # so equal operands of different widths can never be propagated through a former.
