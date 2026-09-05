@@ -74,7 +74,16 @@ The proof kernel is intentionally fail-closed:
    unsupported until loop-target resolution is imported.
    A verified call result may remain bound only as the newly assigned value; failed/unresolved
    call results are opaque and cannot establish a later postcondition. Pre-existing bindings are
-   havocked at call boundaries. A call nested below arithmetic, a constructor, a conditional, or
+   havocked at call boundaries. Fact havoc at a call keeps compiler type bounds and, in addition,
+   every call-stable fact: one built only from literals and by-value scalar locals and parameters
+   of the current frame that its body never references, moves, or hands to a reference parameter
+   or an unknown callee. A callee reaches its caller only through references and globals, so it
+   cannot falsify such a fact; the alias set is computed once per function and any lambda in the
+   body disables the analysis entirely. A branch join re-imports the same class of fact from the
+   arms that reach it — from both, when both fall through — and never a fact an arm falsified,
+   because the arm's own execution already purged it. Conjunctive branch conditions contribute
+   each entailed part as a `branch-conjunct` derived fact, which replay re-proves from the
+   condition rather than accepting as a second assumption. A call nested below arithmetic, a constructor, a conditional, or
    another non-call root—including a runtime `assert` expression—is admitted only when the
    complete nested call expression is certified total-pure; effectful nested calls remain rejected
    until the evaluator can retain their exact post-call value.

@@ -484,6 +484,73 @@ requires that none of the three produces a certificate. `examples/kernel_effect_
 a native harness that drives the kernel rule directly and is built under both stage1 and stage0;
 deliberately mutating the containment test in the kernel makes it exit non-zero.
 
+## Added: facts that a call or a branch cannot falsify
+
+Every call to a callee without a `changes` frame discarded all of the caller's facts except
+compiler type bounds, whether the callee was opaque or a verified summary. That is correct but far
+stronger than the language requires, and it made a very common shape unprovable: a bounded
+recursion whose guard establishes `depth < 127`, and whose *second* recursive call therefore has
+nothing left to establish `depth + 1 <= 127` with. On `examples/kernel_replay_standalone.elisa`
+this accounted for the large majority of unproven obligations.
+
+A callee reaches its caller's state only through references and globals. A fact is therefore
+*call-stable* for a frame when it is built only from literals and by-value scalar locals and
+parameters of that frame whose names the body never references — never takes an address of, moves,
+allocates into a region, uses as a method receiver, or passes as a bare argument either to a
+reference parameter or to a callee whose signature is not imported. `proof_collect_aliased_names`
+computes that name set once per function, before symbolic execution; a lambda anywhere in the body
+pushes a `*` sentinel that disables the analysis for the whole function, and the set is tagged with
+its owner so a stale set can never be consulted. `proof_expr_call_stable` then admits literals,
+const-enum shorthands, loop-binder atoms, and primitive formers over those, and requires a positive
+primitive-scalar witness on every name — the same witness relation that gates equality reasoning.
+
+Three places now retain that class of fact instead of dropping it: `proof_clear_facts_after_call`
+(opaque-call havoc), the frame havoc inside `proof_apply_function` (verified callees without a
+`changes` frame), and `proof_check_frame_calls_in_expression` (a call nested in a larger
+expression). A branch join re-imports it too: when one arm falls through, from that arm, and when
+both do, only from facts standing at the exit of both. An arm that assigns to a scalar has already
+purged the facts over it, so a direct write inside a branch cannot come back this way, and a fact
+mentioning an arm-local binding is not call-stable for the enclosing frame and cannot leak out.
+
+Conjunctive guards needed one more step. `return empty if not valid(x) or depth >= 127` negates to
+a conjunction whose left half mentions the call and whose right half is over `depth` alone; the
+whole is not call-stable, so all of it was lost. `proof_add_branch_condition_facts` now records,
+beside the condition, each part the condition entails — through `and`, through `not (a or b)`, and
+through double negation, but never through `not (a and b)`, which is a disjunction. Each part is a
+`branch-conjunct` **derived** fact: `proof_add_derived_fact_from` records the condition as its sole
+premise, and replay re-proves the part from that premise rather than accepting a second assumption.
+
+The kernel gained the matching rule. `proof_kernel_replay_fact_contains` was a one-directional walk
+that projected out of conjunctions and cancelled double negations; it is now
+`proof_kernel_replay_fact_contains_signed`, a single walk carrying a sign. Unnegated it projects
+out of `and`; negated it projects out of `or`; a `not` flips the sign. All three are classical, and
+the proposition shape of every fact and goal is already checked before the walk runs. The duals —
+a disjunct out of `or`, a negated conjunct out of `not (a and b)` — have no rule and stay refused.
+
+Nothing here weakens the trust boundary: no new assumption kind is admitted as an axiom,
+`branch-conjunct` is validated on the derived-fact path in both the source and the source-neutral
+trace validators, and every certificate is still replayed. On the kernel's own source the proven
+count moved from 205 to 757 obligations with replay gaps unchanged at zero.
+
+Coverage. `examples/call_stable_facts.elisa` proves six shapes with no findings and no gaps: a
+state-writing call, two of them in a row, a bare-call guard, a branch that binds a local, a branch
+that returns, and a guard whose conjunct is the only thing strong enough to close the goal.
+Disabling any one of the four retention points — the two call-havoc restores, the branch-join
+restore, or the conjunct split — leaves a distinct subset of it unproven.
+`examples/rejected_call_stable_facts.elisa` pins the boundary: a scalar handed to a callee by
+reference, a scalar a branch assigns, a scalar rebound after its guard, and the two disjunctive
+shapes are all refused, each with a diagnostic and no certificate.
+`examples/kernel_projection_runtime.elisa` drives the kernel rule directly under both stage1 and
+stage0, and five separate mutations of the signed walk — dropping the negated-`or` rule, dropping
+the sign flip, ignoring the sign on `and`, ignoring it on `or`, and accepting any negated goal —
+each make it exit with a distinct code.
+
+Not covered. Call stability is a syntactic over-approximation: a fact over a struct field, a
+container element, or a scalar that is merely *mentioned* in an argument list is dropped even when
+the callee provably cannot write it. Global state is assumed reachable by every callee, so no fact
+over a global is ever retained. The conjunct split is applied to `if` conditions only; `match`
+patterns and guards still record their conditions whole.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

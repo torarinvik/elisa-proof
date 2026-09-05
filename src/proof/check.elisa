@@ -701,6 +701,60 @@ extend ElisaProof:
         # An else path after `if not condition` carries condition itself, not a redundant
         # double negation. This matters for early-return guards: the surviving path can then
         # publish the predicate that justified a later access or postcondition.
+        # A conjunctive branch condition entails each of its conjuncts. Recording the conjuncts
+        # alongside the whole costs nothing logically and makes each one survive on its own
+        # merits: `not f(x) and depth < 127` is discarded wholesale at the next call because of
+        # the call, while its second conjunct is over a by-value scalar and remains true. The
+        # walk is a bounded worklist so a deeply nested condition cannot blow up the fact set.
+        def proof_conjunct_components(expression: Ast::Expr, components: mutable darray[Ast::Expr]&) -> void:
+            pending: mutable darray[Ast::Expr] = [expression]
+            cursor: mutable usize = 0
+            while cursor < pending.count and components.count < 8 |cursor, pending, components|:
+                current: Ast::Expr = proof_strip_parens(pending[cursor])
+                cursor <- cursor + 1
+                room: bool = pending.count < 16
+                split: mutable bool = false
+                match current:
+                    Ast::Expr.Binary(left, TokenKind.And, right, _):
+                        if room:
+                            pending.push(left)
+                            pending.push(right)
+                            split <- true
+                    Ast::Expr.Unary(TokenKind.Not, operand, _):
+                        # De Morgan only where it makes progress; a negated comparison is
+                        # already atomic and must not be pushed back onto the worklist.
+                        inner: Ast::Expr = proof_strip_parens(operand)
+                        match inner:
+                            Ast::Expr.Binary(_, TokenKind.Or, _, _):
+                                # `not (X or Y)` is the conjunction `not X and not Y`. The dual
+                                # form `not (X and Y)` is a disjunction and is left whole: it is
+                                # not a conjunct and the kernel would not re-derive it.
+                                if room:
+                                    pending.push(proof_branch_negation(inner, Ast::expr_pos(current)))
+                                    split <- true
+                            Ast::Expr.Unary(TokenKind.Not, double, _):
+                                if room:
+                                    pending.push(double)
+                                    split <- true
+                            _:
+                                pass
+                    _:
+                        pass
+                components.push(current) if not split
+
+        # Record a branch condition and, separately, every conjunct it entails. The conjuncts are
+        # derived facts: replay revalidates each one from the premises standing at this point
+        # rather than accepting it as a second assumption.
+        def proof_add_branch_condition_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, condition: Ast::Expr, line: u32, name: sview) -> void:
+            proof_add_traced_fact(facts, report, condition, "branch-condition", line, name)
+            components: mutable darray[Ast::Expr] = []
+            proof_conjunct_components(condition, &components)
+            return if components.count < 2
+            premises: darray[Ast::Expr] = [condition]
+            for component in components |facts, report, line, name, premises|:
+                continue if any existing in facts where proof_expr_equal(existing, component)
+                proof_add_derived_fact_from(facts, report, component, premises, "branch-conjunct", line, name)
+
         def proof_branch_negation(expression: Ast::Expr, position: Ast::Pos) -> Ast::Expr:
             match expression:
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
@@ -731,6 +785,19 @@ extend ElisaProof:
         # they are explicit semantic assumptions at this boundary.
         def proof_add_derived_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> void:
             premises: darray[Ast::Expr] = proof_copy_exprs(facts)
+            facts.push(expression)
+            premises_start: usize = report.fact_trace_premises.count
+            report.fact_trace_premises.extend(premises)
+            kernel_premises_start: usize = report.kernel_fact_trace_premises.count
+            for premise in premises |premise, report|:
+                report.kernel_fact_trace_premises.push(proof_kernel_encode_annotated(premise, &report.kernel_nodes, &report.kernel_children, report.source_annotations))
+            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
+            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+
+        # The same trace, but over an explicit premise list rather than the whole current context.
+        # A step whose justification is a single named fact records exactly that fact, so replay
+        # revalidates a small, precise derivation instead of the entire ambient state.
+        def proof_add_derived_fact_from(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, premises: darray[Ast::Expr]&, kind: sview, line: u32, name: sview) -> void:
             facts.push(expression)
             premises_start: usize = report.fact_trace_premises.count
             report.fact_trace_premises.extend(premises)
@@ -1055,6 +1122,20 @@ extend ElisaProof:
             return if not analyzed
             for fact in source |source, facts, names, parameters, report|:
                 continue if not proof_expr_call_stable(fact, source, names, parameters, report.aliased_names, 0)
+                continue if any existing in facts where proof_expr_equal(existing, fact)
+                facts.push(fact)
+
+        # Re-establish, at a branch join both arms reach, every fact that both arms still hold.
+        # A fact standing at an arm's exit is true on that path, so one held on both paths is
+        # true at the join. Only call-stable facts are imported, so an arm-local binding can
+        # never escape with them, and an arm that assigns to a scalar has already purged the
+        # facts over it, so a direct write inside the branch cannot survive here either.
+        def proof_restore_branch_stable_facts(primary: darray[Ast::Expr]&, secondary: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            return if not analyzed
+            for fact in primary |primary, secondary, facts, names, parameters, report|:
+                continue if not (any other in secondary where proof_expr_equal(other, fact))
+                continue if not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -3784,6 +3865,11 @@ extend ElisaProof:
                     # mutable state. Restore only that explicitly traced fact after the summary's
                     # normal havoc/frame handling; enclosing move invalidation still removes it.
                     proof_restore_type_bound_facts(old_facts, facts, caller_names, report, name)
+                    # A verified callee without a `changes` frame is havoced exactly like an
+                    # opaque one, and the same argument bounds that havoc: a callee reaches the
+                    # caller only through references and globals, so a fact over a by-value
+                    # scalar the caller's body never references survives this call too.
+                    proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name)
                     ensures_start: usize = functions.ensure_starts[function_index]
                     ensures_count: usize = functions.ensure_counts[function_index]
                     result_names: mutable darray[sview] = ["result"]
@@ -5778,7 +5864,7 @@ extend ElisaProof:
                         then_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                         then_flow: mutable ProofFlow = proof_empty_flow()
                         proof_clear_facts_after_call(then_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
-                        proof_add_traced_fact(then_facts, report, condition_value, "branch-condition", position.line, name)
+                        proof_add_branch_condition_facts(then_facts, report, condition_value, position.line, name)
                         proof_check_returns(then_body, &then_names, &then_values, &then_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &then_flow)
                         else_names: mutable darray[sview] = proof_copy_names(names)
                         else_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
@@ -5786,7 +5872,7 @@ extend ElisaProof:
                         else_flow: mutable ProofFlow = proof_empty_flow()
                         negated: Ast::Expr = proof_branch_negation(condition_value, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0})
                         proof_clear_facts_after_call(else_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
-                        proof_add_traced_fact(else_facts, report, negated, "branch-condition", position.line, name)
+                        proof_add_branch_condition_facts(else_facts, report, negated, position.line, name)
                         proof_check_returns(else_body, &else_names, &else_values, &else_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &else_flow)
                         then_falls_through: bool = then_flow.normal
                         else_falls_through: bool = else_flow.normal
@@ -5809,6 +5895,12 @@ extend ElisaProof:
                             else:
                                 proof_forget_values(names, values, position)
                                 proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                                # Control reaches the next statement only through the surviving
+                                # branch, so its end state holds here. The opaque condition call
+                                # forbids importing that state wholesale, but a call-stable fact
+                                # is over by-value scalars of this frame that nothing references:
+                                # true at the end of the branch means true at this point.
+                                proof_restore_call_stable_facts(else_facts, facts, names, frame_parameters, report, name) if else_names.count == names.count
                         elif then_falls_through and not else_falls_through:
                             if condition_facts_stable and then_names.count == names.count and then_values.count >= branch_value_count:
                                 for index in 0..<branch_value_count |index, values, then_values|:
@@ -5818,12 +5910,22 @@ extend ElisaProof:
                             else:
                                 proof_forget_values(names, values, position)
                                 proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                                proof_restore_call_stable_facts(then_facts, facts, names, frame_parameters, report, name) if then_names.count == names.count
                         elif not then_falls_through and not else_falls_through:
                             proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                             flow.normal <- false
                         if not lemma_steps and (proof_body_may_modify(then_body) or proof_body_may_modify(else_body)):
                             proof_forget_values(names, values, position)
                             proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                            # The arms were executed symbolically, so a fact still standing at a
+                            # surviving arm's exit is true on that path. Import the call-stable
+                            # ones from the paths that actually reach this statement.
+                            if then_falls_through and else_falls_through:
+                                proof_restore_branch_stable_facts(then_facts, else_facts, facts, names, frame_parameters, report, name)
+                            elif then_falls_through:
+                                proof_restore_call_stable_facts(then_facts, facts, names, frame_parameters, report, name)
+                            elif else_falls_through:
+                                proof_restore_call_stable_facts(else_facts, facts, names, frame_parameters, report, name)
                     Ast::Stmt.While(condition, while_body, position):
                         # A loop without an invariant is not treated as verified. With one,
                         # establish and check preservation on the one symbolic iteration.

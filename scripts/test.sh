@@ -110,7 +110,7 @@ if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
     printf 'proof test matrix failed: compiler accepted nested destruction/reopening of an inherited region\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/kernel_replay_standalone.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["proven"] >= 25; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; declarations = {declaration["name"] for declaration in report["declaration_details"] if declaration["kind"] == "function" and declaration["verified"]}; required = {"proof_kernel_replay_node_at", "proof_kernel_replay_bool_at", "proof_kernel_replay_bool_set", "proof_kernel_replay_child_at", "proof_kernel_replay_child_range_valid", "proof_kernel_replay_scalar_kind", "proof_kernel_replay_arena_shape_valid", "proof_kernel_replay_arena_child_kind_valid", "proof_kernel_replay_model_value_at", "proof_kernel_replay_difference_query"}; assert required <= declarations; assert not any(f["kind"] == "contract-expression-unsupported" and "unsigned local" in f["message"] for f in report["findings"]); assert report["trust"]["trusted_assumptions"] == []'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/kernel_replay_standalone.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["proven"] >= 700; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; declarations = {declaration["name"] for declaration in report["declaration_details"] if declaration["kind"] == "function" and declaration["verified"]}; required = {"proof_kernel_replay_node_at", "proof_kernel_replay_bool_at", "proof_kernel_replay_bool_set", "proof_kernel_replay_child_at", "proof_kernel_replay_child_range_valid", "proof_kernel_replay_scalar_kind", "proof_kernel_replay_arena_shape_valid", "proof_kernel_replay_arena_child_kind_valid", "proof_kernel_replay_model_value_at", "proof_kernel_replay_difference_query"}; assert required <= declarations; assert not any(f["kind"] == "contract-expression-unsupported" and "unsigned local" in f["message"] for f in report["findings"]); assert report["trust"]["trusted_assumptions"] == []'
 kernel_replay_standalone_probe_status=${PIPESTATUS[1]}
 if [[ "$kernel_replay_standalone_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: standalone replay audit has certificate gaps\n' >&2
@@ -122,7 +122,7 @@ if [[ "$json_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: JSON report is not a valid structured proof state\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
+for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
     "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -1509,6 +1509,29 @@ rejected_aggregate_equality_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_aggregate_equality_status" -ne 0 ]]; then
     printf 'proof test matrix failed: an aggregate equality was admitted\n' >&2
+    exit 1
+fi
+
+# A fact over a by-value scalar the body never lets escape survives an opaque call, and a
+# conjunctive guard entails each of its parts. Both are needed to re-establish a bounded-recursion
+# precondition at a second call; each conjunct is a derived fact the kernel re-proves.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/call_stable_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["proven"] == report["summary"]["obligations"]; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"survives_state_writing_call", "survives_second_call", "survives_branch_join", "survives_call_guard", "survives_returning_branch"} <= names; origins = {origin["kind"] for goal in report["goals"] for origin in goal["fact_origins"] if origin}; assert "branch-conjunct" in origins'
+call_stable_facts_status=${PIPESTATUS[1]}
+set -e
+if [[ "$call_stable_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: call-stable facts and branch conjuncts\n' >&2
+    exit 1
+fi
+
+# The boundary of those two rules: a scalar the callee can write, a scalar a branch assigns, and a
+# disjunction are all refused. Nothing here may be proven.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_call_stable_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"aliased_scalar", "assigned_in_branch", "disjunctive_branch", "negated_conjunctive_guard", "rebound_after_guard"}; assert refused <= {finding["name"] for finding in report["findings"]}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety" and goal["name"] in refused and "depth <= 127" in str(goal)}; assert not claimed'
+rejected_call_stable_facts_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_call_stable_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a fact survived a call or a branch that could falsify it\n' >&2
     exit 1
 fi
 

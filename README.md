@@ -426,8 +426,16 @@ The native checker currently supports:
 - compiler-defined lower bounds for bare unsigned primitive types (`u8`, `u16`, `u32`, `u64`,
   `usize`, and `uint`) enter the proof context as traced `type-bound` facts. This narrow typing
   fact survives call, assignment, and control-flow havoc, while shadowed loop/pattern/scoped
-  bindings and ownership moves remove inherited bounds; all other facts retain the existing
-  pure-call/frame havoc behavior; and
+  bindings and ownership moves remove inherited bounds; and
+- a *call-stable* fact — a proposition built only from literals and by-value scalar locals and
+  parameters of the current frame that the body never references, moves, or passes to a reference
+  parameter or an unknown callee — also survives a call. A callee reaches its caller only through
+  references and globals, so such a fact is as true after the call as before it. The same facts
+  are re-imported at a branch join from the arms that actually reach it. A conjunctive branch
+  condition additionally contributes each part it entails as a `branch-conjunct` derived fact, so
+  the part over a scalar survives even when the whole condition mentions the call; a disjunction
+  contributes nothing. Every other fact retains the existing pure-call/frame havoc behavior. See
+  `examples/call_stable_facts.elisa` and `examples/rejected_call_stable_facts.elisa`; and
 - recursive, deduplicated `include` expansion resolved relative to the including file; and
 - the compiler's complete semantic diagnostic pass after the proof pass.
 

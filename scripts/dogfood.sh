@@ -202,6 +202,8 @@ run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
 run_probe expression_witness examples/expression_witness.elisa 0
+run_probe call_stable_facts examples/call_stable_facts.elisa 0
+run_probe rejected_call_stable_facts examples/rejected_call_stable_facts.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -373,6 +375,36 @@ if claimed:
 print("dogfood expression_witness: term-keyed type witnesses admit exactly the primitive scalar places")
 PY
 
+# A callee reaches the caller only through references and globals, and a conjunctive guard entails
+# each of its parts. Together they carry a bounded-recursion precondition past an opaque call; the
+# conjuncts are derived facts, so every certificate that uses one must still replay without gaps.
+python3 - "$REPORT_DIR/call_stable_facts.json" "$REPORT_DIR/rejected_call_stable_facts.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["summary"]["proven"] != report["summary"]["obligations"]:
+    raise SystemExit("dogfood failed: call-stable fixture did not prove")
+if report["replay"]["gaps"] != 0 or report["findings"] != []:
+    raise SystemExit("dogfood failed: call-stable fixture left a gap or a finding")
+origins = {origin["kind"] for goal in report["goals"] for origin in goal["fact_origins"] if origin}
+if "branch-conjunct" not in origins:
+    raise SystemExit("dogfood failed: no branch conjunct reached a certificate")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
+    raise SystemExit("dogfood failed: call-stable boundary fixture did not fail cleanly")
+if report["replay"]["gaps"] != 0:
+    raise SystemExit("dogfood failed: call-stable boundary fixture left a replay gap")
+refused = {"aliased_scalar", "assigned_in_branch", "disjunctive_branch", "negated_conjunctive_guard", "rebound_after_guard"}
+missing = refused - {finding["name"] for finding in report["findings"]}
+if missing:
+    raise SystemExit("dogfood failed: no diagnostic for %s" % sorted(missing))
+print("dogfood call_stable_facts: facts survive exactly the calls and joins that cannot falsify them")
+PY
+
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.
@@ -421,6 +453,18 @@ fi
 "$runtime_dir/congruence-runtime"
 printf 'dogfood congruence_runtime: participating formers carried equalities and excluded formers refused\n'
 
+# Propositional fact projection is exercised against the kernel directly: a conjunction entails
+# each conjunct, a negated disjunction entails each negated disjunct, a double negation cancels,
+# and the dual forms - a disjunction, a negated conjunction - must stay refused in both signs.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/projection-runtime.o" "$ROOT_DIR/examples/kernel_projection_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    clang -Wl,-dead_strip -o "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$RUNTIME_OBJ"
+else
+    clang -Wl,-dead_strip -o "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/projection-runtime"
+printf 'dogfood projection_runtime: conjunct and negated-disjunct projection admitted, duals refused\n'
+
 # Declared effect containment is checked against the kernel directly: contained rows admitted,
 # uncontained rows refused, and every malformed effect graph rejected rather than interpreted.
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/effect-runtime.o" "$ROOT_DIR/examples/kernel_effect_runtime.elisa" >/dev/null 2>&1
@@ -440,7 +484,7 @@ printf 'dogfood effect_runtime: contained rows admitted and uncontained or malfo
 bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
 if [[ -n "$bootstrap_compiler" ]]; then
     "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
-    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
+    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
         "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
         clang -Wl,-dead_strip -o "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o"
         set +e
