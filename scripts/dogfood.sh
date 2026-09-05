@@ -693,6 +693,45 @@ if invented["tactic"] != baseline["tactic"] or invented["state"] != baseline["st
 PY
 printf 'dogfood proof_script: a written script runs the checked engine and nothing else\n'
 
+# Repair proposes and the kernel disposes. Across every goal of a proved fixture and an adversarial
+# one, a repair that reports success must emit a script that re-runs and replays, and a repair that
+# reports failure must emit none — and no goal of the adversarial fixture may be repaired at all.
+python3 - "$ROOT_DIR/build/elisa-proof" "$REPORT_DIR" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+binary, workdir = sys.argv[1:]
+root = os.path.dirname(os.path.dirname(binary))
+script_path = os.path.join(workdir, "repair.proof")
+for source_name, expect_any in (("examples/verified.elisa", True), ("examples/rejected_repair_target.elisa", False)):
+    source = os.path.join(root, source_name)
+    report = json.loads(subprocess.run([binary, "--json", source], capture_output=True, text=True).stdout)
+    repaired_any = False
+    for goal_id in range(len(report["goals"])):
+        result = subprocess.run([binary, "--repair", str(goal_id), source], capture_output=True, text=True)
+        payload = json.loads(result.stdout)
+        if payload["status"] == "repaired":
+            repaired_any = True
+            if result.returncode != 0 or not payload["script"]:
+                raise SystemExit("dogfood failed: repaired goal %d emitted no script" % goal_id)
+            with open(script_path, "w", encoding="utf-8") as handle:
+                handle.write(payload["script"])
+            rerun = subprocess.run([binary, "--script", script_path, source], capture_output=True, text=True)
+            verdict = json.loads(rerun.stdout)
+            if rerun.returncode != 0 or not verdict["tactic"]["solved"] or not verdict["tactic"]["kernel_replayed"]:
+                raise SystemExit("dogfood failed: repair for goal %d did not re-check in %s" % (goal_id, source_name))
+        else:
+            if payload["script"] is not None:
+                raise SystemExit("dogfood failed: unrepaired goal %d still emitted a script" % goal_id)
+            if result.returncode == 0:
+                raise SystemExit("dogfood failed: unrepaired goal %d exited zero" % goal_id)
+    if repaired_any != expect_any:
+        raise SystemExit("dogfood failed: %s repaired=%s, expected %s" % (source_name, repaired_any, expect_any))
+PY
+printf 'dogfood proof_repair: every proposal the search admits re-runs and replays\n'
+
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.

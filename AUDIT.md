@@ -847,13 +847,41 @@ checks the property that matters most for a writable surface: an invented `given
 neither the tactic result nor the state the engine started from, so writing a hypothesis into the
 file does not make it an assumption.
 
+`--repair <id> <file.elisa>` closes the loop. It searches a bounded, fixed vocabulary of tactic
+scripts for one that closes the goal and emits the winner in the shape `--script` runs, so the
+cycle is: report names a broken goal, repair proposes a proof, script runs it, kernel replays it.
+
+The search is untrusted automation and is structured so that it can only ever propose. A candidate
+is admitted solely when the checked engine reports `valid`, `solved`, `kernel_replayed` *and*
+`certificate_replayed` — the same four gates a hand-written script passes, checked in the same
+engine, with no path of its own. The vocabulary is a literal table of twenty argument-free action
+sequences tried in a fixed order, so a repair is reproducible byte for byte, and the response
+states `candidates`, `tried` and `exhaustive` rather than a heuristic budget: a success is
+explicitly a bounded one. A failure is reported as `unrepaired`, which says the fixed vocabulary
+contained no proof and deliberately does *not* say the goal is false — that distinction is the
+difference between "unknown" and "disproved", and the report keeps them apart.
+
+Coverage. The test matrix repairs a goal, requires the emitted script to re-run through `--script`
+and come back solved with the kernel replaying its certificate, requires two runs to be
+byte-identical, and requires a missing goal id to exit `2` with no script. It then requires each of
+the three goals of `examples/rejected_repair_target.elisa` — a conclusion unrelated to its
+hypotheses, one that reverses an inequality, and one needing arithmetic the vocabulary does not
+have — to come back `unrepaired`, exhaustive, with `tried == candidates` and no script.
+
+Dogfood checks the property across whole files rather than at sampled goals: for every goal of a
+proved fixture and of the adversarial one, a repair reporting success must emit a script that
+re-runs and replays, a repair reporting failure must emit none and exit non-zero, and no goal of
+the adversarial fixture may be repaired at all. A proposal that could not be re-checked would be a
+claim rather than a proof, so the re-check is what the test asserts, not the search's own verdict.
+
 Not covered. No fixture currently has a goal that is proven without a replayed certificate, so the
 `unchecked` keyword is exercised by the renderer's logic but not by a live example; the exhaustive
 dogfood check would catch a regression the moment one appears. `split` and `cases` need nested
 branch scripts, which the text grammar has no syntax for yet, so a branching proof must still be
-written as JSON. And the two proof surfaces are still separate tools: `--check-proof` compares a
-block against the recorded proof, `--script` runs a proposed one, but neither rewrites a block that
-diverges into one that would check.
+written as JSON, and the repair vocabulary is correspondingly branch-free. The vocabulary is also
+fixed rather than derived: it does not consult `--suggest`, so a goal needing a lemma instantiation
+is out of reach even when the lemma is discoverable. And repair works one goal at a time — nothing
+yet walks `repair_queue` and proposes a batch, or re-derives which goals a source edit invalidated.
 
 ## Coverage still required
 

@@ -67,6 +67,15 @@ script. The front end is untrusted elaboration: it translates the text into the 
 text script and its JSON equivalent produce identical output. `split` and `cases` need nested
 branch scripts and must still be written as JSON.
 
+`build/elisa-proof --repair N file.elisa` searches a bounded, fixed vocabulary of tactic scripts for
+one that closes goal `N` and emits the winner in that same runnable shape, so the cycle closes: the
+report names a broken goal, repair proposes a proof, `--script` runs it, the kernel replays it. The
+search only ever proposes — a candidate is admitted solely when the checked engine solves the goal
+*and* the kernel replays the certificate it produced. The response states `candidates`, `tried` and
+`exhaustive`, so a success is explicitly a bounded one; `unrepaired` means the fixed vocabulary
+contained no proof and never that the goal is false. It exits `0` when a repair was found, `1` when
+none was, and `2` when the goal id does not exist.
+
 Use `build/elisa-proof --goal N file.elisa` to retrieve only one of those goals without loading the
 full report or kernel arena. The deterministic `elisa-proof-goal-v1` response includes the source
 fingerprint and completeness gate, proposition, exact hypotheses and origins, dependencies,

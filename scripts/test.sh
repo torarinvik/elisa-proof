@@ -1774,6 +1774,68 @@ if [[ "$proof_script_shape_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `--repair` searches a bounded, fixed vocabulary of tactic scripts and admits one only if the
+# checked engine solves the goal and the kernel replays the certificate it produced. The proposal
+# it emits must itself run: a repair that cannot be re-checked is a claim, not a proof.
+set +e
+"$ROOT_DIR/build/elisa-proof" --repair 7 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair.json"
+proof_repair_status=$?
+"$ROOT_DIR/build/elisa-proof" --repair 7 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_again.json"
+"$ROOT_DIR/build/elisa-proof" --repair 9999 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_missing.json"
+proof_repair_missing_status=$?
+for unrepairable_goal in 1 3 5; do
+    "$ROOT_DIR/build/elisa-proof" --repair "$unrepairable_goal" "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/unrepaired_$unrepairable_goal.json"
+    if [[ $? -ne 1 ]]; then
+        printf 'proof test matrix failed: --repair did not report goal %s as unrepaired\n' "$unrepairable_goal" >&2
+        exit 1
+    fi
+done
+set -e
+if [[ "$proof_repair_status" -ne 0 || "$proof_repair_missing_status" -ne 2 ]]; then
+    printf 'proof test matrix failed: --repair exit codes repaired=%s missing=%s\n' "$proof_repair_status" "$proof_repair_missing_status" >&2
+    exit 1
+fi
+if ! cmp -s "$proof_render_dir/repair.json" "$proof_render_dir/repair_again.json"; then
+    printf 'proof test matrix failed: --repair is not deterministic\n' >&2
+    exit 1
+fi
+python3 -c 'import json, sys; payload = json.load(open(sys.argv[1], encoding="utf-8")); assert payload["status"] == "repaired"; open(sys.argv[2], "w", encoding="utf-8").write(payload["script"])' "$proof_render_dir/repair.json" "$proof_render_dir/repair.proof"
+set +e
+"$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/repair.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_rerun.json"
+proof_repair_rerun_status=$?
+python3 - "$proof_render_dir" <<'PY'
+import json
+import os
+import sys
+
+directory = sys.argv[1]
+def load(name):
+    with open(os.path.join(directory, name), encoding="utf-8") as handle:
+        return json.load(handle)
+
+repaired = load("repair.json")
+assert repaired["format"] == "elisa-proof-repair-v1"
+assert repaired["status"] == "repaired" and repaired["script"]
+assert repaired["search"]["tried"] >= 1 and repaired["search"]["candidates"] >= repaired["search"]["tried"]
+rerun = load("repair_rerun.json")
+assert rerun["status"] == "proved"
+assert rerun["tactic"]["solved"] and rerun["tactic"]["kernel_replayed"] and rerun["tactic"]["certificate_replayed"]
+missing = load("repair_missing.json")
+assert missing["status"] == "not_found" and missing["script"] is None
+for goal_id in (1, 3, 5):
+    payload = load("unrepaired_%d.json" % goal_id)
+    assert payload["status"] == "unrepaired", goal_id
+    assert payload["script"] is None, goal_id
+    assert payload["search"]["exhaustive"] is True, goal_id
+    assert payload["search"]["tried"] == payload["search"]["candidates"], goal_id
+PY
+proof_repair_shape_status=$?
+set -e
+if [[ "$proof_repair_rerun_status" -ne 0 || "$proof_repair_shape_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a repaired script did not re-check (rerun=%s shape=%s)\n' "$proof_repair_rerun_status" "$proof_repair_shape_status" >&2
+    exit 1
+fi
+
 # An unpinned lifetime and a region value reaching a formal that declares none are each refused.
 set +e
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "unpinned_formal") in findings; assert ("region-call-opaque", "unmapped_lifetime") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'
