@@ -570,37 +570,63 @@ callee's declared parameter and return modes: compiler-typing metadata, imported
 the resource header already imports the current function's own parameter modes.
 
 The call does not disappear from the certificate. `proof_resource_record_shared_call` emits a
-`resource-call-shared` event whose children are the argument places, each tagged `shared`, and the
-replay kernel checks the transition it claims: the node carries no callee summary root and no
-region map, its argument count matches its child list, every child is a `resource-call-arg` with
-mode `shared`, every argument place resolves to a live, unmoved binding with an active region, and
-the event root is consumed once. Nothing in the resource state is written, which is the whole
+`resource-call-shared` event whose children are the actuals followed by the callee's declared mode
+for each of the same formals, one pair per parameter, and the replay kernel checks the transition
+it claims: the node carries no callee summary root and no region map, its child list is exactly
+twice its parameter count, each actual is a `resource-call-arg` decoded by the same routine the
+summary path uses, each mode is a `resource-call-formal` whose name matches its actual, a formal
+that is not `external-shared` receives no capability at all, a fresh region allocation is refused,
+and the event root is consumed once. Nothing in the resource state is written, which is the whole
 content of a read.
+
+Two things the mode list buys. An exclusive formal has no encoding under `resource-call-formal` —
+the shape validator admits only `value` and `external-shared` — so a certificate cannot record a
+mutable lend as a shared one even by forgery, and pairing the modes with the actuals by formal
+name stops a permuted list from letting a scalar parameter's harmless mode stand in for the
+parameter that receives the place. `proof_resource_call_is_shared_read` correspondingly refuses a
+callee with *any* mutable reference parameter, not merely one whose actual happens to carry a
+capability at this call site: the recorded claim is about the signature.
+
+Shared and exclusive access to one place cannot be live at the same time, so the rule also refuses
+a lend whose place is overlapped by a live mutable borrow, on both sides. Unlike the summary path
+it excludes nothing: there the summary establishes that the callee reads only through the very
+reference being reborrowed, and here there is no summary to establish it, so every live exclusive
+borrow of the lent place refuses the rule. The narrower reborrow-lend that this gives up is not
+reachable from the current producer — such a call has a summary and takes the summary path.
 
 The summary path is unchanged and still preferred: the shared-read rule is consulted only when no
 mapped callee summary is available. Writable lending, an escaping result and region-polymorphic
 calls all keep their existing diagnostics. On the kernel's own source the proven count moved from
-757 to 843 and `borrow-call-opaque` from 622 to 356, with replay gaps unchanged at zero.
+757 to 842 of 2144 and `borrow-call-opaque` from 622 to 356, with replay gaps unchanged at zero and
+211 shared-lend events recorded.
 
 Coverage. `examples/shared_borrow_calls.elisa` proves self-recursion over a shared collection, two
 shared references at once, a mutable holder lending a shared reborrow, the same place lent twice in
 one call, and a call to a callee with no summary of its own; disabling the rule leaves six of its
 obligations unproven. `examples/rejected_shared_borrow_calls.elisa` pins the boundary: a recursive
-callee with a mutable reference parameter, one that returns a reference, and a moved binding are
-each refused with a diagnostic. `examples/rejected_borrow_call.elisa` now carries both halves — the
+callee with a mutable reference parameter, one that returns a reference, a moved binding, and a
+shared lend made while an exclusive borrow of the same place is still live are each refused with a
+diagnostic and emit no event. `examples/rejected_borrow_call.elisa` now carries both halves — the
 writable lend still reports `borrow-call-opaque`, the shared lend no longer does, and the callee's
 own indexed obligation still fails on its own account.
 `examples/kernel_resource_bootstrap_runtime.elisa` drives the kernel rule directly under stage1 and
-stage0 with six cases; separately removing the liveness check, the event-reuse check, both argument
-mode checks, or both argument count checks each makes it exit with a distinct code.
+stage0 with ten cases — an admitted lend, then a moved place, a capability handed to a by-value
+formal, a miscounted child list, a reused event root, an unbound place, a permuted mode list, a
+lend across a live exclusive borrow, a fresh region allocation and an exclusive formal, each
+refused. Removing the overlap check, the name pairing or the by-value-formal check each makes it
+exit with the matching code; the miscount, region-allocation and exclusive-formal cases are each
+caught by two independent checks and need both removed before they show.
 
 Not covered. A call that lends a *writable* capability still needs the callee's summary, so a
 recursive component that mutates through a reference parameter — `proof_kernel_replay_substitute`
 and the tactic and resource-event walkers in the kernel's own source — remains opaque; that needs
 either an SCC fixed point over resource summaries or a disjointness-based rule for a whole mutable
 place with no overlapping live borrow. Region-polymorphic calls are untouched. The callee's
-declared modes are a compiler-typing import: the kernel checks the shape of the claim, not that the
-callee's signature was read correctly.
+declared modes remain a compiler-typing import: the kernel now checks that the recorded modes are
+harmless, that they pair with the actuals, and that no capability reaches a by-value formal, but
+nothing in the arena ties them back to the callee's source — a producer that misreads a signature
+records a wrong but internally consistent claim. Closing that needs the callee's parameter header
+in the arena, keyed so it cannot be mistaken for a converged summary.
 
 ## Coverage still required
 

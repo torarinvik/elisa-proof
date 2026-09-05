@@ -424,8 +424,15 @@ if report["replay"]["gaps"] != 0 or report["findings"] != []:
 shared = [node for node in report["kernel"]["nodes"] if node["kind"] == "resource-call-shared"]
 if not shared:
     raise SystemExit("dogfood failed: no shared-read call reached the arena")
-if any(node["left"] != 0 or node["auxiliary"] != node["children_count"] for node in shared):
+if any(node["left"] != 0 or node["children_count"] != node["auxiliary"] * 2 for node in shared):
     raise SystemExit("dogfood failed: a shared-read call carried a callee summary root")
+nodes = report["kernel"]["nodes"]
+children = report["kernel"]["children"]
+formals = [nodes[child] for node in shared for child in children[node["children_start"] + node["auxiliary"]:node["children_start"] + node["children_count"]]]
+if not formals or any(formal["kind"] != "resource-call-formal" for formal in formals):
+    raise SystemExit("dogfood failed: a shared-read call recorded no callee parameter modes")
+if any(formal["operator"] not in ("value", "external-shared") for formal in formals):
+    raise SystemExit("dogfood failed: an exclusive callee formal was recorded under a shared read")
 with open(rejected, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
@@ -438,7 +445,10 @@ missing = required - findings
 if missing:
     raise SystemExit("dogfood failed: no diagnostic for %s" % sorted(missing))
 if any(node["kind"] == "resource-call-shared" for node in report["kernel"]["nodes"]):
-    raise SystemExit("dogfood failed: a writable or escaping capability was recorded as a shared read")
+    raise SystemExit("dogfood failed: a writable, escaping or exclusively borrowed capability was recorded as a shared read")
+opaque = {finding["name"] for finding in report["findings"] if finding["kind"] == "borrow-call-opaque"}
+if "lends_shared_while_mutably_borrowed" not in opaque:
+    raise SystemExit("dogfood failed: a shared lend across a live exclusive borrow was not refused")
 print("dogfood shared_borrow_calls: shared lending needs no callee summary, writable lending still does")
 PY
 
