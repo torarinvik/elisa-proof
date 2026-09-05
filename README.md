@@ -371,11 +371,14 @@ The native checker currently supports:
 - recursive, deduplicated `include` expansion resolved relative to the including file; and
 - the compiler's complete semantic diagnostic pass after the proof pass.
 
-Functions declaring unsigned locals (including aliases and refinements) currently report
-`unsupported` before logical obligations are published. Substituting their initializers would
-erase fixed-width arithmetic semantics. This also temporarily excludes `kernel_core.add_node`;
-the core bounds predicates and their call-site proofs still verify and replay. Full typed symbolic
-bindings are required to restore these functions, including bounded-safe unsigned locals.
+Unsigned locals (including aliases and refinements) are bound to their own typed symbol rather
+than having their initializer substituted, which would erase fixed-width arithmetic semantics.
+The symbol carries the same traced `type-bound` facts as an unsigned parameter, and its value is
+recorded as a `local-binding` equality only when that value is range-safe under the current
+facts. A plain rebinding re-symbolizes the local; a redeclared spelling, a compound assignment,
+and every binding whose recorded value mentions a re-symbolized symbol are purged transitively
+so no fact silently describes a newer value. Scoped `proof` blocks keep only type facts. See
+`examples/unsigned_local.elisa` and the `rejected_unsigned_local*` fixtures.
 
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its

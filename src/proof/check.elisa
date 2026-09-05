@@ -204,15 +204,26 @@ extend ElisaProof:
                     pass
             return 0
 
-        def proof_unsigned_type_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, width: i64, line: u32, owner: sview, position: Ast::Pos) -> void:
-            return if name == "" or width == 0
-            proof_add_traced_fact(facts, report, proof_unsigned_type_marker(name, width, position), "type-bound", line, owner)
-            # u64/usize/uint do not have a representable maximum in the proof AST's i64 literal
-            # domain. Their marker still forces a finite, explicitly established interval before
-            # arithmetic reasoning; only the smaller widths get an automatic exact upper bound.
+        # Type facts are re-established whenever a binding is re-symbolized, so this must be
+        # idempotent: a fact already present is not pushed again, and a fact already traced as
+        # a type bound of this owner is not traced again. Otherwise every join and rebinding
+        # would multiply identical facts and traces.
+        def proof_add_type_bound_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
+            for existing in facts |existing, expression|:
+                return if proof_expr_equal(existing, expression)
+            if proof_fact_is_type_bound(report, expression, owner):
+                facts.push(expression)
+                return
+            proof_add_traced_fact(facts, report, expression, "type-bound", line, owner)
+
+        def proof_add_unsigned_binding_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, width: i64, line: u32, owner: sview, position: Ast::Pos) -> void:
+            return if name == "" or width <= 0
+            lower_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0), TokenKind.LtEq, Ast::Expr.Ident(name, position), position)
+            proof_add_type_bound_fact(facts, report, lower_bound, line, owner)
+            proof_add_type_bound_fact(facts, report, proof_unsigned_type_marker(name, width, position), line, owner)
             if width < 64:
                 upper: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(name, position), TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(width)), position)
-                proof_add_traced_fact(facts, report, upper, "type-bound", line, owner)
+                proof_add_type_bound_fact(facts, report, upper, line, owner)
 
         # Fixed arrays carry an exact element count in their type (`array[T, N]` or the
         # primitive shorthand `T[N]`). Keep this importer intentionally narrower than the
@@ -574,6 +585,90 @@ extend ElisaProof:
                 facts[write_index] <- facts[read_index]
                 write_index <- write_index + 1
             facts.resize(write_index)
+
+        # Replaces `facts.clear()` at every state-invalidation point of symbolic execution.
+        # Type-bound facts describe the compiler type of a binding, not mutable program state,
+        # so they remain true across an invalidation while that binding is lexically live. A
+        # redeclaration purges them explicitly before establishing the new declaration's type.
+        # Without this, a cleared unsigned marker would let later arithmetic on the binding be
+        # folded as unbounded signed arithmetic.
+        def proof_clear_facts_keep_type_bounds(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            original_count: usize = facts.count
+            write_index: mutable usize = 0
+            for read_index in 0..<original_count |facts, names, parameters, report, owner, original_count, write_index|:
+                bound_name: sview = proof_type_bound_name(facts[read_index])
+                continue if bound_name == ""
+                continue if not (any candidate in names where candidate == bound_name) and not (any parameter in parameters where parameter == bound_name)
+                continue if not proof_fact_is_type_bound(report, facts[read_index], owner)
+                facts[write_index] <- facts[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
+
+        # A binding becomes an opaque symbol again whenever its new value is not expressible in
+        # terms of the existing symbols: a declaration reuses a spelling, an unsigned local is
+        # bound or rebound, or any binding is updated by a compound assignment. Every fact that
+        # mentions the old symbol, and every other binding whose recorded value mentions it,
+        # would otherwise silently describe the new value. Purge both transitively. Only the
+        # compiler type facts of cascaded bindings are re-established; their types are unchanged.
+        def proof_resymbolize_binding(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, target: sview, position: Ast::Pos) -> void:
+            return if target == ""
+            targets: mutable darray[sview] = [target]
+            changed: mutable bool = true
+            while changed |changed, targets, names, values|:
+                changed <- false
+                for index in 0..<values.count |index, names, values, targets, changed|:
+                    continue if index >= names.count
+                    continue if any existing in targets where existing == names[index]
+                    mentions: mutable bool = false
+                    for candidate in targets |candidate, values, index, mentions|:
+                        mentions <- true if proof_expr_mentions_name(values[index], candidate)
+                    if mentions:
+                        targets.push(names[index])
+                        changed <- true
+            cascaded_widths: mutable darray[i64] = []
+            for candidate in targets |candidate, facts, cascaded_widths|:
+                cascaded_widths.push(proof_unsigned_marker_width_for_name(facts, candidate))
+            original_count: usize = facts.count
+            write_index: mutable usize = 0
+            for read_index in 0..<original_count |facts, targets, original_count, write_index|:
+                mentions: mutable bool = false
+                for candidate in targets |candidate, facts, read_index, mentions|:
+                    mentions <- true if proof_expr_mentions_name(facts[read_index], candidate)
+                continue if mentions
+                facts[write_index] <- facts[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
+            for index in 0..<values.count |index, names, values, targets, position|:
+                continue if index >= names.count
+                values[index] <- Ast::Expr.Ident(names[index], position) if any candidate in targets where candidate == names[index]
+            for target_index in 0..<targets.count |target_index, targets, cascaded_widths, facts, report, owner, position|:
+                continue if target_index == 0 or target_index >= cascaded_widths.count
+                proof_add_unsigned_binding_facts(facts, report, targets[target_index], cascaded_widths[target_index], position.line, owner, position)
+
+        # Bind an unsigned local to its own symbol instead of substituting its value. The symbol
+        # keeps its compiler width through every later substitution, so wrapping arithmetic on
+        # it stays visible to the unsigned range guard rather than being folded into signed
+        # literal arithmetic. The value is recorded as an equality only when it is itself
+        # range-safe under the current facts; a possibly wrapping initializer leaves the symbol
+        # opaque within its declared type range.
+        def proof_bind_unsigned_symbol(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, slot: usize, width: i64, value: Ast::Expr, position: Ast::Pos) -> void:
+            return if slot >= names.count or slot >= values.count or width <= 0
+            symbol: sview = names[slot]
+            proof_resymbolize_binding(names, values, facts, report, owner, symbol, position)
+            values[slot] <- Ast::Expr.Ident(symbol, position)
+            proof_add_unsigned_binding_facts(facts, report, symbol, width, position.line, owner, position)
+            value_known: mutable bool = true
+            match value:
+                Ast::Expr.Invalid:
+                    value_known <- false
+                Ast::Expr.Absent:
+                    value_known <- false
+                _:
+                    pass
+            return if not value_known or proof_expr_mentions_name(value, symbol)
+            return if not proof_unsigned_expression_safe(value, facts)
+            binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.EqEq, value, position)
+            proof_add_traced_fact(facts, report, binding, "local-binding", position.line, owner)
 
         def proof_statement_declared_name(statement: Ast::Stmt) -> sview:
             match statement:
@@ -3643,7 +3738,7 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_check_block(block_body: darray[Ast::Stmt]&, tactic: sview, seed_facts: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+        def proof_check_block(block_body: darray[Ast::Stmt]&, tactic: sview, seed_facts: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, parameters: darray[sview]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
             return false if block_body.count == 0
             goal: mutable Ast::Expr = Ast::Expr.Absent
             goal_line: mutable u32 = 0
@@ -3661,7 +3756,11 @@ extend ElisaProof:
                 index <- index + 1
             proof_check_purity(proof_body, lemmas, report, name)
             facts: mutable darray[Ast::Expr] = []
-            facts.extend(seed_facts) if tactic != "scoped"
+            facts.extend(seed_facts)
+            # A scoped block walls off path assumptions, not the language: the compiler type
+            # of every live binding still holds inside it. Keeping those facts is what lets the
+            # unsigned range guard see a fixed-width symbol instead of an untyped integer.
+            proof_clear_facts_keep_type_bounds(&facts, names, parameters, report, name) if tactic == "scoped"
             proof_check_block_steps(proof_body, &facts, names, values, lemmas, report, name, annotations)
             proven: bool = proof_certify_goal(facts, goal, report, goal_line, name, annotations)
             report.proof_obligation(proven)
@@ -4856,7 +4955,7 @@ extend ElisaProof:
                     report.proof_obligation(false)
                     proof_add_finding(report, "expression-unsupported", unsupported_position.line, name, "unsupported runtime expression cannot enter a verified proof state")
                     proof_forget_values(names, values, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
-                    facts.clear()
+                    proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                 getelse: (known: bool, recovery: darray[Ast::Stmt], line: u32) = proof_statement_getelse_recovery(statement)
                 if getelse.known and proof_statement_expressions_supported(statement, functions):
                     # The absent/error branch is a real control-flow path. Check it against a
@@ -4898,6 +4997,12 @@ extend ElisaProof:
                         # scope. Commit the new local only after nested calls have seen the
                         # pre-declaration environment; otherwise `x: T = f(x)` would pass the
                         # freshly assigned x back into f instead of the outer x.
+                        # The spelling may already denote an earlier symbol: a shadowed local,
+                        # a parameter, or a binding forgotten to its own name. Purge everything
+                        # that refers to that symbol before it denotes the new binding; a value
+                        # that mentions its own new name has no expressible meaning either.
+                        proof_resymbolize_binding(names, values, facts, report, name, local_name, position)
+                        value <- Ast::Expr.Invalid if proof_expr_mentions_name(value, local_name)
                         names <- names.push(local_name)
                         values <- values.push(value)
                         values[prior_value_count] <- value if proof_expr_has_call(initializer) and prior_value_count < values.count
@@ -4905,15 +5010,12 @@ extend ElisaProof:
                         if unsigned_width < 0:
                             values[prior_value_count] <- Ast::Expr.Invalid
                             proof_add_finding(report, "contract-expression-unsupported", position.line, name, "local numeric type alias cannot be resolved uniquely")
-                        if unsigned_width > 0:
-                            lower_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0), TokenKind.LtEq, Ast::Expr.Ident(local_name, position), position)
-                            proof_add_traced_fact(facts, report, lower_bound, "type-bound", position.line, name)
-                            proof_unsigned_type_facts(facts, report, local_name, unsigned_width, position.line, name, position)
                         if proof_expr_has_call(initializer):
                             # The new local contains the call result, so retain its binding, but
                             # forget every pre-existing binding that the call may have mutated.
                             proof_forget_values_before(names, values, prior_value_count, position)
-                        facts.clear() if shadowed or (proof_expr_has_call(initializer) and not call_applied)
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if shadowed or (proof_expr_has_call(initializer) and not call_applied)
+                        proof_bind_unsigned_symbol(names, values, facts, report, name, prior_value_count, unsigned_width, value, position) if unsigned_width > 0
                     Ast::Stmt.Assign(target, operator, initializer, position):
                         target_name: sview = proof_ident_name(target)
                         if target_name != "":
@@ -4950,23 +5052,29 @@ extend ElisaProof:
                                     proof_forget_values_except(names, values, target_slot, position)
                                 else:
                                     proof_forget_values(names, values, position)
+                            # An unsigned local keeps its width by staying symbolic; its new
+                            # value becomes an equality fact when it is range-safe.
+                            rebound_width: i64 = proof_unsigned_marker_width_for_name(facts, target_name) if target_slot < values.count else 0
+                            proof_bind_unsigned_symbol(names, values, facts, report, name, target_slot, rebound_width, value, position) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and rebound_width > 0
                             # A compound assignment still executes its RHS call, but the
                             # resulting value depends on the old target and is not modeled.
                             # Discard all facts after it, including when the RHS call had a
-                            # usable executable summary.
-                            facts.clear() if operator != TokenKind.LArrow and operator != TokenKind.Assign
+                            # usable executable summary. The target denotes a new opaque value,
+                            # so bindings that recorded the old symbol are forgotten with it.
+                            proof_resymbolize_binding(names, values, facts, report, name, target_name, position) if operator != TokenKind.LArrow and operator != TokenKind.Assign
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if operator != TokenKind.LArrow and operator != TokenKind.Assign
                             # A plain local rebind is represented in `values`, so keep facts
                             # about prior symbolic values available for the substitution-based
                             # postcondition check. Parameter rebinding is different: it changes
                             # an externally visible root, so all facts must be discarded. Calls
                             # still clear facts when no checked summary was applied.
-                            facts.clear() if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name)
-                            facts.clear() if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name)
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
                         else:
                             # Field/index/compound assignments can mutate aliases whose
                             # dependencies are not represented in this small state model.
                             proof_check_direct_frame_write(proof_substitute(target, names, values), names, frame_parameters, changes, preserves, report, name, position.line)
-                            facts.clear()
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                     Ast::Stmt.Contract(kind, expression, position):
                         if kind == "assert":
                             assertion: mutable Ast::Expr = proof_substitute(expression, names, values)
@@ -4977,7 +5085,7 @@ extend ElisaProof:
                             # pre-call facts before publishing the assertion itself.
                             proof_check_frame_calls_in_expression(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if assertion_has_call
                             proof_forget_values(names, values, position) if assertion_has_call
-                            facts.clear() if assertion_has_call
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if assertion_has_call
                             if lemma_steps:
                                 assertion_proven: bool = proof_certify_goal(facts, assertion, report, position.line, name, annotations)
                                 report.proof_obligation(assertion_proven)
@@ -4998,7 +5106,7 @@ extend ElisaProof:
                                     # retain facts that a nested executable call may have
                                     # invalidated, even when the outer builtin is pure.
                                     proof_forget_values(names, values, position) if assertion_has_call
-                                    facts.clear() if assertion_has_call
+                                    proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if assertion_has_call
                                     if lemma_steps:
                                         call_assertion_proven: bool = proof_certify_goal(facts, assertion_call, report, position.line, name, annotations)
                                         report.proof_obligation(call_assertion_proven)
@@ -5015,7 +5123,7 @@ extend ElisaProof:
                                     if not applied_lemma:
                                         applied_function: bool = proof_apply_function(substituted_expression, Ast::Expr.Absent, facts, functions, names, frame_parameters, changes, preserves, report, name, annotations)
                                         proof_check_opaque_call_frame(substituted_expression, names, frame_parameters, changes, preserves, functions, report, name) if not applied_function
-                                        facts.clear() if not applied_function
+                                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if not applied_function
                                         # A statement call has no result binding to carry forward;
                                         # even a framed summary may have changed an untracked local
                                         # alias, so forget symbolic values at the call boundary.
@@ -5024,7 +5132,7 @@ extend ElisaProof:
                                 proof_check_frame_calls_in_expression(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(expression)
                                 substituted_expression <- proof_substitute(expression, names, values) if proof_expr_has_call(expression)
                                 proof_forget_values(names, values, position) if proof_expr_has_call(expression)
-                                facts.clear()
+                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                         flow.normal <- false if terminal_expression
                     Ast::Stmt.Return(value, position):
                         if value is returned:
@@ -5078,7 +5186,7 @@ extend ElisaProof:
                                     proof_check_frame_calls_in_expression(returned, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(returned)
                                     return_value <- proof_substitute(returned, names, values) if proof_expr_has_call(returned)
                             return_value <- proof_rewrite_pure_call_summaries(return_value, facts, functions, 0) if proof_expr_has_call(return_value)
-                            facts.clear() if proof_expr_has_call(return_value) and not return_call_applied
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if proof_expr_has_call(return_value) and not return_call_applied
                             proof_invalidate_moved_roots(moved_roots, names, values, facts, position)
                             result_name: mutable darray[sview] = ["result"]
                             result_value: mutable darray[Ast::Expr] = [return_value]
@@ -5117,7 +5225,7 @@ extend ElisaProof:
                         then_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
                         then_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                         then_flow: mutable ProofFlow = proof_empty_flow()
-                        then_facts.clear() if condition_has_call and not condition_facts_stable
+                        proof_clear_facts_keep_type_bounds(then_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
                         proof_add_traced_fact(then_facts, report, condition_value, "branch-condition", position.line, name)
                         proof_check_returns(then_body, &then_names, &then_values, &then_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &then_flow)
                         else_names: mutable darray[sview] = proof_copy_names(names)
@@ -5125,7 +5233,7 @@ extend ElisaProof:
                         else_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                         else_flow: mutable ProofFlow = proof_empty_flow()
                         negated: Ast::Expr = proof_branch_negation(condition_value, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0})
-                        else_facts.clear() if condition_has_call and not condition_facts_stable
+                        proof_clear_facts_keep_type_bounds(else_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
                         proof_add_traced_fact(else_facts, report, negated, "branch-condition", position.line, name)
                         proof_check_returns(else_body, &else_names, &else_values, &else_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &else_flow)
                         then_falls_through: bool = then_flow.normal
@@ -5148,7 +5256,7 @@ extend ElisaProof:
                                 facts.extend(else_facts)
                             else:
                                 proof_forget_values(names, values, position)
-                                facts.clear()
+                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                         elif then_falls_through and not else_falls_through:
                             if condition_facts_stable and then_names.count == names.count and then_values.count >= branch_value_count:
                                 for index in 0..<branch_value_count |index, values, then_values|:
@@ -5157,13 +5265,13 @@ extend ElisaProof:
                                 facts.extend(then_facts)
                             else:
                                 proof_forget_values(names, values, position)
-                                facts.clear()
+                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                         elif not then_falls_through and not else_falls_through:
-                            facts.clear()
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                             flow.normal <- false
                         if not lemma_steps and (proof_body_may_modify(then_body) or proof_body_may_modify(else_body)):
                             proof_forget_values(names, values, position)
-                            facts.clear()
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                     Ast::Stmt.While(condition, while_body, position):
                         # A loop without an invariant is not treated as verified. With one,
                         # establish and check preservation on the one symbolic iteration.
@@ -5287,7 +5395,7 @@ extend ElisaProof:
                             # so retaining its entry expression would be an unsound shortcut.
                             for index in 0..<values.count |index, names, values|:
                                 values[index] <- Ast::Expr.Ident(names[index], position)
-                            facts.clear()
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                             for invariant in invariants |facts, names, values, report, name, position|:
                                 proof_add_traced_fact(facts, report, proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
                             exit_condition: Ast::Expr = proof_substitute(condition, names, values)
@@ -5298,7 +5406,7 @@ extend ElisaProof:
                             proof_add_traced_fact(facts, report, Ast::Expr.Unary(TokenKind.Not, exit_condition, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0}), "loop-condition", position.line, name) if not loop_body_flow.breaks
                         else:
                             proof_forget_values(names, values, position)
-                            facts.clear()
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                     Ast::Stmt.For(bind, variables, iterable, for_body, position):
                         # `parallel for` is not an ordinary sequential loop. The compiler checks
                         # its pool grant and cross-thread capture rules, but this proof state does
@@ -5331,7 +5439,7 @@ extend ElisaProof:
                             report.proof_obligation(false)
                             proof_add_finding(report, "parallel-state-unsupported", position.line, name, "parallel loop join semantics are not modeled by the proof state")
                             proof_forget_values(names, values, Ast::expr_pos(iterable))
-                            facts.clear()
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                             continue
                         iterable_value: mutable Ast::Expr = proof_substitute(iterable, names, values)
                         proof_check_frame_calls_in_expression(iterable, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(iterable)
@@ -5362,7 +5470,7 @@ extend ElisaProof:
                             flow.valid <- false if not for_body_flow.valid
                             if proof_body_may_modify(for_body):
                                 proof_forget_values(names, values, Ast::expr_pos(iterable))
-                                facts.clear()
+                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                         else:
                             # Establish the invariant after evaluating the iterable, then check
                             # one arbitrary iteration. Only outer-scope facts are exported: a
@@ -5400,13 +5508,13 @@ extend ElisaProof:
                                 # opaque current-value atoms for the outer bindings.
                                 for index in 0..<values.count |index, names, values, position|:
                                     values[index] <- Ast::Expr.Ident(names[index], position)
-                                facts.clear()
+                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                                 for invariant in invariants |facts, names, values, frame_parameters, old_values, loop_scope_count, report, name, position|:
                                     post_invariant: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
                                     proof_add_traced_fact(facts, report, post_invariant, "loop-invariant", position.line, name)
                             else:
                                 proof_forget_values(names, values, position)
-                                facts.clear()
+                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                     Ast::Stmt.Match(scrutinee, arms, match_position):
                         scrutinee_value: mutable Ast::Expr = proof_substitute(scrutinee, names, values)
                         proof_check_frame_calls_in_expression(scrutinee, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(scrutinee)
@@ -5464,12 +5572,12 @@ extend ElisaProof:
                             arms_may_modify <- true if not pattern_supported or guard_has_call or proof_body_may_modify(arm.body)
                         if arms_may_modify:
                             proof_forget_values(names, values, Ast::expr_pos(scrutinee))
-                            facts.clear()
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                         flow.normal <- match_has_normal if arms.count > 0
                         flow.valid <- flow.valid and match_valid
                     Ast::Stmt.Block(block_kind, _, binding, block_body, block_position):
                         if block_kind == "assert_by":
-                            proofed: bool = proof_check_block(block_body, binding, facts, names, values, lemmas, report, name, annotations)
+                            proofed: bool = proof_check_block(block_body, binding, facts, names, values, frame_parameters, lemmas, report, name, annotations)
                             if proofed and block_body.count > 0:
                                 match block_body[0]:
                                     Ast::Stmt.Contract(_, block_goal, _):
@@ -5480,7 +5588,7 @@ extend ElisaProof:
                                         # preserve facts established before guard evaluation.
                                         proof_check_frame_calls_in_expression(block_goal, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if runtime_goal_has_call
                                         proof_forget_values(names, values, Ast::expr_pos(block_goal)) if runtime_goal_has_call
-                                        facts.clear() if runtime_goal_has_call
+                                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if runtime_goal_has_call
                                         proof_add_traced_fact(facts, report, runtime_goal, "runtime-guard", block_position.line, name) if proof_runtime_fact_is_stable(runtime_goal, functions)
                                     _:
                                         pass
@@ -5506,7 +5614,7 @@ extend ElisaProof:
                             proof_append_continue_states(flow, block_flow)
                             if proof_body_may_modify(block_body):
                                 proof_forget_values(names, values, block_position)
-                                facts.clear()
+                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                     Ast::Stmt.Break(label, position):
                         if loop_depth == 0 or label != "":
                             flow.valid <- false
@@ -5532,7 +5640,7 @@ extend ElisaProof:
                         report.proof_obligation(false)
                         proof_add_finding(report, "statement-unsupported", 0, name, "invalid statement cannot enter a verified proof state")
                         proof_forget_values(names, values, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
-                        facts.clear()
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                     _:
                         # This arm is unreachable for the compiler AST version known to this
                         # build. Keep it rejecting so adding a future statement variant to the
@@ -5543,7 +5651,7 @@ extend ElisaProof:
                         report.proof_obligation(false)
                         proof_add_finding(report, "statement-unsupported", 0, name, "unknown statement form cannot enter a verified proof state")
                         proof_forget_values(names, values, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
-                        facts.clear()
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                 proof_invalidate_moved_roots(moved_roots, names, values, facts, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
                 proof_restore_type_bound_facts_except(statement_facts, facts, names, report, name, declared_name) if moved_roots.count == 0
 
@@ -5580,126 +5688,7 @@ extend ElisaProof:
             visited: darray[sview] = []
             return proof_type_may_contain_float_depth(expression, declarations, all_declarations, depth, visited)
 
-        # Until symbolic bindings carry numeric types, substituting an unsigned local
-        # erases its modular semantics. Reject the entire function before publishing any
-        # source obligation or summary, including locals nested inside expression bodies.
-        def proof_body_erases_unsigned_local(body: darray[Ast::Stmt]&, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
-            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for statement in body:
-                match statement:
-                    Ast::Stmt.Expr(expression, _):
-                        return true if proof_expr_erases_unsigned_local(expression, declarations, depth + 1)
-                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
-                        return true if proof_unsigned_type_width(type_expression, declarations, 0) != 0
-                        return true if proof_expr_erases_unsigned_local(type_expression, declarations, depth + 1) or proof_expr_erases_unsigned_local(initializer, declarations, depth + 1)
-                    Ast::Stmt.Assign(target, _, initializer, _):
-                        return true if proof_expr_erases_unsigned_local(target, declarations, depth + 1) or proof_expr_erases_unsigned_local(initializer, declarations, depth + 1)
-                    Ast::Stmt.Return(value, _):
-                        return true if value is returned and proof_expr_erases_unsigned_local(returned, declarations, depth + 1)
-                    Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_expr_erases_unsigned_local(condition, declarations, depth + 1) or proof_body_erases_unsigned_local(then_body, declarations, depth + 1) or proof_body_erases_unsigned_local(else_body, declarations, depth + 1)
-                    Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_expr_erases_unsigned_local(condition, declarations, depth + 1) or proof_body_erases_unsigned_local(while_body, declarations, depth + 1)
-                    Ast::Stmt.For(_, _, iterable, for_body, _):
-                        return true if proof_expr_erases_unsigned_local(iterable, declarations, depth + 1) or proof_body_erases_unsigned_local(for_body, declarations, depth + 1)
-                    Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_expr_erases_unsigned_local(scrutinee, declarations, depth + 1)
-                        for arm in arms:
-                            return true if proof_expr_erases_unsigned_local(arm.guard, declarations, depth + 1) or proof_body_erases_unsigned_local(arm.body, declarations, depth + 1)
-                    Ast::Stmt.Block(_, _, _, block_body, _):
-                        return true if proof_body_erases_unsigned_local(block_body, declarations, depth + 1)
-                    Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_expr_erases_unsigned_local(expression, declarations, depth + 1)
-                    _:
-                        pass
-            return false
-
-        def proof_expr_erases_unsigned_local(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
-            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_expr_erases_unsigned_local(callee, declarations, depth + 1)
-                    for argument in arguments:
-                        return true if proof_expr_erases_unsigned_local(argument, declarations, depth + 1)
-                    return false
-                Ast::Expr.Paren(inner, _):
-                    return proof_expr_erases_unsigned_local(inner, declarations, depth + 1)
-                Ast::Expr.Unary(_, operand, _):
-                    return proof_expr_erases_unsigned_local(operand, declarations, depth + 1)
-                Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_erases_unsigned_local(left, declarations, depth + 1) or proof_expr_erases_unsigned_local(right, declarations, depth + 1)
-                Ast::Expr.Field(object, _, _):
-                    return proof_expr_erases_unsigned_local(object, declarations, depth + 1)
-                Ast::Expr.Scope(base, _, _):
-                    return proof_expr_erases_unsigned_local(base, declarations, depth + 1)
-                Ast::Expr.Index(object, index, _):
-                    return proof_expr_erases_unsigned_local(object, declarations, depth + 1) or proof_expr_erases_unsigned_local(index, declarations, depth + 1)
-                Ast::Expr.Slice(object, low, high, _):
-                    return proof_expr_erases_unsigned_local(object, declarations, depth + 1) or proof_expr_erases_unsigned_local(low, declarations, depth + 1) or proof_expr_erases_unsigned_local(high, declarations, depth + 1)
-                Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_expr_erases_unsigned_local(object, declarations, depth + 1)
-                    for argument in arguments:
-                        return true if proof_expr_erases_unsigned_local(argument, declarations, depth + 1)
-                    return false
-                Ast::Expr.Move(operand, _):
-                    return proof_expr_erases_unsigned_local(operand, declarations, depth + 1)
-                Ast::Expr.RegionNew(operand, _, _):
-                    return proof_expr_erases_unsigned_local(operand, declarations, depth + 1)
-                Ast::Expr.Array(elements, _):
-                    for element in elements:
-                        return true if proof_expr_erases_unsigned_local(element, declarations, depth + 1)
-                    return false
-                Ast::Expr.Tuple(elements, _):
-                    for element in elements:
-                        return true if proof_expr_erases_unsigned_local(element, declarations, depth + 1)
-                    return false
-                Ast::Expr.SetLit(elements, _):
-                    for element in elements:
-                        return true if proof_expr_erases_unsigned_local(element, declarations, depth + 1)
-                    return false
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries:
-                        return true if proof_expr_erases_unsigned_local(entry.key, declarations, depth + 1) or proof_expr_erases_unsigned_local(entry.value, declarations, depth + 1)
-                    return false
-                Ast::Expr.Construct(_, fields, _):
-                    for field in fields:
-                        return true if proof_expr_erases_unsigned_local(field.value, declarations, depth + 1)
-                    return false
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_expr_erases_unsigned_local(base, declarations, depth + 1)
-                    for field in fields:
-                        return true if proof_expr_erases_unsigned_local(field.value, declarations, depth + 1)
-                    return false
-                Ast::Expr.If(condition, then_expr, else_expr, _):
-                    return proof_expr_erases_unsigned_local(condition, declarations, depth + 1) or proof_expr_erases_unsigned_local(then_expr, declarations, depth + 1) or proof_expr_erases_unsigned_local(else_expr, declarations, depth + 1)
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_expr_erases_unsigned_local(iterable, declarations, depth + 1) or proof_expr_erases_unsigned_local(condition, declarations, depth + 1) or proof_expr_erases_unsigned_local(body, declarations, depth + 1)
-                Ast::Expr.Refinement(base, predicate, _):
-                    return proof_expr_erases_unsigned_local(base, declarations, depth + 1) or proof_expr_erases_unsigned_local(predicate, declarations, depth + 1)
-                Ast::Expr.Match(scrutinee, arms, _):
-                    return true if proof_expr_erases_unsigned_local(scrutinee, declarations, depth + 1)
-                    for arm in arms:
-                        return true if proof_expr_erases_unsigned_local(arm.guard, declarations, depth + 1) or proof_body_erases_unsigned_local(arm.body, declarations, depth + 1)
-                    return false
-                Ast::Expr.Catch(guarded, arms, _):
-                    return true if proof_expr_erases_unsigned_local(guarded, declarations, depth + 1)
-                    for arm in arms:
-                        return true if proof_expr_erases_unsigned_local(arm.guard, declarations, depth + 1) or proof_body_erases_unsigned_local(arm.body, declarations, depth + 1)
-                    return false
-                Ast::Expr.GetElse(guarded, recovery, _):
-                    return proof_expr_erases_unsigned_local(guarded, declarations, depth + 1) or proof_body_erases_unsigned_local(recovery, declarations, depth + 1)
-                Ast::Expr.Lambda(_, body, _):
-                    return proof_body_erases_unsigned_local(body, declarations, depth + 1)
-                Ast::Expr.Block(statements, value, _, _):
-                    return proof_body_erases_unsigned_local(statements, declarations, depth + 1) or proof_expr_erases_unsigned_local(value, declarations, depth + 1)
-                _:
-                    return false
-
         def proof_check_function(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, position: Ast::Pos, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
-            if proof_body_erases_unsigned_local(body, file.top_decls, 0):
-                report.proof_obligation(false)
-                proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "unsigned local verification requires type-preserving symbolic bindings")
-                return
             # The logical kernel currently models ordinary equality and integer arithmetic,
             # not IEEE NaN or rounding. Erasing a floating parameter to an untyped identifier
             # would make even x == x an unsound theorem. Stop before publishing obligations
@@ -5772,10 +5761,7 @@ extend ElisaProof:
             facts: mutable darray[Ast::Expr] = []
             for parameter in parameters |facts, report, function_name, position|:
                 unsigned_width: i64 = proof_unsigned_type_width(parameter.type_expression, report.source_declarations, 0)
-                if unsigned_width != 0:
-                    lower_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0), TokenKind.LtEq, Ast::Expr.Ident(parameter.name, position), position)
-                    proof_add_traced_fact(facts, report, lower_bound, "type-bound", position.line, function_name)
-                    proof_unsigned_type_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position)
+                proof_add_unsigned_binding_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position) if unsigned_width > 0
             for requirement in preconditions |facts, names, values, report, function_name, position|:
                 proof_add_traced_fact(facts, report, proof_substitute(requirement, names, values), "precondition", position.line, function_name)
             # Resource transitions are checked after entry facts are established so the source

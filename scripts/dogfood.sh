@@ -85,23 +85,21 @@ print(f"dogfood {label}: status={report['status']} obligations={report['summary'
 PY
 }
 
-# The bounds slices still prove independently. The insertion helper's unsigned
-# local is explicitly unsupported until symbolic bindings retain numeric types.
-run_probe kernel_core src/proof/kernel_core.elisa 1
-run_probe kernel_core_fixture examples/dogfood_kernel_core.elisa 1
+# The bounds slices and the insertion helper (whose `index` is an unsigned local bound
+# to its own typed symbol) prove and replay independently.
+run_probe kernel_core src/proof/kernel_core.elisa 0
+run_probe kernel_core_fixture examples/dogfood_kernel_core.elisa 0
 python3 - "$REPORT_DIR/kernel_core.json" "$REPORT_DIR/kernel_core_fixture.json" <<'PY'
 import json
 import sys
 
-for path, proven in zip(sys.argv[1:], (6, 19)):
+for path, proven in zip(sys.argv[1:], (7, 20)):
     with open(path, encoding="utf-8") as handle:
         report = json.load(handle)
-    assert report["status"] == "failed"
-    assert report["verification_state"] == "unsupported"
+    assert report["status"] == "proved"
     assert report["summary"]["proven"] == proven
-    assert [(f["name"], f["kind"]) for f in report["findings"]] == [
-        ("add_node", "contract-expression-unsupported")
-    ]
+    assert report["summary"]["obligations"] == proven
+    assert report["findings"] == []
 PY
 run_probe quantifier_hypothesis examples/quantifier_hypothesis.elisa 0
 run_probe rejected_float_reflexivity examples/rejected_float_reflexivity.elisa 1
@@ -129,24 +127,34 @@ assert {(f["name"], f["kind"]) for f in report["findings"]} == {
     ("unsigned_subtraction_explosion", "ensure-unproven"),
 }
 PY
+run_probe unsigned_local examples/unsigned_local.elisa 0
 run_probe rejected_unsigned_local examples/rejected_unsigned_local.elisa 1
 run_probe rejected_unsigned_local_states examples/rejected_unsigned_local_states.elisa 1
 
-# Rejection alone is insufficient: source-bound tactics must not receive an
-# erased arithmetic goal that could be repaired into a false source theorem.
-python3 - "$REPORT_DIR/rejected_unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local_states.json" <<'PY'
+# Unsigned locals stay symbolic with their compiler width. Every arithmetic goal in
+# the rejected fixtures is false under wrapping, stale after a rebinding, or leaks a
+# shadowed symbol's facts; none may prove or certify. Only the per-function
+# resource-safety obligations, which carry no arithmetic, are admitted.
+python3 - "$REPORT_DIR/unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local_states.json" <<'PY'
 import json
 import sys
 
-for path in sys.argv[1:]:
+accepted, *rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["summary"]["proven"] == report["summary"]["obligations"] == 16
+assert report["findings"] == []
+for path in rejected:
     with open(path, encoding="utf-8") as handle:
         report = json.load(handle)
-    if report["replay"]["certificates"] != 0 or report["summary"]["proven"] != 0:
-        raise SystemExit("dogfood failed: unsigned local preflight emitted a proof")
-    if report["status"] != "failed" or report["verification_state"] != "unsupported":
-        raise SystemExit("dogfood failed: unsigned local preflight did not report unsupported")
-    if report["goals"] or report["summary"]["semantic_errors"] != 0:
-        raise SystemExit("dogfood failed: unsigned local fixture exposed a goal or had semantic errors")
+    if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
+        raise SystemExit("dogfood failed: unsigned local fixture did not fail cleanly")
+    arithmetic_goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]
+    if not arithmetic_goals or any(goal["proven"] for goal in arithmetic_goals):
+        raise SystemExit("dogfood failed: an unsigned local goal was proven under erased semantics")
+    if report["replay"]["certificates"] != len(report["goals"]) - len(arithmetic_goals):
+        raise SystemExit("dogfood failed: unsigned local fixture certified an arithmetic goal")
 PY
 
 # This fixture intentionally contains unsupported surface around the standalone replay module.
@@ -173,6 +181,7 @@ run_probe rejected_borrow_symbolic_alias examples/rejected_borrow_symbolic_alias
 run_probe for_invariant examples/for_invariant.elisa 0
 run_probe for_loop_control_invariant examples/for_loop_control_invariant.elisa 0
 run_probe region_allocation examples/region_allocation.elisa 0
+run_probe region_scalar_copy examples/region_scalar_copy.elisa 0
 run_probe region_statement examples/region_statement.elisa 0
 run_probe region_auto_close examples/region_auto_close.elisa 0
 run_probe region_generic_allocation examples/region_generic_allocation.elisa 0

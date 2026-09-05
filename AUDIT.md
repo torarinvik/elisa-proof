@@ -4,39 +4,42 @@ Passing the current suites is regression evidence, not completion of the full au
 The objective covers all existing implementation code, scripts, proof fixtures, and their
 assumptions about the compiler. No module below is yet certified as fully audited.
 
-## Contained defect; full repair open: unsigned local substitution
+## Repaired: unsigned local substitution erased fixed-width semantics
 
-Reproducer: `examples/rejected_unsigned_local.elisa`.
+Reproducer: `examples/rejected_unsigned_local.elisa` (with `rejected_unsigned_local_states.elisa`).
 
-```
-./build/elisa-proof examples/rejected_unsigned_local.elisa
-```
+Observed at revision `8f3dfbf`: `x: u8 = 255` followed by `proof x + 1 > x` was certified,
+because the declaration path substituted the initializer literal for the name and every later
+tier reasoned about signed `255 + 1`. The interim containment rejected any function with an
+unsigned local, which also excluded `kernel_core.add_node` and
+`proof_kernel_replay_difference_query` from verification.
 
-Observed at revision `8f3dfbf`: exit 0, three proven obligations, three replayed certificates,
-zero replay gaps. The proof is false: after `x: u8 = 255`, `x + 1 > x` fails under wrapping
-unsigned arithmetic. The current preflight rejects functions containing explicit unsigned local
-declarations before publishing logical obligations or summaries. The fixture is now in dogfood,
-along with rebinding, compound assignment, branch, shadowing, loop, and bounded-safe cases.
-The tests require zero proven obligations and zero certificates, not just a nonzero exit status.
+Repair (`src/proof/check.elisa`): an unsigned local is bound to its own symbol, exactly like an
+unsigned parameter, and carries the same traced `type-bound` facts (lower bound, width marker,
+and exact upper bound below 64 bits). Its value is recorded as a traced `local-binding` equality
+only when the value is range-safe under the current facts; a possibly wrapping initializer leaves
+the symbol opaque within its type range. Replay admits `local-binding` as a boundary fact kind.
 
-This is conservative containment, not completed type preservation: even bounded-safe unsigned
-locals are temporarily unsupported. The core `add_node` helper is affected; six obligations in
-the remaining core and nineteen in its call-site fixture still prove and independently replay.
-Tests explicitly require that the only finding in those two fixtures belongs to `add_node`.
-The standalone replay audit also loses verification of `proof_kernel_replay_difference_query`,
-which has unsigned locals. Its test now requires the explicit type-erasure finding while keeping
-the other nine previously required verified helpers and all certificate replay checks.
+Re-symbolization is now explicit and transitive. Declaring a spelling that already denotes a
+symbol (a shadowed local, a parameter, or a forgotten binding), rebinding an unsigned local, and
+any compound assignment purge every fact mentioning the old symbol and forget every other binding
+whose recorded value mentions it, re-establishing only the compiler type facts of cascaded
+bindings. A self-referential initializer such as `x: u8 = x + 1` yields an opaque value.
 
-The declaration path in `proof_check_returns` substitutes the initializer into its value table.
-It records the unsigned type marker against the original local name, but subsequent expression
-substitution replaces that name with an untyped `IntLit`. Both the producer and replay kernel
-then reason about signed mathematical `255 + 1` instead of the source's u8 operation.
+Fact invalidation inside symbolic execution keeps type-bound facts of live bindings and
+parameters (`proof_clear_facts_keep_type_bounds`); a scoped `proof` block likewise keeps only
+those facts. Previously a cleared marker would have let later arithmetic on the binding be folded
+as unbounded signed arithmetic. Type facts are added idempotently; without that, joins and
+rebindings multiplied identical facts and traces until the standalone replay audit did not finish.
 
-Required repair must preserve arithmetic type through substitution, not only attach more facts
-to a name that disappears. Check declarations, rebindings, compound assignments, shadowing,
-branch joins, loop state, and instantiated function summaries. Regression requirements include
-rejection of wrapping operations, acceptance of bounded safe operations, and direct kernel replay
-that cannot admit a certificate after the arithmetic type has been removed or changed.
+Coverage: `examples/unsigned_local.elisa` proves bounded declaration, rebinding, `usize` from a
+count, an ensure through a `u8` local, unsigned subtraction under an order precondition, and the
+type range inside a scoped block. The rejected fixtures cover wrapping declaration, rebinding,
+compound assignment, branch and loop locals, a wrapping initializer, a local shadowing a
+parameter with a precondition, and a dependent binding that must be forgotten on rebinding; the
+tests require that no arithmetic goal in them proves or certifies. `kernel_core` and its
+call-site fixture now prove completely and the standalone replay audit verifies
+`proof_kernel_replay_difference_query` again, with 187 proven obligations instead of 160.
 
 ## Targeted repairs
 
@@ -87,6 +90,20 @@ Standalone attempts to isolate the pattern outside the replay module are rejecte
 "darray push requires an active in <arena>: scope" instead of being miscompiled, so the reduced
 replay trace is the reproducer. Dogfood now builds the reduced trace and the full arena harness
 with stage0 whenever it is installed.
+
+### Repaired: scalar copies out of region-owned references were treated as region aliases
+
+Unmasked by the repair above: once `proof_kernel_replay_resource_events` and
+`proof_kernel_replay_resource_call` were resource-checked at all, sixteen
+`region-use-after-destroy` findings appeared, and their counterexample status flipped the
+standalone audit to `disproved`. Reproducer: `examples/region_scalar_copy.elisa`. A
+`usize` declared from `store.names.count` inherited the region of the `@s` reference, was then
+reported as an unsupported region alias with a dead live bit, and every later use or rebinding
+of that plain integer was flagged as a use after region destruction. A scalar read is a copied
+value, not a view into the region. The resource state now records bindings declared with a bare
+scalar primitive type, and neither declaration nor assignment propagates a source region into
+them. Aliases and refinements are not guessed and keep the conservative behavior. Note that the
+report line numbers for the standalone audit are offset by that example's include prologue.
 
 ### Repaired: unsigned assumptions entering signed decision procedures
 
