@@ -88,9 +88,9 @@ The proof kernel is intentionally fail-closed:
    A direct whole-binding region allocation carries one exclusive owner token; a same-region alias
    transfers that token rather than copying it. This permits one controlled shared-to-mutable
    exposure while rejecting duplicate mutable capabilities and use of the consumed owner. Region
-   aliases currently carry no path metadata, so field/index sources are rejected rather than
-   widened to whole-root capabilities. Borrowed or external references have no such token and
-   cannot be upgraded by alias metadata.
+   aliases and region assignments currently carry no source-path metadata, so field/index sources
+   are rejected rather than widened to whole-root capabilities. Borrowed or external references
+   have no such token and cannot be upgraded by alias metadata.
    Child resource snapshots additionally mark inherited region identities as protected, so a nested
    `destroy r` followed by a same-named reopen cannot be hidden by the child join even when no
    binding currently carries `r`.
