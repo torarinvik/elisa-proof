@@ -80,6 +80,12 @@ if [[ "$rejected_borrow_after_move_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid borrow-after-move fixture\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-negative-affine-difference.o" "$ROOT_DIR/examples/rejected_negative_affine_difference.elisa" >/dev/null 2>&1
+rejected_negative_affine_difference_compiler_status=$?
+if [[ "$rejected_negative_affine_difference_compiler_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: compiler rejected the signed-affine regression fixture\n' >&2
+    exit 1
+fi
 "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/nested-region-destroy.o" "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/dev/null 2>&1
 nested_region_destroy_compiler_status=$?
 if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
@@ -199,6 +205,19 @@ if [[ "$rejected_region_bind_mutable_external_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "region-alias-unsupported" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_region_bind_mutable_external_report"; then
     printf 'proof test matrix failed: mutable external region alias report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+rejected_negative_affine_difference_report="$standalone_probe_dir/rejected-negative-affine-difference.json"
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_negative_affine_difference.elisa" >"$rejected_negative_affine_difference_report"
+rejected_negative_affine_difference_status=$?
+set -e
+if [[ "$rejected_negative_affine_difference_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: signed affine difference admitted a false postcondition\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "ensure-unproven" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_negative_affine_difference_report"; then
+    printf 'proof test matrix failed: signed affine difference report was incomplete\n' >&2
     exit 1
 fi
 set +e
