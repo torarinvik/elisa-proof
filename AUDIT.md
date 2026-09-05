@@ -40,6 +40,26 @@ that cannot admit a certificate after the arithmetic type has been removed or ch
 
 ## Coverage still required
 
+### Repaired: unsigned assumptions entering signed decision procedures
+
+`examples/rejected_unsigned_fact_explosion.elisa` originally certified `x == 0` from
+`x: u8 == 255`, `y: u8 == 0`, and `y == x + 1`. These premises describe a real wrapping
+execution, but the signed arithmetic tiers treated them as excluding that execution.
+The producer and independent replay now check arithmetic safety of premises, not just goals,
+before using signed decision procedures. Direct assumption reuse remains admissible.
+Subtraction safety uses only plain scalar order facts, so an unchecked modular arithmetic
+premise cannot establish its own non-wrapping interpretation.
+
+Regressions cover false-source-goal rejection, bounded-safe arithmetic premises, direct reuse
+of a wrapping premise, and direct hostile arena replay without the producer. This repair does
+not add modular arithmetic or resolve the separately tracked typed-binding work.
+
+Validation used an isolated copy with both the stage1 compiler and included front end from the
+installed snapshot at revision `3c8924aa`. The shared compiler worktree was concurrently edited;
+normal builds during this fix encountered parser mutability errors there. Those unrelated edits
+were not changed. Snapshot validation does not establish that the moving shared-front-end build
+is currently working.
+
 | Code | Required audit coverage |
 | --- | --- |
 | `src/main.elisa` | Source import, diagnostics, every CLI admission gate, serialization, fingerprints, target repair |

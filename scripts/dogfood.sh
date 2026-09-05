@@ -114,6 +114,21 @@ run_probe unsigned_alias examples/unsigned_alias.elisa 0
 run_probe rejected_unsigned_alias examples/rejected_unsigned_alias.elisa 1
 run_probe unsigned_refinement examples/unsigned_refinement.elisa 0
 run_probe rejected_unsigned_refinement examples/rejected_unsigned_refinement.elisa 1
+run_probe unsigned_fact_safety examples/unsigned_fact_safety.elisa 0
+run_probe rejected_unsigned_fact_explosion examples/rejected_unsigned_fact_explosion.elisa 1
+python3 - "$REPORT_DIR/rejected_unsigned_fact_explosion.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["summary"]["semantic_errors"] == 0
+assert report["summary"]["proven"] == 2
+assert {(f["name"], f["kind"]) for f in report["findings"]} == {
+    ("unsigned_fact_explosion", "ensure-unproven"),
+    ("unsigned_subtraction_explosion", "ensure-unproven"),
+}
+PY
 run_probe rejected_unsigned_local examples/rejected_unsigned_local.elisa 1
 run_probe rejected_unsigned_local_states examples/rejected_unsigned_local_states.elisa 1
 

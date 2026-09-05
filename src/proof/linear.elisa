@@ -191,6 +191,30 @@ extend ElisaProof:
                 _:
                     return 0
 
+        def proof_unsigned_order_atom(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.IntLit(_): return true
+                Ast::Expr.Ident(_, _): return true
+                Ast::Expr.Paren(inner, _): return proof_unsigned_order_atom(inner)
+                _: return false
+
+        # Range safety must not be justified by reinterpreting the very modular
+        # arithmetic whose safety is in question. Only plain scalar orders enter
+        # the subtraction-order solver; split conjunctions without importing their
+        # arithmetic siblings.
+        def proof_collect_unsigned_order_facts(expression: Ast::Expr, orders: mutable darray[Ast::Expr]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_unsigned_order_facts(inner, orders)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        proof_collect_unsigned_order_facts(left, orders)
+                        proof_collect_unsigned_order_facts(right, orders)
+                    elif proof_is_comparison(operator) and proof_unsigned_order_atom(left) and proof_unsigned_order_atom(right):
+                        orders.push(expression)
+                _:
+                    pass
+
         def proof_unsigned_expression_safe_with_bounds(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&) -> bool:
             match expression:
                 Ast::Expr.Paren(inner, _):
@@ -213,8 +237,11 @@ extend ElisaProof:
                     # minuend is at least the subtrahend, even when the values are wider than
                     # this prover's i64 interval domain. Preserve useful range proofs such as
                     # `count <= total - start` under the explicit `start <= total` precondition.
-                    if operator == TokenKind.Minus and proof_linear_goal(right, TokenKind.LtEq, left, facts):
-                        return true
+                    if operator == TokenKind.Minus:
+                        orders: mutable darray[Ast::Expr] = []
+                        for fact in facts |orders|:
+                            proof_collect_unsigned_order_facts(fact, &orders)
+                        return true if proof_linear_goal(right, TokenKind.LtEq, left, orders)
                     interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
                     return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
@@ -1353,12 +1380,17 @@ extend ElisaProof:
             # valid even though it is not enough to construct a finite interval for `x`.
             for fact in facts:
                 return true if proof_fact_contains(fact, goal) or proof_quantifier_equal(fact, goal, annotations)
-            return true if proof_facts_inconsistent(facts)
-            return true if proof_fact_proves_call_summary(facts, goal)
             # Do not let the unbounded signed interval/model tiers prove a fixed-width unsigned
             # expression unless every arithmetic subterm is shown to remain in its declared
             # range. Directly asserted facts were handled above and remain valid path assumptions.
             return true if proof_unsigned_goal_identity(goal)
+            # Signed decision procedures consume premises as well as the goal.
+            # A true wrapping premise may be false over integers; treating it as
+            # such can discard every actual execution and prove an arbitrary goal.
+            for fact in facts:
+                return false if not proof_unsigned_expression_safe(fact, facts)
+            return true if proof_facts_inconsistent(facts)
+            return true if proof_fact_proves_call_summary(facts, goal)
             return false if not proof_unsigned_expression_safe(goal, facts)
             if split_depth < 4:
                 disjunction_index: mutable usize = facts.count
