@@ -514,6 +514,13 @@ recognize, stay unsupported, as do executable calls in `while`, `for`, `match`, 
 does not discharge a later obligation naming it again. See `examples/condition_call_positions.elisa`
 and `examples/rejected_condition_call_positions.elisa`.
 
+The sign of a product follows from its operands' signs: `x * y >= 0` from two nonnegative or two
+nonpositive operands, `x * y <= 0` from a mixed pair, and the strict conclusions from strict
+premises, with the product on either side of a literal zero. The rule is syntactic — the sign facts
+must be present as facts — so the producer and the replay kernel state it identically, and both
+operands must be witnessed primitive scalars because `*` on a struct operand is a user `__mul__`
+under no sign law. See `examples/product_sign.elisa` and `examples/rejected_product_sign.elisa`.
+
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its
 strongest built-in refinement/invariant mode, but the custom kernel still has no SMT backend,

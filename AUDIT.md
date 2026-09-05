@@ -969,6 +969,44 @@ a branching proof must be written as JSON and the vocabulary is branch-free. And
 re-derives which goals a source *edit* invalidated: the batch repairs what is open now, but does
 not diff two revisions.
 
+## Added: the sign of a product
+
+Every arithmetic tier in the checker was linear, so `x >= 0, y >= 0 |- x * y >= 0` had no rule at
+all — not because it is hard, but because it is the one nonlinear fact that follows from the
+operands' signs and needs no reasoning about multiplication beyond them. The previous entry
+measured that this exact gap is what blocks automated repair: a lemma cannot supply it either,
+because a recursive lemma proving `n * m >= 0` fails its own `ensure` for want of the distributivity
+its inductive step would need. The same missing arithmetic blocked both halves, so closing it here
+is the piece that actually moves.
+
+`proof_product_sign_goal` and `proof_kernel_replay_product_sign` conclude a sign for `A * B`
+against a literal zero, in either order, from the operands' signs: nonnegative from two
+nonnegatives or two nonpositives, nonpositive from a mixed pair, and the strict conclusions from
+strict premises. `0 <= x` is accepted as the same fact as `x >= 0`.
+
+Two design choices are load-bearing. The rule is **syntactic**: the required sign facts must be
+present as facts, matched structurally, never re-derived by a second search. A tier the producer
+and the kernel could only approximate would surface as a replay gap rather than as a proof, and
+keeping the rule small is what lets the two state it identically. And both operands must be
+witnessed primitive scalars, because Elisa rewrites `*` on a struct operand to a user `__mul__`,
+which is an ordinary method under no sign law whatsoever.
+
+Nothing about signed overflow is newly assumed. The prover already models signed arithmetic as
+unbounded integers — it is how `x >= 0, y >= 0 |- x + y >= 0` is proved today — and the unsigned
+range guards that gate fixed-width reasoning are untouched.
+
+Coverage. `examples/product_sign.elisa` proves all six accepted shapes and
+`examples/rejected_product_sign.elisa` refuses five near misses: a strict conclusion from
+non-strict premises, a mixed pair claimed nonnegative, one known sign standing in for two, a bound
+other than zero, and sign facts about unrelated terms. Both suites require the accepted file to
+replay with zero gaps and the rejected file to prove no non-resource goal.
+
+The two mutation results are the point. Disabling the producer's rule drops the accepted fixture
+from 12 proven to 6. Disabling the *kernel's* mirror leaves the producer proving all 12 and
+produces **6 replay gaps** — the kernel independently re-derives every one of these signs, and a
+rule the producer alone believed could not pass as a proof. On the kernel's own source the proven
+count moved from 891 to 896 with replay gaps unchanged at zero.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

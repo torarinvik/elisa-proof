@@ -1213,6 +1213,84 @@ extend ElisaProof:
                     pass
             return false
 
+        # The sign of a product, the one nonlinear fact worth deciding. Every other tier here is
+        # linear, so `x >= 0, y >= 0 |- x * y >= 0` was out of reach even though it is decidable
+        # from the operands' signs alone and needs no multiplication reasoning beyond them.
+        #
+        # The rule is deliberately syntactic: the required sign facts must be present as facts,
+        # matched structurally, rather than re-derived by another search. That keeps it small, and
+        # it keeps the producer and the replay kernel able to state exactly the same rule — a tier
+        # the two could only approximate would show up as a replay gap rather than a proof.
+        #
+        # Both operands must be witnessed primitive scalars. Elisa rewrites `*` on a struct operand
+        # to a user `__mul__`, which is an ordinary method under no sign law at all.
+        def proof_product_sign_operands(expression: Ast::Expr) -> (known: bool, left: Ast::Expr, right: Ast::Expr):
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_product_sign_operands(inner)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, left, right) if operator == TokenKind.Star
+                    return (false, Ast::Expr.Absent, Ast::Expr.Absent)
+                _:
+                    return (false, Ast::Expr.Absent, Ast::Expr.Absent)
+
+        # Is `term <relation> 0` an explicit fact? Only the four orderings against a literal zero
+        # count; anything else would need the arithmetic tiers this rule sits beside.
+        def proof_product_sign_fact(term: Ast::Expr, relation: TokenKind, facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts |fact, term, relation|:
+                match fact:
+                    Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
+                        if fact_operator == relation and proof_expr_is_zero_literal(fact_right) and proof_expr_equal(fact_left, term):
+                            return true
+                        # `0 <= x` is the same fact as `x >= 0`; accept the mirrored form too.
+                        mirrored: TokenKind = proof_product_sign_mirror(relation)
+                        if fact_operator == mirrored and proof_expr_is_zero_literal(fact_left) and proof_expr_equal(fact_right, term):
+                            return true
+                    _:
+                        pass
+            return false
+
+        def proof_product_sign_mirror(relation: TokenKind) -> TokenKind:
+            return TokenKind.LtEq if relation == TokenKind.GtEq
+            return TokenKind.GtEq if relation == TokenKind.LtEq
+            return TokenKind.Lt if relation == TokenKind.Gt
+            return TokenKind.Gt if relation == TokenKind.Lt
+            return relation
+
+        def proof_expr_is_zero_literal(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_is_zero_literal(inner)
+                Ast::Expr.IntLit(value):
+                    return value == 0
+                _:
+                    return false
+
+        def proof_product_sign_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            # Only `product <relation> 0` shapes; the product may sit on either side.
+            product: mutable (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_product_sign_operands(left)
+            relation: mutable TokenKind = operator
+            if not product.known:
+                product <- proof_product_sign_operands(right)
+                relation <- proof_product_sign_mirror(operator)
+                return false if not product.known or not proof_expr_is_zero_literal(left)
+            else:
+                return false if not proof_expr_is_zero_literal(right)
+            return false if not proof_scalar_term_witnessed(product.left, facts, 0) or not proof_scalar_term_witnessed(product.right, facts, 0)
+            if relation == TokenKind.GtEq:
+                return true if proof_product_sign_fact(product.left, TokenKind.GtEq, facts) and proof_product_sign_fact(product.right, TokenKind.GtEq, facts)
+                return proof_product_sign_fact(product.left, TokenKind.LtEq, facts) and proof_product_sign_fact(product.right, TokenKind.LtEq, facts)
+            if relation == TokenKind.LtEq:
+                return true if proof_product_sign_fact(product.left, TokenKind.GtEq, facts) and proof_product_sign_fact(product.right, TokenKind.LtEq, facts)
+                return proof_product_sign_fact(product.left, TokenKind.LtEq, facts) and proof_product_sign_fact(product.right, TokenKind.GtEq, facts)
+            if relation == TokenKind.Gt:
+                return true if proof_product_sign_fact(product.left, TokenKind.Gt, facts) and proof_product_sign_fact(product.right, TokenKind.Gt, facts)
+                return proof_product_sign_fact(product.left, TokenKind.Lt, facts) and proof_product_sign_fact(product.right, TokenKind.Lt, facts)
+            if relation == TokenKind.Lt:
+                return true if proof_product_sign_fact(product.left, TokenKind.Gt, facts) and proof_product_sign_fact(product.right, TokenKind.Lt, facts)
+                return proof_product_sign_fact(product.left, TokenKind.Lt, facts) and proof_product_sign_fact(product.right, TokenKind.Gt, facts)
+            return false
+
         def proof_linear_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             return true if proof_primitive_comparison(left, right, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
             left_name: sview = proof_ident_name(left)
@@ -1750,6 +1828,7 @@ extend ElisaProof:
                     if proof_is_comparison(operator):
                         return true if proof_fact_proves_comparison_negation(left, operator, right, facts)
                         return true if proof_linear_goal(left, operator, right, facts)
+                        return true if proof_product_sign_goal(left, operator, right, facts)
                         # Congruence is the last equality tier and runs only after the
                         # fixed-width safety guards above rejected every wrapping premise/goal.
                         return proof_congruence_goal(facts, goal, annotations, exhausted) if operator == TokenKind.EqEq
