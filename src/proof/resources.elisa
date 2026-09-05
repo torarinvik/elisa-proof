@@ -882,7 +882,39 @@ extend ElisaProof:
                             return false if proof_resource_has_mutable_borrow_overlap(state, report, actual.place, actual.slot if actual.is_reference else state.binding_names.count)
                 else:
                     return false if actual_kind != "value"
+            return false if proof_resource_call_source_has_pairwise_alias(state, report, callee_root, mapped)
             return true
+
+        # A call creates all of its argument borrows at one boundary. Checking each actual only
+        # against borrows that existed before the call misses `f(&x, &x)` (and the equivalent
+        # reference-slot form): the two temporaries do not enter the caller state, but they still
+        # alias each other while the callee is running. Shared formals may alias shared actuals;
+        # any pair involving a mutable formal must be disjoint. Fresh `new[r]` arguments have no
+        # caller place and are intentionally excluded.
+        def proof_resource_call_source_has_pairwise_alias(state: mutable ProofResourceState&, report: mutable ProofReport&, callee_root: usize, mapped: darray[Ast::Expr]&) -> bool:
+            return false if callee_root >= report.kernel_nodes.count
+            callee: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[callee_root]
+            return false if callee.kind != "resource-safety" or callee.auxiliary != mapped.count
+            places: mutable darray[ProofResourcePlace] = []
+            has_place: mutable darray[bool] = []
+            mutable_formal: mutable darray[bool] = []
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, report, callee, state, places, has_place, mutable_formal|:
+                formal_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_resource_callee_parameter_node(report, callee, parameter_index)
+                return false if not formal_node.known
+                formal: ElisaProofKernelCore::ProofKernelNode = formal_node.node
+                actual_kind: sview = proof_resource_call_argument_kind(mapped[parameter_index], state, report)
+                actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_source_actual(mapped[parameter_index], state, report)
+                places.push(actual.place)
+                is_reference_formal: bool = formal.operator == "external-shared" or formal.operator == "external-mutable"
+                has_place.push(is_reference_formal and actual_kind != "region-new" and actual.known and actual.place.root != "")
+                mutable_formal.push(formal.operator == "external-mutable")
+            for left_index in 0..<places.count |left_index, places, has_place, mutable_formal, state, report|:
+                continue if not has_place[left_index]
+                for right_index in 0..<places.count |right_index, left_index, places, has_place, mutable_formal, state, report|:
+                    continue if right_index <= left_index or not has_place[right_index]
+                    continue if not mutable_formal[left_index] and not mutable_formal[right_index]
+                    return true if proof_resource_places_overlap(state, report, places[left_index], places[right_index])
+            return false
 
         # Infer a symbolic callee region only from an explicitly region-pinned formal and a
         # directly tracked caller value carrying that same region. A scalar argument cannot infer
@@ -1680,9 +1712,12 @@ extend ElisaProof:
                         mapped_allocation_roots: mutable darray[usize] = []
                         mapped_ok: bool = summary.known and callee_index < functions.names.count and proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &mapped) and proof_resource_map_call_allocation_roots(functions, callee_index, normalized_arguments, argument_names, allocation_roots, &mapped_allocation_roots)
                         if summary.known and mapped_ok:
-                            recorded: bool = proof_resource_record_call(state, report, callee_name, summary.root, callee_index, mapped, mapped_allocation_roots, functions)
+                            pairwise_alias: bool = proof_resource_call_source_has_pairwise_alias(state, report, summary.root, mapped)
+                            recorded: mutable bool = false
+                            recorded <- proof_resource_record_call(state, report, callee_name, summary.root, callee_index, mapped, mapped_allocation_roots, functions) if not pairwise_alias
+                            proof_resource_add_failing_obligation(report, "borrow-call-alias", position, function_name, "mutable call arguments overlap while the callee is running") if pairwise_alias
                             proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call is not mapped to a verified caller region") if (region_argument or region_polymorphic_call) and not recorded
-                            proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "the checked callee resource summary could not be encoded for this call") if resource_argument and not recorded
+                            proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "the checked callee resource summary could not be encoded for this call") if resource_argument and not recorded and not pairwise_alias
                         elif summary.known:
                             proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call requires an exact verified region summary") if region_argument or region_polymorphic_call
                             proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "borrow-carrying call requires an exact argument mapping with no unresolved defaults") if resource_argument

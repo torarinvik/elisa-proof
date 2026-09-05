@@ -92,6 +92,12 @@ if [[ "$rejected_negative_affine_goal_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the signed-affine goal regression fixture\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >/dev/null 2>&1
+rejected_borrow_call_duplicate_alias_compiler_status=$?
+if [[ "$rejected_borrow_call_duplicate_alias_compiler_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate mutable call-alias fixture\n' >&2
+    exit 1
+fi
 "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/nested-region-destroy.o" "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/dev/null 2>&1
 nested_region_destroy_compiler_status=$?
 if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
@@ -237,6 +243,19 @@ if [[ "$rejected_negative_affine_goal_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "ensure-unproven" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_negative_affine_goal_report"; then
     printf 'proof test matrix failed: signed affine goal report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+rejected_borrow_call_duplicate_alias_report="$standalone_probe_dir/rejected-borrow-call-duplicate-alias.json"
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >"$rejected_borrow_call_duplicate_alias_report"
+rejected_borrow_call_duplicate_alias_status=$?
+set -e
+if [[ "$rejected_borrow_call_duplicate_alias_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: duplicate mutable call alias was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "borrow-call-alias" and f["status"] == "unknown" for f in report["findings"]); assert not any(node["kind"] == "resource-call" and node["name"] == "write_pair" for node in report["kernel"]["nodes"]); assert report["replay"]["gaps"] == 0' "$rejected_borrow_call_duplicate_alias_report"; then
+    printf 'proof test matrix failed: duplicate mutable call alias report was incomplete\n' >&2
     exit 1
 fi
 set +e
