@@ -891,15 +891,37 @@ proved, and the batch's `partial` path is demonstrated but its all-repaired path
 statement about the vocabulary's reach, not about the plumbing, and it is the honest reason to
 build the next piece rather than a reason to trust this one further than it goes.
 
-That next piece is a `lemma` tactic. `--suggest` already matches a verified theorem's conclusion
-against a goal and reports the parameter bindings, but no tactic can consume one: `apply` works
-only over an existing `A => B` fact and `have` requires the proposed fact to be entailed by current
-hypotheses, so neither can introduce an instantiated lemma conclusion. A tactic mirroring
-`proof_apply_lemma` — instantiate the parameters from the suggestion's bindings, discharge each
-precondition from the current facts, then add the instantiated postcondition — would let the repair
-vocabulary be *derived* from the source's own theorem catalog instead of enumerated. It touches the
-checked engine, so it needs its own adversarial fixtures: an unverified lemma must not be usable, a
-precondition that does not discharge must refuse, and a binding that does not match must refuse.
+That next piece is a `lemma` tactic, and building it far enough to find the blocker turned up a
+constraint worth writing down rather than rediscovering.
+
+`--suggest` already matches a verified theorem's conclusion against a goal and reports the
+parameter bindings, but no tactic can consume one: `apply` works only over an existing `A => B`
+fact, and `have` requires the proposed fact to already be entailed, so neither can introduce an
+instantiated lemma conclusion. A tactic mirroring `proof_apply_lemma` — match a verified theorem's
+postcondition against the current goal, discharge each instantiated precondition from the current
+hypotheses, and close the goal — is the missing piece, and it is what would let the repair
+vocabulary be *derived* from the source's own theorem catalog instead of enumerated.
+
+The blocker is store locality. A prototype reached the point of finding the theorem, confirming it
+verified, and validating its array ranges, and then failed at the conclusion match — because
+`Ast::Expr` values are opaque handles into the parser store that produced them, and the tactic
+engine deliberately runs in a *fresh* store. That is the same constraint the source-bound tactic
+path already works around by exporting the goal and its facts to the JSON expression interchange
+and reparsing them in the tactic store. The theorem catalog needs exactly that treatment: the
+verified theorems' parameter names, preconditions and postconditions have to be exported and
+reparsed alongside the goal state before any tactic can read them.
+
+Two pieces of that are now understood rather than guessed. The matcher itself can be made
+store-independent by taking the parameter-name list instead of `(report, theorem)` — a mechanical
+change that leaves `--suggest` working. And the trace replay needs the catalog too: a `lemma` step
+records which theorem it used, and `proof_tactic_replay` must be able to re-derive it, or the step
+is not independently checked and the trace must be refused rather than trusted.
+
+The prototype was reverted rather than landed. A partially wired step in the checked engine is
+exactly the stub this project does not want, and the tactic needs its own adversarial fixtures
+before it is worth having: an unverified theorem must not be usable, a conclusion that does not
+match must refuse, a precondition that does not discharge must refuse, and a trace naming a
+theorem the source no longer verifies must fail replay rather than silently apply another.
 
 `split` and `cases` still need nested branch scripts, which the text grammar has no syntax for, so
 a branching proof must be written as JSON and the vocabulary is branch-free. And nothing yet
