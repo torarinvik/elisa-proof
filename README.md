@@ -449,14 +449,17 @@ so no fact silently describes a newer value. Scoped `proof` blocks keep only typ
 `examples/unsigned_local.elisa` and the `rejected_unsigned_local*` fixtures.
 
 A borrow-carrying call is admitted either from the callee's independently replayed resource trace
-or, when the call lends only shared references, from the callee's declared parameter and return
-modes: a non-mutable reference confers no write and no move, and the capability ends with the call,
-so the caller's resource state is unchanged whatever the callee's body does. That second path is
-the only one open to a recursive component, which can never consume one of its own summaries. It is
-recorded as an explicit `resource-call-shared` transition that replay re-checks. Lending a writable
-capability, a call whose result escapes as a reference, and region-polymorphic calls all still
-require the callee's converged summary. See `examples/shared_borrow_calls.elisa` and
-`examples/rejected_shared_borrow_calls.elisa`.
+or, when the call lends only references the caller already holds, from the callee's declared
+parameter and return modes: a reference confers no move and the capability ends with the call, so a
+shared lend leaves the caller's resource state unchanged and an exclusive lend can do no more than
+write the whole lent place, whatever the callee's body does. That second path is the only one open
+to a recursive component, which can never consume one of its own summaries. It is recorded as an
+explicit `resource-call-lend` transition carrying the actuals and the callee's declared mode for
+each of the same formals, and replay re-derives every permission from them. An exclusive lend needs
+a place the caller may write, with no overlapping live borrow and no overlapping co-lend; a call
+whose result escapes as a reference and region-polymorphic calls still require the callee's
+converged summary. See `examples/shared_borrow_calls.elisa`, `examples/writable_lend_calls.elisa`,
+`examples/rejected_shared_borrow_calls.elisa` and `examples/rejected_writable_lend_calls.elisa`.
 
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its

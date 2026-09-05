@@ -206,6 +206,8 @@ run_probe call_stable_facts examples/call_stable_facts.elisa 0
 run_probe rejected_call_stable_facts examples/rejected_call_stable_facts.elisa 1
 run_probe shared_borrow_calls examples/shared_borrow_calls.elisa 0
 run_probe rejected_shared_borrow_calls examples/rejected_shared_borrow_calls.elisa 1
+run_probe writable_lend_calls examples/writable_lend_calls.elisa 0
+run_probe rejected_writable_lend_calls examples/rejected_writable_lend_calls.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -421,7 +423,7 @@ if report["status"] != "proved" or report["summary"]["proven"] != report["summar
     raise SystemExit("dogfood failed: shared-reference call fixture did not prove")
 if report["replay"]["gaps"] != 0 or report["findings"] != []:
     raise SystemExit("dogfood failed: shared-reference call fixture left a gap or a finding")
-shared = [node for node in report["kernel"]["nodes"] if node["kind"] == "resource-call-shared"]
+shared = [node for node in report["kernel"]["nodes"] if node["kind"] == "resource-call-lend"]
 if not shared:
     raise SystemExit("dogfood failed: no shared-read call reached the arena")
 if any(node["left"] != 0 or node["children_count"] != node["auxiliary"] * 2 for node in shared):
@@ -440,16 +442,51 @@ if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
 if report["replay"]["gaps"] != 0:
     raise SystemExit("dogfood failed: shared-reference boundary fixture left a replay gap")
 findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}
-required = {("borrow-call-opaque", "recursive_mutate"), ("borrow-call-opaque", "recursive_reference_return"), ("resource-use-after-move", "lends_moved_value")}
+required = {("borrow-call-opaque", "recursive_reference_return"), ("borrow-call-opaque", "lends_shared_while_mutably_borrowed"), ("resource-use-after-move", "lends_moved_value")}
 missing = required - findings
 if missing:
     raise SystemExit("dogfood failed: no diagnostic for %s" % sorted(missing))
-if any(node["kind"] == "resource-call-shared" for node in report["kernel"]["nodes"]):
-    raise SystemExit("dogfood failed: a writable, escaping or exclusively borrowed capability was recorded as a shared read")
+if any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"]):
+    raise SystemExit("dogfood failed: an escaping, moved or exclusively borrowed capability was recorded as a lend")
 opaque = {finding["name"] for finding in report["findings"] if finding["kind"] == "borrow-call-opaque"}
 if "lends_shared_while_mutably_borrowed" not in opaque:
     raise SystemExit("dogfood failed: a shared lend across a live exclusive borrow was not refused")
-print("dogfood shared_borrow_calls: shared lending needs no callee summary, writable lending still does")
+print("dogfood shared_borrow_calls: shared lending needs no callee summary")
+PY
+
+# An exclusive lend needs no callee summary either. The callee can do no more than write through
+# the reference, so the caller records a write to the whole lent place; every exclusive capability
+# must be one the caller holds alone, with no overlapping live borrow and no overlapping co-lend.
+python3 - "$REPORT_DIR/writable_lend_calls.json" "$REPORT_DIR/rejected_writable_lend_calls.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: confined writable lending did not prove cleanly")
+nodes = report["kernel"]["nodes"]
+children = report["kernel"]["children"]
+lends = [node for node in nodes if node["kind"] == "resource-call-lend"]
+if not lends:
+    raise SystemExit("dogfood failed: no confined lend reached the arena")
+formals = [nodes[child] for node in lends for child in children[node["children_start"] + node["auxiliary"]:node["children_start"] + node["children_count"]]]
+if not any(formal["operator"] == "external-mutable" for formal in formals):
+    raise SystemExit("dogfood failed: no exclusive lend was recorded")
+if any(formal["kind"] != "resource-call-formal" for formal in formals):
+    raise SystemExit("dogfood failed: a confined lend recorded no callee parameter modes")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: exclusive-lend boundary fixture did not fail cleanly")
+if any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"]):
+    raise SystemExit("dogfood failed: an unconfined exclusive capability was recorded as a lend")
+opaque = {finding["name"] for finding in report["findings"] if finding["kind"] == "borrow-call-opaque"}
+for name in ("swap_pair", "read_and_write", "touch_borrowed"):
+    if name not in opaque:
+        raise SystemExit("dogfood failed: %s was not refused" % name)
+print("dogfood writable_lend_calls: an exclusive lend is confined to a whole-place write")
 PY
 
 

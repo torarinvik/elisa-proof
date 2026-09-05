@@ -551,7 +551,7 @@ the callee provably cannot write it. Global state is assumed reachable by every 
 over a global is ever retained. The conjunct split is applied to `if` conditions only; `match`
 patterns and guards still record their conditions whole.
 
-## Added: lending a shared reference needs no callee summary
+## Added: lending a reference the caller already holds needs no callee summary
 
 A call that passed any capability required the callee's own converged `resource-safety` trace, and
 a recursive component can never have one — it would be consuming a summary it is still computing.
@@ -559,74 +559,94 @@ Every recursive walk over a shared `darray[T]&` was therefore `borrow-call-opaqu
 `examples/kernel_replay_standalone.elisa` alone, and the diagnostic cascaded: a callee that failed
 for any reason emitted no summary, so all of its callers failed too.
 
-The summary is not what a shared lend needs. Elisa's type system forbids writing through a
-non-mutable reference and forbids moving out of one, and the capability the callee receives ends
-with the call, so the caller's bindings, borrows and regions are unchanged whatever the callee's
-body does. `proof_resource_call_is_shared_read` admits a call when every argument that carries a
-capability maps to a parameter whose declared type is a reference and *not* mutable, no argument is
-a `move`, a `new[r]` allocation, an opaque borrow or a region value, the callee declares no region
-parameters, and its return type is neither a reference nor region-bound. The premise is the
-callee's declared parameter and return modes: compiler-typing metadata, imported exactly the way
-the resource header already imports the current function's own parameter modes.
+The summary is not what a lend needs. Elisa forbids moving out of a reference, and the capability
+the callee receives ends with the call, so a *shared* lend leaves the caller's bindings, borrows
+and regions exactly as they were. An *exclusive* lend is bounded just as tightly, and the kernel
+itself says by how much: the summary composer refuses any callee effect that is not a `write`
+rooted at a mutable formal. A write to the whole lent place therefore subsumes every effect any
+summary for that callee could ever have exported, so the caller can take it without seeing one.
 
-The call does not disappear from the certificate. `proof_resource_record_shared_call` emits a
-`resource-call-shared` event whose children are the actuals followed by the callee's declared mode
-for each of the same formals, one pair per parameter, and the replay kernel checks the transition
-it claims: the node carries no callee summary root and no region map, its child list is exactly
-twice its parameter count, each actual is a `resource-call-arg` decoded by the same routine the
-summary path uses, each mode is a `resource-call-formal` whose name matches its actual, a formal
-that is not `external-shared` receives no capability at all, a fresh region allocation is refused,
-and the event root is consumed once. Nothing in the resource state is written, which is the whole
-content of a read.
+`proof_resource_call_is_confined_lend` admits a call when no argument is a `move`, a `new[r]`
+allocation, an opaque borrow or a region value, the callee declares no region parameters, its
+return type is neither a reference nor region-bound, every by-value formal receives a value, every
+shared formal's place has no overlapping live mutable borrow, every exclusive formal's place is one
+the caller may write with no overlapping live borrow at all, and two lent places overlap only when
+neither is exclusive. The premise is the callee's declared parameter and return modes:
+compiler-typing metadata, imported exactly the way the resource header already imports the current
+function's own parameter modes.
 
-Two things the mode list buys. An exclusive formal has no encoding under `resource-call-formal` —
-the shape validator admits only `value` and `external-shared` — so a certificate cannot record a
-mutable lend as a shared one even by forgery, and pairing the modes with the actuals by formal
-name stops a permuted list from letting a scalar parameter's harmless mode stand in for the
-parameter that receives the place. `proof_resource_call_is_shared_read` correspondingly refuses a
-callee with *any* mutable reference parameter, not merely one whose actual happens to carry a
-capability at this call site: the recorded claim is about the signature.
+The call does not disappear from the certificate. `proof_resource_record_lend_call` emits a
+`resource-call-lend` event whose children are the actuals followed by the callee's declared mode
+for each of the same formals, one pair per parameter, and `proof_kernel_replay_resource_lend`
+re-derives every permission from them rather than trusting the producer: the node carries no callee
+summary root and no region map, its child list is exactly twice its parameter count, each actual is
+a `resource-call-arg` decoded by the same routine the summary path uses, each mode is a
+`resource-call-formal` whose name matches its actual, a by-value formal receives no capability at
+all, a fresh region allocation is refused, the exclusive-lend permissions and the pairwise
+disjointness are checked against the replayed state, and the event root is consumed once. A shared
+formal writes nothing; an exclusive one pushes a whole-place `write` effect through the same
+origin-resolution the direct write path uses.
+
+Pairing the modes with the actuals by formal name stops a permuted list from letting a scalar
+parameter's harmless mode stand in for the parameter that receives the place. Only the three modes
+whose caller-side permission the kernel can re-derive have an encoding, so nothing else can be
+smuggled in.
 
 Shared and exclusive access to one place cannot be live at the same time, so the rule also refuses
-a lend whose place is overlapped by a live mutable borrow, on both sides. Unlike the summary path
-it excludes nothing: there the summary establishes that the callee reads only through the very
-reference being reborrowed, and here there is no summary to establish it, so every live exclusive
-borrow of the lent place refuses the rule. The narrower reborrow-lend that this gives up is not
-reachable from the current producer — such a call has a summary and takes the summary path.
+a lend whose place is overlapped by a live borrow, on both sides. Unlike the summary path it
+excludes nothing: there the summary establishes that the callee touches the place only through the
+very reference being reborrowed, and here there is no summary to establish it, so every live
+conflicting borrow of the lent place refuses the rule. The narrower reborrow-lend that this gives
+up is not reachable from the current producer — such a call has a summary and takes the summary
+path.
 
-The summary path is unchanged and still preferred: the shared-read rule is consulted only when no
-mapped callee summary is available. Writable lending, an escaping result and region-polymorphic
-calls all keep their existing diagnostics. On the kernel's own source the proven count moved from
-757 to 842 of 2144 and `borrow-call-opaque` from 622 to 356, with replay gaps unchanged at zero and
-211 shared-lend events recorded.
+The summary path is unchanged and still preferred: the lend rule is consulted only when no mapped
+callee summary is available. An escaping result and region-polymorphic calls keep their existing
+diagnostics. On the kernel's own source the proven count moved from 757 to 878 of 2070 and
+`borrow-call-opaque` from 622 to 235, with replay gaps unchanged at zero and 326 lend events
+recorded, 178 of them carrying an exclusive formal.
 
 Coverage. `examples/shared_borrow_calls.elisa` proves self-recursion over a shared collection, two
 shared references at once, a mutable holder lending a shared reborrow, the same place lent twice in
-one call, and a call to a callee with no summary of its own; disabling the rule leaves six of its
-obligations unproven. `examples/rejected_shared_borrow_calls.elisa` pins the boundary: a recursive
-callee with a mutable reference parameter, one that returns a reference, a moved binding, and a
-shared lend made while an exclusive borrow of the same place is still live are each refused with a
-diagnostic and emit no event. `examples/rejected_borrow_call.elisa` now carries both halves — the
-writable lend still reports `borrow-call-opaque`, the shared lend no longer does, and the callee's
-own indexed obligation still fails on its own account.
-`examples/kernel_resource_bootstrap_runtime.elisa` drives the kernel rule directly under stage1 and
-stage0 with ten cases — an admitted lend, then a moved place, a capability handed to a by-value
-formal, a miscounted child list, a reused event root, an unbound place, a permuted mode list, a
-lend across a live exclusive borrow, a fresh region allocation and an exclusive formal, each
-refused. Removing the overlap check, the name pairing or the by-value-formal check each makes it
-exit with the matching code; the miscount, region-allocation and exclusive-formal cases are each
-caught by two independent checks and need both removed before they show.
+one call, and a call to a callee with no summary of its own. `examples/writable_lend_calls.elisa`
+proves self-recursion that writes through a mutable reference parameter, an exclusive lend beside a
+shared one, two exclusive lends of disjoint places, and callers that own the lent value outright.
+`examples/rejected_shared_borrow_calls.elisa` and `examples/rejected_writable_lend_calls.elisa` pin
+the boundary: a callee that returns a reference, a moved binding, a shared lend across a live
+exclusive borrow, the same place lent exclusively twice, a shared lend beside an exclusive lend of
+the same place, and an exclusive lend across a live borrow are each refused with a diagnostic and
+emit no event. Disabling the producer's pairwise-overlap check admits the two aliasing cases and
+nothing else; disabling its exclusive-borrow check admits the third and nothing else.
+`examples/rejected_borrow_call.elisa` now records that neither caller is opaque any more while the
+callee's own indexed obligation still fails and both callers are reported as depending on an
+unverified summary.
 
-Not covered. A call that lends a *writable* capability still needs the callee's summary, so a
-recursive component that mutates through a reference parameter — `proof_kernel_replay_substitute`
-and the tactic and resource-event walkers in the kernel's own source — remains opaque; that needs
-either an SCC fixed point over resource summaries or a disjointness-based rule for a whole mutable
-place with no overlapping live borrow. Region-polymorphic calls are untouched. The callee's
-declared modes remain a compiler-typing import: the kernel now checks that the recorded modes are
-harmless, that they pair with the actuals, and that no capability reaches a by-value formal, but
-nothing in the arena ties them back to the callee's source — a producer that misreads a signature
-records a wrong but internally consistent claim. Closing that needs the callee's parameter header
-in the arena, keyed so it cannot be mistaken for a converged summary.
+`examples/kernel_resource_bootstrap_runtime.elisa` drives the kernel rule directly under stage1 and
+stage0 with fourteen cases — two admitted lends, one shared and one exclusive, then a moved place,
+a capability handed to a by-value formal, a miscounted child list, a reused event root, an unbound
+place, a permuted mode list, a shared lend across a live exclusive borrow, a fresh region
+allocation, an exclusive lend of a place the caller may not write, the same place lent exclusively
+twice, a shared lend beside an exclusive one over the same place, and an exclusive lend across a
+live borrow, each refused. Removing the shared or exclusive borrow-overlap check, the name pairing,
+the by-value-formal check, the writable-permission check, or either half of the pairwise rule each
+makes it exit with the matching code; the miscount, region-allocation and exclusive-formal-shape
+cases are each caught by two independent checks and need both removed before they show.
+
+Not covered. The remaining 235 `borrow-call-opaque` are calls the rule refuses on purpose or cannot
+reach: a lent place that is already borrowed, two overlapping lent places, an escaping reference
+result, and a `borrow-opaque` actual whose place the producer cannot name. Region-polymorphic calls
+are untouched, and are now the largest resource-safety gap at 280 `region-call-opaque`. The
+whole-place write is deliberately coarse: a callee that writes one field of a lent struct is
+recorded as writing all of it, which can conflict with a `preserves` clause that a real summary
+would have satisfied.
+
+The callee's declared modes remain a compiler-typing import: the kernel checks that the recorded
+modes are ones it can re-derive permissions for, that they pair with the actuals, and that every
+permission holds in the replayed state, but nothing in the arena ties them back to the callee's
+source — a producer that misreads a signature records a wrong but internally consistent claim.
+Closing that needs the callee's parameter header in the arena, keyed so it cannot be mistaken for a
+converged summary; for a self-recursive call, which is the case the rule exists to serve, the
+header is already present as the resource root being replayed.
 
 ## Coverage still required
 

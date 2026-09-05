@@ -1041,7 +1041,7 @@ extend ElisaProof:
         # metadata, imported the same way the resource header already imports the current
         # function's own parameter modes; it is recorded in the trace so replay checks the claim's
         # shape rather than having the call disappear from the certificate.
-        def proof_resource_call_is_shared_read(functions: ProofFunctionTable&, callee_index: usize, mapped: darray[Ast::Expr]&, state: mutable ProofResourceState&, report: mutable ProofReport&) -> bool:
+        def proof_resource_call_is_confined_lend(functions: ProofFunctionTable&, callee_index: usize, mapped: darray[Ast::Expr]&, state: mutable ProofResourceState&, report: mutable ProofReport&) -> bool:
             return false if callee_index >= functions.param_counts.count or callee_index >= functions.param_starts.count
             return false if mapped.count != functions.param_counts[callee_index]
             # A region-polymorphic callee may allocate into, or close, a caller region.
@@ -1051,36 +1051,62 @@ extend ElisaProof:
             return false if callee_index >= functions.return_references.count or functions.return_references[callee_index]
             return false if callee_index >= functions.return_regions.count or functions.return_regions[callee_index] != ""
             param_start: usize = functions.param_starts[callee_index]
-            for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, param_start, state, report|:
+            lent_places: mutable darray[ProofResourcePlace] = []
+            lent_known: mutable darray[bool] = []
+            lent_exclusive: mutable darray[bool] = []
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, param_start, state, report, lent_places, lent_known, lent_exclusive|:
                 slot: usize = param_start + parameter_index
                 return false if slot >= functions.all_parameter_references.count or slot >= functions.all_parameter_mutable_references.count
-                # No formal may be exclusive, whether or not this particular actual carries a
-                # capability: the recorded claim is about the callee's signature, so it has to
-                # hold for the signature rather than for one call site's arguments.
-                return false if functions.all_parameter_mutable_references[slot]
+                reference_formal: bool = functions.all_parameter_references[slot]
+                exclusive_formal: bool = functions.all_parameter_mutable_references[slot]
                 argument: Ast::Expr = mapped[parameter_index]
                 kind: sview = proof_resource_call_argument_kind(argument, state, report)
                 return false if kind != "value" and kind != "reference" and kind != "borrow"
+                # A fresh `new[r]` actual has a lifetime the callee controls, and any other region
+                # value would need the callee's own trace to place.
                 return false if proof_resource_expr_contains_region_value(argument, state)
+                lent_places.push(proof_resource_empty_place())
+                lent_known.push(false)
+                lent_exclusive.push(exclusive_formal)
                 # A by-value formal receives no capability at all, so the actual must not be one.
-                return false if not functions.all_parameter_references[slot] and kind != "value"
-                continue if not proof_resource_expr_carries_resource(argument, state, report)
-                # The argument carries a capability, so the formal must be a shared reference.
-                return false if not functions.all_parameter_references[slot]
-                # Shared and exclusive access to the same place cannot be live together, so a
-                # live mutable borrow overlapping the lent place is a conflict. The summary path
-                # excludes the lent binding's own borrow, because the summary says the callee only
-                # reads through that formal; here there is no summary to say so, and every live
-                # exclusive borrow of the place refuses the rule.
+                if not reference_formal:
+                    return false if kind != "value"
+                    continue
+                continue if not exclusive_formal and not proof_resource_expr_carries_resource(argument, state, report)
                 actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_source_actual(argument, state, report)
                 return false if not actual.known or actual.place.root == ""
-                return false if proof_resource_has_mutable_borrow_overlap(state, report, actual.place, state.binding_names.count)
+                lent_places[lent_places.count - 1] <- actual.place
+                lent_known[lent_known.count - 1] <- true
+                if exclusive_formal:
+                    # The callee may write through this one, so the caller must actually hold the
+                    # permission to write the whole place, and no other borrow of it may be live.
+                    return false if kind == "reference" and not actual.mutable_reference
+                    if kind == "borrow":
+                        if actual.slot < state.binding_reference.count and state.binding_reference[actual.slot]:
+                            return false if not actual.mutable_reference
+                        else:
+                            return false if not actual.writable
+                    return false if proof_resource_has_borrow_overlap(state, report, actual.place, state.binding_names.count)
+                else:
+                    # Shared and exclusive access to the same place cannot be live together. The
+                    # summary path excludes the lent binding's own borrow, because the summary
+                    # says the callee only reads through that formal; here there is no summary to
+                    # say so, and every live exclusive borrow of the place refuses the rule.
+                    return false if proof_resource_has_mutable_borrow_overlap(state, report, actual.place, state.binding_names.count)
+            # Every lent capability is live at once while the callee runs, so two of them may
+            # overlap only when neither is exclusive.
+            for left_index in 0..<lent_places.count |left_index, lent_places, lent_known, lent_exclusive, state, report|:
+                continue if not lent_known[left_index]
+                for right_index in 0..<lent_places.count |right_index, left_index, lent_places, lent_known, lent_exclusive, state, report|:
+                    continue if right_index <= left_index or not lent_known[right_index]
+                    continue if not lent_exclusive[left_index] and not lent_exclusive[right_index]
+                    return false if proof_resource_places_overlap(state, report, lent_places[left_index], lent_places[right_index])
             return true
 
         # Record the shared-read transition. Every argument place is listed so replay re-checks
         # that each one is a live, unmoved binding at this point in the trace; nothing in the
         # state changes, which is the whole content of the claim.
-        def proof_resource_record_shared_call[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, callee_name: sview, callee_index: usize, mapped: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> bool:
+        def proof_resource_record_lend_call[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, callee_name: sview, callee_index: usize, mapped: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> bool:
             # The argument mode is the actual's own shape, exactly as on the summary path, so the
             # kernel decodes the lent place with the same routine. The event kind is what carries
             # the claim that every one of them is lent as a shared capability.
@@ -1117,17 +1143,19 @@ extend ElisaProof:
                 report.kernel_children.push(child)
             # The callee's declared parameter modes are the whole premise of the rule, so they are
             # recorded alongside the actuals rather than left as the producer's word. Replay pairs
-            # each formal with its actual and re-derives that no exclusive capability is lent; a
-            # mutable formal has no encoding here at all and therefore cannot be recorded.
+            # each formal with its actual and re-derives the permission each mode requires, and
+            # over-approximates an exclusive formal by a write to the whole lent place.
             for parameter_index in 0..<mapped.count |parameter_index, report, functions, param_start|:
                 slot: usize = param_start + parameter_index
                 return false if slot >= functions.all_params.count or slot >= functions.all_parameter_references.count or slot >= functions.all_parameter_mutable_references.count
-                return false if functions.all_parameter_mutable_references[slot]
-                shared_formal: bool = functions.all_parameter_references[slot]
-                mode: sview = "external-shared" if shared_formal else "value"
+                reference_formal: bool = functions.all_parameter_references[slot]
+                exclusive_formal: bool = functions.all_parameter_mutable_references[slot]
+                return false if exclusive_formal and not reference_formal
+                shared_mode: sview = "external-shared" if reference_formal else "value"
+                mode: sview = "external-mutable" if exclusive_formal else shared_mode
                 formal: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-formal", mode, 0, 0, 0, 0, 0, 0, functions.all_params[slot], "")
                 report.kernel_children.push(formal)
-            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-shared", "", 0, 0, mapped.count, start, mapped.count * 2, 0, callee_name, "")
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-lend", "", 0, 0, mapped.count, start, mapped.count * 2, 0, callee_name, "")
             state.trace_events.push(event)
             return true
 
@@ -1849,11 +1877,11 @@ extend ElisaProof:
                         # alone, so it is admitted from the callee's declared modes without a body
                         # summary. This is the only path open to a recursive component, which by
                         # construction cannot consume one of its own summaries.
-                        shared_mapped: mutable darray[Ast::Expr] = []
-                        shared_read: mutable bool = false
-                        if not (summary.known and mapped_ok) and callee_index < functions.names.count and proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &shared_mapped):
-                            shared_read <- proof_resource_call_is_shared_read(functions, callee_index, shared_mapped, state, report) and proof_resource_record_shared_call(state, report, callee_name, callee_index, shared_mapped, functions)
-                        if shared_read:
+                        lend_mapped: mutable darray[Ast::Expr] = []
+                        confined_lend: mutable bool = false
+                        if not (summary.known and mapped_ok) and callee_index < functions.names.count and proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &lend_mapped):
+                            confined_lend <- proof_resource_call_is_confined_lend(functions, callee_index, lend_mapped, state, report) and proof_resource_record_lend_call(state, report, callee_name, callee_index, lend_mapped, functions)
+                        if confined_lend:
                             pass
                         elif summary.known and mapped_ok:
                             pairwise_alias: bool = proof_resource_call_source_has_pairwise_alias(state, report, summary.root, mapped)
