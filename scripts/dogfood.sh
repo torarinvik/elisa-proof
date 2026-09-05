@@ -212,6 +212,15 @@ if [[ "$runtime_status" -ne 0 ]]; then
 fi
 printf 'dogfood arena_runtime: malformed arenas/resource places rejected and valid DAG sharing accepted\n'
 
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/comparison-runtime.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    clang -Wl,-dead_strip -o "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$RUNTIME_OBJ"
+else
+    clang -Wl,-dead_strip -o "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/comparison-runtime"
+printf 'dogfood comparison_runtime: all six comparisons checked through goal and tactic replay\n'
+
 # Exercise the Elisa-native proof-state action layer itself. This is intentionally an
 # executable harness rather than a report-only probe: both branches of split/cases must solve,
 # rewrite requires an explicit equality, and a rejected action must leave the state unsolved.

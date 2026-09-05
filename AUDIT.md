@@ -38,7 +38,25 @@ branch joins, loop state, and instantiated function summaries. Regression requir
 rejection of wrapping operations, acceptance of bounded safe operations, and direct kernel replay
 that cannot admit a certificate after the arithmetic type has been removed or changed.
 
-## Coverage still required
+## Targeted repairs
+
+### Repaired: non-reflexive comparisons accepted by replay's identity shortcut
+
+The independent kernel's early identity rule used the existence of a comparison negation as
+its admission test. This admitted `x < x`, `x > x`, and `x != x` with no premises. A native
+reproducer exited with `FALSE_REFLEXIVE_COMPARISON_ADMITTED` before the fix and succeeds after
+restricting the rule to `==`, `<=`, and `>=`. The source decision procedure already had the
+correct restriction, which is why source-only rejection tests did not catch this kernel flaw.
+
+`examples/kernel_comparison_runtime.elisa` checks all six operators over shared nodes,
+distinct equal nodes, and definitionally equal `x + 0` terms, through both public goal replay
+and public `decide` tactic replay. It is part of dogfood's native test layer.
+
+Stage1 native tests and the full normal-worktree test matrix pass for this repair; the
+shared-front-end build errors noted below did not recur. Snapshot-based dogfood also passes.
+A stage0 parity attempt cannot yet compile the existing single-line match arms in arena shape
+validation (`1: return ...`); it fails before linking. Stage0 parity remains unverified and the
+scripts' advertised bootstrap fallback still needs compatibility work.
 
 ### Repaired: unsigned assumptions entering signed decision procedures
 
@@ -59,6 +77,8 @@ installed snapshot at revision `3c8924aa`. The shared compiler worktree was conc
 normal builds during this fix encountered parser mutability errors there. Those unrelated edits
 were not changed. Snapshot validation does not establish that the moving shared-front-end build
 is currently working.
+
+## Coverage still required
 
 | Code | Required audit coverage |
 | --- | --- |
