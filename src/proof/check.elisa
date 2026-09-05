@@ -153,6 +153,45 @@ extend ElisaProof:
                 _:
                     return 0
 
+        # The primitive scalar types. Equality, arithmetic, and ordering on these are the
+        # language's own operators; only a struct operand dispatches to a user protocol method.
+        # Floating point is deliberately absent: it is excluded from the certificate term
+        # language entirely because arithmetic can produce NaN, which is not reflexive.
+        def proof_scalar_primitive_type_name(name: sview) -> bool:
+            return true if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "int"
+            return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uint"
+            return true if name == "bool" or name == "char"
+            return false
+
+        # 1 means a primitive scalar type, 0 means it is not one, and -1 means alias resolution
+        # is ambiguous or too deep. A failed resolution is never reported as scalar. References
+        # are excluded rather than followed: `&T` compares by address, and reading that as the
+        # pointee's equality would need a separate argument.
+        def proof_scalar_type_kind(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return 1 if proof_scalar_primitive_type_name(name)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return -1 if alias.count > 1
+                    return proof_scalar_type_kind(alias.target, declarations, depth + 1) if alias.count == 1
+                    return 0
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_type_kind(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    # A predicate restricts inhabitants; the underlying operators are unchanged.
+                    return proof_scalar_type_kind(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_scalar_type_kind(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                Ast::Expr.Scope(_, name, _):
+                    # A bare-name search cannot establish a qualified alias's owner.
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return -1 if alias.count > 0
+                    return 0
+                _:
+                    return 0
+
         def proof_find_type_alias(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> (count: usize, target: Ast::Expr):
             return (2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             count: mutable usize = 0
@@ -5762,6 +5801,11 @@ extend ElisaProof:
             for parameter in parameters |facts, report, function_name, position|:
                 unsigned_width: i64 = proof_unsigned_type_width(parameter.type_expression, report.source_declarations, 0)
                 proof_add_unsigned_binding_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position) if unsigned_width > 0
+                # An unsigned width marker already witnesses a primitive scalar type, so only the
+                # remaining scalar parameters need the narrower marker. Congruence consumes it to
+                # establish that this name's operators cannot be a user protocol implementation.
+                scalar_kind: i64 = proof_scalar_type_kind(parameter.type_expression, report.source_declarations, 0)
+                proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(parameter.name, position), position.line, function_name) if scalar_kind == 1 and unsigned_width <= 0
             for requirement in preconditions |facts, names, values, report, function_name, position|:
                 proof_add_traced_fact(facts, report, proof_substitute(requirement, names, values), "precondition", position.line, function_name)
             # Resource transitions are checked after entry facts are established so the source

@@ -179,6 +179,41 @@ The proof kernel is intentionally fail-closed:
    assumed.
 13. Positive equalities between bare identifiers may form an alias relation and transport explicit
    interval bounds. Calls, fields, and arithmetic expressions are not generalized by this rule.
+13b. Ground congruence closure is a separate, kernel-owned equality rule over the primitive
+    scalar fragment. Its universe is the set of subterms of the premises and the goal, its
+    relation is seeded only by positive equalities (`and` is transparent and `not (a != b)` is
+    the same premise), and it is saturated to a fixed point: two terms are merged when they are
+    built by the same former with pairwise equal operands.
+    Elisa's operators are not unconditionally primitive. `==`, `!=`, `+`, `-`, `*`, `/` and the
+    four ordering operators dispatch to a user `__eq__`/`__add__`/`__cmp__` whenever an operand's
+    type is a struct, and a user `__eq__` need not be Leibniz equality: it may compare a subset of
+    the fields, so `p == q` does not entail `p.x == q.x`. Indexing and the aggregate constructors
+    are user-implementable in the same way. The universe is therefore closed under integer,
+    Boolean and character literals, identifiers the producer witnessed as having a declared
+    primitive scalar type, and the arithmetic, comparison, bitwise, logical and conditional
+    formers over those. A goal outside the fragment declines; a premise outside it contributes
+    nothing, which is conservative. The scalar witness travels through the same traced-fact
+    channel as unsigned widths: it is a compiler-derived type statement, opaque to every
+    arithmetic tier, that proves no proposition by itself, and replay still requires its source
+    trace to identify it as a type bound of the owning declaration. An unsigned width marker is
+    accepted as the same witness. A field selector, a construction field name, and a literal
+    payload belong to a former's identity, not to its operands.
+    Excluded formers are not merged at all: `call` carries no determinism witness and no known
+    result type, `move` transfers ownership rather than denoting a value, unary `&` is an address
+    and two equal values may live at different addresses, `is`/`as` are type operations, `::` is a
+    namespace path, `get … else` marks a guarded access, and a quantifier binds names, so its body
+    is never entered and a bound occurrence can never join a free term's class. The conclusion is
+    always an equality; order and disequality goals are left to the arithmetic tiers. The rule
+    runs only after the fixed-width safety guards have rejected every wrapping premise and goal,
+    which keeps an equality between operands of different widths from travelling through a
+    wrapping former. Term and saturation-round budgets are fixed, and exceeding them declines the
+    rule rather than reasoning over a truncated universe. The AST producer does not own this rule:
+    it lowers the premises and goal into a scratch arena and calls the same kernel routine that
+    re-derives the certificate during replay, so the producer can never find a congruence the
+    checker cannot reproduce.
+    Admitting field selection, indexing, or the aggregates needs a witness that the receiver's
+    selector is the language's own and that the selected type's equality is primitive. That
+    witness is not represented in the term language, so those formers stay excluded.
 14. Quantifiers are checked only when the compiler-preserved kind is unambiguous and the lowered
     expression has one integer binder over an explicit finite `..<`/`..=` range, or a finite
     literal collection (with exactly two binders for dictionary key/value pairs). The kernel

@@ -122,7 +122,7 @@ if [[ "$json_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: JSON report is not a valid structured proof state\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant arithmetic_identity equality_alias summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds slice_kernel indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
+for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds slice_kernel indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
     "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -1412,14 +1412,14 @@ if [[ "$source_bound_script_status" -ne 0 ]]; then
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]; assert binding["goal_fingerprint"]["value"] == 1172841562 and binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]; assert binding["goal_fingerprint"]["value"] == 3193966897 and binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert any(fact["kind"] == "call" and not fact.get("argument_names") for fact in report["state"]["initial_facts"])'
 repair_target_status=${PIPESTATUS[0]}
 if [[ "$repair_target_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic could not repair an open target\n' >&2
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_shifted.json" "$ROOT_DIR/examples/tactic_repair_target_shifted.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["goal_id"] == 2; assert binding["goal_fingerprint"]["value"] == 1172841562; assert binding["fingerprint_match"] is True'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_shifted.json" "$ROOT_DIR/examples/tactic_repair_target_shifted.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["goal_id"] == 2; assert binding["goal_fingerprint"]["value"] == 3193966897; assert binding["fingerprint_match"] is True'
 shifted_repair_target_status=${PIPESTATUS[0]}
 if [[ "$shifted_repair_target_status" -ne 0 ]]; then
     printf 'proof test matrix failed: stable target proof did not survive unrelated source insertion\n' >&2
@@ -1459,6 +1459,22 @@ rejected_borrow_after_move_probe_status=${PIPESTATUS[0]}
 set -e
 if [[ "$rejected_borrow_after_move_probe_status" -ne 1 ]]; then
     printf 'proof test matrix failed: borrow-after-move was not rejected with replayable evidence\n' >&2
+    exit 1
+fi
+
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; assert report["findings"] == []; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"congruence_sum", "congruence_difference", "congruence_product", "congruence_nested", "congruence_chain", "congruence_boolean", "congruence_bitwise", "congruence_conditional", "congruence_character", "congruence_boolean_parameters", "congruence_bounded_unsigned"} <= names'
+congruence_status=${PIPESTATUS[1]}
+if [[ "$congruence_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: ground congruence closure did not carry equalities through deterministic formers\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "indexed_element", "constructed_aggregate", "call_congruence", "call_result_operand", "cross_width", "wrapping_operand"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
+rejected_congruence_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_congruence_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: congruence admitted a goal outside the deterministic term fragment\n' >&2
     exit 1
 fi
 

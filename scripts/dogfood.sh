@@ -198,6 +198,50 @@ run_probe rejected_region_bind_mutable_external examples/rejected_region_bind_mu
 run_probe rejected_region_call_result_duplicate_owner examples/rejected_region_call_result_duplicate_owner.elisa 1
 run_probe rejected_for_invariant examples/rejected_for_invariant.elisa 1
 run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.elisa 1
+run_probe congruence examples/congruence.elisa 0
+run_probe rejected_congruence examples/rejected_congruence.elisa 1
+
+# Ground congruence must carry an equality through every primitive scalar former and through
+# no other one. The accepted fixture may not leave a replay gap, and no adversarial goal may prove
+# or emit a certificate; only the arithmetic-free resource obligations are admitted there.
+python3 - "$REPORT_DIR/congruence.json" "$REPORT_DIR/rejected_congruence.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["summary"]["proven"] == report["summary"]["obligations"]
+assert report["replay"]["gaps"] == 0
+assert report["findings"] == []
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
+    raise SystemExit("dogfood failed: adversarial congruence fixture did not fail cleanly")
+if report["replay"]["gaps"] != 0:
+    raise SystemExit("dogfood failed: adversarial congruence fixture left a replay gap")
+refused = {
+    "disequality_premise",
+    "order_premise",
+    "disjunctive_premise",
+    "unrelated_operand",
+    "distinct_former",
+    "struct_equality_premise",
+    "indexed_element",
+    "constructed_aggregate",
+    "call_congruence",
+    "call_result_operand",
+    "cross_width",
+    "wrapping_operand",
+}
+claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}
+if refused & claimed:
+    raise SystemExit("dogfood failed: congruence admitted %s" % sorted(refused & claimed))
+if refused - {finding["name"] for finding in report["findings"]}:
+    raise SystemExit("dogfood failed: an adversarial congruence goal produced no diagnostic")
+PY
+
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.
@@ -234,6 +278,18 @@ fi
 "$runtime_dir/comparison-runtime"
 printf 'dogfood comparison_runtime: all six comparisons checked through goal and tactic replay\n'
 
+# Congruence closure is exercised against the kernel directly: every participating former must
+# carry an equality, and every excluded former (call, move, address-of, namespace path, guarded
+# access, quantifier) must refuse to, on both the dedicated rule and full goal replay.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/congruence-runtime.o" "$ROOT_DIR/examples/kernel_congruence_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    clang -Wl,-dead_strip -o "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$RUNTIME_OBJ"
+else
+    clang -Wl,-dead_strip -o "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/congruence-runtime"
+printf 'dogfood congruence_runtime: participating formers carried equalities and excluded formers refused\n'
+
 # Bootstrap coverage: compile the runtime with stage0 as well; an installed stage1
 # runtime is not an implicit bootstrap dependency. The reduced resource trace
 # guards the stage0 miscompile of allocations made through an unannotated mutable
@@ -242,7 +298,7 @@ printf 'dogfood comparison_runtime: all six comparisons checked through goal and
 bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
 if [[ -n "$bootstrap_compiler" ]]; then
     "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
-    for bootstrap_example in kernel_comparison_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
+    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
         "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
         clang -Wl,-dead_strip -o "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o"
         set +e
@@ -509,7 +565,7 @@ assert report["source"]["complete"] is False
 assert report["source"]["admissible"] is True
 binding = report["source_goal_binding"]
 assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]
-assert binding["goal_fingerprint"]["value"] == 1172841562
+assert binding["goal_fingerprint"]["value"] == 3193966897
 assert binding["fingerprint_match"] is True
 assert report["tactic"]["certificate_replayed"] is True
 assert [step["action"] for step in report["state"]["trace"]] == ["rewrite", "decide"]

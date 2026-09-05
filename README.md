@@ -206,11 +206,28 @@ The native checker currently supports:
   relations between distinct identifiers;
 - explicit identifier equality closure (`x == y`, including short chains) with safe bound
   propagation;
-- bounded one-binder `forall`/`exists` contracts over finite integer ranges (`..<` and `..=`),
-  checked by explicit kernel instantiation with a fixed work budget;
-- bounded `forall`/`exists` contracts over finite literal arrays, tuples, sets, and dictionaries
-  (one binder for ordinary collections, two for dictionary key/value pairs), also checked by
-  explicit instantiation;
+- ground congruence closure over the primitive scalar fragment of the source-neutral term
+  language: a positive equality premise is carried through every former whose operator is the
+  language's own, so `a == b` proves `a + c == b + c`, `(a < 5) == (b < 5)`, `(a & c) == (b & c)`,
+  the nested and chained forms of those, and conditional selection. The relation is seeded only
+  by positive equalities (`and` is transparent, `not (a != b)` is the same premise) and saturated
+  to a fixed point under bounded term and round budgets.
+  Elisa's operators are not unconditionally primitive: `==`, `!=`, arithmetic, and the four
+  ordering operators dispatch to a user `__eq__`/`__add__`/`__cmp__` whenever an operand's type is
+  a struct, and a user `__eq__` need not be Leibniz equality — it may compare a subset of the
+  fields, so `p == q` does not entail `p.x == q.x`. The rule is therefore closed over integer,
+  Boolean and character literals plus identifiers the producer witnessed as having a declared
+  primitive scalar type, recorded through the same traced-fact channel as unsigned widths. A goal
+  outside that fragment declines and a premise outside it contributes nothing.
+  Field selection, indexing, slicing, aggregate construction, and `call` are consequently not
+  congruent formers; neither are `move`, unary `&`, `is`/`as`, `::`, `get … else`, or a
+  quantifier, whose body is never entered so a bound occurrence can never join a free term's
+  class. The rule also runs only after the fixed-width safety guards have rejected every wrapping
+  premise and goal, so an equality between operands of different widths cannot travel through
+  arithmetic. The producer does not own the rule: it lowers the premises and goal into a scratch
+  arena and calls the same kernel routine that re-derives the certificate during replay. See
+  `examples/congruence.elisa`, `examples/rejected_congruence.elisa`, and the native kernel harness
+  `examples/kernel_congruence_runtime.elisa`;
 - symbolic substitution through local declarations and assignments, including constructor and
   record-update field projection;
 - compiler-checked `get collection[index] else fallback` accesses, where the runtime fallback

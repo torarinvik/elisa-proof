@@ -127,6 +127,28 @@ extend ElisaProof:
             arguments: darray[Ast::Expr] = [Ast::Expr.Ident(name, position), Ast::Expr.IntLit(width)]
             return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
 
+        # Elisa dispatches `==`, `+`, `-`, `*`, `/` and the ordering operators to a user
+        # `__eq__`/`__add__`/`__cmp__` implementation whenever an operand's type is a struct, and
+        # a user `__eq__` need not be Leibniz equality. Ground congruence is therefore admitted
+        # only over terms whose operators are the language's primitive ones. The proof AST carries
+        # no compiler type metadata, so the producer records the declared primitive scalar types
+        # it resolved through the same traced-fact channel used for unsigned widths. The marker is
+        # opaque to every arithmetic tier and proves no proposition by itself; manufacturing one
+        # can only lose completeness, because the source trace still has to identify it as a
+        # type-bound fact of the owning declaration.
+        def proof_scalar_type_marker(name: sview, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [Ast::Expr.Ident(name, position)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_primitive_scalar_type", position), arguments, [], position)
+
+        def proof_scalar_marker_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return "" if argument_names.count != 0 and argument_names.count != arguments.count
+                    return "" if proof_ident_name(callee) != "__elisa_primitive_scalar_type" or arguments.count != 1
+                    return proof_ident_name(arguments[0])
+                _:
+                    return ""
+
         def proof_unsigned_marker_info(expression: Ast::Expr) -> (known: bool, name: sview, width: i64):
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, _):
@@ -1098,6 +1120,10 @@ extend ElisaProof:
             return (false, 0)
 
         def proof_counterexample_bool(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&) -> (known: bool, value: bool):
+            # A compiler type marker states a declared type, not a constraint on the model. It
+            # holds at every point of the domain, so bounded enumeration must read it as true
+            # rather than as an unknown fact that abandons the search.
+            return (true, true) if proof_unsigned_marker_name(expression) != "" or proof_scalar_marker_name(expression) != ""
             match expression:
                 Ast::Expr.BoolLit(value):
                     return (true, value)
@@ -1378,6 +1404,23 @@ extend ElisaProof:
                     pass
             return (false, Ast::Expr.Absent, Ast::Expr.Absent)
 
+        # Ground congruence closure. Proof search belongs to this AST tier, but the equality rule
+        # itself does not: the premises and goal are lowered into a scratch source-neutral arena
+        # and decided by the same kernel routine that re-derives the certificate during replay.
+        # A congruence the kernel cannot reproduce therefore cannot be found here either, so this
+        # rule can never widen the producer beyond the checker.
+        def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if not proof_kernel_expression_supported(goal)
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            roots: mutable darray[usize] = []
+            for fact in facts |fact, nodes, children, roots, annotations|:
+                continue if not proof_kernel_expression_supported(fact)
+                roots.push(proof_kernel_encode_annotated(fact, &nodes, &children, annotations))
+            return false if roots.count == 0
+            goal_root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, annotations)
+            return ElisaProofKernelReplay::proof_kernel_replay_congruence_report(&nodes, &children, roots, goal_root)
+
         def proof_goal_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, depth: usize, budget: mutable usize&, split_depth: usize) -> bool:
             # An explicitly asserted proposition is accepted before trying the arithmetic
             # fragment. This matters for one-sided facts such as `x >= 0`: the fact itself is
@@ -1461,7 +1504,9 @@ extend ElisaProof:
                                 else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
                                 then_goal: Ast::Expr = Ast::Expr.Binary(then_expression, operator, right, position)
                                 else_goal: Ast::Expr = Ast::Expr.Binary(else_expression, operator, right, position)
-                                return proof_goal_depth(then_facts, then_goal, annotations, depth, budget, split_depth + 1) and proof_goal_depth(else_facts, else_goal, annotations, depth, budget, split_depth + 1)
+                                # A failed case split proves nothing either way, so it must not
+                                # consume the goal; later tiers still get to decide it.
+                                return true if proof_goal_depth(then_facts, then_goal, annotations, depth, budget, split_depth + 1) and proof_goal_depth(else_facts, else_goal, annotations, depth, budget, split_depth + 1)
                             _:
                                 pass
                         match right:
@@ -1474,11 +1519,16 @@ extend ElisaProof:
                                 else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
                                 then_goal: Ast::Expr = Ast::Expr.Binary(left, operator, then_expression, position)
                                 else_goal: Ast::Expr = Ast::Expr.Binary(left, operator, else_expression, position)
-                                return proof_goal_depth(then_facts, then_goal, annotations, depth, budget, split_depth + 1) and proof_goal_depth(else_facts, else_goal, annotations, depth, budget, split_depth + 1)
+                                return true if proof_goal_depth(then_facts, then_goal, annotations, depth, budget, split_depth + 1) and proof_goal_depth(else_facts, else_goal, annotations, depth, budget, split_depth + 1)
                             _:
                                 pass
                     if proof_is_comparison(operator):
-                        return proof_fact_proves_comparison_negation(left, operator, right, facts) or proof_linear_goal(left, operator, right, facts)
+                        return true if proof_fact_proves_comparison_negation(left, operator, right, facts)
+                        return true if proof_linear_goal(left, operator, right, facts)
+                        # Congruence is the last equality tier and runs only after the
+                        # fixed-width safety guards above rejected every wrapping premise/goal.
+                        return proof_congruence_goal(facts, goal, annotations) if operator == TokenKind.EqEq
+                        return false
                 _:
                     pass
             return false

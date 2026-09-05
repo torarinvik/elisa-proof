@@ -41,6 +41,97 @@ tests require that no arithmetic goal in them proves or certifies. `kernel_core`
 call-site fixture now prove completely and the standalone replay audit verifies
 `proof_kernel_replay_difference_query` again, with 187 proven obligations instead of 160.
 
+## Added: ground congruence closure over the primitive scalar fragment
+
+Before this change the checker had no congruence rule. Equality reasoning was limited to
+identifier alias chains, so `a == b` did not prove `a + c == b + c` or `(a < 5) == (b < 5)`.
+Every such obligation had to be discharged by hand, which is exactly the bureaucratic plumbing
+the design is meant to automate.
+
+The rule lives in the replay kernel (`src/proof/kernel_replay.elisa`), not in the AST producer.
+The producer lowers its premises and goal into a scratch arena and calls the same routine that
+re-derives the certificate during replay, so it cannot find a congruence the checker cannot
+reproduce, and there is one implementation to audit rather than two that can drift.
+
+### Elisa's operators are not unconditionally primitive
+
+The first draft of this rule treated field selection, indexing, and the aggregate constructors as
+congruent formers, on the assumption that `==` is Leibniz equality. It is not. Elisa's backend
+rewrites `==`, `!=`, `+`, `-`, `*`, `/` and the four ordering operators to a user
+`__eq__`/`__add__`/`__cmp__` whenever an operand's type is a struct
+(`src/backend/codegen_expr_binary_tail.elisa`), and `Eq`'s `__eq__` is an ordinary method that may
+compare a subset of the fields. A struct with
+
+```
+impl Eq for Version:
+    def __eq__(self: Self, other: Self) -> bool:
+        return self.major == other.major
+```
+
+made the draft rule certify `p == q |- p.minor == q.minor`, which is false for
+`p = {1, 0}`, `q = {1, 5}`. The defect was found by auditing the compiler's dispatch rather than
+by a failing test, and the reproducer confirmed it before the rule was narrowed.
+
+The repair restricts the rule to the fragment where the operators are the language's own. The
+universe is closed under integer, Boolean and character literals, identifiers carrying a
+producer-emitted primitive-scalar type witness, and the arithmetic, comparison, bitwise, logical
+and conditional formers over those. A goal outside the fragment declines; a premise outside it
+contributes nothing. The witness (`__elisa_primitive_scalar_type`) travels through the same
+traced-fact channel as the unsigned width marker, is emitted from declared parameter types
+resolved through the existing alias/refinement resolver, and is opaque to every arithmetic tier;
+an unsigned width marker is accepted as the same witness. Both bounded-model evaluators were
+taught to read a type marker as trivially true, since it holds at every point of a bounded domain
+and constrains nothing — without that, adding the marker would have silently disabled bounded
+model checking for every function with a scalar parameter.
+
+Soundness now rests on four restrictions, each checked in the kernel:
+
+- Only formers whose result is a function of their operand values participate, and only over
+  scalars. `call` also carries no determinism witness; `move`, unary `&`, `is`/`as`, `::`,
+  `get … else`, and `quantifier` are excluded for the reasons given in DESIGN rule 13b. A
+  quantifier body is never entered, so a bound occurrence cannot join a free term's class.
+- A former enters the universe only after all of its operands do, so no term is ever merged on
+  the strength of an operand the rule has not accepted.
+- Only positive equalities seed the relation. `and` is transparent and `not (a != b)` is the same
+  premise; disequalities, order comparisons, and equalities under a disjunction contribute
+  nothing. Without a non-trivial merge the rule declines rather than degenerating into the
+  structural equality that earlier tiers already decided.
+- The rule runs after the existing fixed-width safety guards, so a cross-width equality such as
+  `x: u8 == y: u16` cannot travel through a wrapping former.
+
+### Coverage
+
+`examples/congruence.elisa` proves 22 obligations with no replay gap across sums, differences,
+products from two premises, nested formers, a class derived by congruence and then equated
+further, Boolean and bitwise formers, conditional selection, `char` and `bool` parameters, and
+bounded unsigned arithmetic. `examples/rejected_congruence.elisa` requires that twelve adversarial
+goals neither prove nor certify: a disequality premise, an order premise, an equality under a
+disjunction, an unrelated second operand, a different former, a struct equality premise, an
+indexed element, an aggregate construction, congruence through a verified total-pure call, an
+equated pair of call results used as operands, a cross-width equality, and a same-width wrapping
+sum. `examples/kernel_congruence_runtime.elisa` drives the kernel directly with 37 assertions so
+source proof search cannot mask a kernel bug; it runs under stage1 and stage0. Six deliberate
+mutations of the kernel were each caught by that harness: dropping the scalar-type witness,
+re-admitting `field` as a former, treating `call` as a former, seeding from `!=`, dropping the
+selector identity check, and treating unary `&` as a value former.
+
+### Not covered
+
+Field selection, indexing, slicing, and the aggregate constructors need a witness that the
+receiver's selector is the language's own and that the selected type's equality is primitive.
+That witness is not represented in the term language, so those formers stay excluded and the
+adversarial fixture pins the refusal. Congruence through a call additionally needs a determinism
+witness. The scalar witness is currently emitted for function parameters only, so a congruence
+whose universe includes a local declaration declines.
+
+Separately, and predating this work: the kernel's reflexivity rule accepts `t == t` for any term,
+including a struct whose `__eq__` need not be reflexive. That is not reached by the congruence
+rule and is recorded here as an open item rather than repaired in this change.
+
+The new routines are also not yet self-verified by the standalone replay audit: only the bounded
+accessors and the classification predicates prove there, for the same resource-summary and
+unsupported-expression reasons that leave most of the kernel unverified.
+
 ## Targeted repairs
 
 ### Repaired: non-reflexive comparisons accepted by replay's identity shortcut
@@ -90,6 +181,37 @@ Standalone attempts to isolate the pattern outside the replay module are rejecte
 "darray push requires an active in <arena>: scope" instead of being miscompiled, so the reduced
 replay trace is the reproducer. Dogfood now builds the reduced trace and the full arena harness
 with stage0 whenever it is installed.
+
+### Repaired: a source-bound tactic could not import an all-positional call
+
+The compiler AST uses either an empty argument-name vector for an all-positional call or one slot
+aligned with every argument; `kernel.elisa` states that convention and enforces it. The tactic
+script importer instead required a full vector, so reimporting any state whose goal or hypotheses
+mentioned a positional call failed with `invalid source-bound proof script` and an `invalid`
+initial goal. That included every compiler type marker, which is why the defect had been latent:
+the unsigned width marker is a positional call, so a source-bound script could never have
+targeted a goal inside an unsigned function either.
+
+`tactic_json.elisa` now applies the same rule as the AST and the certificate encoder: an empty
+vector means all-positional, a full vector names every argument, and a partial vector is still
+rejected because it would attach names to the wrong arguments. `tactic_script_repair_target.json`
+now exercises the path, since its target goal carries a primitive-scalar type marker among its
+hypotheses.
+
+### Repaired: a failed conditional case split consumed the goal
+
+Adding congruence exposed a producer/kernel asymmetry. Both tiers eliminate a conditional
+expression in a comparison goal by checking both branches, and both then returned that result
+directly, so a failed split ended the whole goal. The two tiers disagreed about when the rule
+applied: the AST producer matches an `If` operand without stripping parentheses, while the
+encoder erases them, so `(c if a < 5 else d) == (c if b < 5 else d)` reached congruence in the
+producer and was consumed by the split during replay. The obligation proved and then appeared as
+a replay gap.
+
+A failed case split proves nothing either way, so it must not consume the goal. Both tiers now
+return only on success and fall through to the later tiers otherwise. This is monotone: it can
+only admit goals that a subsequent independently sound rule decides. `examples/congruence.elisa`
+regressed to a gap before the fix and replays completely after it.
 
 ### Repaired: builds compiled the live compiler working tree
 
