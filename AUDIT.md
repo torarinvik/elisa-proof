@@ -887,9 +887,33 @@ Not covered. No fixture currently has a goal that is proven without a replayed c
 significantly, **no fixture has an open goal that the bounded vocabulary can close**: the source
 checker is strong enough that the goals it leaves open are, so far, also out of reach of twenty
 argument-free tactic sequences. So `repaired` is demonstrated on goals the checker had already
-proved, and the batch's `partial` path is demonstrated but its all-repaired path is not. This is a
-statement about the vocabulary's reach, not about the plumbing, and it is the honest reason to
-build the next piece rather than a reason to trust this one further than it goes.
+proved, and the batch's `partial` path is demonstrated but its all-repaired path is not.
+
+That is not a statement about the vocabulary's size, and widening it would not help. The reason is
+structural, and it was measured rather than assumed. A lemma can only close a goal the checker
+cannot close inline when the checker can prove the lemma's statement *standalone* — with induction
+or recursion — but not in the goal's context. Otherwise the composition collapses: the goal's facts
+discharge the lemma's premises, the lemma's premises give its conclusion, and a checker that proves
+both halves proves the whole thing directly, so the lemma is redundant exactly where it would have
+been needed.
+
+Probing that boundary found no case on either side of it. `n * m >= 0` from `n >= 0, m >= 0` is
+beyond the checker inline; written as a recursive lemma with `decreases n` it is *also* beyond it,
+because the inductive step needs distributivity to relate `n * m` to `(n - 1) * m + m`. The lemma
+therefore fails its own `ensure`, is not verified, and cannot be applied — a lemma that could
+repair the goal would have to be provable, and the same missing arithmetic blocks both.
+
+So the repair gap is a checker-strength gap, not a search gap. What would move it is a proof
+method the checker does not have — nonlinear arithmetic, or induction that can rewrite under a
+recursive call — which is where a solver portfolio or a bounded bit-precise checker would pay for
+itself concretely rather than as a wish. Until one exists, enlarging the repair vocabulary, or
+deriving it from the theorem catalog, adds reach the system cannot use.
+
+A third repair shape was built and reverted on the same evidence: proposing a *source patch* (an
+`assert <goal> by: <theorem>(...)` block) instead of a tactic step, validated by re-running the
+whole checker on the patched source. That needs no kernel change and is sound by construction —
+the checker is the checker. It was reverted because its positive path has no demonstrable case for
+exactly the reason above, and an untestable capability is a stub.
 
 That next piece is a `lemma` tactic, and building it far enough to find the blocker turned up a
 constraint worth writing down rather than rediscovering.
