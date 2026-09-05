@@ -4746,6 +4746,62 @@ extend ElisaProof:
         def proof_runtime_expression_calls_allowed(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
             return not proof_expr_has_call(expression) or proof_expr_is_call_rooted(expression) or proof_runtime_calls_are_pure(expression, functions)
 
+        # A branch condition may carry an executable call anywhere the call runs whenever the
+        # condition is evaluated at all. The `if` machinery frames every call in the condition,
+        # forgets symbolic values, and clears unstable facts on both arms before recording the
+        # branch fact, which is exactly the model of a call that certainly happened — so the older
+        # restriction to a call at the root was conservatism, not a requirement.
+        #
+        # This is deliberately narrower than `proof_runtime_expression_calls_allowed`, which still
+        # governs `while`, `for`, `match`, `catch` and `assert`. An assertion in particular
+        # publishes its expression as a fact through a different path that would hand back the
+        # pre-call symbolic value; `examples/rejected_assert_nested_call.elisa` pins that.
+        def proof_runtime_branch_calls_allowed(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            return not proof_expr_has_call(expression) or proof_runtime_calls_evaluate_unconditionally(expression, functions, 0) or proof_runtime_calls_are_pure(expression, functions)
+
+        # A call hidden behind a short-circuit, a ternary or a recovery arm may not happen, so
+        # only a pure one is admitted there. Every shape this does not reason about explicitly
+        # falls through to the no-executable-call case rather than being assumed unconditional.
+        def proof_runtime_calls_evaluate_unconditionally(expression: Ast::Expr, functions: ProofFunctionTable&, depth: usize) -> bool:
+            requires depth <= 63
+            decreases 63 - depth
+            return false if depth >= 63
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    # Arguments and the callee term are evaluated before the call itself.
+                    return false if not proof_runtime_calls_evaluate_unconditionally(callee, functions, depth + 1)
+                    for argument in arguments |functions, depth|:
+                        return false if not proof_runtime_calls_evaluate_unconditionally(argument, functions, depth + 1)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_runtime_calls_evaluate_unconditionally(inner, functions, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_runtime_calls_evaluate_unconditionally(operand, functions, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_runtime_calls_evaluate_unconditionally(object, functions, depth + 1)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_runtime_calls_evaluate_unconditionally(base, functions, depth + 1)
+                Ast::Expr.Move(operand, _):
+                    return proof_runtime_calls_evaluate_unconditionally(operand, functions, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_runtime_calls_evaluate_unconditionally(left, functions, depth + 1)
+                    # `and` and `or` evaluate their right operand only for one value of the left.
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        return not proof_expr_has_executable_call(right) or proof_runtime_calls_are_pure(right, functions)
+                    return proof_runtime_calls_evaluate_unconditionally(right, functions, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_runtime_calls_evaluate_unconditionally(object, functions, depth + 1) and proof_runtime_calls_evaluate_unconditionally(index, functions, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_runtime_calls_evaluate_unconditionally(object, functions, depth + 1)
+                    return proof_runtime_calls_evaluate_unconditionally(low, functions, depth + 1) and proof_runtime_calls_evaluate_unconditionally(high, functions, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_runtime_calls_evaluate_unconditionally(object, functions, depth + 1)
+                    for argument in arguments |functions, depth|:
+                        return false if not proof_runtime_calls_evaluate_unconditionally(argument, functions, depth + 1)
+                    return true
+                _:
+                    return not proof_expr_has_executable_call(expression)
+
         # Expression-position catch is admitted only for a closed, value-producing arm shape.
         # The first arm is the successful payload binding; subsequent arms handle errors and the
         # final arm must be an explicit catch-all. This keeps the branch relation finite and
@@ -4886,7 +4942,7 @@ extend ElisaProof:
                 Ast::Stmt.Assign(target, _, initializer, _):
                     return proof_expr_supported(target) and proof_statement_value_supported(initializer, functions)
                 Ast::Stmt.If(condition, _, _, _):
-                    return proof_expr_supported(condition) and proof_runtime_expression_calls_allowed(condition, functions)
+                    return proof_expr_supported(condition) and proof_runtime_branch_calls_allowed(condition, functions)
                 Ast::Stmt.While(condition, _, _):
                     return proof_expr_supported(condition) and proof_runtime_expression_calls_allowed(condition, functions)
                 Ast::Stmt.For(_, _, iterable, _, _):

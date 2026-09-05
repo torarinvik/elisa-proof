@@ -719,6 +719,48 @@ refused, and a construction whose left edge is not a type name is refused. Remov
 rule or the field walk each makes it exit with the matching code. On the kernel's own source the
 proven count moved from 885 to 891, with replay gaps unchanged at zero.
 
+## Added: an executable call in a branch condition need not sit at the root
+
+A statement whose expressions the checker cannot model does not merely go unproven: it invalidates
+the path. `proof_statement_expressions_supported` gated a branch condition carrying an executable
+call on `proof_expr_is_call_rooted` — the whole condition had to *be* the call. So `if f(x):` was
+modelled and `if not f(x):` was `expression-unsupported`, along with `if f(x) < n:` and every other
+shape where the call sat under an operator. On the kernel's own source that was the largest
+non-resource gap: 251 findings, and the dominant shape was `return false if not <call>(...)`.
+
+The root restriction was conservatism, not a requirement. The `if` handler already frames every
+call in the condition, forgets symbolic values, and clears unstable facts on *both* arms before
+recording the branch fact — which is exactly the model of a call that certainly happened. What it
+does not model is a call that might not happen, so `proof_runtime_calls_evaluate_unconditionally`
+admits a call only where evaluation is unconditional: under `not`, under a comparison or
+arithmetic, in an index or a slice, in a call's own arguments, and on the left of `and`/`or`. On
+the *right* of a short-circuit only a pure call is admitted, because there is no effect to skip.
+Every shape the walk does not reason about explicitly falls through to "contains no executable
+call", so an unrecognized form is refused rather than assumed to run.
+
+The gate is deliberately narrow. `while`, `for`, `match`, `catch` and `assert` keep the old
+root-only rule: an assertion publishes its expression as a fact through a path that hands back the
+pre-call symbolic value, so widening it there proved
+`examples/rejected_assert_nested_call.elisa`'s goal — a false claim that the test matrix caught
+before the change shipped. Those forms are separate work, each needing its own handler audited.
+
+Two calls of one impure function are not one term, and nothing here changes that. A guard naming
+an impure call records a fact naming that call; a later obligation naming the same call is a
+*different* call and is not discharged by it. `examples/rejected_condition_call_positions.elisa`
+pins both directions: `bound_after_guard` and `stored_before_guard` each guard on `next(counter)`
+and then index with a second `next(counter)`, and both keep `index-upper-unproven`.
+
+On the kernel's own source `expression-unsupported` moved from 251 to 182 and
+`function-summary-unverified` from 177 to 172, with replay gaps unchanged at zero.
+
+Coverage. `examples/condition_call_positions.elisa` proves a bare call, a negated call, a compared
+call, a call under arithmetic, an impure call beside a pure one across `and`, and the sound
+reuse pattern of binding the result to a local before the guard.
+`examples/rejected_condition_call_positions.elisa` refuses an impure call on the right of `and`
+and of `or`, one inside a ternary, one inside a struct literal the walk does not recognize, and
+the two repeated-call index shapes. Removing the short-circuit clause admits the first two;
+`rejected_assert_nested_call` guards the statement forms that were left alone.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

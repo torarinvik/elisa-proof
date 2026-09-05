@@ -122,7 +122,7 @@ if [[ "$json_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: JSON report is not a valid structured proof state\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
+for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
     "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -1597,6 +1597,28 @@ region_call_summary_status=${PIPESTATUS[1]}
 set -e
 if [[ "$region_call_summary_status" -ne 0 ]]; then
     printf 'proof test matrix failed: region-polymorphic callee summary composition\n' >&2
+    exit 1
+fi
+
+# A branch condition may carry an executable call wherever that call runs whenever the condition
+# is evaluated, not only at the root. A call that may be skipped stays refused.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["proven"] == report["summary"]["obligations"]; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"bare_call", "negated_call", "compared_call", "short_circuit_left", "arithmetic_call", "guarded_index"} <= names'
+condition_call_positions_status=${PIPESTATUS[1]}
+set -e
+if [[ "$condition_call_positions_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: executable calls in branch conditions\n' >&2
+    exit 1
+fi
+
+# A skippable call, an unrecognized shape, and a guard whose fact names the same impure call as a
+# later obligation are each refused; two calls of one impure function are not one term.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; unsupported = {name for kind, name in findings if kind == "expression-unsupported"}; assert {"right_of_and", "right_of_or", "conditional_call", "literal_field_call"} <= unsupported; assert ("index-upper-unproven", "bound_after_guard") in findings; assert ("index-upper-unproven", "stored_before_guard") in findings; assert not any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"])'
+rejected_condition_call_positions_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_condition_call_positions_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a skippable or repeated impure call entered a proof state\n' >&2
     exit 1
 fi
 

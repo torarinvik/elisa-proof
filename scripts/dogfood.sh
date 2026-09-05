@@ -211,6 +211,8 @@ run_probe rejected_writable_lend_calls examples/rejected_writable_lend_calls.eli
 run_probe region_lend_calls examples/region_lend_calls.elisa 0
 run_probe rejected_region_lend_calls examples/rejected_region_lend_calls.elisa 1
 run_probe region_call_summary examples/region_call_summary.elisa 0
+run_probe condition_call_positions examples/condition_call_positions.elisa 0
+run_probe rejected_condition_call_positions examples/rejected_condition_call_positions.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -543,6 +545,34 @@ for kind in ("resource-region-alloc", "construct", "record-update", "resource-ca
     if kind not in kinds:
         raise SystemExit("dogfood failed: %s never reached the arena" % kind)
 print("dogfood region_call_summary: a constructed type is not a value, a record base still is")
+PY
+
+# An executable call in a branch condition is modelled wherever it certainly runs. A call that may
+# be skipped, and a fact naming an impure call that a later obligation names again, stay refused.
+python3 - "$REPORT_DIR/condition_call_positions.json" "$REPORT_DIR/rejected_condition_call_positions.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: unconditional condition calls did not prove cleanly")
+names = {goal["name"] for goal in report["goals"] if goal["proven"]}
+for name in ("negated_call", "compared_call", "short_circuit_left", "arithmetic_call", "guarded_index"):
+    if name not in names:
+        raise SystemExit("dogfood failed: %s did not enter a verified proof state" % name)
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: condition-call boundary fixture did not fail cleanly")
+unsupported = {finding["name"] for finding in report["findings"] if finding["kind"] == "expression-unsupported"}
+for name in ("right_of_and", "right_of_or", "conditional_call", "literal_field_call"):
+    if name not in unsupported:
+        raise SystemExit("dogfood failed: %s was admitted as an unconditional call" % name)
+if any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"]):
+    raise SystemExit("dogfood failed: a guard naming an impure call discharged an index bound")
+print("dogfood condition_call_positions: a condition call is modelled only where it certainly runs")
 PY
 
 

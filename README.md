@@ -464,6 +464,15 @@ callee's converged summary. See `examples/shared_borrow_calls.elisa`,
 `examples/writable_lend_calls.elisa`, `examples/region_lend_calls.elisa` and the matching
 `rejected_*` fixtures.
 
+A branch condition may carry an executable call wherever that call runs whenever the condition is
+evaluated — under `not`, a comparison, arithmetic, an index, or on the left of `and`/`or` — because
+the branch frames every such call, forgets symbolic values and clears unstable facts on both arms
+before recording the branch fact. A call that may be skipped, and every shape the walk does not
+recognize, stay unsupported, as do executable calls in `while`, `for`, `match`, `catch` and
+`assert` conditions. Two calls of one impure function are never one term: a guard naming a call
+does not discharge a later obligation naming it again. See `examples/condition_call_positions.elisa`
+and `examples/rejected_condition_call_positions.elisa`.
+
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its
 strongest built-in refinement/invariant mode, but the custom kernel still has no SMT backend,
