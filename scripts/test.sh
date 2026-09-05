@@ -1678,6 +1678,29 @@ if [[ "$rejected_unnamed_lifetime_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `for x in xs |a, b|:` reaches the statement walker as an expression statement holding a captured
+# block. Refusing it invalidated the enclosing path, which skipped the loop body entirely; the
+# write-back is modelled instead, so obligations inside and after the loop are both checked.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/captured_block.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("obligations_after_the_loop_are_checked", "index-upper") in proven; assert ("obligations_inside_the_loop_are_checked", "index-upper") in proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported"}'
+captured_block_status=${PIPESTATUS[1]}
+set -e
+if [[ "$captured_block_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: captured block statements\n' >&2
+    exit 1
+fi
+
+# The write-back is havocked, so nothing established before the loop survives it, and an
+# unprovable obligation inside the body stays visible instead of vanishing with the path.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_captured_block.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert goals[("fact_must_not_survive", "goal")] is False; assert goals[("value_must_not_survive", "goal")] is False; assert goals[("obligation_inside_is_not_skipped", "index-upper")] is False'
+rejected_captured_block_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_captured_block_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a captured block let outer state survive\n' >&2
+    exit 1
+fi
+
 # A skippable call, an unrecognized shape, and a guard whose fact names the same impure call as a
 # later obligation are each refused; two calls of one impure function are not one term.
 set +e

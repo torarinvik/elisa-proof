@@ -5597,6 +5597,44 @@ extend ElisaProof:
 
         # Check one exact loop back-edge. Every edge gets its own post-body facts; sharing the
         # entry context here would allow a condition or assertion from one branch to justify a
+        # A captured block statement: `for x in xs |a, b|: ...` reaches the statement walker as an
+        # expression statement holding a block with a capture list, not as `Ast::Stmt.For`. The
+        # shape gate refuses such a block on purpose — a captured block writes back into its outer
+        # bindings, and accepting it as a pure expression would let an outer fact survive a hidden
+        # mutation. In *statement* position the value is discarded, so the write-back can simply be
+        # modelled instead: check the body in a private state so no nested obligation is skipped,
+        # then havoc the outer symbolic values and facts exactly as an opaque call boundary does.
+        #
+        # That is strictly better than refusing, which invalidates the whole enclosing path and so
+        # costs every obligation after the loop as well as the function's own summary.
+        def proof_captured_block_statement(statement: Ast::Stmt) -> (known: bool, body: darray[Ast::Stmt], position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+            empty: mutable darray[Ast::Stmt] = []
+            match statement:
+                Ast::Stmt.Expr(expression, _):
+                    match expression:
+                        Ast::Expr.Block(statements, value, captures, position):
+                            return (false, empty, position) if captures.count == 0
+                            # The statement position discards the block's result, but the trailing
+                            # value is still evaluated and may carry obligations of its own. Append
+                            # it as an ordinary expression statement so the body walk checks it;
+                            # `Absent` and `Invalid` are the parser's "no result" markers and carry
+                            # nothing to check.
+                            body: mutable darray[Ast::Stmt] = []
+                            body.extend(statements)
+                            match value:
+                                Ast::Expr.Absent:
+                                    pass
+                                Ast::Expr.Invalid:
+                                    pass
+                                _:
+                                    body.push(Ast::Stmt.Expr(value, position))
+                            return (true, body, position)
+                        _:
+                            pass
+                _:
+                    pass
+            return (false, empty, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+
         # different branch's termination step.
         def proof_check_decreases_step(measure_components: darray[Ast::Expr]&, decreases_components: darray[Ast::Expr]&, next_names: darray[sview]&, next_values: darray[Ast::Expr]&, next_facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, report: mutable ProofReport&, name: sview, position: Ast::Pos) -> bool:
             next_components: mutable darray[Ast::Expr] = []
@@ -5632,6 +5670,25 @@ extend ElisaProof:
                 proof_statement_move_roots(statement, &moved_roots)
                 statement_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
                 declared_name: sview = proof_statement_declared_name(statement)
+                captured_block: (known: bool, body: darray[Ast::Stmt], position: Ast::Pos) = proof_captured_block_statement(statement)
+                if captured_block.known:
+                    # The body is checked against the same postconditions, so a `return` inside it
+                    # still has to establish them; `break` and `continue` are absorbed by the loop
+                    # and never reach the enclosing function.
+                    block_names: mutable darray[sview] = proof_copy_names(names)
+                    block_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                    block_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                    block_flow: mutable ProofFlow = proof_empty_flow()
+                    empty_block_invariants: mutable darray[Ast::Expr] = []
+                    proof_check_returns(captured_block.body, &block_names, &block_values, &block_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", empty_block_invariants, 0, &block_flow)
+                    flow.valid <- false if not block_flow.valid
+                    # The loop itself is not verified: no invariant relates its iterations, so the
+                    # obligation is recorded as failing while the enclosing path stays checkable.
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "captured-block-unsupported", captured_block.position.line, name, "a captured block's write-back is havocked rather than modeled")
+                    proof_forget_values(names, values, captured_block.position)
+                    proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                    continue
                 if not proof_statement_expressions_supported(statement, functions):
                     unsupported_position: Ast::Pos = proof_statement_position(statement)
                     flow.valid <- false

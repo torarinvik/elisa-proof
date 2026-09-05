@@ -219,6 +219,8 @@ run_probe frame_lifetime examples/frame_lifetime.elisa 0
 run_probe rejected_frame_lifetime examples/rejected_frame_lifetime.elisa 1
 run_probe unnamed_lifetime_lend examples/unnamed_lifetime_lend.elisa 1
 run_probe rejected_unnamed_lifetime_lend examples/rejected_unnamed_lifetime_lend.elisa 1
+run_probe captured_block examples/captured_block.elisa 1
+run_probe rejected_captured_block examples/rejected_captured_block.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -660,6 +662,35 @@ if report["status"] != "failed" or report["replay"]["gaps"]:
 if not any(finding["kind"] == "region-call-opaque" for finding in report["findings"]):
     raise SystemExit("dogfood failed: the summary path admitted an unnamed lifetime")
 print("dogfood unnamed_lifetime_lend: a lend may carry a region the callee cannot name; a summary may not")
+PY
+
+# A captured block's body must be checked rather than skipped, and nothing established before it
+# may survive the write-back.
+python3 - "$REPORT_DIR/captured_block.json" "$REPORT_DIR/rejected_captured_block.json" <<'PY'
+import json
+import sys
+
+checked, havocked = sys.argv[1:]
+with open(checked, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: captured block fixture did not replay cleanly")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for entry in (("obligations_after_the_loop_are_checked", "index-upper"), ("obligations_inside_the_loop_are_checked", "index-upper")):
+    if entry not in proven:
+        raise SystemExit("dogfood failed: %s was not checked past the captured block" % (entry,))
+kinds = {finding["kind"] for finding in report["findings"]}
+if kinds != {"captured-block-unsupported"}:
+    raise SystemExit("dogfood failed: unexpected findings around a captured block: %s" % sorted(kinds))
+with open(havocked, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: captured block boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for entry in (("fact_must_not_survive", "goal"), ("value_must_not_survive", "goal"), ("obligation_inside_is_not_skipped", "index-upper")):
+    if goals.get(entry) is not False:
+        raise SystemExit("dogfood failed: %s survived a captured block's write-back" % (entry,))
+print("dogfood captured_block: a captured block's body is checked and its write-back is havocked")
 PY
 
 # The rendered proof must agree with the report for *every* goal, not a sampled one: `qed` appears

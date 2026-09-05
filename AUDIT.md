@@ -1110,12 +1110,40 @@ invalidates its function's path. That is very likely where a large share of the 
 `function-summary-unverified` comes from as well, since a function whose path is invalid exports no
 summary and every caller then reports one.
 
-This is not a cheap fix and should not be attempted as one. A block-valued loop can `break`,
-`continue` and `return`, so it cannot be treated as a straight-line havoc the way an opaque call
-is: the existing `flow.valid <- false` is doing real work. What it needs is the treatment
-`Ast::Stmt.For` already gets — a missing invariant reported, the body checked in an isolated entry
-state, and the path left valid — which means recognizing the block form and routing it to the same
-handler rather than widening the shape gate.
+The shape gate refuses such a block *on purpose*, and the reason is recorded next to it: a captured
+block writes back into its outer bindings, and accepting it as a pure expression would let an outer
+fact survive a hidden mutation. So the fix was never to widen the gate — it was to model the
+write-back where the block's result is discarded anyway.
+
+`proof_captured_block_statement` recognizes the statement form and the walker gives it the
+treatment `parallel for` already uses: check the body in a private state so no nested obligation is
+skipped, record the loop itself as an unverified obligation, then havoc the outer symbolic values
+and clear the outer facts, keeping type bounds. The body is checked against the same `ensures`, so
+a `return` inside it still has to establish them, while `break` and `continue` are absorbed by the
+loop and never reach the enclosing function. A trailing block value is appended to the body as an
+ordinary expression statement rather than ignored, so its own obligations are checked too.
+
+What this bought is mostly *visibility*, and that is the honest way to read the numbers. On the
+kernel's own source proven went from 901 to 1135, but total obligations went from 1706 to 2412 —
+because 270 index-bound obligations *inside* captured loop bodies had never been checked at all.
+Refusing the statement set `flow.valid <- false` and moved on, so the body was never walked. Those
+obligations were not being claimed, but they were not being examined either, which is the worse
+half of a fail-closed answer. `expression-unsupported` drops from 192 to 115 and the loops now
+account for 137 `captured-block-unsupported` findings of their own; replay gaps stay at zero and
+`trusted_assumptions` stays empty.
+
+Coverage. `examples/captured_block.elisa` requires an index obligation *after* the loop and one
+*inside* it both to be proven, which is only possible because the path stays valid and the body is
+walked. `examples/rejected_captured_block.elisa` requires a fact and a symbolic value established
+before the loop not to survive it, and an unprovable obligation inside the body to stay visible
+rather than vanish with the path.
+
+Not covered. Clearing the outer facts is retained as defence in depth but no fixture isolates it:
+every write-back case reachable through a postcondition is already caught by forgetting symbolic
+values, and an `assert` in a normal body is a runtime assertion rather than an obligation, so it
+cannot be used to observe a surviving fact. The havoc is also whole-state rather than
+capture-scoped — the capture list names exactly which bindings the block can write, so a precise
+version would keep facts about everything else, which is the obvious next improvement here.
 
 ## Coverage still required
 
