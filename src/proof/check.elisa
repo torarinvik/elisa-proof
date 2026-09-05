@@ -137,6 +137,32 @@ extend ElisaProof:
                 _:
                     return false
 
+        def proof_unsigned_primitive_width(expression: Ast::Expr) -> i64:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return 8 if name == "u8"
+                    return 16 if name == "u16"
+                    return 32 if name == "u32"
+                    return 64 if name == "u64" or name == "usize" or name == "uint"
+                    return 0
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_primitive_width(inner)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_unsigned_primitive_width(inner) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                _:
+                    return 0
+
+        def proof_unsigned_type_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, width: i64, line: u32, owner: sview, position: Ast::Pos) -> void:
+            return if name == "" or width == 0
+            proof_add_traced_fact(facts, report, proof_unsigned_type_marker(name, width, position), "type-bound", line, owner)
+            # u64/usize/uint do not have a representable maximum in the proof AST's i64 literal
+            # domain. Their marker still forces a finite, explicitly established interval before
+            # arithmetic reasoning; only the smaller widths get an automatic exact upper bound.
+            if width < 64:
+                upper: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(name, position), TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(width)), position)
+                proof_add_traced_fact(facts, report, upper, "type-bound", line, owner)
+
         # Fixed arrays carry an exact element count in their type (`array[T, N]` or the
         # primitive shorthand `T[N]`). Keep this importer intentionally narrower than the
         # compiler's full type algebra: only a literal extent is admitted, and wrappers are
@@ -435,6 +461,8 @@ extend ElisaProof:
             report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: "lemma-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index})
 
         def proof_type_bound_name(expression: Ast::Expr) -> sview:
+            marker_name: sview = proof_unsigned_marker_name(expression)
+            return marker_name if marker_name != ""
             match expression:
                 Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
                     match left:
@@ -442,6 +470,15 @@ extend ElisaProof:
                             match right:
                                 Ast::Expr.Ident(name, _):
                                     return name if value == 0
+                                _:
+                                    pass
+                        _:
+                            pass
+                    match right:
+                        Ast::Expr.IntLit(_):
+                            match left:
+                                Ast::Expr.Ident(name, _):
+                                    return name
                                 _:
                                     pass
                         _:
@@ -4813,9 +4850,11 @@ extend ElisaProof:
                         names <- names.push(local_name)
                         values <- values.push(value)
                         values[prior_value_count] <- value if proof_expr_has_call(initializer) and prior_value_count < values.count
-                        if proof_unsigned_primitive_type(type_expression):
+                        unsigned_width: i64 = proof_unsigned_primitive_width(type_expression)
+                        if unsigned_width != 0:
                             lower_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0), TokenKind.LtEq, Ast::Expr.Ident(local_name, position), position)
                             proof_add_traced_fact(facts, report, lower_bound, "type-bound", position.line, name)
+                            proof_unsigned_type_facts(facts, report, local_name, unsigned_width, position.line, name, position)
                         if proof_expr_has_call(initializer):
                             # The new local contains the call result, so retain its binding, but
                             # forget every pre-existing binding that the call may have mutated.
@@ -5513,9 +5552,11 @@ extend ElisaProof:
             proof_check_header_frame_specs(header_changes, header_preserves, frame_parameters, report, function_name)
             facts: mutable darray[Ast::Expr] = []
             for parameter in parameters |facts, report, function_name, position|:
-                if proof_unsigned_primitive_type(parameter.type_expression):
+                unsigned_width: i64 = proof_unsigned_primitive_width(parameter.type_expression)
+                if unsigned_width != 0:
                     lower_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0), TokenKind.LtEq, Ast::Expr.Ident(parameter.name, position), position)
                     proof_add_traced_fact(facts, report, lower_bound, "type-bound", position.line, function_name)
+                    proof_unsigned_type_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position)
             for requirement in preconditions |facts, names, values, report, function_name, position|:
                 proof_add_traced_fact(facts, report, proof_substitute(requirement, names, values), "precondition", position.line, function_name)
             # Resource transitions are checked after entry facts are established so the source

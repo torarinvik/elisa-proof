@@ -117,6 +117,132 @@ extend ElisaProof:
                 _:
                     pass
 
+        # The proof AST does not carry compiler type metadata. Unsigned widths therefore travel
+        # through the same traced-fact channel as compiler-derived bounds. This marker is opaque
+        # to the arithmetic fragment, but it is encoded in the kernel arena and independently
+        # recognized by kernel replay. A proof author can manufacture the marker only to lose
+        # completeness: it never proves a proposition by itself, and the source trace still has
+        # to identify it as a type-bound fact.
+        def proof_unsigned_type_marker(name: sview, width: i64, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [Ast::Expr.Ident(name, position), Ast::Expr.IntLit(width)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
+
+        def proof_unsigned_marker_info(expression: Ast::Expr) -> (known: bool, name: sview, width: i64):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, "", 0) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, "", 0) if proof_ident_name(callee) != "__elisa_unsigned_type_bound" or arguments.count != 2
+                    name: sview = proof_ident_name(arguments[0])
+                    width: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    return (width.known and name != "" and width.value >= 8 and width.value <= 64, name, width.value)
+                _:
+                    return (false, "", 0)
+
+        def proof_unsigned_marker_name(expression: Ast::Expr) -> sview:
+            marker: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(expression)
+            return marker.name if marker.known
+            return ""
+
+        def proof_unsigned_marker_width_for_name(facts: darray[Ast::Expr]&, name: sview) -> i64:
+            width: mutable i64 = 0
+            for fact in facts |fact, name, width|:
+                marker: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(fact)
+                continue if not marker.known or marker.name != name
+                width <- marker.width if width == 0 or marker.width < width
+            return width
+
+        def proof_unsigned_width_max(width: i64) -> i64:
+            return 255 if width == 8
+            return 65535 if width == 16
+            return 4294967295 if width == 32
+            # i64 is the largest signed value representable by this proof AST. For u64/usize,
+            # a finite proof interval must establish this conservative representable ceiling;
+            # an unbounded unsigned value consequently cannot enter an arithmetic proof.
+            return 9223372036854775807 if width == 64
+            return 0
+
+        def proof_unsigned_width_in_expression(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> i64:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return proof_unsigned_marker_width_for_name(facts, name)
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_width_in_expression(inner, facts)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_unsigned_width_in_expression(operand, facts)
+                Ast::Expr.Binary(left, _, right, _):
+                    left_width: i64 = proof_unsigned_width_in_expression(left, facts)
+                    right_width: i64 = proof_unsigned_width_in_expression(right, facts)
+                    return right_width if left_width == 0
+                    return left_width if right_width == 0 or left_width < right_width
+                    return right_width
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    condition_width: i64 = proof_unsigned_width_in_expression(condition, facts)
+                    then_width: i64 = proof_unsigned_width_in_expression(then_expression, facts)
+                    else_width: i64 = proof_unsigned_width_in_expression(else_expression, facts)
+                    return condition_width if condition_width != 0 and (then_width == 0 or condition_width < then_width) and (else_width == 0 or condition_width < else_width)
+                    return then_width if then_width != 0 and (else_width == 0 or then_width < else_width)
+                    return else_width
+                Ast::Expr.Call(callee, arguments, _, _):
+                    width: mutable i64 = proof_unsigned_width_in_expression(callee, facts)
+                    for argument in arguments |argument, facts, width|:
+                        candidate: i64 = proof_unsigned_width_in_expression(argument, facts)
+                        width <- candidate if width == 0 or (candidate != 0 and candidate < width)
+                    return width
+                _:
+                    return 0
+
+        def proof_unsigned_expression_safe_with_bounds(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_expression_safe_with_bounds(inner, facts, bounds)
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if not proof_unsigned_expression_safe_with_bounds(operand, facts, bounds)
+                    if operator == TokenKind.Minus:
+                        width: i64 = proof_unsigned_width_in_expression(operand, facts)
+                        if width != 0:
+                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+                            return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
+                    return true
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_unsigned_expression_safe_with_bounds(left, facts, bounds)
+                    return false if not proof_unsigned_expression_safe_with_bounds(right, facts, bounds)
+                    arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.LShift or operator == TokenKind.RShift
+                    width: i64 = proof_unsigned_width_in_expression(expression, facts)
+                    return true if not arithmetic or width == 0
+                    # Unsigned subtraction is defined for every nonnegative pair when the
+                    # minuend is at least the subtrahend, even when the values are wider than
+                    # this prover's i64 interval domain. Preserve useful range proofs such as
+                    # `count <= total - start` under the explicit `start <= total` precondition.
+                    if operator == TokenKind.Minus and proof_linear_goal(right, TokenKind.LtEq, left, facts):
+                        return true
+                    interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+                    return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_unsigned_expression_safe_with_bounds(condition, facts, bounds) and proof_unsigned_expression_safe_with_bounds(then_expression, facts, bounds) and proof_unsigned_expression_safe_with_bounds(else_expression, facts, bounds)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_unsigned_expression_safe_with_bounds(callee, facts, bounds)
+                    for argument in arguments |argument, facts, bounds|:
+                        return false if not proof_unsigned_expression_safe_with_bounds(argument, facts, bounds)
+                    return true
+                _:
+                    return true
+
+        def proof_unsigned_expression_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            return proof_unsigned_expression_safe_with_bounds(expression, facts, bounds)
+
+        def proof_unsigned_goal_identity(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_goal_identity(inner)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
+                _:
+                    return false
+
         # Collect only explicit identifier equalities. This is deliberately narrower than
         # general expression rewriting: a positive `x == y` fact is safe to use as an alias,
         # while inventing a canonical form for calls, references, or arithmetic could cross
@@ -1229,6 +1355,11 @@ extend ElisaProof:
                 return true if proof_fact_contains(fact, goal) or proof_quantifier_equal(fact, goal, annotations)
             return true if proof_facts_inconsistent(facts)
             return true if proof_fact_proves_call_summary(facts, goal)
+            # Do not let the unbounded signed interval/model tiers prove a fixed-width unsigned
+            # expression unless every arithmetic subterm is shown to remain in its declared
+            # range. Directly asserted facts were handled above and remain valid path assumptions.
+            return true if proof_unsigned_goal_identity(goal)
+            return false if not proof_unsigned_expression_safe(goal, facts)
             if split_depth < 4:
                 disjunction_index: mutable usize = facts.count
                 disjunction_left: mutable Ast::Expr = Ast::Expr.Absent

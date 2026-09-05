@@ -263,6 +263,105 @@ module ElisaProofKernelReplay:
                 return
             proof_kernel_replay_collect_bound_comparison(nodes, node.left, node.operator, node.right, bounds)
 
+        def proof_kernel_replay_unsigned_marker_info(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> (known: bool, name: sview, width: i64):
+            return (false, "", 0) if depth >= 127 or not ElisaProofKernelCore::depth_valid(depth)
+            return (false, "", 0) if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, "", 0) if not located.known or located.node.kind != "call"
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (false, "", 0) if node.children_count != 2
+            return (false, "", 0) if not ElisaProofKernelCore::range_valid(node.children_start, node.children_count, children.count)
+            callee: sview = proof_kernel_replay_ident_name(nodes, node.left)
+            return (false, "", 0) if callee != "__elisa_unsigned_type_bound"
+            first: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start)
+            second: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + 1)
+            # The child slice is validated against the actual children arena by callers before
+            # this helper is used. The extra root checks here keep the helper fail-closed when it
+            # is used from a standalone replay entry point.
+            return (false, "", 0) if not first.known or not second.known
+            first_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, first.value)
+            second_value: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, second.value, depth + 1)
+            return (false, "", 0) if not first_node.known or first_node.node.kind != "call_arg" or not second_value.known
+            name: sview = proof_kernel_replay_ident_name(nodes, first_node.node.left)
+            return (second_value.value >= 8 and second_value.value <= 64 and name != "", name, second_value.value)
+
+        def proof_kernel_replay_unsigned_marker_width_for_name(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], name: sview) -> i64:
+            width: mutable i64 = 0
+            for fact in facts |fact, nodes, name, width|:
+                marker: (known: bool, name: sview, width: i64) = proof_kernel_replay_unsigned_marker_info(nodes, children, fact, 0)
+                continue if not marker.known or marker.name != name
+                width <- marker.width if width == 0 or marker.width < width
+            return width
+
+        def proof_kernel_replay_unsigned_width_in_expression(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], depth: usize) -> i64:
+            return 0 if depth >= 127 or not ElisaProofKernelCore::depth_valid(depth)
+            return 0 if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return 0 if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "ident":
+                return proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, node.name)
+            if node.kind == "unary":
+                return proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, depth + 1)
+            if node.kind == "binary":
+                left_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, depth + 1)
+                right_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.right, facts, depth + 1)
+                return right_width if left_width == 0
+                return left_width if right_width == 0 or left_width < right_width
+                return right_width
+            if node.kind == "if":
+                condition_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, depth + 1)
+                then_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.right, facts, depth + 1)
+                else_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.auxiliary, facts, depth + 1)
+                return condition_width if condition_width != 0 and (then_width == 0 or condition_width < then_width) and (else_width == 0 or condition_width < else_width)
+                return then_width if then_width != 0 and (else_width == 0 or then_width < else_width)
+                return else_width
+            return 0
+
+        def proof_kernel_replay_unsigned_width_max(width: i64) -> i64:
+            return 255 if width == 8
+            return 65535 if width == 16
+            return 4294967295 if width == 32
+            return 9223372036854775807 if width == 64
+            return 0
+
+        def proof_kernel_replay_unsigned_expression_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, depth: usize) -> bool:
+            return false if depth >= 127 or not ElisaProofKernelCore::depth_valid(depth)
+            return false if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "unary":
+                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
+                if node.operator == "-":
+                    width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, depth + 1)
+                    if width != 0:
+                        interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, root, bounds, depth + 1)
+                        return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_kernel_replay_unsigned_width_max(width)
+                return true
+            if node.kind == "binary":
+                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
+                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.right, facts, bounds, depth + 1)
+                arithmetic: bool = node.operator == "+" or node.operator == "-" or node.operator == "*" or node.operator == "/" or node.operator == "%" or node.operator == "<<" or node.operator == ">>"
+                width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, depth + 1)
+                return true if not arithmetic or width == 0
+                # A guarded unsigned subtraction is range-safe even when its operands are
+                # wider than the kernel's i64 interval representation.
+                if node.operator == "-" and proof_kernel_replay_difference_comparison(nodes, node.left, ">=", node.right, facts):
+                    return true
+                interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, root, bounds, depth + 1)
+                return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_kernel_replay_unsigned_width_max(width)
+            if node.kind == "if":
+                return proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1) and proof_kernel_replay_unsigned_expression_safe(nodes, children, node.right, facts, bounds, depth + 1) and proof_kernel_replay_unsigned_expression_safe(nodes, children, node.auxiliary, facts, bounds, depth + 1)
+            return true
+
+        def proof_kernel_replay_unsigned_goal_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> bool:
+            bounds: mutable darray[ProofKernelReplayBound] = []
+            for fact in facts |fact, nodes, bounds|:
+                proof_kernel_replay_collect_bounds(nodes, fact, &bounds, 0)
+            proof_kernel_replay_close_equalities(nodes, facts, &bounds)
+            return proof_kernel_replay_unsigned_expression_safe(nodes, children, root, facts, bounds, 0)
+
         def proof_kernel_replay_collect_name_equalities(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, depth: usize) -> void:
             requires depth <= 127
             decreases 127 - depth
@@ -1944,6 +2043,13 @@ module ElisaProofKernelReplay:
                 return true if proof_kernel_replay_fact_contains(nodes, children, fact, goal_root, depth + 1)
             return true if proof_kernel_replay_facts_inconsistent(nodes, facts, depth + 1)
             return true if proof_kernel_replay_fact_proves_call_summary(nodes, children, facts, goal_root)
+            goal_identity: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
+            if goal_identity.known and goal_identity.node.kind == "binary":
+                return true if proof_kernel_replay_negation(goal_identity.node.operator) != "" and proof_kernel_replay_definitionally_equal(nodes, children, goal_identity.node.left, goal_identity.node.right, depth + 1)
+            # Keep the source-neutral kernel from applying its signed arithmetic/model rules to a
+            # fixed-width unsigned term unless every arithmetic subterm has a finite, in-range
+            # interval under the traced width marker.
+            return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, goal_root)
             if split_depth < 4:
                 for index in 0..<facts.count |index, facts, nodes, children, goal_root, split_depth, depth|:
                     candidate: (known: bool, left: usize, right: usize) = proof_kernel_replay_find_disjunction(nodes, facts[index], depth)

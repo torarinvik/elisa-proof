@@ -98,6 +98,12 @@ if [[ "$rejected_borrow_call_duplicate_alias_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate mutable call-alias fixture\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-unsigned-overflow-goal.o" "$ROOT_DIR/examples/rejected_unsigned_overflow_goal.elisa" >/dev/null 2>&1
+rejected_unsigned_overflow_goal_compiler_status=$?
+if [[ "$rejected_unsigned_overflow_goal_compiler_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: compiler rejected the runtime-valid unsigned overflow fixture\n' >&2
+    exit 1
+fi
 "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/nested-region-destroy.o" "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/dev/null 2>&1
 nested_region_destroy_compiler_status=$?
 if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
@@ -256,6 +262,19 @@ if [[ "$rejected_borrow_call_duplicate_alias_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "borrow-call-alias" and f["status"] == "unknown" for f in report["findings"]); assert not any(node["kind"] == "resource-call" and node["name"] == "write_pair" for node in report["kernel"]["nodes"]); assert report["replay"]["gaps"] == 0' "$rejected_borrow_call_duplicate_alias_report"; then
     printf 'proof test matrix failed: duplicate mutable call alias report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+rejected_unsigned_overflow_goal_report="$standalone_probe_dir/rejected-unsigned-overflow-goal.json"
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_unsigned_overflow_goal.elisa" >"$rejected_unsigned_overflow_goal_report"
+rejected_unsigned_overflow_goal_status=$?
+set -e
+if [[ "$rejected_unsigned_overflow_goal_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: unsigned overflow postcondition was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "ensure-unproven" and f["status"] == "unknown" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_unsigned_overflow_goal_report"; then
+    printf 'proof test matrix failed: unsigned overflow report was incomplete\n' >&2
     exit 1
 fi
 set +e
