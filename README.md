@@ -57,6 +57,16 @@ text. An edited keyword, an invented hypothesis, a swapped conclusion, a renumbe
 a block from another source all diverge alike. It exits `0` for a block that matches what the report
 supports, `1` for one that diverges, and `2` for one that names no goal of this source.
 
+`build/elisa-proof --script block.txt file.elisa` runs a proof written by hand in that same shape,
+so a person can propose a different proof of the goal rather than only compare against the recorded
+one. `by <action>` and `by <action> <index>` lines are the steps; the block header, `given`, `show`
+and `qed` lines are documentation and carry no weight, since a source-bound script takes its
+hypotheses and conclusion from the goal itself. A line matching none of those refuses the whole
+script. The front end is untrusted elaboration: it translates the text into the same
+`elisa-proof-tactics-v1` interchange `--tactics` consumes and runs exactly that checked path, so a
+text script and its JSON equivalent produce identical output. `split` and `cases` need nested
+branch scripts and must still be written as JSON.
+
 Use `build/elisa-proof --goal N file.elisa` to retrieve only one of those goals without loading the
 full report or kernel arena. The deterministic `elisa-proof-goal-v1` response includes the source
 fingerprint and completeness gate, proposition, exact hypotheses and origins, dependencies,

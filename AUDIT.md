@@ -826,13 +826,34 @@ in turn* and requires every one of those mutations to be reported. A checker tha
 edited block would make the readable surface forgeable, so this is checked per line rather than by
 sample.
 
+`--script <block> <file.elisa>` closes the authoring half. It reads a proof written in the same
+shape `--proof` renders and runs it, so a person can propose *a different* proof of the same goal
+rather than only compare against the recorded one. The front end is untrusted elaboration and
+nothing else: it translates the text into the `elisa-proof-tactics-v1` interchange that the checked
+tactic engine already consumes and hands it to exactly that path, gaining no route of its own. A
+text script and its JSON equivalent produce byte-identical output, which both suites assert by
+comparing the two runs.
+
+The grammar is deliberately thin. `by <action>` and `by <action> <index>` lines are the steps; the
+`proof`/`open`/`unchecked` header, `given`, `show`, `unproved:` and `qed` lines are documentation
+and carry no weight, because a source-bound script takes its hypotheses and its conclusion from the
+goal itself. A line matching none of those refuses the whole script rather than being skipped, so a
+typo cannot quietly become a shorter proof than the author wrote, and a script with no steps is
+refused rather than treated as a proof of nothing.
+
+Coverage. The test matrix asserts the text and JSON paths agree byte for byte and pins four refusal
+shapes. Dogfood adds two more — a step with trailing text, and a script with no goal header — and
+checks the property that matters most for a writable surface: an invented `given` line changes
+neither the tactic result nor the state the engine started from, so writing a hypothesis into the
+file does not make it an assumption.
+
 Not covered. No fixture currently has a goal that is proven without a replayed certificate, so the
 `unchecked` keyword is exercised by the renderer's logic but not by a live example; the exhaustive
-dogfood check would catch a regression the moment one appears. Checking is comparison against the
-canonical rendering, not parsing: a person may edit a block and learn exactly where it departs from
-the evidence, but cannot yet *author* a different proof of the same goal and have it checked. That
-needs the rendered form to become an input to the tactic layer, which already has its own
-kernel-backed state machine and portable script format.
+dogfood check would catch a regression the moment one appears. `split` and `cases` need nested
+branch scripts, which the text grammar has no syntax for yet, so a branching proof must still be
+written as JSON. And the two proof surfaces are still separate tools: `--check-proof` compares a
+block against the recorded proof, `--script` runs a proposed one, but neither rewrites a block that
+diverges into one that would check.
 
 ## Coverage still required
 

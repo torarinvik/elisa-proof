@@ -649,6 +649,50 @@ PY
 done
 printf 'dogfood proof_check: rendered blocks round-trip and any edited line is reported\n'
 
+# A human-written script must gain no path of its own: translating it into the tactic interchange
+# and running that must give the identical verdict, and every malformed shape must be refused.
+script_text_output="$REPORT_DIR/script_text.json"
+script_json_output="$REPORT_DIR/script_json.json"
+"$ROOT_DIR/build/elisa-proof" --script "$ROOT_DIR/examples/proof_script_target.proof" "$ROOT_DIR/examples/verified.elisa" >"$script_text_output"
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" >"$script_json_output"
+if ! cmp -s "$script_text_output" "$script_json_output"; then
+    printf 'dogfood failed: a text proof script diverged from its JSON equivalent\n' >&2
+    exit 1
+fi
+python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/verified.elisa" "$REPORT_DIR" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+binary, source, workdir = sys.argv[1:]
+script_path = os.path.join(workdir, "probe.proof")
+refused = {
+    "unknown action": "# goal 7\nproof p:\n    by nosuchtactic\nqed\n",
+    "unrecognized line": "# goal 7\nproof p:\n    bye assumption\nqed\n",
+    "no steps": "# goal 7\nproof p:\nqed\n",
+    "trailing text after a step": "# goal 7\nproof p:\n    by assumption extra\nqed\n",
+    "no goal header": "proof p:\n    by assumption\nqed\n",
+    "step that does not close the goal": "# goal 7\nproof p:\n    by intro\nqed\n",
+}
+for label, text in refused.items():
+    with open(script_path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    result = subprocess.run([binary, "--script", script_path, source], capture_output=True, text=True)
+    payload = json.loads(result.stdout)
+    if payload["status"] == "proved" or payload["tactic"]["solved"]:
+        raise SystemExit("dogfood failed: proof script admitted despite %s" % label)
+# An invented hypothesis is documentation, not an assumption: it must not change the verdict.
+with open(script_path, "w", encoding="utf-8") as handle:
+    handle.write("# goal 7\nproof p:\n    given 1 == 2\n    by assumption\nqed\n")
+invented = json.loads(subprocess.run([binary, "--script", script_path, source], capture_output=True, text=True).stdout)
+with open(os.path.join(workdir, "script_text.json"), encoding="utf-8") as handle:
+    baseline = json.load(handle)
+if invented["tactic"] != baseline["tactic"] or invented["state"] != baseline["state"]:
+    raise SystemExit("dogfood failed: a written hypothesis changed the proof state")
+PY
+printf 'dogfood proof_script: a written script runs the checked engine and nothing else\n'
+
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.

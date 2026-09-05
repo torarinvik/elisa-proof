@@ -1723,6 +1723,57 @@ if [[ "$proof_check_shape_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `--script` is a text front end onto the checked tactic engine: it translates a human-written
+# script into the same interchange a JSON script uses and gains no path of its own, so the two must
+# produce byte-identical verdicts. The elaboration decides nothing — an unknown action, an
+# unrecognized line, and a script with no steps must each be refused, and `qed` carries no weight.
+set +e
+"$ROOT_DIR/build/elisa-proof" --script "$ROOT_DIR/examples/proof_script_target.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/script_text.json"
+proof_script_text_status=$?
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/script_json.json"
+proof_script_json_status=$?
+set -e
+if [[ "$proof_script_text_status" -ne 0 || "$proof_script_json_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: proof script exit codes text=%s json=%s\n' "$proof_script_text_status" "$proof_script_json_status" >&2
+    exit 1
+fi
+if ! cmp -s "$proof_render_dir/script_text.json" "$proof_render_dir/script_json.json"; then
+    printf 'proof test matrix failed: a text proof script did not match its JSON equivalent\n' >&2
+    exit 1
+fi
+printf '# goal 7\nproof p:\n    by nosuchtactic\nqed\n' > "$proof_render_dir/unknown_action.proof"
+printf '# goal 7\nproof p:\n    bye assumption\nqed\n' > "$proof_render_dir/bad_line.proof"
+printf '# goal 7\nproof p:\nqed\n' > "$proof_render_dir/no_steps.proof"
+printf '# goal 7\nproof p:\n    by intro\nqed\n' > "$proof_render_dir/wrong_step.proof"
+set +e
+for refused_script in unknown_action bad_line no_steps wrong_step; do
+    "$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/$refused_script.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/$refused_script.json"
+done
+python3 - "$proof_render_dir" <<'PY'
+import json
+import os
+import sys
+
+directory = sys.argv[1]
+for name in ("unknown_action", "bad_line", "no_steps", "wrong_step"):
+    with open(os.path.join(directory, name + ".json"), encoding="utf-8") as handle:
+        payload = json.load(handle)
+    assert payload["status"] != "proved", name
+    assert not payload["tactic"]["valid"], name
+    assert not payload["tactic"]["solved"], name
+with open(os.path.join(directory, "script_text.json"), encoding="utf-8") as handle:
+    admitted = json.load(handle)
+assert admitted["status"] == "proved"
+assert admitted["tactic"]["solved"] and admitted["tactic"]["kernel_replayed"]
+assert admitted["source_goal_binding"]["bound"] and admitted["source_goal_binding"]["goal_id"] == 7
+PY
+proof_script_shape_status=$?
+set -e
+if [[ "$proof_script_shape_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a malformed proof script was admitted\n' >&2
+    exit 1
+fi
+
 # An unpinned lifetime and a region value reaching a formal that declares none are each refused.
 set +e
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "unpinned_formal") in findings; assert ("region-call-opaque", "unmapped_lifetime") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'

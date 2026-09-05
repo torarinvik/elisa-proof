@@ -857,6 +857,100 @@ def proof_rendered_goal_id(contents: darray[u8]&) -> (known: bool, goal_id: usiz
 
 # Returns the process exit code: 0 the block matches what the report supports, 1 it diverges,
 # 2 it names no goal of this source and so cannot be checked at all.
+# Translate a human-written proof script into the tactic interchange the checked engine already
+# consumes. This is untrusted elaboration and nothing more: it produces a script, it never decides
+# whether a goal holds, and the `proof`/`qed` words carry no weight here — only the tactic engine
+# and the kernel decide that. A line it does not recognize refuses the whole script rather than
+# being skipped, so a typo cannot quietly become a shorter proof than the author wrote.
+#
+# `given` and `show` lines are accepted and carry no effect: in a source-bound script the
+# hypotheses and the conclusion come from the goal itself, and the engine reports the state it
+# actually started from. Use `--check-proof` to confirm they say what the report supports.
+def proof_script_is_space(byte: u8) -> bool:
+    return byte == ' '.u8() or byte == '\t'.u8() or byte == '\r'.u8()
+
+def proof_script_starts_with(contents: darray[u8]&, start: usize, end: usize, prefix: sview) -> bool:
+    return false if end - start < sview_len(prefix)
+    for offset in 0..<sview_len(prefix) |offset, contents, start, prefix|:
+        return false if contents[start + offset] != sview_at(prefix, offset)
+    return true
+
+def proof_script_line_to_json(buffer: mutable darray[u8]&, contents: darray[u8]&, start: usize, end: usize, emitted: usize) -> (ok: bool, emitted: usize) can[Memory.Allocate, Abort.Panic]:
+    cursor: mutable usize = start
+    while cursor < end |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        cursor <- cursor + 1
+    stop: mutable usize = end
+    while stop > cursor |stop, contents|:
+        break if not proof_script_is_space(contents[stop - 1])
+        stop <- stop - 1
+    return (true, emitted) if cursor >= stop
+    return (true, emitted) if contents[cursor] == '#'.u8()
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "proof ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "open ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "unchecked ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "given ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "show ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "unproved:")
+    return (true, emitted) if stop - cursor == 3 and proof_script_starts_with(contents, cursor, stop, "qed")
+    return (false, emitted) if not proof_script_starts_with(contents, cursor, stop, "by ")
+    cursor <- cursor + 3
+    while cursor < stop |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        cursor <- cursor + 1
+    name_start: usize = cursor
+    while cursor < stop |cursor, contents|:
+        byte: u8 = contents[cursor]
+        break if byte < 'a'.u8() or byte > 'z'.u8()
+        cursor <- cursor + 1
+    return (false, emitted) if cursor == name_start
+    name_end: usize = cursor
+    while cursor < stop |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        cursor <- cursor + 1
+    argument_value: mutable usize = 0
+    argument_digits: mutable usize = 0
+    while cursor < stop |cursor, contents, argument_value, argument_digits|:
+        byte: u8 = contents[cursor]
+        break if byte < '0'.u8() or byte > '9'.u8()
+        break if argument_digits >= 9
+        argument_value <- argument_value * 10 + (byte - '0'.u8()).usize()
+        argument_digits <- argument_digits + 1
+        cursor <- cursor + 1
+    # Anything after the action name and one optional index is not part of this grammar.
+    return (false, emitted) if cursor != stop
+    proof_push(buffer, ",") if emitted > 0
+    proof_push(buffer, "{\"action\":")
+    proof_push_json_byte_range(buffer, contents, name_start, name_end)
+    if argument_digits > 0:
+        proof_push(buffer, ",\"argument_index\":")
+        proof_push_number(buffer, argument_value.u32())
+    proof_push(buffer, "}")
+    return (true, emitted + 1)
+
+def proof_tactic_text_to_json(contents: darray[u8]&) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+    empty: mutable darray[u8] = []
+    claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
+    return empty if not claimed.known
+    actions: mutable darray[u8] = []
+    emitted: mutable usize = 0
+    cursor: mutable usize = 0
+    while cursor < contents.count |cursor, contents, actions, emitted|:
+        line: (end: usize, next: usize) = proof_rendered_line(contents, cursor)
+        translated: (ok: bool, emitted: usize) = proof_script_line_to_json(&actions, contents, cursor, line.end, emitted)
+        return empty if not translated.ok
+        emitted <- translated.emitted
+        cursor <- line.next
+    return empty if emitted == 0
+    script: mutable darray[u8] = []
+    proof_push(&script, "{\"format\":\"elisa-proof-tactics-v1\",\"target\":{\"goal_id\":")
+    proof_push_number(&script, claimed.goal_id.u32())
+    proof_push(&script, "},\"actions\":[")
+    for index in 0..<actions.count |index, script, actions|:
+        script.push(actions[index])
+    proof_push(&script, "]}")
+    return script
+
 def proof_push_proof_check(buffer: mutable darray[u8]&, report: ProofReport&, contents: darray[u8]&, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
     claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
     if not claimed.known:
@@ -1987,7 +2081,7 @@ def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTact
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
-        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --proof <id> <file.elisa> | --check-proof <proof.txt> <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
+        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --proof <id> <file.elisa> | --check-proof <proof.txt> <file.elisa> | --script <proof.txt> <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
         proof_write(usage)
         return 2
     slots: mutable cstr&& = argv.cast[mutable cstr&&]
@@ -1997,6 +2091,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
     theorem_json_output: mutable bool = false
     proof_text_output: mutable bool = false
     proof_check_output: mutable bool = false
+    script_is_text: mutable bool = false
     focused_goal_id: mutable usize = 0
     tactic_json_output: mutable bool = false
     script_slot: mutable usize = 0
@@ -2049,6 +2144,16 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
             return 2
         focused_goal_id <- parsed_goal.parsed.usize()
         path_slot <- 3
+    elif proof_cstr_equals(first_argument, "--script"):
+        tactic_json_output <- true
+        script_is_text <- true
+        script_slot <- 2
+        path_slot <- 3
+        if argc < 4:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --script <proof.txt> <file.elisa>\n")
+            proof_write(usage)
+            return 2
     elif proof_cstr_equals(first_argument, "--check-proof"):
         proof_check_output <- true
         script_slot <- 2
@@ -2174,6 +2279,9 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
         source_status <- "failed" if report.failed > 0 or proof_report_has_open_goals(report) or report.replay_gaps > 0 or semantic_errors > 0
         source_admissible: bool = not import_failed and semantic_errors == 0 and report.replay_gaps == 0
         script_source: mutable darray[u8] = proof_read_file(slots[script_slot].cast[cstr])
+        # A human-written script is translated into the same interchange a JSON script uses, so it
+        # runs through exactly the checked engine and gains no path of its own.
+        script_source <- proof_tactic_text_to_json(script_source) if script_is_text
         # A source-bound tactic state must be rebuilt in the tactic store. AST values are opaque
         # handles tied to the imported parser store, so export the selected attempt to the same
         # JSON expression interchange used by --json and reparse it below in the fresh store.
