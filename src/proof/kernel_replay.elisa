@@ -1649,8 +1649,13 @@ module ElisaProofKernelReplay:
             if node.kind == "resource-use":
                 return node.operator == "" and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name == ""
             if node.kind == "resource-call-arg":
-                valid_operator: bool = node.operator == "value" or node.operator == "borrow" or node.operator == "reference" or node.operator == "region-new"
+                valid_operator: bool = node.operator == "value" or node.operator == "borrow" or node.operator == "reference" or node.operator == "region-new" or node.operator == "shared"
                 return valid_operator and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and (node.operator == "region-new" and node.secondary_name != "" or node.operator != "region-new" and node.secondary_name == "")
+            # A call that only lends shared references. It carries no callee summary root and no
+            # region map, because it claims nothing about the callee's body: every argument is a
+            # read-only capability that ends with the call.
+            if node.kind == "resource-call-shared":
+                return node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == node.children_count and node.value == 0 and node.name != "" and node.secondary_name == ""
             if node.kind == "resource-call":
                 return node.operator == "" and node.auxiliary <= node.children_count and node.right == node.children_count - node.auxiliary and node.value == 0 and node.name != "" and node.secondary_name == ""
             if node.kind == "resource-call-region":
@@ -1714,7 +1719,7 @@ module ElisaProofKernelReplay:
                 return false if not quantifier_range.known or not quantifier_range.value
                 quantifier_body: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.right)
                 return quantifier_body.known and quantifier_body.value
-            if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "effect-row" or node.kind == "effect-containment" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "resource-call":
+            if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "effect-row" or node.kind == "effect-containment" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "resource-call" or node.kind == "resource-call-shared":
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "resource-call":
                     collection_head: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, node.left)
@@ -1742,6 +1747,9 @@ module ElisaProofKernelReplay:
                     if node.kind == "resource-call" and index >= node.auxiliary:
                         region_child: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, child.value)
                         return false if not region_child.known or region_child.node.kind != "resource-call-region"
+                    if node.kind == "resource-call-shared":
+                        shared_child: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, child.value)
+                        return false if not shared_child.known or shared_child.node.kind != "resource-call-arg" or shared_child.node.operator != "shared"
                 return true
             if node.kind == "resource-scope" or node.kind == "resource-safety" or node.kind == "structural-safety" or node.kind == "structural-edge":
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
@@ -1803,7 +1811,7 @@ module ElisaProofKernelReplay:
                 if node.kind == "if":
                     work.push(ProofKernelReplayArenaWork{root: node.auxiliary, depth: next_depth, exiting: false})
                 return true
-            if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "effect-row" or node.kind == "effect-containment" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "resource-call":
+            if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "effect-row" or node.kind == "effect-containment" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "resource-call" or node.kind == "resource-call-shared":
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "resource-call":
                     work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
@@ -3587,6 +3595,23 @@ module ElisaProofKernelReplay:
                     state.binding_origin_places.push(result_source_place if result_alias else proof_kernel_replay_resource_empty_place())
                     state.resource_call_results.push(node.left)
                     continue
+                if node.kind == "resource-call-shared":
+                    # A shared-read call changes nothing, so the transition is exactly the claim
+                    # that every listed argument place is a live, unmoved binding at this point.
+                    # No callee summary is consulted and no state is written; if the producer had
+                    # lent a mutable capability instead, this event would be the wrong shape.
+                    return false if any prior_call in state.resource_call_events where prior_call == root
+                    return false if node.children_count != node.auxiliary
+                    return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                    for shared_index in 0..<node.children_count |shared_index, node, children, nodes, state|:
+                        shared_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + shared_index)
+                        return false if not shared_child.known
+                        shared_argument: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, shared_child.value)
+                        return false if not shared_argument.known
+                        return false if shared_argument.node.kind != "resource-call-arg" or shared_argument.node.operator != "shared"
+                        return false if not proof_kernel_replay_resource_argument_is_live(nodes, children, state, shared_argument.node.left)
+                    state.resource_call_events.push(root)
+                    continue
                 if node.kind == "resource-call":
                     return false if any prior_call in state.resource_call_events where prior_call == root
                     return false if not proof_kernel_replay_resource_call(nodes, children, state, effects, node, depth + 1)
@@ -3603,6 +3628,20 @@ module ElisaProofKernelReplay:
                     continue
                 return false
             return false if proof_kernel_replay_resource_has_pending_join(state)
+            return true
+
+        # A shared call argument is admitted only when it denotes a place whose root is a live,
+        # unmoved binding of the current frame with an active region. A value argument that is not
+        # a place carries no capability and is accepted as-is; anything that decodes to a place
+        # must pass the same liveness test a direct read does.
+        def proof_kernel_replay_resource_argument_is_live(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, state: ProofKernelReplayResourceState&, root: usize) -> bool:
+            decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, root, 0)
+            return true if not decoded.known or decoded.place.root == ""
+            slot: usize = proof_kernel_replay_resource_lookup(state, decoded.place.root)
+            return false if slot >= state.binding_names.count
+            region: sview = proof_kernel_replay_resource_binding_region(state, slot)
+            return false if region != "" and (not proof_kernel_replay_resource_binding_region_is_live(state, slot) or not proof_kernel_replay_resource_region_active(state, region))
+            return false if slot >= state.binding_moved.count or state.binding_moved[slot]
             return true
 
         def proof_kernel_replay_resource_parameters(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, names: mutable darray[sview]&, references: mutable darray[bool]&, mutable_references: mutable darray[bool]&, regions: mutable darray[sview]&) -> bool:

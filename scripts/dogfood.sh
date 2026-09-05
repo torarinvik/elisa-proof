@@ -204,6 +204,8 @@ run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
 run_probe expression_witness examples/expression_witness.elisa 0
 run_probe call_stable_facts examples/call_stable_facts.elisa 0
 run_probe rejected_call_stable_facts examples/rejected_call_stable_facts.elisa 1
+run_probe shared_borrow_calls examples/shared_borrow_calls.elisa 0
+run_probe rejected_shared_borrow_calls examples/rejected_shared_borrow_calls.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -403,6 +405,41 @@ missing = refused - {finding["name"] for finding in report["findings"]}
 if missing:
     raise SystemExit("dogfood failed: no diagnostic for %s" % sorted(missing))
 print("dogfood call_stable_facts: facts survive exactly the calls and joins that cannot falsify them")
+PY
+
+# Lending only shared references leaves the caller's resource state untouched, so such a call needs
+# no callee body summary. Every one of them must still appear in the trace as an explicit
+# shared-read transition, and a writable or escaping capability must still be refused.
+python3 - "$REPORT_DIR/shared_borrow_calls.json" "$REPORT_DIR/rejected_shared_borrow_calls.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["summary"]["proven"] != report["summary"]["obligations"]:
+    raise SystemExit("dogfood failed: shared-reference call fixture did not prove")
+if report["replay"]["gaps"] != 0 or report["findings"] != []:
+    raise SystemExit("dogfood failed: shared-reference call fixture left a gap or a finding")
+shared = [node for node in report["kernel"]["nodes"] if node["kind"] == "resource-call-shared"]
+if not shared:
+    raise SystemExit("dogfood failed: no shared-read call reached the arena")
+if any(node["left"] != 0 or node["auxiliary"] != node["children_count"] for node in shared):
+    raise SystemExit("dogfood failed: a shared-read call carried a callee summary root")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
+    raise SystemExit("dogfood failed: shared-reference boundary fixture did not fail cleanly")
+if report["replay"]["gaps"] != 0:
+    raise SystemExit("dogfood failed: shared-reference boundary fixture left a replay gap")
+findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}
+required = {("borrow-call-opaque", "recursive_mutate"), ("borrow-call-opaque", "recursive_reference_return"), ("resource-use-after-move", "lends_moved_value")}
+missing = required - findings
+if missing:
+    raise SystemExit("dogfood failed: no diagnostic for %s" % sorted(missing))
+if any(node["kind"] == "resource-call-shared" for node in report["kernel"]["nodes"]):
+    raise SystemExit("dogfood failed: a writable or escaping capability was recorded as a shared read")
+print("dogfood shared_borrow_calls: shared lending needs no callee summary, writable lending still does")
 PY
 
 

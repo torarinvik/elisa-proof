@@ -551,6 +551,57 @@ the callee provably cannot write it. Global state is assumed reachable by every 
 over a global is ever retained. The conjunct split is applied to `if` conditions only; `match`
 patterns and guards still record their conditions whole.
 
+## Added: lending a shared reference needs no callee summary
+
+A call that passed any capability required the callee's own converged `resource-safety` trace, and
+a recursive component can never have one — it would be consuming a summary it is still computing.
+Every recursive walk over a shared `darray[T]&` was therefore `borrow-call-opaque`, 622 of them on
+`examples/kernel_replay_standalone.elisa` alone, and the diagnostic cascaded: a callee that failed
+for any reason emitted no summary, so all of its callers failed too.
+
+The summary is not what a shared lend needs. Elisa's type system forbids writing through a
+non-mutable reference and forbids moving out of one, and the capability the callee receives ends
+with the call, so the caller's bindings, borrows and regions are unchanged whatever the callee's
+body does. `proof_resource_call_is_shared_read` admits a call when every argument that carries a
+capability maps to a parameter whose declared type is a reference and *not* mutable, no argument is
+a `move`, a `new[r]` allocation, an opaque borrow or a region value, the callee declares no region
+parameters, and its return type is neither a reference nor region-bound. The premise is the
+callee's declared parameter and return modes: compiler-typing metadata, imported exactly the way
+the resource header already imports the current function's own parameter modes.
+
+The call does not disappear from the certificate. `proof_resource_record_shared_call` emits a
+`resource-call-shared` event whose children are the argument places, each tagged `shared`, and the
+replay kernel checks the transition it claims: the node carries no callee summary root and no
+region map, its argument count matches its child list, every child is a `resource-call-arg` with
+mode `shared`, every argument place resolves to a live, unmoved binding with an active region, and
+the event root is consumed once. Nothing in the resource state is written, which is the whole
+content of a read.
+
+The summary path is unchanged and still preferred: the shared-read rule is consulted only when no
+mapped callee summary is available. Writable lending, an escaping result and region-polymorphic
+calls all keep their existing diagnostics. On the kernel's own source the proven count moved from
+757 to 843 and `borrow-call-opaque` from 622 to 356, with replay gaps unchanged at zero.
+
+Coverage. `examples/shared_borrow_calls.elisa` proves self-recursion over a shared collection, two
+shared references at once, a mutable holder lending a shared reborrow, the same place lent twice in
+one call, and a call to a callee with no summary of its own; disabling the rule leaves six of its
+obligations unproven. `examples/rejected_shared_borrow_calls.elisa` pins the boundary: a recursive
+callee with a mutable reference parameter, one that returns a reference, and a moved binding are
+each refused with a diagnostic. `examples/rejected_borrow_call.elisa` now carries both halves — the
+writable lend still reports `borrow-call-opaque`, the shared lend no longer does, and the callee's
+own indexed obligation still fails on its own account.
+`examples/kernel_resource_bootstrap_runtime.elisa` drives the kernel rule directly under stage1 and
+stage0 with six cases; separately removing the liveness check, the event-reuse check, both argument
+mode checks, or both argument count checks each makes it exit with a distinct code.
+
+Not covered. A call that lends a *writable* capability still needs the callee's summary, so a
+recursive component that mutates through a reference parameter — `proof_kernel_replay_substitute`
+and the tactic and resource-event walkers in the kernel's own source — remains opaque; that needs
+either an SCC fixed point over resource summaries or a disjointness-based rule for a whole mutable
+place with no overlapping live borrow. Region-polymorphic calls are untouched. The callee's
+declared modes are a compiler-typing import: the kernel checks the shape of the claim, not that the
+callee's signature was read correctly.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

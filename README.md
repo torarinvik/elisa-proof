@@ -448,6 +448,16 @@ and every binding whose recorded value mentions a re-symbolized symbol are purge
 so no fact silently describes a newer value. Scoped `proof` blocks keep only type facts. See
 `examples/unsigned_local.elisa` and the `rejected_unsigned_local*` fixtures.
 
+A borrow-carrying call is admitted either from the callee's independently replayed resource trace
+or, when the call lends only shared references, from the callee's declared parameter and return
+modes: a non-mutable reference confers no write and no move, and the capability ends with the call,
+so the caller's resource state is unchanged whatever the callee's body does. That second path is
+the only one open to a recursive component, which can never consume one of its own summaries. It is
+recorded as an explicit `resource-call-shared` transition that replay re-checks. Lending a writable
+capability, a call whose result escapes as a reference, and region-polymorphic calls all still
+require the callee's converged summary. See `examples/shared_borrow_calls.elisa` and
+`examples/rejected_shared_borrow_calls.elisa`.
+
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its
 strongest built-in refinement/invariant mode, but the custom kernel still has no SMT backend,

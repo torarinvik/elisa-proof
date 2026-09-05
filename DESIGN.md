@@ -61,7 +61,10 @@ The proof kernel is intentionally fail-closed:
    dependent caller is checked without that summary. This prevents source order or a failed body
    from manufacturing a modular proof.
 5. Direct writes are checked against the enclosing `changes`/`preserves` clauses. Calls through
-   known summaries must fit the caller frame; opaque calls and writes through a framed or
+   known summaries must fit the caller frame; a call that lends only shared references is
+   admitted from the callee's declared parameter and return modes and recorded as an explicit
+   read-only transition, since a non-mutable reference confers neither a write nor a move and the
+   capability ends with the call; opaque calls and writes through a framed or
    preserved alias are rejected rather than treated as pure. Tracked local aliases are resolved
    through the symbolic binding map, while unknown reference-producing expressions are opaque.
 6. Assignments and effectful control-flow joins discard facts and forget symbolic values that this

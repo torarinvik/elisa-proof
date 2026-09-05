@@ -1029,6 +1029,75 @@ extend ElisaProof:
             state.trace_events.push(event)
             return true
 
+        # A call that hands every resource-carrying argument to a *shared* reference parameter
+        # cannot change the caller's resource state. Elisa's type system forbids writing through a
+        # non-mutable reference and forbids moving out of one, and the capability the callee holds
+        # ends with the call, so the caller's bindings, borrows and regions are exactly as they
+        # were. Such a call therefore needs no callee body summary — which is what makes a
+        # recursive walk over a shared `darray[T]&` checkable at all, since a recursive component
+        # can never consume one of its own summaries.
+        #
+        # The premise is the callee's declared parameter and return modes. That is compiler-typing
+        # metadata, imported the same way the resource header already imports the current
+        # function's own parameter modes; it is recorded in the trace so replay checks the claim's
+        # shape rather than having the call disappear from the certificate.
+        def proof_resource_call_is_shared_read(functions: ProofFunctionTable&, callee_index: usize, mapped: darray[Ast::Expr]&, state: ProofResourceState&, report: mutable ProofReport&) -> bool:
+            return false if callee_index >= functions.param_counts.count or callee_index >= functions.param_starts.count
+            return false if mapped.count != functions.param_counts[callee_index]
+            # A region-polymorphic callee may allocate into, or close, a caller region.
+            return false if callee_index >= functions.region_param_counts.count or functions.region_param_counts[callee_index] > 0
+            # A returned reference is a capability that outlives the call and would need the
+            # callee's own summary to place.
+            return false if callee_index >= functions.return_references.count or functions.return_references[callee_index]
+            return false if callee_index >= functions.return_regions.count or functions.return_regions[callee_index] != ""
+            param_start: usize = functions.param_starts[callee_index]
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, param_start, state, report|:
+                slot: usize = param_start + parameter_index
+                return false if slot >= functions.all_parameter_references.count or slot >= functions.all_parameter_mutable_references.count
+                argument: Ast::Expr = mapped[parameter_index]
+                kind: sview = proof_resource_call_argument_kind(argument, state, report)
+                return false if kind != "value" and kind != "reference" and kind != "borrow"
+                return false if proof_resource_expr_contains_region_value(argument, state)
+                continue if not proof_resource_expr_carries_resource(argument, state, report)
+                # The argument carries a capability, so the formal must be a shared reference.
+                return false if not functions.all_parameter_references[slot]
+                return false if functions.all_parameter_mutable_references[slot]
+            return true
+
+        # Record the shared-read transition. Every argument place is listed so replay re-checks
+        # that each one is a live, unmoved binding at this point in the trace; nothing in the
+        # state changes, which is the whole content of the claim.
+        def proof_resource_record_shared_call[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, callee_name: sview, callee_index: usize, mapped: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> bool:
+            return false if callee_name == ""
+            return false if callee_index >= functions.param_starts.count or callee_index >= functions.param_counts.count
+            return false if mapped.count != functions.param_counts[callee_index]
+            param_start: usize = functions.param_starts[callee_index]
+            encoded_arguments: mutable darray[usize] = []
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, report, encoded_arguments|:
+                actual: Ast::Expr = mapped[parameter_index]
+                encoded: mutable usize = proof_kernel_encode_expression(actual, &report.kernel_nodes, &report.kernel_children)
+                match actual:
+                    Ast::Expr.Unary(operator, operand, _):
+                        encoded <- proof_resource_encode_access_place(operand, report) if operator == TokenKind.Ampersand
+                    Ast::Expr.Paren(inner, _):
+                        match inner:
+                            Ast::Expr.Unary(operator, operand, _):
+                                encoded <- proof_resource_encode_access_place(operand, report) if operator == TokenKind.Ampersand
+                            _:
+                                pass
+                    _:
+                        pass
+                return false if encoded >= report.kernel_nodes.count
+                encoded_arguments.push(encoded)
+            start: usize = report.kernel_children.count
+            for parameter_index in 0..<mapped.count |parameter_index, encoded_arguments, report, functions, param_start|:
+                return false if param_start + parameter_index >= functions.all_params.count
+                child: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-arg", "shared", encoded_arguments[parameter_index], 0, 0, 0, 0, 0, functions.all_params[param_start + parameter_index], "")
+                report.kernel_children.push(child)
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-shared", "", 0, 0, mapped.count, start, mapped.count, 0, callee_name, "")
+            state.trace_events.push(event)
+            return true
+
         def proof_resource_lookup(state: ProofResourceState&, name: sview) -> usize:
             index: mutable usize = state.binding_names.count
             while index > 0 |index, state, name|:
@@ -1743,7 +1812,17 @@ extend ElisaProof:
                         mapped: mutable darray[Ast::Expr] = []
                         mapped_allocation_roots: mutable darray[usize] = []
                         mapped_ok: bool = summary.known and callee_index < functions.names.count and proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &mapped) and proof_resource_map_call_allocation_roots(functions, callee_index, normalized_arguments, argument_names, allocation_roots, &mapped_allocation_roots)
-                        if summary.known and mapped_ok:
+                        # A call that only lends shared references leaves the caller's state
+                        # alone, so it is admitted from the callee's declared modes without a body
+                        # summary. This is the only path open to a recursive component, which by
+                        # construction cannot consume one of its own summaries.
+                        shared_mapped: mutable darray[Ast::Expr] = []
+                        shared_read: mutable bool = false
+                        if not (summary.known and mapped_ok) and callee_index < functions.names.count and proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &shared_mapped):
+                            shared_read <- proof_resource_call_is_shared_read(functions, callee_index, shared_mapped, state, report) and proof_resource_record_shared_call(state, report, callee_name, callee_index, shared_mapped, functions)
+                        if shared_read:
+                            pass
+                        elif summary.known and mapped_ok:
                             pairwise_alias: bool = proof_resource_call_source_has_pairwise_alias(state, report, summary.root, mapped)
                             recorded: mutable bool = false
                             recorded <- proof_resource_record_call(state, report, callee_name, summary.root, callee_index, mapped, mapped_allocation_roots, functions) if not pairwise_alias
