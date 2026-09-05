@@ -423,10 +423,24 @@ domain wider than the enumeration limit), one goal no rule decides, and one refu
 counterexample. The test matrix additionally requires the focused-goal API to report the exhausted
 goal as `timeout` with no counterexample.
 
-Not covered. The congruence term and saturation-round budgets, the case-split depth caps, and the
-kernel-side replay budgets do not yet report exhaustion; they decline silently. The report's
-`trusted_assumptions` list remains empty, which is currently accurate: compiler-derived inputs are
-counted separately as boundary facts rather than as assumptions inside a proof.
+Extended. The congruence term and saturation-round budgets and the case-split depth cap now
+report exhaustion too. The kernel's term budget is enforced in one routine,
+`proof_kernel_replay_congruence_push`, and saturation records whether its last round was still
+merging classes when the round budget ended the loop; both feed an advisory flag returned by
+`proof_kernel_replay_congruence_report_status`, which the producer threads into the same
+exhaustion channel. The producer also reports a disjunctive premise or a conditional operand
+that the split budget refused to open. `examples/rejected_budget.elisa` gains four `timeout`
+cases — a goal wider than the term budget, nine layers of top-down premises that need more
+saturation rounds than the budget grants, a fifth disjunction, and a fifth nested conditional —
+and `examples/kernel_congruence_runtime.elisa` requires the flag on the first two and requires
+it clear on a decided goal. Removing either kernel report, or lifting the round limit so the
+layered goal is admitted, each makes the harness exit with a distinct code.
+
+Not covered. The kernel-side replay budgets do not report exhaustion: a certificate that replay
+cannot re-derive within budget is a replay gap, indistinguishable from one whose rule does not
+apply. The witness budget and depth for expression-level type witnesses are silent as well. The
+report's `trusted_assumptions` list remains empty, which is currently accurate: compiler-derived
+inputs are counted separately as boundary facts rather than as assumptions inside a proof.
 
 ## Added: declared effect containment
 

@@ -227,7 +227,8 @@ The native checker currently supports:
   language's own, so `a == b` proves `a + c == b + c`, `(a < 5) == (b < 5)`, `(a & c) == (b & c)`,
   the nested and chained forms of those, and conditional selection. The relation is seeded only
   by positive equalities (`and` is transparent, `not (a != b)` is the same premise) and saturated
-  to a fixed point under bounded term and round budgets.
+  to a fixed point under bounded term and round budgets, and running out of either is reported
+  as a `timeout` rather than passed off as "no rule applied".
   Elisa's operators are not unconditionally primitive: `==`, `!=`, arithmetic, and the four
   ordering operators dispatch to a user `__eq__`/`__add__`/`__cmp__` whenever an operand's type is
   a struct, and a user `__eq__` need not be Leibniz equality — it may compare a subset of the
@@ -346,7 +347,9 @@ The native checker currently supports:
   `unsupported` names a form the kernel does not model, `timeout` means a fixed budget ran out
   before the search reached a verdict, and `unknown` means no rule applied. The budgets that
   report `timeout` are quantifier instantiation (range width and instance count), the quantifier
-  nesting depth, and bounded model checking's per-name and product-domain limits. A counterexample
+  nesting depth, bounded model checking's per-name and product-domain limits, ground
+  congruence's term and saturation-round budgets, and the case-split depth that bounds
+  disjunction and conditional elimination. A counterexample
   outranks a budget, so a refuted goal is never reported as a timeout. The distinction is
   observational: an exhausted attempt is unproven either way, and nothing about admission changes.
   See `examples/rejected_budget.elisa`; and

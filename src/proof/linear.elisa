@@ -1613,7 +1613,16 @@ extend ElisaProof:
         # and decided by the same kernel routine that re-derives the certificate during replay.
         # A congruence the kernel cannot reproduce therefore cannot be found here either, so this
         # rule can never widen the producer beyond the checker.
-        def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+        def proof_expression_is_conditional(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.If(_, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expression_is_conditional(inner)
+                _:
+                    return false
+
+        def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool:
             return false if not proof_kernel_expression_supported(goal)
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
@@ -1623,7 +1632,7 @@ extend ElisaProof:
                 roots.push(proof_kernel_encode_annotated(fact, &nodes, &children, annotations))
             return false if roots.count == 0
             goal_root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, annotations)
-            return ElisaProofKernelReplay::proof_kernel_replay_congruence_report(&nodes, &children, roots, goal_root)
+            return ElisaProofKernelReplay::proof_kernel_replay_congruence_report_status(&nodes, &children, roots, goal_root, exhausted)
 
         def proof_goal_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
             # An explicitly asserted proposition is accepted before trying the arithmetic
@@ -1643,27 +1652,29 @@ extend ElisaProof:
             return true if proof_facts_inconsistent(facts)
             return true if proof_fact_proves_call_summary(facts, goal)
             return false if not proof_unsigned_expression_safe(goal, facts)
-            if split_depth < 4:
-                disjunction_index: mutable usize = facts.count
-                disjunction_left: mutable Ast::Expr = Ast::Expr.Absent
-                disjunction_right: mutable Ast::Expr = Ast::Expr.Absent
-                for index in 0..<facts.count |index, facts, disjunction_index, disjunction_left, disjunction_right|:
-                    candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(facts[index])
-                    if candidate.known:
-                        disjunction_index <- index
-                        disjunction_left <- candidate.left
-                        disjunction_right <- candidate.right
-                        break
-                if disjunction_index < facts.count:
-                    left_facts: mutable darray[Ast::Expr] = []
-                    right_facts: mutable darray[Ast::Expr] = []
-                    for index in 0..<facts.count |index, facts, left_facts, right_facts, disjunction_index|:
-                        continue if index == disjunction_index
-                        left_facts.push(facts[index])
-                        right_facts.push(facts[index])
-                    left_facts.push(disjunction_left)
-                    right_facts.push(disjunction_right)
-                    return proof_goal_depth(left_facts, goal, annotations, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(right_facts, goal, annotations, depth, budget, split_depth + 1, exhausted)
+            disjunction_index: mutable usize = facts.count
+            disjunction_left: mutable Ast::Expr = Ast::Expr.Absent
+            disjunction_right: mutable Ast::Expr = Ast::Expr.Absent
+            for index in 0..<facts.count |index, facts, disjunction_index, disjunction_left, disjunction_right|:
+                candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(facts[index])
+                if candidate.known:
+                    disjunction_index <- index
+                    disjunction_left <- candidate.left
+                    disjunction_right <- candidate.right
+                    break
+            # A disjunctive premise the split budget refuses to open leaves the goal undecided,
+            # not unprovable: the remaining tiers run without it, and a failure is a timeout.
+            exhausted <- true if disjunction_index < facts.count and split_depth >= 4
+            if disjunction_index < facts.count and split_depth < 4:
+                left_facts: mutable darray[Ast::Expr] = []
+                right_facts: mutable darray[Ast::Expr] = []
+                for index in 0..<facts.count |index, facts, left_facts, right_facts, disjunction_index|:
+                    continue if index == disjunction_index
+                    left_facts.push(facts[index])
+                    right_facts.push(facts[index])
+                left_facts.push(disjunction_left)
+                right_facts.push(disjunction_right)
+                return proof_goal_depth(left_facts, goal, annotations, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(right_facts, goal, annotations, depth, budget, split_depth + 1, exhausted)
             quantifier_kind: sview = proof_quantifier_kind(goal, annotations)
             if quantifier_kind != "" and depth >= 4:
                 exhausted <- true
@@ -1698,7 +1709,9 @@ extend ElisaProof:
                     # The condition and its negation are path assumptions, not asserted facts;
                     # both branches are required, so an opaque condition cannot manufacture a
                     # proof. Bound the split with the same small case-splitting budget used for
-                    # disjunctive facts.
+                    # disjunctive facts. A conditional the budget refuses to eliminate leaves the
+                    # goal undecided rather than unprovable.
+                    exhausted <- true if split_depth >= 4 and (proof_expression_is_conditional(left) or proof_expression_is_conditional(right))
                     if split_depth < 4:
                         match left:
                             Ast::Expr.If(condition, then_expression, else_expression, _):
@@ -1733,7 +1746,7 @@ extend ElisaProof:
                         return true if proof_linear_goal(left, operator, right, facts)
                         # Congruence is the last equality tier and runs only after the
                         # fixed-width safety guards above rejected every wrapping premise/goal.
-                        return proof_congruence_goal(facts, goal, annotations) if operator == TokenKind.EqEq
+                        return proof_congruence_goal(facts, goal, annotations, exhausted) if operator == TokenKind.EqEq
                         return false
                 _:
                     pass

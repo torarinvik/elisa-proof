@@ -240,6 +240,11 @@ The proof kernel is intentionally fail-closed:
     Admitting field selection, indexing, or the aggregates needs a witness that the receiver's
     selector is the language's own and that the selected type's equality is primitive. That
     witness is not represented in the term language, so those formers stay excluded.
+    The term and saturation-round budgets are enforced in one push routine and one loop exit,
+    and running out of either is reported through an advisory exhaustion flag that the producer
+    turns into a `timeout` verdict; the flag never widens admission. The producer reports the
+    case-split depth cap the same way when it refuses to open a disjunctive premise or a
+    conditional operand.
 14. Quantifiers are checked only when the compiler-preserved kind is unambiguous and the lowered
     expression has one integer binder over an explicit finite `..<`/`..=` range, or a finite
     literal collection (with exactly two binders for dictionary key/value pairs). The kernel

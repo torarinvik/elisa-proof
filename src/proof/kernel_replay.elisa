@@ -2384,7 +2384,7 @@ module ElisaProofKernelReplay:
         # letting the relation reason over a partial or non-primitive universe. A former is
         # admitted only after all of its operands are, so a term never enters the universe with
         # an operand the rule has not accepted.
-        def proof_kernel_replay_congruence_collect(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, terms: mutable darray[usize]&, depth: usize) -> bool:
+        def proof_kernel_replay_congruence_collect(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, terms: mutable darray[usize]&, exhausted: mutable bool&, depth: usize) -> bool:
             requires depth <= 127
             decreases 127 - depth
             return false if not ElisaProofKernelCore::depth_valid(depth)
@@ -2396,24 +2396,26 @@ module ElisaProofKernelReplay:
             return false if not proof_kernel_replay_arena_shape_valid(node)
             existing: (known: bool, index: usize) = proof_kernel_replay_congruence_lookup(nodes, children, terms, root)
             return true if existing.known
-            if proof_kernel_replay_congruent_scalar_literal(node):
-                return false if terms.count >= proof_kernel_replay_congruence_term_limit()
-                terms.push(root)
-                return true
+            return proof_kernel_replay_congruence_push(terms, root, exhausted) if proof_kernel_replay_congruent_scalar_literal(node)
             if not proof_kernel_replay_congruent_former(node):
                 # An atom joins the closure only with its own primitive-type witness: a name the
                 # producer typed, a field selection or container element whose declared type it
                 # resolved. Without one, the term's `==` may be a user protocol method that is
                 # not an equivalence, and its class would be meaningless.
                 return false if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, root, depth + 1)
-                return false if terms.count >= proof_kernel_replay_congruence_term_limit()
-                terms.push(root)
-                return true
+                return proof_kernel_replay_congruence_push(terms, root, exhausted)
             operands: mutable darray[usize] = []
             return false if not proof_kernel_replay_congruence_operands(nodes, children, root, &operands)
-            for operand in operands |operand, nodes, children, facts, terms, depth|:
-                return false if not proof_kernel_replay_congruence_collect(nodes, children, facts, operand, terms, depth + 1)
-            return false if terms.count >= proof_kernel_replay_congruence_term_limit()
+            for operand in operands |operand, nodes, children, facts, terms, exhausted, depth|:
+                return false if not proof_kernel_replay_congruence_collect(nodes, children, facts, operand, terms, exhausted, depth + 1)
+            return proof_kernel_replay_congruence_push(terms, root, exhausted)
+
+        # The one place the term budget is enforced. Exceeding it declines the term and reports
+        # exhaustion; it never admits anything.
+        def proof_kernel_replay_congruence_push(terms: mutable darray[usize]&, root: usize, exhausted: mutable bool&) -> bool:
+            if terms.count >= proof_kernel_replay_congruence_term_limit():
+                exhausted <- true
+                return false
             terms.push(root)
             return true
 
@@ -2503,10 +2505,11 @@ module ElisaProofKernelReplay:
             seeded <- true if proof_kernel_replay_congruence_union(parent, left_index.index, right_index.index)
             return true
 
-        def proof_kernel_replay_congruence_saturate(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, terms: darray[usize]&, parent: mutable darray[usize]&) -> void:
+        def proof_kernel_replay_congruence_saturate(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, terms: darray[usize]&, parent: mutable darray[usize]&, exhausted: mutable bool&) -> void:
             round: mutable usize = 0
-            while round < proof_kernel_replay_congruence_round_limit() |round, nodes, children, terms, parent|:
-                changed: mutable bool = false
+            changed: mutable bool = true
+            while round < proof_kernel_replay_congruence_round_limit() and changed |round, changed, nodes, children, terms, parent|:
+                changed <- false
                 for left_index in 0..<terms.count |left_index, terms, nodes, children, parent, changed|:
                     for right_index in 0..<terms.count |right_index, left_index, terms, nodes, children, parent, changed|:
                         continue if right_index <= left_index
@@ -2516,8 +2519,10 @@ module ElisaProofKernelReplay:
                         continue if not left_term.known or not right_term.known
                         continue if not proof_kernel_replay_congruence_pair(nodes, children, terms, parent, left_term.value, right_term.value)
                         changed <- true if proof_kernel_replay_congruence_union(parent, left_index, right_index)
-                break if not changed
                 round <- round + 1
+            # The round budget ended the loop while the last round was still merging classes, so
+            # the fixed point was not reached and the answer below may be incomplete.
+            exhausted <- true if changed
 
         # Reflexivity, symmetry, and coherence with arithmetic are not universal in Elisa: `==`
         # and the ordering operators dispatch to a user `__eq__`/`__cmp__` for a struct operand,
@@ -2527,7 +2532,7 @@ module ElisaProofKernelReplay:
         def proof_kernel_replay_primitive_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, right: usize) -> bool:
             return proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, left, 0) and proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, right, 0)
 
-        def proof_kernel_replay_congruence_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+        def proof_kernel_replay_congruence_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, exhausted: mutable bool&) -> bool:
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
             return false if not located.known
             goal: ElisaProofKernelCore::ProofKernelNode = located.node
@@ -2538,11 +2543,11 @@ module ElisaProofKernelReplay:
             return false if facts.count == 0
             terms: mutable darray[usize] = []
             # The conclusion must lie entirely inside the primitive scalar fragment.
-            return false if not proof_kernel_replay_congruence_collect(nodes, children, facts, goal_root, &terms, 0)
+            return false if not proof_kernel_replay_congruence_collect(nodes, children, facts, goal_root, &terms, exhausted, 0)
             # Premises contribute on a best-effort basis: one outside the fragment, such as a
             # type marker or an aggregate comparison, simply adds no equality.
-            for fact in facts |fact, nodes, children, terms|:
-                collected: bool = proof_kernel_replay_congruence_collect(nodes, children, facts, fact, &terms, 0)
+            for fact in facts |fact, nodes, children, terms, exhausted|:
+                collected: bool = proof_kernel_replay_congruence_collect(nodes, children, facts, fact, &terms, exhausted, 0)
                 continue if not collected
             parent: mutable darray[usize] = []
             for index in 0..<terms.count |index, parent|:
@@ -2553,7 +2558,7 @@ module ElisaProofKernelReplay:
             # Without a non-trivial equality premise this rule degenerates to structural
             # equality, which earlier tiers already decided.
             return false if not seeded
-            proof_kernel_replay_congruence_saturate(nodes, children, terms, &parent)
+            proof_kernel_replay_congruence_saturate(nodes, children, terms, &parent, exhausted)
             left_class: (known: bool, index: usize) = proof_kernel_replay_congruence_class(nodes, children, terms, &parent, goal.left)
             right_class: (known: bool, index: usize) = proof_kernel_replay_congruence_class(nodes, children, terms, &parent, goal.right)
             return false if not left_class.known or not right_class.known
@@ -2723,7 +2728,8 @@ module ElisaProofKernelReplay:
                 # Ground congruence closure is the last equality tier. It runs only after the
                 # fixed-width safety guards above have rejected every wrapping premise and goal,
                 # so equal operands of different widths can never be propagated through a former.
-                return true if proof_kernel_replay_congruence_goal(nodes, children, facts, goal_root)
+                congruence_exhausted: mutable bool = false
+                return true if proof_kernel_replay_congruence_goal(nodes, children, facts, goal_root, &congruence_exhausted)
                 for fact in facts |fact, nodes, children, node|:
                     return true if proof_kernel_replay_negative_fact(nodes, children, fact, node.left, node.operator, node.right, depth + 1)
             return false
@@ -3930,12 +3936,19 @@ module ElisaProofKernelReplay:
             # than maintaining a second equality engine that could drift away from this one, and
             # adversarial harnesses can target the rule without the surrounding tiers.
             def proof_kernel_replay_congruence_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                exhausted: mutable bool = false
+                return proof_kernel_replay_congruence_report_status(nodes, children, facts, goal_root, &exhausted)
+
+            # The same rule with its budget status. `exhausted` is advisory: it is set when the
+            # term or round budget cut the closure short, so a refusal may be "undecided" rather
+            # than "no rule applies". It never changes the verdict.
+            def proof_kernel_replay_congruence_report_status[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, exhausted: mutable bool&) -> bool:
                 return false if not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
                 return false if not proof_kernel_replay_proposition_state_valid(nodes, facts, goal_root)
                 for fact in facts |nodes, children, facts|:
                     return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, fact)
                 return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, goal_root)
-                return proof_kernel_replay_congruence_goal(nodes, children, facts, goal_root)
+                return proof_kernel_replay_congruence_goal(nodes, children, facts, goal_root, exhausted)
 
             # Declared effect containment. The claim is about declared rows: every resolved
             # callee's `can[...]` row is contained in the caller's. It says nothing about effects

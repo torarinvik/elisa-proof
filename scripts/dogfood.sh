@@ -260,6 +260,10 @@ expected = {
     "too_large_model": "timeout",
     "unsupported_reasoning": "unknown",
     "false_comparison": "disproved",
+    "too_many_congruence_terms": "timeout",
+    "too_many_congruence_rounds": "timeout",
+    "too_many_disjunctions": "timeout",
+    "too_deep_conditional": "timeout",
 }
 if status != expected:
     raise SystemExit("dogfood failed: verdict states collapsed, got %s" % sorted(status.items()))
