@@ -1667,6 +1667,62 @@ if [[ "$proof_render_shape_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `--check-proof` reads a rendered block back and checks it against the source it names. The file is
+# untrusted input: an edited keyword, an invented hypothesis, a swapped conclusion or a block from
+# another source must all diverge, and a block naming no goal of this source cannot be checked.
+set +e
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/faithful.json"
+proof_check_faithful_status=$?
+python3 -c 'import sys; text = open(sys.argv[1], encoding="utf-8").read(); open(sys.argv[2], "w", encoding="utf-8").write(text.replace("    show ", "    given values.count > 1000\n    show ", 1))' "$proof_render_dir/proved.txt" "$proof_render_dir/extra_given.txt"
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/extra_given.txt" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/extra_given.json"
+proof_check_extra_status=$?
+python3 -c 'import sys; text = open(sys.argv[1], encoding="utf-8").read(); lines = [line for line in text.splitlines() if not line.startswith("    unproved:")]; lines = [line.replace("open ", "proof ", 1) if line.startswith("open ") else line for line in lines]; lines.append("qed"); open(sys.argv[2], "w", encoding="utf-8").write("\n".join(lines) + "\n")' "$proof_render_dir/open.txt" "$proof_render_dir/forged.txt"
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/forged.txt" "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" > "$proof_render_dir/forged.json"
+proof_check_forged_status=$?
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/writable_lend_calls.elisa" > "$proof_render_dir/foreign.json"
+proof_check_foreign_status=$?
+printf 'not a proof block\n' > "$proof_render_dir/junk.txt"
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/junk.txt" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/junk.json"
+proof_check_junk_status=$?
+set -e
+if [[ "$proof_check_faithful_status" -ne 0 || "$proof_check_extra_status" -ne 1 || "$proof_check_forged_status" -ne 1 || "$proof_check_foreign_status" -ne 1 || "$proof_check_junk_status" -ne 2 ]]; then
+    printf 'proof test matrix failed: --check-proof exit codes faithful=%s extra=%s forged=%s foreign=%s junk=%s\n' "$proof_check_faithful_status" "$proof_check_extra_status" "$proof_check_forged_status" "$proof_check_foreign_status" "$proof_check_junk_status" >&2
+    exit 1
+fi
+set +e
+python3 - "$proof_render_dir" <<'PY'
+import json
+import os
+import sys
+
+directory = sys.argv[1]
+def load(name):
+    with open(os.path.join(directory, name), encoding="utf-8") as handle:
+        return json.load(handle)
+
+faithful = load("faithful.json")
+assert faithful["format"] == "elisa-proof-proof-check-v1"
+assert faithful["status"] == "matches"
+assert faithful["difference_count"] == 0 and faithful["differences"] == []
+extra = load("extra_given.json")
+assert extra["status"] == "diverges" and extra["difference_count"] > 0
+assert any(entry["found"] == "    given values.count > 1000" for entry in extra["differences"])
+forged = load("forged.json")
+assert forged["status"] == "diverges"
+assert any(entry["found"].startswith("proof ") and entry["expected"].startswith("open ") for entry in forged["differences"])
+assert any(entry["found"] == "qed" for entry in forged["differences"])
+foreign = load("foreign.json")
+assert foreign["status"] == "diverges"
+junk = load("junk.json")
+assert junk["status"] == "unreadable" and junk["goal_id"] is None
+PY
+proof_check_shape_status=$?
+set -e
+if [[ "$proof_check_shape_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: --check-proof divergence reporting\n' >&2
+    exit 1
+fi
+
 # An unpinned lifetime and a region value reaching a formal that declares none are each refused.
 set +e
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "unpinned_formal") in findings; assert ("region-call-opaque", "unmapped_lifetime") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'

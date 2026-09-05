@@ -612,6 +612,43 @@ PY
 done
 printf 'dogfood proof_render: every rendered block matches the report verdict and hypothesis set\n'
 
+# Round-trip: every rendered block must check clean against its own source, and mutating any single
+# line of it must be reported as a divergence. A checker that accepted an edited block would make
+# the readable surface forgeable.
+for render_example in condition_call_positions rejected_condition_call_positions; do
+    python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/$render_example.elisa" "$REPORT_DIR/$render_example.json" "$REPORT_DIR" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+binary, source, report_path, workdir = sys.argv[1:]
+with open(report_path, encoding="utf-8") as handle:
+    report = json.load(handle)
+block_path = os.path.join(workdir, "roundtrip.proof")
+for goal_id in range(len(report["goals"])):
+    rendered = subprocess.run([binary, "--proof", str(goal_id), source], capture_output=True, text=True).stdout
+    with open(block_path, "w", encoding="utf-8") as handle:
+        handle.write(rendered)
+    checked = subprocess.run([binary, "--check-proof", block_path, source], capture_output=True, text=True)
+    if checked.returncode != 0 or json.loads(checked.stdout)["status"] != "matches":
+        raise SystemExit("dogfood failed: goal %d did not round-trip in %s" % (goal_id, source))
+    lines = rendered.splitlines()
+    for line_index in range(len(lines)):
+        mutated = list(lines)
+        mutated[line_index] = mutated[line_index] + " tampered"
+        with open(block_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(mutated) + "\n")
+        checked = subprocess.run([binary, "--check-proof", block_path, source], capture_output=True, text=True)
+        if checked.returncode == 0:
+            raise SystemExit("dogfood failed: goal %d accepted a block tampered at line %d" % (goal_id, line_index + 1))
+        payload = json.loads(checked.stdout)
+        if payload["status"] == "matches":
+            raise SystemExit("dogfood failed: goal %d reported a tampered block as matching" % goal_id)
+PY
+done
+printf 'dogfood proof_check: rendered blocks round-trip and any edited line is reported\n'
+
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.

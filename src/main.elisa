@@ -801,6 +801,116 @@ def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofRep
 #   `proof ... qed`  the goal is proven and its certificate replayed independently
 #   `unchecked ...`  the producer proved it but no certificate replayed: not kernel-backed
 #   `open ...`       the goal is unproven; the recorded failure is printed instead of a proof
+# Read a rendered proof block back and check it against the source it claims to be about. The
+# file is untrusted input: nothing in it is believed, and no part of it is used to decide anything.
+# The check re-renders the canonical block for the goal the file names and compares the two, so an
+# edited `qed`, an invented hypothesis, a swapped conclusion, a renumbered certificate and a stale
+# source all show up the same way — as a divergence from what the report actually supports.
+def proof_rendered_line(contents: darray[u8]&, start: usize) -> (end: usize, next: usize) can[Memory.Allocate, Abort.Panic]:
+    cursor: mutable usize = start
+    while cursor < contents.count |cursor, contents|:
+        break if contents[cursor] == '\n'.u8()
+        cursor <- cursor + 1
+    return (cursor, cursor + 1 if cursor < contents.count else cursor)
+
+def proof_rendered_lines_equal(left: darray[u8]&, left_start: usize, left_end: usize, right: darray[u8]&, right_start: usize, right_end: usize) -> bool:
+    return false if left_end - left_start != right_end - right_start
+    for offset in 0..<(left_end - left_start) |offset, left, right, left_start, right_start|:
+        return false if left[left_start + offset] != right[right_start + offset]
+    return true
+
+def proof_push_json_byte_range(buffer: mutable darray[u8]&, contents: darray[u8]&, start: usize, end: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    buffer.push('"'.u8())
+    for index in start..<end |index, buffer, contents|:
+        byte: u8 = contents[index]
+        if byte == '"'.u8() or byte == '\\'.u8():
+            buffer.push('\\'.u8())
+            buffer.push(byte)
+        elif byte < 32:
+            buffer.push('?'.u8())
+        else:
+            buffer.push(byte)
+    buffer.push('"'.u8())
+
+# The goal id the block claims, read from its own header. A block that does not name one cannot be
+# checked against anything, which is itself a refusal rather than a pass.
+def proof_rendered_goal_id(contents: darray[u8]&) -> (known: bool, goal_id: usize) can[Memory.Allocate, Abort.Panic]:
+    marker: sview = "# goal "
+    for start in 0..<contents.count |start, contents, marker|:
+        continue if start > 0 and contents[start - 1] != '\n'.u8()
+        matched: mutable bool = true
+        for offset in 0..<sview_len(marker) |offset, start, contents, marker, matched|:
+            matched <- false if start + offset >= contents.count or contents[start + offset] != sview_at(marker, offset)
+        continue if not matched
+        cursor: mutable usize = start + sview_len(marker)
+        value: mutable usize = 0
+        digits: mutable usize = 0
+        while cursor < contents.count |cursor, contents, value, digits|:
+            byte: u8 = contents[cursor]
+            break if byte < '0'.u8() or byte > '9'.u8()
+            break if digits >= 9
+            value <- value * 10 + (byte - '0'.u8()).usize()
+            digits <- digits + 1
+            cursor <- cursor + 1
+        return (true, value) if digits > 0
+    return (false, 0)
+
+# Returns the process exit code: 0 the block matches what the report supports, 1 it diverges,
+# 2 it names no goal of this source and so cannot be checked at all.
+def proof_push_proof_check(buffer: mutable darray[u8]&, report: ProofReport&, contents: darray[u8]&, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
+    claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
+    if not claimed.known:
+        proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"unreadable\",\"goal_id\":null,\"differences\":[]}\n")
+        return 2
+    if claimed.goal_id >= report.goal_attempts.count:
+        proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"not_found\",\"goal_id\":")
+        proof_push_number(buffer, claimed.goal_id.u32())
+        proof_push(buffer, ",\"differences\":[]}\n")
+        return 2
+    canonical: mutable darray[u8] = []
+    proof_push_elisa_proof(&canonical, report, claimed.goal_id, source_fingerprint, source_complete, source_admissible)
+    differences: mutable darray[u8] = []
+    difference_count: mutable usize = 0
+    file_cursor: mutable usize = 0
+    canonical_cursor: mutable usize = 0
+    line_number: mutable usize = 0
+    while file_cursor < contents.count or canonical_cursor < canonical.count |file_cursor, canonical_cursor, line_number, contents, canonical, differences, difference_count|:
+        line_number <- line_number + 1
+        file_line: (end: usize, next: usize) = proof_rendered_line(contents, file_cursor)
+        canonical_line: (end: usize, next: usize) = proof_rendered_line(canonical, canonical_cursor)
+        file_present: bool = file_cursor < contents.count
+        canonical_present: bool = canonical_cursor < canonical.count
+        equal: bool = file_present and canonical_present and proof_rendered_lines_equal(contents, file_cursor, file_line.end, canonical, canonical_cursor, canonical_line.end)
+        if not equal and difference_count < 32:
+            proof_push(&differences, ",") if difference_count > 0
+            proof_push(&differences, "{\"line\":")
+            proof_push_number(&differences, line_number.u32())
+            proof_push(&differences, ",\"expected\":")
+            if canonical_present:
+                proof_push_json_byte_range(&differences, canonical, canonical_cursor, canonical_line.end)
+            else:
+                proof_push(&differences, "null")
+            proof_push(&differences, ",\"found\":")
+            if file_present:
+                proof_push_json_byte_range(&differences, contents, file_cursor, file_line.end)
+            else:
+                proof_push(&differences, "null")
+            proof_push(&differences, "}")
+        difference_count <- difference_count + 1 if not equal
+        file_cursor <- file_line.next if file_present else file_cursor + 1
+        canonical_cursor <- canonical_line.next if canonical_present else canonical_cursor + 1
+    proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":")
+    proof_push(buffer, "\"matches\"" if difference_count == 0 else "\"diverges\"")
+    proof_push(buffer, ",\"goal_id\":")
+    proof_push_number(buffer, claimed.goal_id.u32())
+    proof_push(buffer, ",\"difference_count\":")
+    proof_push_number(buffer, difference_count.u32())
+    proof_push(buffer, ",\"differences\":[")
+    for index in 0..<differences.count |index, buffer, differences|:
+        buffer.push(differences[index])
+    proof_push(buffer, "]}\n")
+    return 0 if difference_count == 0 else 1
+
 def proof_push_elisa_proof(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "# elisa-proof-proof-v1\n")
     if goal_id >= report.goal_attempts.count:
@@ -1877,7 +1987,7 @@ def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTact
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
-        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --proof <id> <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
+        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --proof <id> <file.elisa> | --check-proof <proof.txt> <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
         proof_write(usage)
         return 2
     slots: mutable cstr&& = argv.cast[mutable cstr&&]
@@ -1886,6 +1996,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
     suggestion_json_output: mutable bool = false
     theorem_json_output: mutable bool = false
     proof_text_output: mutable bool = false
+    proof_check_output: mutable bool = false
     focused_goal_id: mutable usize = 0
     tactic_json_output: mutable bool = false
     script_slot: mutable usize = 0
@@ -1938,6 +2049,15 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
             return 2
         focused_goal_id <- parsed_goal.parsed.usize()
         path_slot <- 3
+    elif proof_cstr_equals(first_argument, "--check-proof"):
+        proof_check_output <- true
+        script_slot <- 2
+        path_slot <- 3
+        if argc < 4:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --check-proof <proof.txt> <file.elisa>\n")
+            proof_write(usage)
+            return 2
     elif proof_cstr_equals(first_argument, "--theorems"):
         theorem_json_output <- true
         if argc < 3:
@@ -2015,6 +2135,19 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
         proof_push_json_focused_goal(&focused, report, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible)
         proof_write(focused)
         return 0 if focused_goal_id < report.goal_attempts.count else 2
+    if proof_check_output:
+        source_complete: bool = report.failed == 0 and not proof_report_has_open_goals(report) and report.replay_gaps == 0 and semantic_errors == 0 and not import_failed
+        source_admissible: bool = not import_failed and semantic_errors == 0 and report.replay_gaps == 0
+        script_read: (ok: bool, contents: darray[u8]) = proof_read_file_checked(slots[script_slot].cast[cstr])
+        if not script_read.ok:
+            message: mutable darray[u8] = []
+            proof_push(&message, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"unreadable\",\"goal_id\":null,\"differences\":[]}\n")
+            proof_write(message)
+            return 2
+        checked: mutable darray[u8] = []
+        check_status: i64 = proof_push_proof_check(&checked, report, script_read.contents, source_fingerprint, source_complete, source_admissible)
+        proof_write(checked)
+        return check_status
     if proof_text_output:
         source_complete: bool = report.failed == 0 and not proof_report_has_open_goals(report) and report.replay_gaps == 0 and semantic_errors == 0 and not import_failed
         source_admissible: bool = not import_failed and semantic_errors == 0 and report.replay_gaps == 0

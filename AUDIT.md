@@ -807,11 +807,32 @@ block and requires `qed` to appear exactly when the report says the goal is prov
 certificate replayed, `open` with a failure line whenever it is unproven, one `show` line, and a
 `given` count equal to the goal's recorded fact count.
 
+`--check-proof <block> <file.elisa>` reads a rendered block back and checks it against the source
+it names. The file is untrusted input: nothing in it is believed and no part of it decides
+anything. The checker re-renders the canonical block for the goal the file's own header claims and
+compares the two line by line, reporting every divergence with its line number, what the report
+supports, and what the file says. So an edited keyword, an invented hypothesis, a swapped
+conclusion, a renumbered certificate and a block taken from a different source all surface the same
+way, and a block that names no goal of this source is refused rather than passed. Exit `0` means
+the block matches what the report supports, `1` that it diverges, `2` that it could not be checked
+at all.
+
+Coverage. The test matrix renders a proved goal and checks it clean, then pins four tampering
+shapes: an inserted `given`, an `open` block rewritten to `proof ... qed`, a block checked against
+another source, and a file with no goal header — with the expected exit code and the specific
+divergence entry for each. Dogfood then does the round trip exhaustively: for every goal of two
+fixtures it renders the block, requires it to check clean, and then appends a marker to *each line
+in turn* and requires every one of those mutations to be reported. A checker that accepted an
+edited block would make the readable surface forgeable, so this is checked per line rather than by
+sample.
+
 Not covered. No fixture currently has a goal that is proven without a replayed certificate, so the
 `unchecked` keyword is exercised by the renderer's logic but not by a live example; the exhaustive
-dogfood check would catch a regression the moment one appears. The renderer is output only — it
-does not parse a rendered proof back, so an edited block is not yet a proof script the checker can
-consume.
+dogfood check would catch a regression the moment one appears. Checking is comparison against the
+canonical rendering, not parsing: a person may edit a block and learn exactly where it departs from
+the evidence, but cannot yet *author* a different proof of the same goal and have it checked. That
+needs the rendered form to become an input to the tactic layer, which already has its own
+kernel-backed state machine and portable script format.
 
 ## Coverage still required
 

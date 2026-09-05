@@ -50,6 +50,13 @@ its recorded failure instead of a proof. The renderer decides nothing: a form it
 prints as an explicit marker rather than as plausible source. It exits `0` when the goal exists and
 `2` otherwise.
 
+`build/elisa-proof --check-proof block.txt file.elisa` reads such a block back and checks it against
+the source it names, treating the file as untrusted input: it re-renders the canonical block for the
+goal the file claims and reports every divergence with its line number, expected text and found
+text. An edited keyword, an invented hypothesis, a swapped conclusion, a renumbered certificate and
+a block from another source all diverge alike. It exits `0` for a block that matches what the report
+supports, `1` for one that diverges, and `2` for one that names no goal of this source.
+
 Use `build/elisa-proof --goal N file.elisa` to retrieve only one of those goals without loading the
 full report or kernel arena. The deterministic `elisa-proof-goal-v1` response includes the source
 fingerprint and completeness gate, proposition, exact hypotheses and origins, dependencies,
