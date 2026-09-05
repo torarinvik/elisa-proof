@@ -575,6 +575,43 @@ if any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goal
 print("dogfood condition_call_positions: a condition call is modelled only where it certainly runs")
 PY
 
+# The rendered proof must agree with the report for *every* goal, not a sampled one: `qed` appears
+# exactly when the goal is proven and its certificate replayed, `unchecked` when it is proven
+# without one, and `open` otherwise. A renderer that overstated a verdict would be a false claim in
+# the most human-facing surface there is.
+for render_example in condition_call_positions rejected_condition_call_positions writable_lend_calls region_lend_calls; do
+    python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/$render_example.elisa" "$REPORT_DIR/$render_example.json" <<'PY'
+import json
+import subprocess
+import sys
+
+binary, source, report_path = sys.argv[1:]
+with open(report_path, encoding="utf-8") as handle:
+    report = json.load(handle)
+replayed = {index for index, certificate in enumerate(report["certificates"]) if certificate["replayed"]}
+for goal_id, goal in enumerate(report["goals"]):
+    rendered = subprocess.run([binary, "--proof", str(goal_id), source], capture_output=True, text=True)
+    if rendered.returncode != 0:
+        raise SystemExit("dogfood failed: --proof %d exited %d" % (goal_id, rendered.returncode))
+    text = rendered.stdout
+    kernel_backed = goal["proven"] and goal.get("replay_status") == "replayed"
+    has_qed = "\nqed\n" in text
+    if has_qed != kernel_backed:
+        raise SystemExit("dogfood failed: goal %d rendered qed=%s but kernel_backed=%s in %s" % (goal_id, has_qed, kernel_backed, source))
+    if not goal["proven"]:
+        if "\nopen " not in text or "    unproved: " not in text:
+            raise SystemExit("dogfood failed: unproven goal %d did not render an open block" % goal_id)
+    elif not kernel_backed and "\nunchecked " not in text:
+        raise SystemExit("dogfood failed: producer-only goal %d did not render as unchecked" % goal_id)
+    givens = sum(1 for line in text.splitlines() if line.startswith("    given "))
+    if givens != len(goal.get("facts", [])):
+        raise SystemExit("dogfood failed: goal %d rendered %d hypotheses for %d recorded facts" % (goal_id, givens, len(goal.get("facts", []))))
+    if text.count("    show ") != 1:
+        raise SystemExit("dogfood failed: goal %d did not render exactly one conclusion" % goal_id)
+PY
+done
+printf 'dogfood proof_render: every rendered block matches the report verdict and hypothesis set\n'
+
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.

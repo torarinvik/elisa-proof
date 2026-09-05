@@ -300,6 +300,176 @@ def proof_push_json_operator(buffer: mutable darray[u8]&, operator: TokenKind) -
     value <- "range_le" if operator == TokenKind.RangeLe
     proof_push_json_string(buffer, value)
 
+# Render an expression back into Elisa source syntax for a human reader. This is presentation
+# only: it never decides anything and is never read back as evidence, so a form it does not know
+# how to spell is printed as an explicit `<kind ...>` marker rather than as plausible-looking
+# source. A nested binary is always parenthesized, so the printed form is unambiguous without a
+# precedence table that could drift from the parser's.
+def proof_push_elisa_expr(buffer: mutable darray[u8]&, expression: Ast::Expr, grouped: bool, depth: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    requires depth <= 63
+    decreases 63 - depth
+    if depth >= 63:
+        proof_push(buffer, "<depth>")
+        return
+    # An operand position groups a nested binary or ternary, so the printed form is unambiguous
+    # without a precedence table that could drift from the parser's.
+    needs_group: mutable bool = false
+    match expression:
+        Ast::Expr.Binary(_, _, _, _):
+            needs_group <- grouped
+        Ast::Expr.If(_, _, _, _):
+            needs_group <- grouped
+        _:
+            pass
+    proof_push(buffer, "(") if needs_group
+    match expression:
+        Ast::Expr.Invalid:
+            proof_push(buffer, "<invalid>")
+        Ast::Expr.Absent:
+            proof_push(buffer, "absent")
+        Ast::Expr.IntLit(value):
+            proof_push_json_i64(buffer, value)
+        Ast::Expr.FloatLit(value):
+            proof_push(buffer, value)
+        Ast::Expr.StringLit(value):
+            proof_push_json_string(buffer, value)
+        Ast::Expr.CharLit(value):
+            proof_push(buffer, "'")
+            proof_push(buffer, value)
+            proof_push(buffer, "'")
+        Ast::Expr.BoolLit(value):
+            proof_push(buffer, "true" if value else "false")
+        Ast::Expr.Ident(name, _):
+            proof_push(buffer, name)
+        Ast::Expr.Paren(inner, _):
+            proof_push(buffer, "(")
+            proof_push_elisa_expr(buffer, inner, false, depth + 1)
+            proof_push(buffer, ")")
+        Ast::Expr.Unary(operator, operand, _):
+            if operator == TokenKind.Not:
+                proof_push(buffer, "not ")
+            else:
+                proof_push_elisa_operator(buffer, operator)
+            proof_push_elisa_expr(buffer, operand, true, depth + 1)
+        Ast::Expr.Binary(left, operator, right, _):
+            proof_push_elisa_expr(buffer, left, true, depth + 1)
+            proof_push(buffer, " ")
+            proof_push_elisa_operator(buffer, operator)
+            proof_push(buffer, " ")
+            proof_push_elisa_expr(buffer, right, true, depth + 1)
+        Ast::Expr.Call(callee, arguments, argument_names, _):
+            proof_push_elisa_expr(buffer, callee, true, depth + 1)
+            proof_push(buffer, "(")
+            for index in 0..<arguments.count |index, arguments, argument_names, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                if index < argument_names.count and argument_names[index] != "":
+                    proof_push(buffer, argument_names[index])
+                    proof_push(buffer, ": ")
+                proof_push_elisa_expr(buffer, arguments[index], false, depth + 1)
+            proof_push(buffer, ")")
+        Ast::Expr.Field(object, field, _):
+            proof_push_elisa_expr(buffer, object, true, depth + 1)
+            proof_push(buffer, ".")
+            proof_push(buffer, field)
+        Ast::Expr.Scope(base, field, _):
+            proof_push_elisa_expr(buffer, base, true, depth + 1)
+            proof_push(buffer, "::")
+            proof_push(buffer, field)
+        Ast::Expr.ShorthandMember(parts, _):
+            for index in 0..<parts.count |index, parts, buffer|:
+                proof_push(buffer, ".")
+                proof_push(buffer, parts[index])
+        Ast::Expr.Index(object, index_expression, _):
+            proof_push_elisa_expr(buffer, object, true, depth + 1)
+            proof_push(buffer, "[")
+            proof_push_elisa_expr(buffer, index_expression, true, depth + 1)
+            proof_push(buffer, "]")
+        Ast::Expr.Slice(object, low, high, _):
+            proof_push_elisa_expr(buffer, object, true, depth + 1)
+            proof_push(buffer, "[")
+            proof_push_elisa_expr(buffer, low, true, depth + 1)
+            proof_push(buffer, "..")
+            proof_push_elisa_expr(buffer, high, true, depth + 1)
+            proof_push(buffer, "]")
+        Ast::Expr.IndexN(object, arguments, _):
+            proof_push_elisa_expr(buffer, object, true, depth + 1)
+            proof_push(buffer, "[")
+            for index in 0..<arguments.count |index, arguments, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push_elisa_expr(buffer, arguments[index], false, depth + 1)
+            proof_push(buffer, "]")
+        Ast::Expr.Move(operand, _):
+            proof_push(buffer, "move ")
+            proof_push_elisa_expr(buffer, operand, true, depth + 1)
+        Ast::Expr.Array(elements, _):
+            proof_push(buffer, "[")
+            for index in 0..<elements.count |index, elements, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push_elisa_expr(buffer, elements[index], false, depth + 1)
+            proof_push(buffer, "]")
+        Ast::Expr.Tuple(elements, _):
+            proof_push(buffer, "(")
+            for index in 0..<elements.count |index, elements, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push_elisa_expr(buffer, elements[index], false, depth + 1)
+            proof_push(buffer, ")")
+        Ast::Expr.Construct(type_expression, fields, _):
+            proof_push_elisa_expr(buffer, type_expression, true, depth + 1)
+            proof_push(buffer, "{")
+            for index in 0..<fields.count |index, fields, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push(buffer, fields[index].name)
+                proof_push(buffer, ": ")
+                proof_push_elisa_expr(buffer, fields[index].value, false, depth + 1)
+            proof_push(buffer, "}")
+        Ast::Expr.RecordUpdate(base, fields, _):
+            proof_push_elisa_expr(buffer, base, true, depth + 1)
+            proof_push(buffer, "{")
+            for index in 0..<fields.count |index, fields, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push(buffer, fields[index].name)
+                proof_push(buffer, " = ")
+                proof_push_elisa_expr(buffer, fields[index].value, false, depth + 1)
+            proof_push(buffer, "}")
+        Ast::Expr.If(condition, then_expression, else_expression, _):
+            proof_push_elisa_expr(buffer, then_expression, true, depth + 1)
+            proof_push(buffer, " if ")
+            proof_push_elisa_expr(buffer, condition, true, depth + 1)
+            proof_push(buffer, " else ")
+            proof_push_elisa_expr(buffer, else_expression, true, depth + 1)
+        _:
+            # Deliberately not spelled out. A reader must not mistake a form this printer does
+            # not model for source that says what the proof state actually holds.
+            proof_push(buffer, "<unprinted expression>")
+    proof_push(buffer, ")") if needs_group
+
+def proof_push_elisa_operator(buffer: mutable darray[u8]&, operator: TokenKind) -> void can[Memory.Allocate, Abort.Panic]:
+    value: mutable sview = "<operator>"
+    value <- "+" if operator == TokenKind.Plus
+    value <- "-" if operator == TokenKind.Minus
+    value <- "*" if operator == TokenKind.Star
+    value <- "/" if operator == TokenKind.Slash
+    value <- "%" if operator == TokenKind.Percent
+    value <- "==" if operator == TokenKind.EqEq
+    value <- "!=" if operator == TokenKind.BangEq
+    value <- "<" if operator == TokenKind.Lt
+    value <- ">" if operator == TokenKind.Gt
+    value <- "<=" if operator == TokenKind.LtEq
+    value <- ">=" if operator == TokenKind.GtEq
+    value <- "and" if operator == TokenKind.And
+    value <- "or" if operator == TokenKind.Or
+    value <- "=>" if operator == TokenKind.FatArrow
+    value <- "not" if operator == TokenKind.Not
+    value <- "in" if operator == TokenKind.In
+    value <- "is" if operator == TokenKind.Is
+    value <- "as" if operator == TokenKind.As
+    value <- "|" if operator == TokenKind.Pipe
+    value <- "^" if operator == TokenKind.Caret
+    value <- "&" if operator == TokenKind.Ampersand
+    value <- "<<" if operator == TokenKind.LShift
+    value <- ">>" if operator == TokenKind.RShift
+    proof_push(buffer, value)
+
 def proof_push_json_expr(buffer: mutable darray[u8]&, expression: Ast::Expr) -> void can[Memory.Allocate, Abort.Panic]:
     match expression:
         Ast::Expr.Invalid:
@@ -621,6 +791,91 @@ def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofRep
     proof_push(buffer, "{\"kind\":\"unresolved-goal\",\"status\":\"unknown\",\"message\":")
     proof_push_json_string(buffer, "multiple unbound diagnostics share this source location" if selected.ambiguous else "no matching diagnostic was recorded")
     proof_push(buffer, ",\"counterexample_found\":false,\"goal_id\":null,\"counterexample\":[]}")
+
+# Render one goal as an Elisa-like proof a person can read and edit. Everything printed comes from
+# the recorded attempt: its hypotheses are the exact certificate facts, its conclusion is the exact
+# goal proposition, and its justification names the certificate that replayed. Nothing is inferred
+# and no step is invented, so this is a view of the evidence rather than a second proof.
+#
+# The block keyword carries the verdict, and only one of the three means the kernel checked it:
+#   `proof ... qed`  the goal is proven and its certificate replayed independently
+#   `unchecked ...`  the producer proved it but no certificate replayed: not kernel-backed
+#   `open ...`       the goal is unproven; the recorded failure is printed instead of a proof
+def proof_push_elisa_proof(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "# elisa-proof-proof-v1\n")
+    if goal_id >= report.goal_attempts.count:
+        proof_push(buffer, "# goal ")
+        proof_push_number(buffer, goal_id.u32())
+        proof_push(buffer, " does not exist in this source\n")
+        return
+    attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+    certificate_replayed: bool = attempt.has_certificate and attempt.certificate_index < report.certificates.count and report.certificates[attempt.certificate_index].replayed
+    proof_push(buffer, "# source: fingerprint fnv1a32=")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, ", complete=")
+    proof_push(buffer, "true" if source_complete else "false")
+    proof_push(buffer, ", admissible=")
+    proof_push(buffer, "true" if source_admissible else "false")
+    proof_push(buffer, "\n# goal ")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, " of ")
+    proof_push_number(buffer, report.goal_attempts.count.u32())
+    proof_push(buffer, ", rule ")
+    proof_push(buffer, attempt.rule)
+    proof_push(buffer, ", in ")
+    proof_push(buffer, attempt.name)
+    proof_push(buffer, " at line ")
+    proof_push_number(buffer, attempt.line)
+    proof_push(buffer, "\n")
+    keyword: mutable sview = "open"
+    keyword <- "unchecked" if attempt.proven
+    keyword <- "proof" if attempt.proven and certificate_replayed
+    if attempt.proven and not certificate_replayed:
+        proof_push(buffer, "# no certificate replayed for this goal: the block below is not kernel-backed\n")
+    proof_push(buffer, keyword)
+    proof_push(buffer, " ")
+    proof_push(buffer, attempt.name)
+    proof_push(buffer, "_")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ":\n")
+    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
+        fact: Ast::Expr = report.certificate_facts[attempt.facts_start + fact_index]
+        proof_push(buffer, "    given ")
+        proof_push_elisa_expr(buffer, fact, false, 0)
+        origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin(report, fact, attempt.name)
+        if origin.known:
+            proof_push(buffer, "    # ")
+            proof_push(buffer, origin.kind)
+            proof_push(buffer, ", line ")
+            proof_push_number(buffer, origin.line)
+            if origin.dependency != "":
+                proof_push(buffer, ", via ")
+                proof_push(buffer, origin.dependency)
+        proof_push(buffer, "\n")
+    proof_push(buffer, "    show ")
+    proof_push_elisa_expr(buffer, attempt.goal, false, 0)
+    proof_push(buffer, "\n")
+    if attempt.proven and certificate_replayed:
+        proof_push(buffer, "    by kernel certificate ")
+        proof_push_number(buffer, attempt.certificate_index.u32())
+        proof_push(buffer, ", arena root ")
+        proof_push_number(buffer, attempt.kernel_goal.u32())
+        proof_push(buffer, "\nqed\n")
+        return
+    if attempt.proven:
+        proof_push(buffer, "    by producer only\n")
+        return
+    selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+    proof_push(buffer, "    unproved: ")
+    if selected.known:
+        proof_push(buffer, report.findings[selected.index].kind)
+        proof_push(buffer, " (")
+        proof_push(buffer, report.findings[selected.index].status)
+        proof_push(buffer, ") - ")
+        proof_push(buffer, report.findings[selected.index].message)
+    else:
+        proof_push(buffer, "unknown")
+    proof_push(buffer, "\n")
 
 def proof_push_json_focused_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_bytes: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
     found: bool = goal_id < report.goal_attempts.count
@@ -1622,7 +1877,7 @@ def proof_push_json_tactic_result(buffer: mutable darray[u8]&, result: ProofTact
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
-        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
+        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --proof <id> <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
         proof_write(usage)
         return 2
     slots: mutable cstr&& = argv.cast[mutable cstr&&]
@@ -1630,6 +1885,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
     goal_json_output: mutable bool = false
     suggestion_json_output: mutable bool = false
     theorem_json_output: mutable bool = false
+    proof_text_output: mutable bool = false
     focused_goal_id: mutable usize = 0
     tactic_json_output: mutable bool = false
     script_slot: mutable usize = 0
@@ -1657,6 +1913,21 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
         if argc < 4:
             usage: mutable darray[u8] = []
             proof_push(&usage, "usage: elisa-proof --goal <id> <file.elisa>\n")
+            proof_write(usage)
+            return 2
+        parsed_goal: (valid: bool, parsed: u32) = proof_cstr_u32(slots[2].cast[cstr])
+        if not parsed_goal.valid:
+            message: mutable darray[u8] = []
+            proof_push(&message, "elisa-proof: goal id must be an unsigned 32-bit integer\n")
+            proof_write(message)
+            return 2
+        focused_goal_id <- parsed_goal.parsed.usize()
+        path_slot <- 3
+    elif proof_cstr_equals(first_argument, "--proof"):
+        proof_text_output <- true
+        if argc < 4:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --proof <id> <file.elisa>\n")
             proof_write(usage)
             return 2
         parsed_goal: (valid: bool, parsed: u32) = proof_cstr_u32(slots[2].cast[cstr])
@@ -1743,6 +2014,13 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Abort
         focused: mutable darray[u8] = []
         proof_push_json_focused_goal(&focused, report, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible)
         proof_write(focused)
+        return 0 if focused_goal_id < report.goal_attempts.count else 2
+    if proof_text_output:
+        source_complete: bool = report.failed == 0 and not proof_report_has_open_goals(report) and report.replay_gaps == 0 and semantic_errors == 0 and not import_failed
+        source_admissible: bool = not import_failed and semantic_errors == 0 and report.replay_gaps == 0
+        rendered: mutable darray[u8] = []
+        proof_push_elisa_proof(&rendered, report, focused_goal_id, source_fingerprint, source_complete, source_admissible)
+        proof_write(rendered)
         return 0 if focused_goal_id < report.goal_attempts.count else 2
     if theorem_json_output:
         source_complete: bool = report.failed == 0 and not proof_report_has_open_goals(report) and report.replay_gaps == 0 and semantic_errors == 0 and not import_failed

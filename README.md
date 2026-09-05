@@ -41,6 +41,15 @@ proof-only summary was checked before a caller can consume it.
 location, rule, replay status, structured failure classification/message, optional counterexample,
 and theorem dependencies so an agent can request focused repair without scanning the complete goal
 stream.
+`build/elisa-proof --proof N file.elisa` renders one goal as an Elisa-like proof for a human
+reviewer: its hypotheses as `given` lines annotated with the origin the replay layer recorded, its
+conclusion as a `show` line, and its justification as the certificate that replayed. The block
+keyword carries the verdict and only `proof ... qed` means the kernel checked it — `unchecked` is a
+goal the producer proved with no replayed certificate, and `open` is an unproven goal, printed with
+its recorded failure instead of a proof. The renderer decides nothing: a form it does not model
+prints as an explicit marker rather than as plausible source. It exits `0` when the goal exists and
+`2` otherwise.
+
 Use `build/elisa-proof --goal N file.elisa` to retrieve only one of those goals without loading the
 full report or kernel arena. The deterministic `elisa-proof-goal-v1` response includes the source
 fingerprint and completeness gate, proposition, exact hypotheses and origins, dependencies,

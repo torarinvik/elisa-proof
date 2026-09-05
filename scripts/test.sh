@@ -1622,6 +1622,51 @@ if [[ "$rejected_condition_call_positions_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `--proof <id>` renders one goal as an Elisa-like proof. The block keyword carries the verdict and
+# only `proof ... qed` means the kernel checked it, so a goal that is unproven, or proven without a
+# replayed certificate, must never render one.
+proof_render_dir="$(mktemp -d)"
+trap 'rm -rf "$proof_render_dir"' EXIT
+set +e
+proved_goal=$("$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if goal["rule"] == "index-upper" and goal["proven"]))')
+"$ROOT_DIR/build/elisa-proof" --proof "$proved_goal" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/proved.txt"
+proof_render_proved_status=$?
+open_goal=$("$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if not goal["proven"]))')
+"$ROOT_DIR/build/elisa-proof" --proof "$open_goal" "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" > "$proof_render_dir/open.txt"
+proof_render_open_status=$?
+"$ROOT_DIR/build/elisa-proof" --proof 99999 "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/missing.txt"
+proof_render_missing_status=$?
+set -e
+if [[ "$proof_render_proved_status" -ne 0 || "$proof_render_open_status" -ne 0 || "$proof_render_missing_status" -ne 2 ]]; then
+    printf 'proof test matrix failed: --proof exit codes proved=%s open=%s missing=%s\n' "$proof_render_proved_status" "$proof_render_open_status" "$proof_render_missing_status" >&2
+    exit 1
+fi
+set +e
+python3 - "$proof_render_dir/proved.txt" "$proof_render_dir/open.txt" "$proof_render_dir/missing.txt" <<'PY'
+import sys
+
+proved, open_goal, missing = (open(path, encoding="utf-8").read() for path in sys.argv[1:])
+assert proved.startswith("# elisa-proof-proof-v1\n")
+assert "\nproof guarded_index_" in proved
+assert "\nqed\n" in proved
+assert "    show index < values.count\n" in proved
+assert "    by kernel certificate " in proved
+assert "    given index < values.count" in proved
+assert "branch-condition" in proved
+assert "\nopen " in open_goal
+assert "proof " not in open_goal.replace("elisa-proof-proof-v1", "")
+assert "qed" not in open_goal
+assert "    unproved: index-upper-unproven" in open_goal
+assert "does not exist" in missing
+assert "qed" not in missing and "\nproof " not in missing
+PY
+proof_render_shape_status=$?
+set -e
+if [[ "$proof_render_shape_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: --proof rendering shape\n' >&2
+    exit 1
+fi
+
 # An unpinned lifetime and a region value reaching a formal that declares none are each refused.
 set +e
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "unpinned_formal") in findings; assert ("region-call-opaque", "unmapped_lifetime") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'

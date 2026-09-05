@@ -761,6 +761,58 @@ and of `or`, one inside a ternary, one inside a struct literal the walk does not
 the two repeated-call index shapes. Removing the short-circuit clause admits the first two;
 `rejected_assert_nested_call` guards the statement forms that were left alone.
 
+## Added: a goal rendered as an Elisa-like proof a person can read
+
+Every surface for reading a result was machine-shaped: `--json`, `--goal`, `--theorems`,
+`--suggest` all return structured trees. A reviewer who wanted to see *why* a goal holds had to
+reassemble the proposition, its hypotheses and their origins out of nested JSON. `--proof <id>`
+now renders one goal directly:
+
+```
+# elisa-proof-proof-v1
+# source: fingerprint fnv1a32=834510316, complete=true, admissible=true
+# goal 11 of 12, rule index-upper, in guarded_index at line 56
+proof guarded_index_11:
+    given measure(counter) >= 1    # function-summary, line 54, via measure
+    given index == measure(counter)    # local-binding, line 54
+    given index < values.count    # branch-condition, line 55
+    show index < values.count
+    by kernel certificate 11, arena root 473
+qed
+```
+
+This is a *view of recorded evidence*, not a second proof. The hypotheses are exactly the goal's
+certificate facts in order, each annotated with the origin the replay layer already records; the
+conclusion is exactly the goal proposition; the justification names the certificate that replayed
+and the arena root it replayed against. Nothing is inferred and no step is invented.
+
+The block keyword carries the verdict, and only one of the three means the kernel checked it:
+`proof ... qed` for a goal that is proven *and* whose certificate replayed, `unchecked` for one the
+producer proved with no replayed certificate, and `open` for an unproven goal, which prints the
+recorded failure kind, status and message instead of a proof. So the most human-facing surface
+cannot overstate a verdict by omission: a reader who sees no `qed` has been told so.
+
+`proof_push_elisa_expr` spells expressions back into source syntax. It decides nothing and is never
+read back as evidence, so a form it does not model prints as an explicit `<unprinted expression>`
+marker rather than as plausible-looking source, and a nested binary or ternary is always
+parenthesized so the printed form is unambiguous without a precedence table that could drift from
+the parser's.
+
+Coverage. The test matrix pins the three shapes and the exit codes: a proved goal renders
+`proof ... qed` with its `show` line, its `by kernel certificate` line and its branch-condition
+hypothesis; an unproven goal renders `open` with an `unproved:` line and contains neither `proof`
+nor `qed`; a goal id past the end exits `2` and renders no block. Dogfood then checks the
+invariant *exhaustively* rather than by sample: for every goal of four fixtures it renders the
+block and requires `qed` to appear exactly when the report says the goal is proven and its
+certificate replayed, `open` with a failure line whenever it is unproven, one `show` line, and a
+`given` count equal to the goal's recorded fact count.
+
+Not covered. No fixture currently has a goal that is proven without a replayed certificate, so the
+`unchecked` keyword is exercised by the renderer's logic but not by a live example; the exhaustive
+dogfood check would catch a regression the moment one appears. The renderer is output only — it
+does not parse a rendered proof back, so an edited block is not yet a proof script the checker can
+consume.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
