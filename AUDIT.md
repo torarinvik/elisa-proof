@@ -124,9 +124,9 @@ adversarial fixture pins the refusal. Congruence through a call additionally nee
 witness. The scalar witness is currently emitted for function parameters only, so a congruence
 whose universe includes a local declaration declines.
 
-Separately, and predating this work: the kernel's reflexivity rule accepts `t == t` for any term,
-including a struct whose `__eq__` need not be reflexive. That is not reached by the congruence
-rule and is recorded here as an open item rather than repaired in this change.
+Auditing operator dispatch for this rule also exposed the same hazard in the pre-existing
+reflexivity and identifier-alias tiers, which are not reached by congruence. That is recorded
+below as a confirmed open defect with its reproducer and the design of the fix.
 
 The new routines are also not yet self-verified by the standalone replay audit: only the bounded
 accessors and the classification predicates prove there, for the same resource-summary and
@@ -262,6 +262,65 @@ normal builds during this fix encountered parser mutability errors there. Those 
 were not changed. Snapshot validation does not establish that the moving shared-front-end build
 is currently working.
 
+## Confirmed open defect: reflexivity and symmetry over user-defined equality
+
+Found while auditing operator dispatch for the congruence rule above, and not repaired.
+
+Elisa rewrites `==`, `!=` and the four ordering operators to a user
+`__eq__`/`__cmp__` whenever an operand's type is a struct
+(`src/backend/codegen_expr_binary_tail.elisa`). There is no built-in struct equality to fall back
+on: a struct `==` without `impl Eq` fails to resolve at codegen. A user `__eq__` is an ordinary
+method, so it is not required to be reflexive, symmetric, or coherent with `__cmp__`. An `__eq__`
+modelling partial equality — the same shape as IEEE NaN, which this kernel already excludes for
+exactly this reason — makes the following claims false, and the checker currently proves all of
+them:
+
+```
+struct Partial:
+    tag: i64
+
+def reflexive_equality(p: Partial) -> i64:
+    ensure p == p              # false when __eq__ is partial
+    return 0
+
+def reflexive_order(p: Partial) -> i64:
+    ensure p <= p              # false when __cmp__ never returns 0
+    return 0
+
+def aliased_equality(p: Partial, q: Partial) -> i64:
+    requires p == q
+    ensure q == p              # false when __eq__ is not symmetric
+    return 0
+```
+
+The claim is reachable through five independent inference paths, each of which concludes that a
+comparison holds because its operands denote the same value:
+
+1. `proof_unsigned_goal_identity` and the kernel's identity shortcut in
+   `proof_kernel_replay_goal_depth` (`t == t`, `t <= t`, `t >= t`).
+2. `proof_linear_goal`'s leading `proof_definitionally_equal` test, and the kernel's
+   corresponding `proof_kernel_replay_definitionally_equal` site.
+3. `proof_linear_goal`'s identifier-alias rule, which turns `proof_names_equal_from_facts` into
+   `==`/`<=`/`>=`.
+4. The cancellation tier, where `proof_delta_constant` returns a zero difference.
+5. The affine and difference-constraint tiers, which close over `==` premises between
+   identifiers.
+
+The fix is a primitive-type witness on the compared operand, using the traced type-bound channel
+that the congruence rule above already established: a bare identifier may enter these rules only
+with a `__elisa_primitive_scalar_type` or unsigned width marker. A prototype gating all five paths
+does reject every claim above, and the parameter and local witnesses needed for it are
+straightforward. It is not landed because the witness must also follow every other symbol the
+producer synthesizes — the `result` binder, call-result symbols, loop and pattern binders — and
+must survive the havoc points that currently clear all facts (`proof_invalidate_moved_roots`
+clears the fact set outright, which drops a destination binding's type marker after an unrelated
+move). Without that pass the gate turns working obligations such as `examples/move_runtime_value.elisa`
+into failures, so it needs its own systematic change rather than a patch at the end of this one.
+
+Note that this defect is not reachable through the congruence rule: that rule already requires
+the primitive-type witness on every identifier in its universe, and
+`examples/rejected_congruence.elisa` pins the refusal of a struct equality premise.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
@@ -286,4 +345,5 @@ Recent commits provide targeted evidence for quantifier kind preservation, exact
 binding, rejection of lossy JSON integers, floating-point exclusions, and unsigned alias and
 refinement widths. They do not establish type preservation through every symbolic transformation.
 
-Completion requires coverage of the full table and resolution of every confirmed open defect.
+Completion requires coverage of the full table and resolution of every confirmed open defect,
+including the reflexivity/symmetry defect recorded above.
