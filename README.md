@@ -103,8 +103,15 @@ build/elisa-proof --tactics examples/tactic_script.json examples/verified.elisa
 The script uses the same `elisa-proof-tactics-v1` format with an ordered `actions` array. For a
 reusable theorem-state check it may provide an `initial` facts/goal state; expressions use the
 report's JSON AST shape, so an AI/editor can emit a script without constructing in-process Elisa
-values. For declaration-level verification, it can instead provide `target: {"goal_id": N}`. The
-runner then takes the exact goal and traced facts captured for imported source goal attempt `N`;
+values. For declaration-level verification, it can instead provide `target: {"goal_id": N}`.
+
+JSON tactic importer accepts integer numbers only from -9007199254740991 through
+9007199254740991, because its JSON library stores numbers as `f64`. Larger source integers remain
+supported by the source checker, but their JSON tactic states are rejected to prevent rounding
+from changing the proposition. Source-bound quantifier kinds come from compiler annotations;
+script annotations cannot override them.
+
+The runner takes the exact goal and traced facts captured for imported source goal attempt `N`;
 `initial` is rejected in this mode, so a proof of a different proposition cannot be relabeled as a
 source proof. The command imports and checks the Elisa source, then requires the script's
 transition trace and final certificate to replay independently; an optional unsigned

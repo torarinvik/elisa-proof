@@ -475,6 +475,34 @@ assert report["state"]["trace"][0]["action"] == "instantiate"
 assert report["state"]["trace"][0]["accepted"] is False
 print("dogfood forged_instantiation: existential hypothesis cannot be relabeled universal")
 PY
+exact_integer_output="$REPORT_DIR/tactic-integer-exact.json"
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_integer_rounding.json" "$ROOT_DIR/examples/tactic_integer_exact_boundary.elisa" >"$exact_integer_output"
+python3 - "$exact_integer_output" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["tactic"]["certificate_replayed"] is True
+assert report["state"]["initial_goal"]["left"]["value"] == 9007199254740991
+PY
+rounding_output="$REPORT_DIR/tactic-integer-rounding.json"
+if "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_integer_rounding.json" "$ROOT_DIR/examples/rejected_tactic_integer_rounding.elisa" >"$rounding_output"; then
+    printf 'dogfood failed: rounded integers admitted a false source equality\n' >&2
+    exit 1
+fi
+python3 - "$rounding_output" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "failed"
+assert report["source"]["admissible"] is True
+assert report["source_goal_binding"]["previously_proven"] is False
+assert report["tactic"]["valid"] is False
+assert report["tactic"]["certificate_replayed"] is False
+print("dogfood integer_rounding: lossy JSON numbers cannot prove a different source goal")
+PY
 stale_output="$REPORT_DIR/tactic-script-stale.json"
 set +e
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_stale.json" "$ROOT_DIR/examples/verified.elisa" >"$stale_output"
