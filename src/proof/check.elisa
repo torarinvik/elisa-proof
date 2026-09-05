@@ -564,6 +564,8 @@ extend ElisaProof:
         def proof_type_bound_name(expression: Ast::Expr) -> sview:
             marker_name: sview = proof_unsigned_marker_name(expression)
             return marker_name if marker_name != ""
+            scalar_name: sview = proof_scalar_marker_name(expression)
+            return scalar_name if scalar_name != ""
             match expression:
                 Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
                     match left:
@@ -875,10 +877,24 @@ extend ElisaProof:
         # unavailable. This makes a later use substitute to Invalid and prevents the proof
         # checker from proving a post-move property from a pre-move alias. The compiler's own
         # affine/linear/region passes remain the authority for exact ownership legality.
-        def proof_invalidate_moved_roots(roots: darray[sview], names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, position: Ast::Pos) -> void:
+        def proof_invalidate_moved_roots(roots: darray[sview], names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: ProofReport&, owner: sview, position: Ast::Pos) -> void:
             return if roots.count == 0
             proof_forget_values(names, values, position)
-            facts.clear()
+            # A transfer invalidates what is known about the moved roots, not the declared type of
+            # every other binding: an unrelated `y: i64` is still an `i64` afterwards. Keep the
+            # traced type bounds of live, unmoved names and discard everything else, which is the
+            # same retention rule used at call and control-flow havoc points.
+            original_count: usize = facts.count
+            write_index: mutable usize = 0
+            for read_index in 0..<original_count |facts, names, roots, report, owner, original_count, write_index|:
+                bound_name: sview = proof_type_bound_name(facts[read_index])
+                continue if bound_name == ""
+                continue if any root in roots where root == bound_name
+                continue if not (any candidate in names where candidate == bound_name)
+                continue if not proof_fact_is_type_bound(report, facts[read_index], owner)
+                facts[write_index] <- facts[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
             for root in roots |root, names, values|:
                 for index in 0..<names.count |index, names, values, root|:
                     values[index] <- Ast::Expr.Invalid if names[index] == root
@@ -4808,6 +4824,9 @@ extend ElisaProof:
                     upper: Ast::Expr = Ast::Expr.Binary(binder, upper_operator, high, position)
                     proof_add_traced_fact(facts, report, lower, "loop-range", line, name)
                     proof_add_traced_fact(facts, report, upper, "loop-range", line, name)
+                    # The endpoints of a counting range are integers, so the binder is one too.
+                    # That is the same semantic source as the two bounds just recorded.
+                    proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(variables[0], binder_position), line, name)
                 _:
                     pass
 
@@ -5055,6 +5074,11 @@ extend ElisaProof:
                             proof_forget_values_before(names, values, prior_value_count, position)
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if shadowed or (proof_expr_has_call(initializer) and not call_applied)
                         proof_bind_unsigned_symbol(names, values, facts, report, name, prior_value_count, unsigned_width, value, position) if unsigned_width > 0
+                        # A scalar local carries the same primitive-type witness as a parameter, so
+                        # equality reasoning over it is not held back by the binding form. An
+                        # unsigned width marker already witnesses the same thing.
+                        local_scalar_kind: i64 = proof_scalar_type_kind(type_expression, report.source_declarations, 0)
+                        proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(local_name, position), position.line, name) if local_scalar_kind == 1 and unsigned_width <= 0
                     Ast::Stmt.Assign(target, operator, initializer, position):
                         target_name: sview = proof_ident_name(target)
                         if target_name != "":
@@ -5226,7 +5250,7 @@ extend ElisaProof:
                                     return_value <- proof_substitute(returned, names, values) if proof_expr_has_call(returned)
                             return_value <- proof_rewrite_pure_call_summaries(return_value, facts, functions, 0) if proof_expr_has_call(return_value)
                             proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if proof_expr_has_call(return_value) and not return_call_applied
-                            proof_invalidate_moved_roots(moved_roots, names, values, facts, position)
+                            proof_invalidate_moved_roots(moved_roots, names, values, facts, report, name, position)
                             result_name: mutable darray[sview] = ["result"]
                             result_value: mutable darray[Ast::Expr] = [return_value]
                             for ensure in ensures |report, name, facts, result_name, result_value, position|:
@@ -5251,7 +5275,7 @@ extend ElisaProof:
                                     proven <- proof_certify_goal_with_rule(facts, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
                                 report.proof_obligation(proven)
                                 proof_add_goal_failure(report, "ensure-unproven", position.line, name, "void return does not establish ensure", facts, goal) if not proven
-                            proof_invalidate_moved_roots(moved_roots, names, values, facts, position)
+                            proof_invalidate_moved_roots(moved_roots, names, values, facts, report, name, position)
                         flow.normal <- false
                     Ast::Stmt.If(condition, then_body, else_body, position):
                         condition_value: mutable Ast::Expr = proof_substitute(condition, names, values)
@@ -5691,7 +5715,7 @@ extend ElisaProof:
                         proof_add_finding(report, "statement-unsupported", 0, name, "unknown statement form cannot enter a verified proof state")
                         proof_forget_values(names, values, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
-                proof_invalidate_moved_roots(moved_roots, names, values, facts, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+                proof_invalidate_moved_roots(moved_roots, names, values, facts, report, name, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
                 proof_restore_type_bound_facts_except(statement_facts, facts, names, report, name, declared_name) if moved_roots.count == 0
 
         const PROOF_TYPE_AUDIT_DEPTH_LIMIT: usize = 64

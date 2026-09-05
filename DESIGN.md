@@ -179,6 +179,21 @@ The proof kernel is intentionally fail-closed:
    assumed.
 13. Positive equalities between bare identifiers may form an alias relation and transport explicit
    interval bounds. Calls, fields, and arithmetic expressions are not generalized by this rule.
+13a. Reflexivity, symmetry, and coherence between equality and ordering are properties of the
+    language's own operators, not of every type. Elisa rewrites `==`, `!=`, `+`, `-`, `*`, `/`
+    and the four ordering operators to a user `__eq__`/`__add__`/`__cmp__` whenever an operand's
+    type is a struct, and there is no built-in struct equality to fall back on. Every rule that
+    concludes a comparison because its operands denote the same value therefore requires the
+    operand's primitive-type witness when that operand is a bare identifier: the reflexive
+    identity shortcut, the definitional-identity test, the identifier-alias rule, the
+    cancellation tier's zero difference, and the affine and difference-constraint closures, in
+    both the producer and the replay kernel. A richer operand shape is left to the numeric tiers,
+    which cannot construct an interval for a struct value. The witness is the same traced
+    `__elisa_primitive_scalar_type` type-bound marker used by congruence; it is recorded from
+    declared parameter, local and counting-range binder types, an unsigned width marker is
+    accepted in its place, and it survives every havoc point that keeps type bounds. A comparison
+    whose operand is a symbol the producer never typed remains admitted by these tiers and is
+    tracked in AUDIT.md.
 13b. Ground congruence closure is a separate, kernel-owned equality rule over the primitive
     scalar fragment. Its universe is the set of subterms of the premises and the goal, its
     relation is seeded only by positive equalities (`and` is transparent and `not (a != b)` is

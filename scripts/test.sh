@@ -1405,7 +1405,7 @@ if [[ "$source_nested_branch_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound nested branch tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 1'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 2; assert any(fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_primitive_scalar_type" for fact in report["state"]["initial_facts"])'
 source_bound_script_status=${PIPESTATUS[0]}
 if [[ "$source_bound_script_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic script\n' >&2
@@ -1475,6 +1475,15 @@ rejected_congruence_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_congruence_status" -ne 0 ]]; then
     printf 'proof test matrix failed: congruence admitted a goal outside the deterministic term fragment\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_reflexivity.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"reflexive_equality", "reflexive_order", "reflexive_reverse_order", "symmetric_equality", "local_reflexive_equality"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
+rejected_reflexivity_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_reflexivity_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a user-defined equality was assumed reflexive, symmetric, or coherent with ordering\n' >&2
     exit 1
 fi
 

@@ -206,6 +206,16 @@ The native checker currently supports:
   relations between distinct identifiers;
 - explicit identifier equality closure (`x == y`, including short chains) with safe bound
   propagation;
+- a primitive-type witness on every rule that concludes a comparison because its operands denote
+  the same value. Elisa's `==`, `!=` and the four ordering operators dispatch to a user
+  `__eq__`/`__cmp__` whenever an operand's type is a struct, and no protocol method is required to
+  be reflexive, symmetric, or coherent with ordering, so `p == p`, `p <= p` and `q == p` from
+  `p == q` are not theorems for an arbitrary type. Reflexivity, the definitional-identity test,
+  the identifier-alias rule, the cancellation tier, and the affine and difference-constraint tiers
+  all require a bare identifier operand to carry the declared primitive scalar type the producer
+  recorded. Parameters, scalar locals and counting-range loop binders carry it, an unsigned width
+  marker counts as the same witness, and it survives call, assignment, move and control-flow
+  havoc. See `examples/rejected_reflexivity.elisa`;
 - ground congruence closure over the primitive scalar fragment of the source-neutral term
   language: a positive equality premise is carried through every former whose operator is the
   language's own, so `a == b` proves `a + c == b + c`, `(a < 5) == (b < 5)`, `(a & c) == (b & c)`,

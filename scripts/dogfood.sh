@@ -200,6 +200,34 @@ run_probe rejected_for_invariant examples/rejected_for_invariant.elisa 1
 run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.elisa 1
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
+run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
+
+# Reflexivity, symmetry, and coherence with arithmetic hold for the language's own operators, not
+# for a user `__eq__`/`__cmp__`. No goal here may prove or emit a certificate.
+python3 - "$REPORT_DIR/rejected_reflexivity.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
+    raise SystemExit("dogfood failed: reflexivity fixture did not fail cleanly")
+if report["replay"]["gaps"] != 0:
+    raise SystemExit("dogfood failed: reflexivity fixture left a replay gap")
+refused = {
+    "reflexive_equality",
+    "reflexive_order",
+    "reflexive_reverse_order",
+    "symmetric_equality",
+    "local_reflexive_equality",
+}
+claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}
+if refused & claimed:
+    raise SystemExit("dogfood failed: user-defined equality was assumed reflexive for %s" % sorted(refused & claimed))
+if refused - {finding["name"] for finding in report["findings"]}:
+    raise SystemExit("dogfood failed: a reflexivity goal produced no diagnostic")
+PY
+
 
 # Ground congruence must carry an equality through every primitive scalar former and through
 # no other one. The accepted fixture may not leave a replay gap, and no adversarial goal may prove
@@ -276,7 +304,7 @@ else
     clang -Wl,-dead_strip -o "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$runtime_dir/runtime-support.o"
 fi
 "$runtime_dir/comparison-runtime"
-printf 'dogfood comparison_runtime: all six comparisons checked through goal and tactic replay\n'
+printf 'dogfood comparison_runtime: six witnessed comparisons checked, and unwitnessed reflexivity refused\n'
 
 # Congruence closure is exercised against the kernel directly: every participating former must
 # carry an equality, and every excluded former (call, move, address-of, namespace path, guarded
@@ -539,7 +567,11 @@ assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_prov
 assert binding["fingerprint_match"] is True
 assert report["tactic"]["status"] == "proved"
 assert report["tactic"]["certificate_replayed"] is True
-assert len(report["state"]["initial_facts"]) == 1
+assert len(report["state"]["initial_facts"]) == 2
+assert any(
+    fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_primitive_scalar_type"
+    for fact in report["state"]["initial_facts"]
+)
 assert report["state"]["initial_goal"] == report["state"]["goal"]
 print("dogfood tactic_script_target: imported goal and facts were bound before replay")
 PY

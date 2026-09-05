@@ -267,6 +267,11 @@ extend ElisaProof:
                         orders: mutable darray[Ast::Expr] = []
                         for fact in facts |orders|:
                             proof_collect_unsigned_order_facts(fact, &orders)
+                        # The order tier is gated on its operands' primitive type witness, which
+                        # is a type statement rather than an order fact. Carry the markers across
+                        # with the orders; they are inert for every bound and alias collector.
+                        for fact in facts |orders|:
+                            orders.push(fact) if proof_scalar_marker_name(fact) != "" or proof_unsigned_marker_name(fact) != ""
                         return true if proof_linear_goal(right, TokenKind.LtEq, left, orders)
                     interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
                     return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
@@ -287,12 +292,32 @@ extend ElisaProof:
             proof_close_equalities(facts, &bounds)
             return proof_unsigned_expression_safe_with_bounds(expression, facts, bounds)
 
-        def proof_unsigned_goal_identity(expression: Ast::Expr) -> bool:
+        # Reflexivity, symmetry, and coherence with arithmetic are not universal in Elisa. `==`,
+        # `!=` and the four ordering operators dispatch to a user `__eq__`/`__cmp__` whenever an
+        # operand's type is a struct, and neither protocol method is required to have any of those
+        # properties, so `p == p`, `p <= p`, and `q == p` from `p == q` are not theorems for an
+        # arbitrary type. Every rule that concludes a comparison because its operands denote the
+        # same value therefore needs the operand's primitive type witness. A bare identifier is
+        # the shape whose declared type the producer records; a richer operand shape is left to
+        # the numeric tiers, which cannot construct an interval for a struct anyway.
+        def proof_scalar_witnessed(facts: darray[Ast::Expr]&, name: sview) -> bool:
+            return false if name == ""
+            for fact in facts:
+                return true if proof_scalar_marker_name(fact) == name
+                return true if proof_unsigned_marker_name(fact) == name
+            return false
+
+        def proof_primitive_comparison_operand(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            name: sview = proof_ident_name(expression)
+            return true if name == ""
+            return proof_scalar_witnessed(facts, name)
+
+        def proof_unsigned_goal_identity(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_unsigned_goal_identity(inner)
+                    return proof_unsigned_goal_identity(inner, facts)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
+                    return proof_primitive_comparison_operand(left, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
                 _:
                     return false
 
@@ -1019,14 +1044,20 @@ extend ElisaProof:
             return false
 
         def proof_linear_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            return true if proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
+            return true if proof_primitive_comparison_operand(left, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
             left_name: sview = proof_ident_name(left)
             right_name: sview = proof_ident_name(right)
             if proof_names_equal_from_facts(left_name, right_name, facts):
-                return true if operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+                # Denoting the same value is not the same as satisfying the operator. A negative
+                # answer stays available, since refusing to conclude is always sound.
+                return true if proof_primitive_comparison_operand(left, facts) and (operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq)
                 return false if operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt
             delta: (known: bool, value: i64) = proof_delta_constant(left, right)
             if delta.known:
+                # A zero difference says the two terms denote the same value, so concluding a
+                # comparison on them needs the operator to be reflexive. The numeric tiers below
+                # cannot help either without a bound on the operand, so declining here is sound.
+                return false if delta.value == 0 and not proof_primitive_comparison_operand(left, facts) and (operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq)
                 return delta.value > 0 if operator == TokenKind.Gt
                 return delta.value >= 0 if operator == TokenKind.GtEq
                 return delta.value < 0 if operator == TokenKind.Lt
@@ -1037,8 +1068,12 @@ extend ElisaProof:
             for fact in facts |bounds|:
                 proof_collect_bounds(fact, &bounds)
             proof_close_equalities(facts, &bounds)
-            return true if proof_affine_goal(left, operator, right, bounds, facts)
-            return true if proof_difference_goal(left, operator, right, facts)
+            # The affine and difference tiers close over `==` premises between identifiers, so a
+            # bare identifier operand carries the same requirement as the rules above.
+            # The affine and difference tiers close over `==` premises between identifiers, so a
+            # bare identifier operand carries the same requirement as the rules above.
+            return true if proof_primitive_comparison_operand(left, facts) and proof_affine_goal(left, operator, right, bounds, facts)
+            return true if proof_primitive_comparison_operand(left, facts) and proof_difference_goal(left, operator, right, facts)
             a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(left, bounds)
             b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
             return a.has_lower and b.has_upper and a.lower > b.upper if operator == TokenKind.Gt
@@ -1430,7 +1465,7 @@ extend ElisaProof:
             # Do not let the unbounded signed interval/model tiers prove a fixed-width unsigned
             # expression unless every arithmetic subterm is shown to remain in its declared
             # range. Directly asserted facts were handled above and remain valid path assumptions.
-            return true if proof_unsigned_goal_identity(goal)
+            return true if proof_unsigned_goal_identity(goal, facts)
             # Signed decision procedures consume premises as well as the goal.
             # A true wrapping premise may be false over integers; treating it as
             # such can discard every actual execution and prove an arbitrary goal.
