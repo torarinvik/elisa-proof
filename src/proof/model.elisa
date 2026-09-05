@@ -4,7 +4,9 @@ module ElisaProof:
     public:
         struct ProofFinding:
             kind: sview
-            status: sview
+            # A diagnostic's status is refined after the fact when the goal attempt it is bound to
+            # ended on a resource limit, so it is mutable like the goal binding below.
+            status: mutable sview
             line: u32
             name: sview
             message: sview
@@ -32,6 +34,11 @@ module ElisaProof:
 
         struct ProofGoalAttempt:
             goal: Ast::Expr
+            # True when the search ended because a fixed budget ran out rather than because no
+            # rule applied. This never affects admission: an exhausted attempt is unproven either
+            # way. It exists so a client is not told "unknown" when the honest answer is that the
+            # obligation was never decided.
+            budget_exhausted: mutable bool
             facts_start: usize
             facts_count: usize
             kernel_goal: usize
@@ -291,6 +298,17 @@ module ElisaProof:
         def proof_empty_functions() -> ProofFunctionTable:
             return ProofFunctionTable{names: [], name_hashes: [], index_hashes: [], index_values: [], param_starts: [], param_counts: [], all_params: [], all_parameter_mutable: [], all_has_defaults: [], all_defaults: [], region_param_starts: [], region_param_counts: [], all_region_params: [], all_param_region_starts: [], all_param_regions: [], return_references: [], return_mutable_references: [], return_reference_parameters: [], return_regions: [], requires_starts: [], requires_counts: [], all_requires: [], ensure_starts: [], ensure_counts: [], all_ensures: [], changes_starts: [], changes_counts: [], all_changes: [], preserves_starts: [], preserves_counts: [], all_preserves: [], decreases_starts: [], decreases_counts: [], all_decreases: [], decreases_unbounded: [], structural: [], structural_subject_positions: [], structural_subject_types: [], call_starts: [], call_counts: [], all_calls: [], recursive: [], recursive_component_ids: [], direct_pure: [], pure: [], verified: [], verification_reasons: []}
 
+        # Mark the most recent goal attempt as ended by a resource limit, and reclassify its
+        # diagnostic from "unknown" to "timeout" so a client can tell an undecided obligation from
+        # one the kernel decided it could not prove.
+        def proof_mark_latest_attempt_exhausted(report: mutable ProofReport&, exhausted: bool) -> void:
+            return if not exhausted or report.goal_attempts.count == 0
+            report.goal_attempts[report.goal_attempts.count - 1].budget_exhausted <- true
+
+        def proof_latest_attempt_exhausted(report: ProofReport&) -> bool:
+            return false if report.goal_attempts.count == 0
+            return report.goal_attempts[report.goal_attempts.count - 1].budget_exhausted
+
         def proof_finding_status(kind: sview) -> sview:
             return "disproved" if kind == "borrow-alias-conflict" or kind == "borrow-move-conflict" or kind == "borrow-mutable-source" or kind == "borrow-readonly-write" or kind == "borrow-write-conflict" or kind == "resource-use-after-move" or kind == "region-use-after-destroy" or kind == "frame-preserve-violated" or kind == "frame-preserve-write" or kind == "frame-write-outside" or kind == "frame-call-outside"
             return "unsupported" if kind == "borrow-call-opaque" or kind == "borrow-call-summary-unsupported" or kind == "borrow-contract-unsupported" or kind == "borrow-escape" or kind == "borrow-source-opaque" or kind == "call-old-opaque" or kind == "catch-arm-unsupported" or kind == "contract-call-unsupported" or kind == "contract-expression-unsupported" or kind == "contract-resource-unsupported" or kind == "control-flow-unsupported" or kind == "declaration-unsupported" or kind == "expression-unsupported" or kind == "frame-call-opaque" or kind == "frame-expression-opaque" or kind == "frame-preserve-opaque" or kind == "frame-spec-opaque" or kind == "frame-write-opaque" or kind == "function-summary-unverified" or kind == "index-bounds-opaque" or kind == "lemma-impure" or kind == "lemma-malformed" or kind == "lemma-recursive-unsupported" or kind == "lemma-result-unbound" or kind == "lemma-return" or kind == "loop-condition-opaque" or kind == "loop-decreases-malformed" or kind == "loop-invariant-scope" or kind == "parallel-control-flow-unsupported" or kind == "parallel-state-unsupported" or kind == "pattern-unsupported" or kind == "proof-malformed" or kind == "recursive-summary-unsupported" or kind == "slice-bounds-opaque" or kind == "statement-unsupported" or kind == "region-alias-unsupported" or kind == "region-allocation-unsupported" or kind == "region-destroy-unsupported" or kind == "region-expression-unsupported" or kind == "region-return-escape" or kind == "region-return-witness-unsupported" or kind == "region-scope-unsupported" or kind == "region-store-escape"
@@ -350,7 +368,7 @@ module ElisaProof:
                 proof_kernel_bind_quantifier_kind(&report.kernel_nodes, kernel_goal, quantifier_kind)
             kernel_facts_count: usize = captured_facts.count
             certificate_index: usize = report.certificates.count
-            report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: goal, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, proven: proven, has_certificate: proven, certificate_index: certificate_index})
+            report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, proven: proven, has_certificate: proven, certificate_index: certificate_index})
             report.certificates <- report.certificates.push(ProofGoalCertificate{goal: goal, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, replayed: false}) if proven
 
         # Resource safety is certified by a source-neutral transition trace rather than by a
@@ -362,7 +380,7 @@ module ElisaProof:
             empty_goal: Ast::Expr = Ast::Expr.BoolLit(true)
             facts_start: usize = report.certificate_facts.count
             kernel_facts_start: usize = report.kernel_certificate_facts.count
-            report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: empty_goal, facts_start: facts_start, facts_count: 0, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: 0, line: line, name: name, rule: "resource-safety", proven: true, has_certificate: true, certificate_index: certificate_index})
+            report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: empty_goal, budget_exhausted: false, facts_start: facts_start, facts_count: 0, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: 0, line: line, name: name, rule: "resource-safety", proven: true, has_certificate: true, certificate_index: certificate_index})
             report.certificates <- report.certificates.push(ProofGoalCertificate{goal: empty_goal, facts_start: facts_start, facts_count: 0, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: 0, line: line, name: name, rule: "resource-safety", replayed: false})
 
         # Structural termination is a source-neutral transition certificate, just like the
@@ -374,5 +392,5 @@ module ElisaProof:
             empty_goal: Ast::Expr = Ast::Expr.BoolLit(true)
             facts_start: usize = report.certificate_facts.count
             kernel_facts_start: usize = report.kernel_certificate_facts.count
-            report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: empty_goal, facts_start: facts_start, facts_count: 0, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: 0, line: line, name: name, rule: "structural-safety", proven: true, has_certificate: true, certificate_index: certificate_index})
+            report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: empty_goal, budget_exhausted: false, facts_start: facts_start, facts_count: 0, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: 0, line: line, name: name, rule: "structural-safety", proven: true, has_certificate: true, certificate_index: certificate_index})
             report.certificates <- report.certificates.push(ProofGoalCertificate{goal: empty_goal, facts_start: facts_start, facts_count: 0, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: 0, line: line, name: name, rule: "structural-safety", replayed: false})

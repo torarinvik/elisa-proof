@@ -322,6 +322,35 @@ these tiers. That is a strictly smaller surface than before and it fails toward 
 than refusal, so it remains an open item: closing it needs the callee return type recorded in the
 function table.
 
+## Added: exhausted searches are reported as timeouts
+
+A goal whose search ran out of budget was reported with the same `unknown` status as a goal no
+rule applied to. `examples/rejected_quantifier.elisa` already contained a `too_large_bounded_forall`
+case that was reported this way, so the two states had been collapsed since that fixture was
+written. An agent repairing the first should shrink the range or supply a lemma; an agent
+repairing the second needs a different specification.
+
+The decision procedures now thread an advisory exhaustion flag out of the quantifier range-width
+and instance-count limits, the quantifier nesting cap, and bounded model checking's per-name and
+product-domain limits. `proof_certify_goal_with_rule` records it on the goal attempt, and
+`proof_add_goal_failure` reclassifies the diagnostic from `unknown` to `timeout` — but only when
+no counterexample was found, so a refuted goal keeps the stronger `disproved` answer.
+
+The flag is observational and cannot widen admission: an exhausted attempt is unproven exactly as
+before, no certificate is emitted for it, and the replay kernel is unchanged. `proof_goal` keeps
+its old signature and discards the flag, so the tactic and resource callers are unaffected.
+
+Coverage. `examples/rejected_budget.elisa` requires all four states from one file: two exhausted
+searches (a quantifier range wider than the instantiation budget, and a bounded-model product
+domain wider than the enumeration limit), one goal no rule decides, and one refuted goal with a
+counterexample. The test matrix additionally requires the focused-goal API to report the exhausted
+goal as `timeout` with no counterexample.
+
+Not covered. The congruence term and saturation-round budgets, the case-split depth caps, and the
+kernel-side replay budgets do not yet report exhaustion; they decline silently. The report's
+`trusted_assumptions` list remains empty, which is currently accurate: compiler-derived inputs are
+counted separately as boundary facts rather than as assumptions inside a proof.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

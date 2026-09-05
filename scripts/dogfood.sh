@@ -201,6 +201,29 @@ run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.eli
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
+run_probe rejected_budget examples/rejected_budget.elisa 1
+
+# A budget that ran out, a goal no rule decides, and a refuted goal are three different answers.
+# The report must keep them apart so an agent repairs the right thing.
+python3 - "$REPORT_DIR/rejected_budget.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["replay"]["gaps"] != 0 or report["summary"]["semantic_errors"] != 0:
+    raise SystemExit("dogfood failed: budget fixture did not fail cleanly")
+status = {finding["name"]: finding["status"] for finding in report["findings"]}
+expected = {
+    "too_wide_quantifier": "timeout",
+    "too_large_model": "timeout",
+    "unsupported_reasoning": "unknown",
+    "false_comparison": "disproved",
+}
+if status != expected:
+    raise SystemExit("dogfood failed: verdict states collapsed, got %s" % sorted(status.items()))
+PY
+
 
 # Reflexivity, symmetry, and coherence with arithmetic hold for the language's own operators, not
 # for a user `__eq__`/`__cmp__`. No goal here may prove or emit a certificate.

@@ -1487,4 +1487,20 @@ if [[ "$rejected_reflexivity_status" -ne 0 ]]; then
     exit 1
 fi
 
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert {f["name"]: f["status"] for f in report["findings"]} == {"too_wide_quantifier": "timeout", "too_large_model": "timeout", "unsupported_reasoning": "unknown", "false_comparison": "disproved"}'
+rejected_budget_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_budget_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: exhausted, undecided and refuted goals were not reported as distinct states\n' >&2
+    exit 1
+fi
+
+"$ROOT_DIR/build/elisa-proof" --goal 1 "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "timeout"; assert report["failure"]["status"] == "timeout"; assert report["failure"]["counterexample_found"] is False'
+budget_goal_status=${PIPESTATUS[1]}
+if [[ "$budget_goal_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: the focused-goal API did not report an exhausted search as a timeout\n' >&2
+    exit 1
+fi
+
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

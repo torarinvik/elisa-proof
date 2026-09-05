@@ -241,6 +241,15 @@ The proof kernel is intentionally fail-closed:
     Pure conditional expressions in comparison goals use the same exhaustive shape: the replay
     kernel checks the then branch under the condition and the else branch under its structural
     negation. It never treats either branch as unconditional, and the split depth is bounded.
+15b. An unproven obligation is reported with the reason it was not proven. `disproved` carries a
+    concrete counterexample, `unsupported` names a form outside the modeled fragment, `timeout`
+    means a fixed budget ran out before the search reached a verdict, and `unknown` means no rule
+    applied. The decision procedures thread an advisory exhaustion flag out of the quantifier
+    instantiation limits, the quantifier nesting cap, and the bounded model-checking domain and
+    step limits. The flag never widens what is provable: an exhausted attempt is unproven exactly
+    as before, and a counterexample outranks a budget so a refuted goal is never a timeout. Its
+    only purpose is to stop the report from telling a client "no rule applied" when the honest
+    answer is that the obligation was never decided.
 16. Bounded model checking may discharge a goal only when every identifier in the pure
     integer/Boolean fragment has a finite explicit interval, the complete product domain is at
     most 65,536 states, every fact and the goal evaluates without overflow at every state, and

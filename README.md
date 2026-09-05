@@ -325,6 +325,14 @@ The native checker currently supports:
 - deterministic report-local `goal_id`, `certificate_id`, goal-to-certificate links, and explicit
   theorem dependencies in JSON, so an editor or proof agent can target one obligation, invalidate
   affected summaries, and request a focused repair/replay; and
+- distinct verdict states for an unproven obligation. `disproved` carries a counterexample,
+  `unsupported` names a form the kernel does not model, `timeout` means a fixed budget ran out
+  before the search reached a verdict, and `unknown` means no rule applied. The budgets that
+  report `timeout` are quantifier instantiation (range width and instance count), the quantifier
+  nesting depth, and bounded model checking's per-name and product-domain limits. A counterexample
+  outranks a budget, so a refuted goal is never reported as a timeout. The distinction is
+  observational: an exhausted attempt is unproven either way, and nothing about admission changes.
+  See `examples/rejected_budget.elisa`; and
 - a source-neutral `elisa-proof-kernel-v1` term arena for certificate goals, facts, and derived
   premises. Its independent replay path consumes canonical node/index data rather than compiler
   AST nodes; malformed or unsupported lowered terms remain replay gaps; and
