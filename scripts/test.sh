@@ -1193,6 +1193,15 @@ if [[ "$modulo_division_bounds_status" -ne 0 || "$rejected_modulo_division_bound
     exit 1
 fi
 
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_duplicate_quantifier.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(goal["rule"] == "quantifier-forall" and not goal["proven"] and goal["replay_status"] == "not_certified" for goal in report["goals"]); assert not any(certificate["rule"] == "quantifier-forall" for certificate in report["certificates"])'
+duplicate_quantifier_status=${PIPESTATUS[0]}
+set -e
+if [[ "$duplicate_quantifier_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: duplicate dictionary quantifier binder was accepted\n' >&2
+    exit 1
+fi
+
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["format"] == "elisa-proof-tactic-result-v1"; assert report["status"] == "proved"; assert report["source"]["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert report["tactic"]["kernel_trace_replayed"] is True; assert len(report["state"]["trace"]) == 2'
 portable_script_status=${PIPESTATUS[0]}
 if [[ "$portable_script_status" -ne 0 ]]; then
