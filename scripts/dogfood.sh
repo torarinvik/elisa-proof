@@ -292,6 +292,7 @@ refused = {
     "field_reflexive_order",
     "element_reflexive_equality",
     "opaque_call_reflexive_equality",
+    "struct_element_binder_reflexive_equality",
 }
 claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}
 if refused & claimed:

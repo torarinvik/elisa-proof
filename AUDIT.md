@@ -394,10 +394,19 @@ unconditional gate, a marker matching any term, a subscript ignoring depth, a su
 collected, and a former admitted without operand witnesses — each make the harness exit with a
 distinct code.
 
-Not covered. Type resolution stops at what the producer can see: a loop binder over a container
-(`for x in values`) is not witnessed, nor is a pattern binder from a struct pattern except
-through its substituted place, nor a field of a call result. Those decline. The witness budget
-and depth are fixed constants and their exhaustion is silent.
+Loop binders. A binder is represented by its own proof atom `(name, offset)`, and the first
+version of this change keyed the counting-range witness by the bare spelling, which no goal ever
+contains: `for i in 0 ..< n: proof i == i` had been admitted only through tuple reflexivity and
+so regressed to unproven. The witness is now keyed by the atom, retention follows the atom's
+name, and a binder over a container whose element witness has depth one inherits the scalar
+witness, so `for v in values: proof v == v` and congruence through `v` are proved. A binder over
+a container of structs binds an aggregate and stays unwitnessed; its fields are not witnessed
+either, because the element's declared type is not carried through the element marker.
+
+Not covered. Type resolution stops at what the producer can see: the fields of a struct-typed
+loop binder, a pattern binder from a struct pattern except through its substituted place, and a
+field of a call result all decline. The witness budget and depth are fixed constants and their
+exhaustion is silent.
 
 ## Added: exhausted searches are reported as timeouts
 

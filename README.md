@@ -216,9 +216,9 @@ The native checker currently supports:
   to be witnessed; an unwitnessed shape declines. Witnesses are expression-level: the producer
   resolves the declared type of every place reachable from a binding — a bare name, struct
   fields to a fixed depth, a built-in container's `count`, and its elements to the declared
-  subscript depth — plus `const enum` values and the result of a verified total-pure call over
-  witnessed arguments, and records each against the exact term for the kernel to match
-  structurally. Opaque calls, struct subscripts, plain enums, and aggregates are never
+  subscript depth — plus `const enum` values, the result of a verified total-pure call over
+  witnessed arguments, and loop binders (a counting-range binder, or a binder over a container
+  of scalars), and records each against the exact term for the kernel to match structurally. Opaque calls, struct subscripts, plain enums, and aggregates are never
   witnessed. See `examples/expression_witness.elisa`, `examples/rejected_reflexivity.elisa`,
   `examples/rejected_aggregate_equality.elisa`, and the native kernel harness
   `examples/kernel_comparison_runtime.elisa`;

@@ -199,8 +199,10 @@ The proof kernel is intentionally fail-closed:
     whose operator is the language's own is a scalar when all of its operands are.
     The producer records these from declared parameter and local types, following struct fields
     to a fixed depth and built-in container spellings (`darray[T]`, `view[T]`, `array[T, N]`,
-    `T[N]`) to their element, and from counting-range binders; each witness is retained and
-    invalidated with its root symbol. A call is witnessed only when the callee is a verified
+    `T[N]`) to their element, and from loop binders — a counting-range binder is an integer, and
+    a binder over a container whose element witness has depth one inherits the scalar witness;
+    both are keyed by the binder's proof atom. Each witness is retained and invalidated with its
+    root symbol. A call is witnessed only when the callee is a verified
     total-pure function with a scalar declared return type and every argument is witnessed: that
     classification is what makes two occurrences of the call text one value. An opaque call, a
     subscript on a struct (an `__index__` protocol call), a plain enum, a reference to a scalar,
