@@ -732,6 +732,36 @@ for source_name, expect_any in (("examples/verified.elisa", True), ("examples/re
 PY
 printf 'dogfood proof_repair: every proposal the search admits re-runs and replays\n'
 
+# The whole-file walk must agree with the per-goal one exactly: the same goals, the same verdicts,
+# the same scripts. A batch that disagreed with the single-goal answer would mean one of them is
+# reporting something the engine did not decide.
+python3 - "$ROOT_DIR/build/elisa-proof" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+binary = sys.argv[1]
+root = os.path.dirname(os.path.dirname(binary))
+for source_name in ("examples/verified.elisa", "examples/rejected_repair_target.elisa"):
+    source = os.path.join(root, source_name)
+    report = json.loads(subprocess.run([binary, "--json", source], capture_output=True, text=True).stdout)
+    batch = json.loads(subprocess.run([binary, "--repair-all", source], capture_output=True, text=True).stdout)
+    expected = [index for index, goal in enumerate(report["goals"]) if not goal["proven"]]
+    if [entry["goal_id"] for entry in batch["goals"]] != expected:
+        raise SystemExit("dogfood failed: %s batch did not walk exactly the unresolved goals" % source_name)
+    if batch["summary"]["unresolved"] != len(expected):
+        raise SystemExit("dogfood failed: %s batch miscounted unresolved goals" % source_name)
+    for entry in batch["goals"]:
+        single = json.loads(subprocess.run([binary, "--repair", str(entry["goal_id"]), source], capture_output=True, text=True).stdout)
+        if single["status"] != entry["status"] or single["script"] != entry["script"]:
+            raise SystemExit("dogfood failed: %s goal %d disagrees between --repair and --repair-all" % (source_name, entry["goal_id"]))
+    repaired = sum(1 for entry in batch["goals"] if entry["status"] == "repaired")
+    if repaired != batch["summary"]["repaired"]:
+        raise SystemExit("dogfood failed: %s batch summary does not match its own entries" % source_name)
+PY
+printf 'dogfood proof_repair_batch: the whole-file walk agrees with the per-goal answer\n'
+
 
 # Exercise the same admission routine as native Elisa code. This is separate from the report
 # checker: malformed input must be rejected by the compiled source-neutral module too.

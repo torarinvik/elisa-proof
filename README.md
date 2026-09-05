@@ -76,6 +76,12 @@ search only ever proposes — a candidate is admitted solely when the checked en
 contained no proof and never that the goal is false. It exits `0` when a repair was found, `1` when
 none was, and `2` when the goal id does not exist.
 
+`build/elisa-proof --repair-all file.elisa` walks every unresolved goal of a file in one pass,
+reporting each with its own verdict and script. It tries nothing the checker already proved, and
+its own verdict is the conjunction of the per-goal ones: `nothing_to_repair` when the file has no
+open goals, `repaired` when every open goal got a kernel-checked script, and `partial` otherwise.
+It exits `0` for the first two and `1` for the third.
+
 Use `build/elisa-proof --goal N file.elisa` to retrieve only one of those goals without loading the
 full report or kernel arena. The deterministic `elisa-proof-goal-v1` response includes the source
 fingerprint and completeness gate, proposition, exact hypotheses and origins, dependencies,

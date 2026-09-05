@@ -874,14 +874,37 @@ re-runs and replays, a repair reporting failure must emit none and exit non-zero
 the adversarial fixture may be repaired at all. A proposal that could not be re-checked would be a
 claim rather than a proof, so the re-check is what the test asserts, not the search's own verdict.
 
+`--repair-all <file.elisa>` walks the whole unresolved queue in one pass. It repairs nothing the
+checker already proved — only goals the report still reports as open are tried — reports each one
+separately with its own verdict and script, and takes its own verdict as the conjunction: a file
+with any unrepaired goal is `partial` and exits non-zero, a file with none is `nothing_to_repair`.
+Dogfood pins the property that makes the batch trustworthy: the goals it walks are exactly the
+report's unresolved ones, and for each of them `--repair-all` and `--repair` must agree on both the
+verdict and the script, so neither can report something the engine did not decide.
+
 Not covered. No fixture currently has a goal that is proven without a replayed certificate, so the
-`unchecked` keyword is exercised by the renderer's logic but not by a live example; the exhaustive
-dogfood check would catch a regression the moment one appears. `split` and `cases` need nested
-branch scripts, which the text grammar has no syntax for yet, so a branching proof must still be
-written as JSON, and the repair vocabulary is correspondingly branch-free. The vocabulary is also
-fixed rather than derived: it does not consult `--suggest`, so a goal needing a lemma instantiation
-is out of reach even when the lemma is discoverable. And repair works one goal at a time — nothing
-yet walks `repair_queue` and proposes a batch, or re-derives which goals a source edit invalidated.
+`unchecked` keyword is exercised by the renderer's logic but not by a live example. More
+significantly, **no fixture has an open goal that the bounded vocabulary can close**: the source
+checker is strong enough that the goals it leaves open are, so far, also out of reach of twenty
+argument-free tactic sequences. So `repaired` is demonstrated on goals the checker had already
+proved, and the batch's `partial` path is demonstrated but its all-repaired path is not. This is a
+statement about the vocabulary's reach, not about the plumbing, and it is the honest reason to
+build the next piece rather than a reason to trust this one further than it goes.
+
+That next piece is a `lemma` tactic. `--suggest` already matches a verified theorem's conclusion
+against a goal and reports the parameter bindings, but no tactic can consume one: `apply` works
+only over an existing `A => B` fact and `have` requires the proposed fact to be entailed by current
+hypotheses, so neither can introduce an instantiated lemma conclusion. A tactic mirroring
+`proof_apply_lemma` — instantiate the parameters from the suggestion's bindings, discharge each
+precondition from the current facts, then add the instantiated postcondition — would let the repair
+vocabulary be *derived* from the source's own theorem catalog instead of enumerated. It touches the
+checked engine, so it needs its own adversarial fixtures: an unverified lemma must not be usable, a
+precondition that does not discharge must refuse, and a binding that does not match must refuse.
+
+`split` and `cases` still need nested branch scripts, which the text grammar has no syntax for, so
+a branching proof must be written as JSON and the vocabulary is branch-free. And nothing yet
+re-derives which goals a source *edit* invalidated: the batch repairs what is open now, but does
+not diff two revisions.
 
 ## Coverage still required
 

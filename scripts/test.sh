@@ -1836,6 +1836,51 @@ if [[ "$proof_repair_rerun_status" -ne 0 || "$proof_repair_shape_status" -ne 0 ]
     exit 1
 fi
 
+# `--repair-all` walks the unresolved goals of a whole file in one pass. It repairs nothing the
+# checker already proved, reports each open goal separately, and its verdict is the conjunction of
+# the per-goal ones — a file with any unrepaired goal is `partial` and exits non-zero.
+set +e
+"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/batch_clean.json"
+proof_batch_clean_status=$?
+"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/batch_open.json"
+proof_batch_open_status=$?
+set -e
+if [[ "$proof_batch_clean_status" -ne 0 || "$proof_batch_open_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: --repair-all exit codes clean=%s open=%s\n' "$proof_batch_clean_status" "$proof_batch_open_status" >&2
+    exit 1
+fi
+set +e
+python3 - "$proof_render_dir" <<'PY'
+import json
+import os
+import sys
+
+directory = sys.argv[1]
+def load(name):
+    with open(os.path.join(directory, name), encoding="utf-8") as handle:
+        return json.load(handle)
+
+clean = load("batch_clean.json")
+assert clean["format"] == "elisa-proof-repair-batch-v1"
+assert clean["status"] == "nothing_to_repair"
+assert clean["summary"]["unresolved"] == 0 and clean["summary"]["repaired"] == 0
+assert clean["goals"] == []
+open_file = load("batch_open.json")
+assert open_file["status"] == "partial"
+assert open_file["summary"]["unresolved"] == 3 and open_file["summary"]["repaired"] == 0
+assert {entry["goal_id"] for entry in open_file["goals"]} == {1, 3, 5}
+assert {entry["name"] for entry in open_file["goals"]} == {"unrelated_hypothesis", "wrong_direction", "needs_arithmetic_we_do_not_have"}
+for entry in open_file["goals"]:
+    assert entry["status"] == "unrepaired" and entry["script"] is None
+    assert entry["tried"] == open_file["summary"]["candidates"]
+PY
+proof_batch_shape_status=$?
+set -e
+if [[ "$proof_batch_shape_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: --repair-all reporting\n' >&2
+    exit 1
+fi
+
 # An unpinned lifetime and a region value reaching a formal that declares none are each refused.
 set +e
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "unpinned_formal") in findings; assert ("region-call-opaque", "unmapped_lifetime") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'
