@@ -98,6 +98,8 @@ run_probe rejected_float_expression examples/rejected_float_expression.elisa 1
 run_probe integer_alias examples/integer_alias.elisa 0
 run_probe unsigned_alias examples/unsigned_alias.elisa 0
 run_probe rejected_unsigned_alias examples/rejected_unsigned_alias.elisa 1
+run_probe unsigned_refinement examples/unsigned_refinement.elisa 0
+run_probe rejected_unsigned_refinement examples/rejected_unsigned_refinement.elisa 1
 
 # This fixture intentionally contains unsupported surface around the standalone replay module.
 # A non-zero command verdict is expected, but every certificate it does emit must replay.
