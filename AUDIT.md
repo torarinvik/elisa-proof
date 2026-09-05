@@ -68,17 +68,25 @@ substitution, quantifier enumeration, and tactic instantiation. Stage1 test/dogf
 the comparison harness also compiles, links, and passes under stage0 with a stage0-built runtime.
 Dogfood now performs that targeted bootstrap check whenever stage0 is installed.
 
-### Open: stage0 full arena-harness crash
+### Repaired: stage0 full arena-harness crash
 
-After the syntax/precondition fixes, `examples/kernel_arena_runtime.elisa` compiles under stage0
-but exits 139 when linked with stage0-compiled `native_runtime_support.elisa`. The stage1 harness
-passes. LLDB identifies an invalid read in `proof_kernel_replay_resource_has_pending_join`,
-called by `proof_kernel_replay_resource_report_impl`, then `proof_kernel_replay_resource_report`.
-This is not yet minimized or attributed to compiler code generation versus prover/runtime
-memory handling. Full bootstrap parity must not be claimed until it is resolved.
-An isolated empty `resource-safety` trace succeeds under stage0, so the failure is not triggered
-by every resource-state initialization; reduction must retain the relevant resource transitions
-or preceding allocations from the full harness.
+After the syntax/precondition fixes, `examples/kernel_arena_runtime.elisa` compiled under stage0
+but exited 139 when linked with stage0-compiled `native_runtime_support.elisa`, while the stage1
+harness passed. LLDB placed the invalid read in `proof_kernel_replay_resource_has_pending_join`.
+The crash reduced to `examples/kernel_resource_bootstrap_runtime.elisa`: one valid trace that
+opens a region, allocates, uses the value, and closes the region. Empty traces did not trigger it.
+
+Cause: `proof_kernel_replay_resource_events` and `proof_kernel_replay_resource_call` are
+region-polymorphic (`[@r, @e]`) but took `state: mutable ProofKernelReplayResourceState&` with no
+region annotation. Stage0 placed the darray growth performed through that reference in a region
+that was released when the callee returned, so the caller's state buffers dangled. Stage1 handles
+the same source correctly. Giving the parameter its own region variable (`& @s`) makes the
+allocation region explicit and both stages agree; the full arena harness now passes under stage0.
+This is a bootstrap-compiler defect, not a prover-logic defect, and stage1 remains authoritative.
+Standalone attempts to isolate the pattern outside the replay module are rejected by stage0 with
+"darray push requires an active in <arena>: scope" instead of being miscompiled, so the reduced
+replay trace is the reproducer. Dogfood now builds the reduced trace and the full arena harness
+with stage0 whenever it is installed.
 
 ### Repaired: unsigned assumptions entering signed decision procedures
 
