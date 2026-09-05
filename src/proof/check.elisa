@@ -836,6 +836,248 @@ extend ElisaProof:
         # redeclaration purges them explicitly before establishing the new declaration's type.
         # Without this, a cleared unsigned marker would let later arithmetic on the binding be
         # folded as unbounded signed arithmetic.
+        def proof_push_aliased(aliased: mutable darray[sview]&, name: sview) -> void:
+            return if name == ""
+            return if any existing in aliased where existing == name
+            aliased.push(name)
+
+        # The locals of a function body that may be referenced: a place under `&`, `mutable` or
+        # `move`, the receiver of a method call, and a bare name passed to a parameter that is a
+        # reference (Elisa references such an argument implicitly) or to a callee whose signature
+        # is not imported. A lambda body is not analyzed; it disables the analysis for the whole
+        # function through the `*` sentinel. Everything else is a by-value scalar a callee cannot
+        # reach.
+        def proof_collect_aliased_names(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, aliased: mutable darray[sview]&) -> void:
+            for statement in body |functions, aliased|:
+                match statement:
+                    Ast::Stmt.Expr(expression, _):
+                        proof_collect_aliased_in_expression(expression, functions, aliased)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        proof_collect_aliased_names(block_body, functions, aliased)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        proof_collect_aliased_in_expression(initializer, functions, aliased)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        proof_collect_aliased_in_expression(target, functions, aliased)
+                        proof_collect_aliased_in_expression(value, functions, aliased)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_collect_aliased_in_expression(condition, functions, aliased)
+                        proof_collect_aliased_names(then_body, functions, aliased)
+                        proof_collect_aliased_names(else_body, functions, aliased)
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_collect_aliased_in_expression(condition, functions, aliased)
+                        proof_collect_aliased_names(while_body, functions, aliased)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        proof_collect_aliased_in_expression(iterable, functions, aliased)
+                        proof_collect_aliased_names(for_body, functions, aliased)
+                    Ast::Stmt.Return(value, _):
+                        proof_collect_aliased_in_expression(returned, functions, aliased) if value is returned
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_collect_aliased_in_expression(scrutinee, functions, aliased)
+                        for arm in arms |functions, aliased|:
+                            proof_collect_aliased_in_expression(arm.guard, functions, aliased)
+                            proof_collect_aliased_names(arm.body, functions, aliased)
+                    Ast::Stmt.Contract(_, expression, _):
+                        proof_collect_aliased_in_expression(expression, functions, aliased)
+                    _:
+                        pass
+
+        def proof_strip_parens(expression: Ast::Expr) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_strip_parens(inner)
+                _:
+                    return expression
+
+        def proof_collect_aliased_call_arguments(callee: Ast::Expr, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, functions: ProofFunctionTable&, aliased: mutable darray[sview]&) -> void:
+            called: sview = proof_callable_name(callee)
+            index: usize = proof_function_index(functions, called)
+            known: bool = called != "" and index < functions.names.count
+            match callee:
+                Ast::Expr.Field(receiver, _, _):
+                    proof_push_aliased(aliased, proof_ident_name(proof_strip_parens(receiver)))
+                _:
+                    pass
+            for position in 0..<arguments.count |position, arguments, argument_names, functions, aliased, known, index|:
+                argument_name: sview = proof_ident_name(proof_strip_parens(arguments[position]))
+                continue if argument_name == ""
+                if not known:
+                    proof_push_aliased(aliased, argument_name)
+                    continue
+                parameter_start: usize = functions.param_starts[index]
+                parameter_count: usize = functions.param_counts[index]
+                slot: mutable usize = parameter_count
+                if argument_names.count == arguments.count and argument_names[position] != "":
+                    for offset in 0..<parameter_count |offset, functions, parameter_start, argument_names, position, slot|:
+                        slot <- offset if functions.all_params[parameter_start + offset] == argument_names[position]
+                else:
+                    slot <- position if position < parameter_count
+                if slot >= parameter_count or parameter_start + slot >= functions.all_parameter_references.count:
+                    proof_push_aliased(aliased, argument_name)
+                    continue
+                proof_push_aliased(aliased, argument_name) if functions.all_parameter_references[parameter_start + slot]
+
+        def proof_collect_aliased_in_expression(expression: Ast::Expr, functions: ProofFunctionTable&, aliased: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Unary(operator, operand, _):
+                    proof_push_aliased(aliased, proof_place_root_name(operand, 0)) if operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut
+                    proof_collect_aliased_in_expression(operand, functions, aliased)
+                Ast::Expr.Move(operand, _):
+                    proof_push_aliased(aliased, proof_place_root_name(operand, 0))
+                    proof_collect_aliased_in_expression(operand, functions, aliased)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_push_aliased(aliased, proof_place_root_name(operand, 0))
+                    proof_collect_aliased_in_expression(operand, functions, aliased)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    proof_collect_aliased_call_arguments(callee, arguments, argument_names, functions, aliased)
+                    proof_collect_aliased_in_expression(callee, functions, aliased)
+                    for argument in arguments |functions, aliased|:
+                        proof_collect_aliased_in_expression(argument, functions, aliased)
+                Ast::Expr.StaticEffectCall(_, _, _, arguments, _, _):
+                    for argument in arguments |functions, aliased|:
+                        proof_push_aliased(aliased, proof_ident_name(proof_strip_parens(argument)))
+                        proof_collect_aliased_in_expression(argument, functions, aliased)
+                Ast::Expr.Field(object, _, _):
+                    proof_collect_aliased_in_expression(object, functions, aliased)
+                Ast::Expr.Scope(base, _, _):
+                    proof_collect_aliased_in_expression(base, functions, aliased)
+                Ast::Expr.Index(object, index, _):
+                    proof_collect_aliased_in_expression(object, functions, aliased)
+                    proof_collect_aliased_in_expression(index, functions, aliased)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_collect_aliased_in_expression(object, functions, aliased)
+                    proof_collect_aliased_in_expression(low, functions, aliased)
+                    proof_collect_aliased_in_expression(high, functions, aliased)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_collect_aliased_in_expression(object, functions, aliased)
+                    for argument in arguments |functions, aliased|:
+                        proof_collect_aliased_in_expression(argument, functions, aliased)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_aliased_in_expression(left, functions, aliased)
+                    proof_collect_aliased_in_expression(right, functions, aliased)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_aliased_in_expression(inner, functions, aliased)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |functions, aliased|:
+                        proof_collect_aliased_in_expression(element, functions, aliased)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |functions, aliased|:
+                        proof_collect_aliased_in_expression(element, functions, aliased)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |functions, aliased|:
+                        proof_collect_aliased_in_expression(element, functions, aliased)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |functions, aliased|:
+                        proof_collect_aliased_in_expression(entry.key, functions, aliased)
+                        proof_collect_aliased_in_expression(entry.value, functions, aliased)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |functions, aliased|:
+                        proof_collect_aliased_in_expression(field.value, functions, aliased)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_collect_aliased_in_expression(base, functions, aliased)
+                    for field in fields |functions, aliased|:
+                        proof_collect_aliased_in_expression(field.value, functions, aliased)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    proof_collect_aliased_in_expression(condition, functions, aliased)
+                    proof_collect_aliased_in_expression(then_expression, functions, aliased)
+                    proof_collect_aliased_in_expression(else_expression, functions, aliased)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    proof_collect_aliased_in_expression(scrutinee, functions, aliased)
+                    for arm in arms |functions, aliased|:
+                        proof_collect_aliased_in_expression(arm.guard, functions, aliased)
+                        proof_collect_aliased_names(arm.body, functions, aliased)
+                Ast::Expr.Catch(guarded, arms, _):
+                    proof_collect_aliased_in_expression(guarded, functions, aliased)
+                    for arm in arms |functions, aliased|:
+                        proof_collect_aliased_in_expression(arm.guard, functions, aliased)
+                        proof_collect_aliased_names(arm.body, functions, aliased)
+                Ast::Expr.Comprehension(_, iterable, condition, comprehension_body, _):
+                    proof_collect_aliased_in_expression(iterable, functions, aliased)
+                    proof_collect_aliased_in_expression(condition, functions, aliased)
+                    proof_collect_aliased_in_expression(comprehension_body, functions, aliased)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_collect_aliased_in_expression(base, functions, aliased)
+                    proof_collect_aliased_in_expression(predicate, functions, aliased)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_collect_aliased_in_expression(guarded, functions, aliased)
+                    proof_collect_aliased_names(recovery, functions, aliased)
+                Ast::Expr.Lambda(_, _, _):
+                    proof_push_aliased(aliased, "*")
+                Ast::Expr.Block(statements, value, _, _):
+                    proof_collect_aliased_names(statements, functions, aliased)
+                    proof_collect_aliased_in_expression(value, functions, aliased)
+                _:
+                    pass
+
+        # A fact a call cannot falsify: a proposition over literals and by-value scalar locals
+        # and parameters of the current function that are never referenced. A callee reaches
+        # its caller's state only through references and globals, so such a fact holds after
+        # the call exactly as before it. Anything else — a field, an element, a container, a
+        # call, a name the body may reference — is not stable.
+        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.IntLit(_):
+                    return true
+                Ast::Expr.BoolLit(_):
+                    return true
+                Ast::Expr.CharLit(_):
+                    return true
+                Ast::Expr.ShorthandMember(parts, _):
+                    return parts.count == 1 and parts[0] != ""
+                Ast::Expr.Ident(name, _):
+                    return false if any existing in aliased where existing == name
+                    return false if not (any candidate in names where candidate == name) and not (any parameter in parameters where parameter == name)
+                    return proof_scalar_witnessed(facts, name)
+                Ast::Expr.Tuple(_, _):
+                    # A loop binder's atom `(name, offset)`: the binder is a local of this body.
+                    binder: sview = proof_place_root_name(expression, 0)
+                    return false if binder == ""
+                    return false if any existing in aliased where existing == binder
+                    return false if not (any candidate in names where candidate == binder)
+                    return proof_scalar_term_witnessed(expression, facts, 0)
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
+                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_call_stable(left, facts, names, parameters, aliased, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, depth + 1)
+                _:
+                    return false
+
+        # Re-establish, after a nested opaque call, every pre-call fact that is call-stable for
+        # the current function. Witnesses are read from the pre-call state, which still holds
+        # every type bound the call could not remove.
+        def proof_restore_call_stable_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            return if not analyzed
+            for fact in source |source, facts, names, parameters, report|:
+                continue if not proof_expr_call_stable(fact, source, names, parameters, report.aliased_names, 0)
+                continue if any existing in facts where proof_expr_equal(existing, fact)
+                facts.push(fact)
+
+        # Havoc for an opaque call. Type bounds are kept as at every havoc point; in addition a
+        # fact that is call-stable for the current function is kept. The alias set must belong
+        # to this very owner, otherwise nothing but type bounds survives.
+        def proof_clear_facts_after_call(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            original: darray[Ast::Expr] = proof_copy_exprs(facts)
+            keep: mutable darray[bool] = []
+            for fact in original |keep, original, names, parameters, report, owner, analyzed|:
+                bound_name: sview = proof_type_bound_name(fact)
+                retained: mutable bool = false
+                retained <- true if bound_name != "" and ((any candidate in names where candidate == bound_name) or (any parameter in parameters where parameter == bound_name)) and proof_fact_is_type_bound(report, fact, owner)
+                retained <- true if not retained and analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, 0)
+                keep.push(retained)
+            write_index: mutable usize = 0
+            for read_index in 0..<original.count |facts, original, keep, write_index|:
+                continue if not keep[read_index]
+                facts[write_index] <- original[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
+
         def proof_clear_facts_keep_type_bounds(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
             original_count: usize = facts.count
             write_index: mutable usize = 0
@@ -3283,6 +3525,7 @@ extend ElisaProof:
                         functions.all_param_region_starts <- functions.all_param_region_starts.push(functions.all_param_regions.count)
                         for parameter in parameters |functions|:
                             functions.all_params <- functions.all_params.push(parameter.name)
+                            functions.all_parameter_references <- functions.all_parameter_references.push(proof_resource_is_reference_type(parameter.type_expression))
                             functions.all_parameter_mutable <- functions.all_parameter_mutable.push(parameter.is_mutable)
                             functions.all_has_defaults <- functions.all_has_defaults.push(parameter.has_default)
                             functions.all_defaults <- functions.all_defaults.push(parameter.default_value)
@@ -3875,6 +4118,9 @@ extend ElisaProof:
                     facts.clear()
                     facts.extend(probe_facts) if applied
                     proof_restore_type_bound_facts(pre_call_facts, facts, names, report, name) if not proof_expr_has_move(expression)
+                    # An opaque nested call reaches an unreferenced by-value scalar local no
+                    # more than a call statement does: the facts over such locals come back.
+                    proof_restore_call_stable_facts(pre_call_facts, facts, names, parameter_names, report, name) if not applied and not proof_expr_has_move(expression)
                     # A nested call has no destination binding to preserve. Forget all symbolic
                     # values after it so a later sibling or the enclosing call sees only the
                     # current-state identifiers, never a pre-call alias expression.
@@ -5106,7 +5352,7 @@ extend ElisaProof:
                 error_names <- proof_copy_names(names)
                 error_values <- proof_copy_exprs(values)
             else:
-                proof_clear_facts_keep_type_bounds(error_facts, error_names, frame_parameters, report, name)
+                proof_clear_facts_after_call(error_facts, error_names, frame_parameters, report, name)
                 proof_forget_values(error_names, error_values, position)
             result_names: darray[sview] = ["result"]
             for arm_index in 0..<arms.count |arm_index, arms, success_names, success_values, success_facts, error_names, error_values, error_facts, success_call, ensures, frame_parameters, old_values, report, name, annotations, position|:
@@ -5138,7 +5384,7 @@ extend ElisaProof:
                             proof_check_frame_calls_in_expression(arm_value.value, arm_facts, arm_names, arm_values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(arm_value.value)
                             returned_value <- proof_substitute(arm_value.value, arm_names, arm_values) if proof_expr_has_call(arm_value.value)
                     returned_value <- proof_rewrite_pure_call_summaries(returned_value, arm_facts, functions, 0) if proof_expr_has_call(returned_value)
-                    proof_clear_facts_keep_type_bounds(arm_facts, arm_names, frame_parameters, report, name) if proof_expr_has_call(returned_value) and not arm_call_applied
+                    proof_clear_facts_after_call(arm_facts, arm_names, frame_parameters, report, name) if proof_expr_has_call(returned_value) and not arm_call_applied
                     result_values: darray[Ast::Expr] = [returned_value]
                     for ensure in ensures |ensure, arm_values, old_values, frame_parameters, result_names, result_values, arm_facts, report, name, annotations, position|:
                         current_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, arm_values, old_values)
@@ -5249,7 +5495,9 @@ extend ElisaProof:
                     report.proof_obligation(false)
                     proof_add_finding(report, "expression-unsupported", unsupported_position.line, name, "unsupported runtime expression cannot enter a verified proof state")
                     proof_forget_values(names, values, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
-                    proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                    # Whatever the expression does, it reaches an unreferenced by-value scalar
+                    # local no more than a call does; the alias analysis covered this expression.
+                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
                 getelse: (known: bool, recovery: darray[Ast::Stmt], line: u32) = proof_statement_getelse_recovery(statement)
                 if getelse.known and proof_statement_expressions_supported(statement, functions):
                     # The absent/error branch is a real control-flow path. Check it against a
@@ -5308,7 +5556,8 @@ extend ElisaProof:
                             # The new local contains the call result, so retain its binding, but
                             # forget every pre-existing binding that the call may have mutated.
                             proof_forget_values_before(names, values, prior_value_count, position)
-                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if shadowed or (proof_expr_has_call(initializer) and not call_applied)
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if shadowed
+                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if not shadowed and proof_expr_has_call(initializer) and not call_applied
                         proof_bind_unsigned_symbol(names, values, facts, report, name, prior_value_count, unsigned_width, value, position) if unsigned_width > 0
                         # A scalar local carries the same primitive-type witness as a parameter, so
                         # equality reasoning over it is not held back by the binding form. An
@@ -5371,12 +5620,12 @@ extend ElisaProof:
                             # an externally visible root, so all facts must be discarded. Calls
                             # still clear facts when no checked summary was applied.
                             proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name)
-                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
+                            proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
                         else:
                             # Field/index/compound assignments can mutate aliases whose
                             # dependencies are not represented in this small state model.
                             proof_check_direct_frame_write(proof_substitute(target, names, values), names, frame_parameters, changes, preserves, report, name, position.line)
-                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                            proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
                     Ast::Stmt.Contract(kind, expression, position):
                         if kind == "assert":
                             assertion: mutable Ast::Expr = proof_substitute(expression, names, values)
@@ -5387,7 +5636,7 @@ extend ElisaProof:
                             # pre-call facts before publishing the assertion itself.
                             proof_check_frame_calls_in_expression(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if assertion_has_call
                             proof_forget_values(names, values, position) if assertion_has_call
-                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if assertion_has_call
+                            proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if assertion_has_call
                             if lemma_steps:
                                 assertion_proven: bool = proof_certify_goal(facts, assertion, report, position.line, name, annotations)
                                 report.proof_obligation(assertion_proven)
@@ -5408,7 +5657,7 @@ extend ElisaProof:
                                     # retain facts that a nested executable call may have
                                     # invalidated, even when the outer builtin is pure.
                                     proof_forget_values(names, values, position) if assertion_has_call
-                                    proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if assertion_has_call
+                                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if assertion_has_call
                                     if lemma_steps:
                                         call_assertion_proven: bool = proof_certify_goal(facts, assertion_call, report, position.line, name, annotations)
                                         report.proof_obligation(call_assertion_proven)
@@ -5425,7 +5674,7 @@ extend ElisaProof:
                                     if not applied_lemma:
                                         applied_function: bool = proof_apply_function(substituted_expression, Ast::Expr.Absent, facts, functions, names, frame_parameters, changes, preserves, report, name, annotations)
                                         proof_check_opaque_call_frame(substituted_expression, names, frame_parameters, changes, preserves, functions, report, name) if not applied_function
-                                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if not applied_function
+                                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if not applied_function
                                         # A statement call has no result binding to carry forward;
                                         # even a framed summary may have changed an untracked local
                                         # alias, so forget symbolic values at the call boundary.
@@ -5434,7 +5683,7 @@ extend ElisaProof:
                                 proof_check_frame_calls_in_expression(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(expression)
                                 substituted_expression <- proof_substitute(expression, names, values) if proof_expr_has_call(expression)
                                 proof_forget_values(names, values, position) if proof_expr_has_call(expression)
-                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                                proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
                         flow.normal <- false if terminal_expression
                     Ast::Stmt.Return(value, position):
                         if value is returned:
@@ -5488,7 +5737,7 @@ extend ElisaProof:
                                     proof_check_frame_calls_in_expression(returned, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(returned)
                                     return_value <- proof_substitute(returned, names, values) if proof_expr_has_call(returned)
                             return_value <- proof_rewrite_pure_call_summaries(return_value, facts, functions, 0) if proof_expr_has_call(return_value)
-                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if proof_expr_has_call(return_value) and not return_call_applied
+                            proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if proof_expr_has_call(return_value) and not return_call_applied
                             proof_invalidate_moved_roots(moved_roots, names, values, facts, report, name, position)
                             result_name: mutable darray[sview] = ["result"]
                             result_value: mutable darray[Ast::Expr] = [return_value]
@@ -5528,7 +5777,7 @@ extend ElisaProof:
                         then_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
                         then_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                         then_flow: mutable ProofFlow = proof_empty_flow()
-                        proof_clear_facts_keep_type_bounds(then_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
+                        proof_clear_facts_after_call(then_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
                         proof_add_traced_fact(then_facts, report, condition_value, "branch-condition", position.line, name)
                         proof_check_returns(then_body, &then_names, &then_values, &then_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &then_flow)
                         else_names: mutable darray[sview] = proof_copy_names(names)
@@ -5536,7 +5785,7 @@ extend ElisaProof:
                         else_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                         else_flow: mutable ProofFlow = proof_empty_flow()
                         negated: Ast::Expr = proof_branch_negation(condition_value, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0})
-                        proof_clear_facts_keep_type_bounds(else_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
+                        proof_clear_facts_after_call(else_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
                         proof_add_traced_fact(else_facts, report, negated, "branch-condition", position.line, name)
                         proof_check_returns(else_body, &else_names, &else_values, &else_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &else_flow)
                         then_falls_through: bool = then_flow.normal
@@ -5891,7 +6140,7 @@ extend ElisaProof:
                                         # preserve facts established before guard evaluation.
                                         proof_check_frame_calls_in_expression(block_goal, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if runtime_goal_has_call
                                         proof_forget_values(names, values, Ast::expr_pos(block_goal)) if runtime_goal_has_call
-                                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if runtime_goal_has_call
+                                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if runtime_goal_has_call
                                         proof_add_traced_fact(facts, report, runtime_goal, "runtime-guard", block_position.line, name) if proof_runtime_fact_is_stable(runtime_goal, functions)
                                     _:
                                         pass
@@ -6062,6 +6311,9 @@ extend ElisaProof:
             proof_check_frame_specs(body, changes, preserves, frame_parameters, report, function_name)
             proof_check_header_frame_specs(header_changes, header_preserves, frame_parameters, report, function_name)
             facts: mutable darray[Ast::Expr] = []
+            report.aliased_names.clear()
+            report.aliased_owner <- function_name
+            proof_collect_aliased_names(body, functions, &report.aliased_names)
             for parameter in parameters |facts, report, function_name, position|:
                 unsigned_width: i64 = proof_unsigned_type_width(parameter.type_expression, report.source_declarations, 0)
                 proof_add_unsigned_binding_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position) if unsigned_width > 0
