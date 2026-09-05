@@ -397,6 +397,8 @@ calls are supported when a pinned reference formal witnesses each `[@r]` paramet
 summary records the region return and the kernel replays the mapped `resource-call-result` against
 the caller's live region. Scalar-only calls to a region-polymorphic function remain rejected
 because an ambient arena is not a proof of a lifetime mapping.
+Nested control-flow snapshots also protect inherited region identities: a child cannot destroy and
+reopen the same spelling and then make the parent's older lifetime appear live at the join.
 The proof checker now carries a separate lexical resource state for a useful ownership slice:
 bounded named places (`&x`, `&box.inner`, and arbitrary named-field paths within the kernel depth
 bound) have stable structural identities,

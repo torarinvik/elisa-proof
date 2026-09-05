@@ -2120,6 +2120,10 @@ module ElisaProofKernelReplay:
             # result references do not; replay uses this provenance when checking region aliases.
             binding_region_owner: mutable darray[bool]
             active_regions: mutable darray[sview]
+            # A nested scope inherits the parent's active region identities. Names alone are
+            # insufficient here: closing and reopening the same spelling in the child must not
+            # make the parent's older region appear preserved when the child snapshot joins.
+            protected_regions: mutable darray[sview]
             # Region parameters are caller-owned and remain live for the complete callee trace;
             # they are distinct from lexical regions that a close transition invalidates.
             external_regions: mutable darray[sview]
@@ -2146,7 +2150,7 @@ module ElisaProofKernelReplay:
             binding_origin_places: mutable darray[ProofKernelReplayResourcePlace]
 
         def proof_kernel_replay_resource_empty() -> ProofKernelReplayResourceState:
-            return ProofKernelReplayResourceState{binding_names: [], binding_scope_depth: [], scope_depth: 0, binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], active_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], resource_call_events: [], resource_call_allocations: [], resource_call_allocations_used: [], resource_call_results: [], resource_return_alloc_regions: [], resource_return_witnesses: [], pending_join_moves: [], binding_origin_places: []}
+            return ProofKernelReplayResourceState{binding_names: [], binding_scope_depth: [], scope_depth: 0, binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], active_regions: [], protected_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], resource_call_events: [], resource_call_allocations: [], resource_call_allocations_used: [], resource_call_results: [], resource_return_alloc_regions: [], resource_return_witnesses: [], pending_join_moves: [], binding_origin_places: []}
 
         def proof_kernel_replay_resource_copy(source: ProofKernelReplayResourceState&, target: mutable ProofKernelReplayResourceState&) -> void:
             target.binding_names.clear()
@@ -2159,6 +2163,7 @@ module ElisaProofKernelReplay:
             target.binding_region_live.clear()
             target.binding_region_owner.clear()
             target.active_regions.clear()
+            target.protected_regions.clear()
             target.external_regions.clear()
             target.borrow_target_slots.clear()
             target.borrow_target_places.clear()
@@ -2185,6 +2190,7 @@ module ElisaProofKernelReplay:
             target.binding_region_live.extend(source.binding_region_live)
             target.binding_region_owner.extend(source.binding_region_owner)
             target.active_regions.extend(source.active_regions)
+            target.protected_regions.extend(source.protected_regions)
             target.external_regions.extend(source.external_regions)
             target.borrow_target_slots.extend(source.borrow_target_slots)
             target.borrow_target_places.extend(source.borrow_target_places)
@@ -2303,6 +2309,9 @@ module ElisaProofKernelReplay:
         def proof_kernel_replay_resource_region_external(state: ProofKernelReplayResourceState&, region: sview) -> bool:
             return any external in state.external_regions where external == region
 
+        def proof_kernel_replay_resource_region_protected(state: ProofKernelReplayResourceState&, region: sview) -> bool:
+            return any protected in state.protected_regions where protected == region
+
         def proof_kernel_replay_resource_binding_region(state: ProofKernelReplayResourceState&, slot: usize) -> sview:
             return state.binding_region[slot] if slot < state.binding_region.count
             return ""
@@ -2394,6 +2403,11 @@ module ElisaProofKernelReplay:
                     child_state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
                     proof_kernel_replay_resource_copy(state, &child_state)
                     child_state.scope_depth <- state.scope_depth + 1
+                    # Preserve region identity across the child snapshot. A same-named region
+                    # opened after an inherited close is a fresh lifetime, not the parent's
+                    # region, and must not be allowed to hide that close at the join boundary.
+                    for inherited_region in state.active_regions |inherited_region, child_state|:
+                        child_state.protected_regions.push(inherited_region) if not any prior in child_state.protected_regions where prior == inherited_region
                     return false if not proof_kernel_replay_resource_events(nodes, children, child_roots, &child_state, effects, depth + 1)
                     return false if not proof_kernel_replay_resource_scope_preserves_parent(state, child_state)
                     for index in 0..<state.binding_moved.count |index, state, child_state|:
@@ -2412,7 +2426,7 @@ module ElisaProofKernelReplay:
                 if node.kind == "resource-region-close":
                     return false if state.active_regions.count == 0
                     return false if state.active_regions[state.active_regions.count - 1] != node.name
-                    return false if proof_kernel_replay_resource_region_external(state, node.name)
+                    return false if proof_kernel_replay_resource_region_external(state, node.name) or proof_kernel_replay_resource_region_protected(state, node.name)
                     state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
                     proof_kernel_replay_resource_invalidate_region_bindings(state, node.name)
                     continue

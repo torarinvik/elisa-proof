@@ -42,6 +42,10 @@ extend ElisaProof:
             # re-exposed as a mutable reference when the source type lacks that marker.
             binding_region_owner: mutable darray[bool]
             active_regions: mutable darray[sview]
+            # Nested snapshots inherit these region identities. A child may not destroy an
+            # inherited region and reopen the same spelling, because the parent would otherwise
+            # continue with a different lifetime after the child joins.
+            protected_regions: mutable darray[sview]
             # Region parameters are caller-owned capabilities. They remain active across the
             # callee's return and therefore must not be closed by proof_resource_finish.
             external_regions: mutable darray[sview]
@@ -58,7 +62,7 @@ extend ElisaProof:
             trace_events: mutable darray[usize]
 
         def proof_resource_empty() -> ProofResourceState:
-            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], active_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
+            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], active_regions: [], protected_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
 
         # Copy into an already-created state. Returning a struct that owns several darrays would
         # hide their allocation region from the self-hosting compiler, so all branch snapshots
@@ -73,6 +77,7 @@ extend ElisaProof:
             target.binding_region_live.clear()
             target.binding_region_owner.clear()
             target.active_regions.clear()
+            target.protected_regions.clear()
             target.external_regions.clear()
             target.borrow_target_slots.clear()
             target.borrow_target_places.clear()
@@ -89,6 +94,7 @@ extend ElisaProof:
             target.binding_region_live.extend(source.binding_region_live)
             target.binding_region_owner.extend(source.binding_region_owner)
             target.active_regions.extend(source.active_regions)
+            target.protected_regions.extend(source.protected_regions)
             target.external_regions.extend(source.external_regions)
             target.borrow_target_slots.extend(source.borrow_target_slots)
             target.borrow_target_places.extend(source.borrow_target_places)
@@ -139,6 +145,16 @@ extend ElisaProof:
         def proof_resource_region_is_external(state: ProofResourceState&, region: sview) -> bool:
             return any external in state.external_regions where external == region
 
+        def proof_resource_region_is_protected(state: ProofResourceState&, region: sview) -> bool:
+            return any protected in state.protected_regions where protected == region
+
+        # Mark the active region identities inherited by a child snapshot before its body is
+        # checked. This is separate from external-region status: ordinary lexical regions are
+        # also protected from child destruction, even when they have no live binding yet.
+        def proof_resource_mark_scope_inherited(parent: ProofResourceState&, child: mutable ProofResourceState&) -> void:
+            for region in parent.active_regions |region, child|:
+                child.protected_regions.push(region) if not any prior in child.protected_regions where prior == region
+
         # Attach the explicit `@r` lifetime of a formal reference parameter to both the source
         # state and its serialized bind node. Keeping it on the bind node lets independent replay
         # validate the same region relation without consulting the AST or the producer tables.
@@ -171,7 +187,7 @@ extend ElisaProof:
         # `region r(size)` form keeps the owner live across following statements, so its close
         # must be a real stack transition rather than the end of a synthetic child scope.
         def proof_resource_close_named_region[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            valid: bool = region != "" and not proof_resource_region_is_external(state, region) and state.active_regions.count > 0 and state.active_regions[state.active_regions.count - 1] == region
+            valid: bool = region != "" and not proof_resource_region_is_external(state, region) and not proof_resource_region_is_protected(state, region) and state.active_regions.count > 0 and state.active_regions[state.active_regions.count - 1] == region
             proof_resource_add_failing_obligation(report, "region-destroy-unsupported", position, function_name, "destroy must name the innermost active tracked region") if not valid
             if valid:
                 state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
@@ -1732,6 +1748,7 @@ extend ElisaProof:
                     for arm in arms |arm, state, report, function_name, functions|:
                         arm_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &arm_state)
+                        proof_resource_mark_scope_inherited(state, &arm_state)
                         proof_resource_check_pattern_names(arm.pattern, &arm_state, report, functions)
                         proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions)
                         proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions)
@@ -1741,6 +1758,7 @@ extend ElisaProof:
                     for arm in arms |arm, state, report, function_name, functions|:
                         arm_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &arm_state)
+                        proof_resource_mark_scope_inherited(state, &arm_state)
                         proof_resource_check_pattern_names(arm.pattern, &arm_state, report, functions)
                         proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions)
                         proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions)
@@ -1749,11 +1767,13 @@ extend ElisaProof:
                     proof_resource_check_expression(guarded, state, report, function_name, functions)
                     recovery_state: mutable ProofResourceState = proof_resource_empty()
                     proof_resource_copy_into(state, &recovery_state)
+                    proof_resource_mark_scope_inherited(state, &recovery_state)
                     proof_resource_check_statements(recovery, &recovery_state, report, function_name, functions)
                     proof_resource_close_child(state, recovery_state, report, false)
                 Ast::Expr.Lambda(parameters, body, _):
                     lambda_state: mutable ProofResourceState = proof_resource_empty()
                     proof_resource_copy_into(state, &lambda_state)
+                    proof_resource_mark_scope_inherited(state, &lambda_state)
                     for parameter in parameters |parameter, lambda_state|:
                         proof_resource_add_binding_traced(&lambda_state, report, parameter, false, false, false, lambda_state.binding_names.count, false, "", proof_resource_empty_place(), 0)
                     proof_resource_check_statements(body, &lambda_state, report, function_name, functions)
@@ -1761,6 +1781,7 @@ extend ElisaProof:
                 Ast::Expr.Block(statements, value, _, _):
                     child: mutable ProofResourceState = proof_resource_empty()
                     proof_resource_copy_into(state, &child)
+                    proof_resource_mark_scope_inherited(state, &child)
                     proof_resource_check_statements(statements, &child, report, function_name, functions)
                     proof_resource_check_expression(value, &child, report, function_name, functions)
                     proof_resource_close_child(state, child, report, true)
@@ -2272,6 +2293,8 @@ extend ElisaProof:
                         else_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &then_state)
                         proof_resource_copy_into(state, &else_state)
+                        proof_resource_mark_scope_inherited(state, &then_state)
+                        proof_resource_mark_scope_inherited(state, &else_state)
                         proof_resource_check_statements(then_body, &then_state, report, function_name, functions)
                         proof_resource_check_statements(else_body, &else_state, report, function_name, functions)
                         proof_resource_close_child(state, then_state, report, true)
@@ -2281,6 +2304,7 @@ extend ElisaProof:
                         proof_resource_check_expression(condition, state, report, function_name, functions)
                         while_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &while_state)
+                        proof_resource_mark_scope_inherited(state, &while_state)
                         proof_resource_check_statements(while_body, &while_state, report, function_name, functions)
                         proof_resource_close_child(state, while_state, report, true)
                         state.facts.clear()
@@ -2288,6 +2312,7 @@ extend ElisaProof:
                         proof_resource_check_expression(iterable, state, report, function_name, functions)
                         for_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &for_state)
+                        proof_resource_mark_scope_inherited(state, &for_state)
                         for variable in variables |variable, for_state|:
                             proof_resource_add_binding_traced(&for_state, report, variable, false, false, false, for_state.binding_names.count, false, "", proof_resource_empty_place(), 0) if variable != ""
                         proof_resource_check_statements(for_body, &for_state, report, function_name, functions)
@@ -2298,6 +2323,7 @@ extend ElisaProof:
                         for arm in arms |arm, state, report, function_name|:
                             arm_state: mutable ProofResourceState = proof_resource_empty()
                             proof_resource_copy_into(state, &arm_state)
+                            proof_resource_mark_scope_inherited(state, &arm_state)
                             proof_resource_check_pattern_names(arm.pattern, &arm_state, report, functions)
                             match arm.guard:
                                 Ast::Expr.Absent:
@@ -2327,6 +2353,7 @@ extend ElisaProof:
                             continue
                         block_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &block_state)
+                        proof_resource_mark_scope_inherited(state, &block_state)
                         if block_kind == "region" and binding == "":
                             region_name: sview = clause[0] if clause.count > 0 else ""
                             region_valid: bool = region_name != "" and not proof_resource_region_is_active(state, region_name)

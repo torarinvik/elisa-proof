@@ -48,6 +48,12 @@ if [[ "$region_statement_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected canonical region statement form\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/nested-region-destroy.o" "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/dev/null 2>&1
+nested_region_destroy_compiler_status=$?
+if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
+    printf 'proof test matrix failed: compiler accepted nested destruction/reopening of an inherited region\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/kernel_replay_standalone.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["proven"] >= 25; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; declarations = {declaration["name"] for declaration in report["declaration_details"] if declaration["kind"] == "function" and declaration["verified"]}; required = {"proof_kernel_replay_node_at", "proof_kernel_replay_bool_at", "proof_kernel_replay_bool_set", "proof_kernel_replay_child_at", "proof_kernel_replay_child_range_valid", "proof_kernel_replay_scalar_kind", "proof_kernel_replay_arena_shape_valid", "proof_kernel_replay_arena_child_kind_valid", "proof_kernel_replay_difference_query", "proof_kernel_replay_model_value_at"}; assert required <= declarations; assert report["trust"]["trusted_assumptions"] == []'
 kernel_replay_standalone_probe_status=${PIPESTATUS[1]}
 if [[ "$kernel_replay_standalone_probe_status" -ne 0 ]]; then
@@ -139,6 +145,18 @@ if [[ "$rejected_region_generic_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-region-generic.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-call-opaque" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: unmapped region-polymorphic call report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/tmp/elisa-proof-rejected-nested-region-destroy.json
+rejected_nested_region_destroy_status=$?
+set -e
+if [[ "$rejected_nested_region_destroy_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: nested inherited-region destruction was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-nested-region-destroy.json")); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert any(f["kind"] == "region-destroy-unsupported" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0'; then
+    printf 'proof test matrix failed: nested inherited-region destruction report was incomplete\n' >&2
     exit 1
 fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/pattern_scalar_literals.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "char" for node in report["kernel"]["nodes"])'
