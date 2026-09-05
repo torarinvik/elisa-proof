@@ -130,6 +130,19 @@ if [[ "$region_statement_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: canonical region statement transitions were not replayed\n' >&2
     exit 1
 fi
+set +e
+rejected_region_duplicate_alias_report="$standalone_probe_dir/rejected-region-duplicate-alias.json"
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_duplicate_mutable_alias.elisa" >"$rejected_region_duplicate_alias_report"
+rejected_region_duplicate_alias_status=$?
+set -e
+if [[ "$rejected_region_duplicate_alias_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: duplicate mutable region alias was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "region-alias-unsupported" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_region_duplicate_alias_report"; then
+    printf 'proof test matrix failed: duplicate mutable region alias report was incomplete\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_auto_close.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert kinds.count("resource-region-open") == 1 and kinds.count("resource-region-close") == 1'
 region_auto_close_probe_status=${PIPESTATUS[1]}
 if [[ "$region_auto_close_probe_status" -ne 0 ]]; then

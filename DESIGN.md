@@ -85,6 +85,10 @@ The proof kernel is intentionally fail-closed:
    function-scope close are source-neutral transitions independently replayed by the kernel. Replay
    tracks region liveness separately from its source spelling, invalidating owned bindings and
    inherited aliases at close so a same-named later region cannot resurrect stale storage.
+   A direct region allocation carries one exclusive owner token; a same-region alias transfers
+   that token rather than copying it. This permits one controlled shared-to-mutable exposure while
+   rejecting duplicate mutable capabilities and use of the consumed owner. Borrowed or external
+   references have no such token and cannot be upgraded by alias metadata.
    Child resource snapshots additionally mark inherited region identities as protected, so a nested
    `destroy r` followed by a same-named reopen cannot be hidden by the child join even when no
    binding currently carries `r`.

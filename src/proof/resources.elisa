@@ -37,9 +37,11 @@ extend ElisaProof:
             # the spelling `r`. Keep a separate liveness bit so an old binding cannot become live
             # merely because a same-named region was opened again.
             binding_region_live: mutable darray[bool]
-            # A direct `new[r]` binding is the owner lineage of its region allocation. This is
-            # distinct from a borrowed or externally supplied reference: only the former may be
-            # re-exposed as a mutable reference when the source type lacks that marker.
+            # A direct `new[r]` binding carries the exclusive owner token for its allocation.
+            # This is distinct from a borrowed or externally supplied reference: only the former
+            # may be re-exposed as a mutable reference when the source type lacks that marker.
+            # Region aliases transfer this token instead of copying it, so one allocation cannot
+            # mint multiple independently writable capabilities.
             binding_region_owner: mutable darray[bool]
             active_regions: mutable darray[sview]
             # Nested snapshots inherit these region identities. A child may not destroy an
@@ -257,12 +259,17 @@ extend ElisaProof:
             source_is_reference: bool = source_slot < state.binding_reference.count and state.binding_reference[source_slot]
             source_is_mutable_reference: bool = source_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[source_slot]
             source_region_owner: bool = source_slot < state.binding_region_owner.count and state.binding_region_owner[source_slot]
-            valid: bool = proof_resource_region_is_active(state, region) and source_place.known and source_slot < state.binding_names.count and proof_resource_binding_region(state, source_slot) == region and proof_resource_binding_region_is_live(state, source_slot) and encoded < report.kernel_nodes.count and (not is_reference and not source_is_reference or is_reference and source_is_reference) and (not is_reference or is_mutable_reference == source_is_mutable_reference or source_region_owner)
-            proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "region value aliases require a live source with the same tracked region") if not valid
+            source_moved: bool = proof_resource_binding_is_moved(state, source_slot)
+            valid: bool = proof_resource_region_is_active(state, region) and source_place.known and source_slot < state.binding_names.count and not source_moved and proof_resource_binding_region(state, source_slot) == region and proof_resource_binding_region_is_live(state, source_slot) and encoded < report.kernel_nodes.count and (not is_reference and not source_is_reference or is_reference and source_is_reference) and (not is_reference or is_mutable_reference == source_is_mutable_reference or source_region_owner)
+            proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "region value aliases require a live, unmoved source with the same tracked region") if not valid
             proof_resource_add_binding(state, name, is_reference, is_mutable_reference, writable, state.binding_names.count, false, proof_resource_empty_place())
             state.binding_region[state.binding_region.count - 1] <- region
             state.binding_region_live[state.binding_region_live.count - 1] <- valid
             state.binding_region_owner[state.binding_region_owner.count - 1] <- valid and source_region_owner
+            # The owner token is linear even though shared region references may otherwise be
+            # copied. Transfer it to the new binding; borrowed/external references have no token
+            # and therefore remain ordinary shared aliases.
+            proof_resource_mark_binding_moved(state, source_slot) if valid and source_region_owner
             proof_resource_record_event(state, report, "resource-region-bind", "", encoded, name, region, (1 if writable else 0) + (2 if is_reference else 0) + (4 if is_mutable_reference else 0)) if valid
 
         def proof_resource_finish[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, line: u32, failed_before: u32, parameter_count: usize) -> void:
