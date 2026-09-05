@@ -351,6 +351,39 @@ kernel-side replay budgets do not yet report exhaustion; they decline silently. 
 `trusted_assumptions` list remains empty, which is currently accurate: compiler-derived inputs are
 counted separately as boundary facts rather than as assumptions inside a proof.
 
+## Added: declared effect containment
+
+Elisa functions carry an effect row (`can[...]`), and the checker imported nothing from it. A row
+is a specification an agent can read and reason about, so leaving it out meant the proof surface
+silently ignored a declared property of every function it checked.
+
+The row is now imported into the declaration summaries, into the JSON `effects` field, and into
+the function table, and a new obligation is checked for every function that writes one: the
+declared row must cover the declared row of each function it calls. The accepted containment is
+lowered into `effect`, `effect-row`, `effect-call` and `effect-containment` nodes and re-derived
+by an independent kernel rule that runs with an empty fact set, so nothing about the containment
+rests on the AST pass that produced it.
+
+What the claim is. Exactly: the declared rows of this function's callees are members of this
+function's declared row. It is not a claim that the body performs only those effects. An effect
+performed directly by the body, without going through an imported call, is the compiler effect
+checker's obligation and remains outside this system. A function with no written row makes no
+claim and is not checked.
+
+Fail-closed cases are kept distinct rather than collapsed into a refusal. A callee whose row was
+never imported yields `effect-call-opaque` with status `unsupported` — a missing row is not read
+as an empty one. An abstract row, whose members are not concrete names, yields
+`effect-row-abstract`: it has no comparable members, so containment is meaningless rather than
+false. An imported callee whose row has a member the caller's row lacks yields
+`effect-row-exceeded` with status `disproved`. In each of those three cases no certificate is
+emitted, so nothing enters the replayed evidence stream.
+
+Coverage. `examples/effect_containment.elisa` proves fifteen containments with no replay gaps.
+`examples/rejected_effect_containment.elisa` pins one instance of each of the three refusals and
+requires that none of the three produces a certificate. `examples/kernel_effect_runtime.elisa` is
+a native harness that drives the kernel rule directly and is built under both stage1 and stage0;
+deliberately mutating the containment test in the kernel makes it exit non-zero.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

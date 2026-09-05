@@ -3049,7 +3049,7 @@ extend ElisaProof:
         def proof_collect_functions(file: Ast::File&, declarations: darray[Ast::Decl], lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&) -> void:
             for declaration in declarations |file, lemmas, functions|:
                 match declaration:
-                    Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
+                    Ast::Decl.Func(name, parameters, return_type, body, declared_effects, _, position):
                         # Lemmas are erased proof declarations, never executable summaries.
                         # Keeping them out of this table prevents a runtime assignment or
                         # return from manufacturing facts through a proof-only call.
@@ -3087,6 +3087,11 @@ extend ElisaProof:
                         for annotation in file.local_region_annotations |position, return_region|:
                             return_region <- annotation.region if annotation.name == "__region_return" and annotation.line == position.line
                         functions.return_regions <- functions.return_regions.push(return_region)
+                        functions.effect_starts <- functions.effect_starts.push(functions.all_effects.count)
+                        functions.effect_counts <- functions.effect_counts.push(declared_effects.count)
+                        functions.effects_declared <- functions.effects_declared.push(declared_effects.count > 0)
+                        for effect in declared_effects |functions|:
+                            functions.all_effects <- functions.all_effects.push(effect)
                         functions.call_starts <- functions.call_starts.push(functions.all_calls.count)
                         call_names: mutable darray[sview] = []
                         proof_collect_body_call_names(body, &call_names)
@@ -5844,6 +5849,7 @@ extend ElisaProof:
             # this snapshot across mutations and calls; replay checks each emitted separation
             # certificate independently.
             proof_check_resource_safety(parameters, body, facts, report, function_name, position.line, functions)
+            proof_check_effect_containment(functions, report, function_name, position.line)
             lemma_steps: bool = proof_lemma_index(lemmas, function_name) < lemmas.names.count
             proof_check_lemma_purity(body, lemmas, report, function_name) if lemma_steps
             empty_loop_invariants: mutable darray[Ast::Expr] = []
@@ -5857,12 +5863,104 @@ extend ElisaProof:
                     proof_add_goal_failure(report, "ensure-unproven", position.line, function_name, "normal completion does not establish ensure", facts, normal_goal) if not proven
 
         def proof_declaration_summary(kind: sview, name: sview, line: u32) -> ProofDeclarationSummary:
-            return ProofDeclarationSummary{kind: kind, name: name, line: line, parameters_start: 0, parameters_count: 0, requires_count: 0, ensures_count: 0, changes_count: 0, preserves_count: 0, decreases_count: 0, lemma: false, recursive: false, pure: false, verified: false, verification_reason: "not-checked", structural: false}
+            return ProofDeclarationSummary{kind: kind, name: name, line: line, parameters_start: 0, parameters_count: 0, requires_count: 0, ensures_count: 0, changes_count: 0, preserves_count: 0, decreases_count: 0, lemma: false, recursive: false, pure: false, verified: false, verification_reason: "not-checked", structural: false, effects_start: 0, effects_count: 0, effects_declared: false}
+
+        # A declared `can[...]` row is source-declared metadata, exactly like a parameter list.
+        # An abstract row — one naming an effect variable rather than a concrete effect — is
+        # recorded as declared but is refused by the containment obligation, which cannot compare
+        # a row it does not know the members of.
+        def proof_effect_row_is_abstract(effects: darray[sview]&) -> bool:
+            for effect in effects:
+                return true if effect == ""
+                # A concrete effect is written `Group.Operation`; a bare lowercase name is an
+                # effect variable introduced by the signature.
+                return true if not proof_effect_name_is_concrete(effect)
+            return false
+
+        def proof_effect_name_is_concrete(effect: sview) -> bool:
+            return false if effect == ""
+            dotted: mutable bool = false
+            offset: mutable usize = 0
+            while offset < sview_len(effect) |offset, effect, dotted|:
+                dotted <- true if sview_at(effect, offset) == 46
+                offset <- offset + 1
+            return dotted
+
+        # Emit the declared-effect containment obligation for one function. The claim is exactly
+        # what is checked: every direct call in the body resolves to a declared function whose
+        # `can[...]` row is contained in this function's row. It is not a claim that the body
+        # performs no other effect — a body can allocate or panic without calling anything, and
+        # that remains the compiler effect checker's obligation. An unresolved callee or an
+        # abstract row is reported and no certificate is emitted.
+        def proof_check_effect_containment(functions: ProofFunctionTable&, report: mutable ProofReport&, function_name: sview, line: u32) -> void:
+            caller: usize = proof_function_index(functions, function_name)
+            return if caller >= functions.names.count
+            return if caller >= functions.effects_declared.count or not functions.effects_declared[caller]
+            declared_start: usize = functions.effect_starts[caller]
+            declared_count: usize = functions.effect_counts[caller]
+            return if declared_start > functions.all_effects.count or declared_count > functions.all_effects.count - declared_start
+            declared: mutable darray[sview] = []
+            for offset in 0..<declared_count |offset, functions, declared, declared_start|:
+                declared.push(functions.all_effects[declared_start + offset])
+            if proof_effect_row_is_abstract(declared):
+                proof_add_finding(report, "effect-row-abstract", line, function_name, "an abstract effect row has no comparable members")
+                return
+            call_start: usize = functions.call_starts[caller]
+            call_count: usize = functions.call_counts[caller]
+            return if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start
+            callee_indexes: mutable darray[usize] = []
+            for offset in 0..<call_count |offset, functions, call_start, callee_indexes, report, function_name, line|:
+                callee_name: sview = functions.all_calls[call_start + offset]
+                callee: usize = proof_function_index(functions, callee_name)
+                if callee >= functions.names.count:
+                    proof_add_finding(report, "effect-call-opaque", line, function_name, "a called function has no imported effect row")
+                    callee_indexes.clear()
+                    callee_indexes.push(functions.names.count)
+                    return
+                already: bool = any existing in callee_indexes where existing == callee
+                callee_indexes.push(callee) if not already
+            # Compare the rows before emitting anything: a certificate is only produced for a
+            # containment that holds, so a failing function has a diagnostic and no evidence.
+            for callee in callee_indexes |callee, functions, declared, report, function_name, line|:
+                continue if callee >= functions.effect_counts.count
+                callee_start: usize = functions.effect_starts[callee]
+                callee_count: usize = functions.effect_counts[callee]
+                continue if callee_start > functions.all_effects.count or callee_count > functions.all_effects.count - callee_start
+                for offset in 0..<callee_count |offset, functions, declared, callee_start, report, function_name, line|:
+                    effect: sview = functions.all_effects[callee_start + offset]
+                    covered: bool = any member in declared where member == effect
+                    if not covered:
+                        proof_add_finding(report, "effect-row-exceeded", line, function_name, "a called function declares an effect outside this function's row")
+                        return
+            declared_roots: mutable darray[usize] = []
+            for effect in declared |effect, report, declared_roots|:
+                declared_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect", "", 0, 0, 0, 0, 0, 0, effect, ""))
+            declared_children_start: usize = report.kernel_children.count
+            report.kernel_children.extend(declared_roots)
+            declared_row: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-row", "", 0, 0, 0, declared_children_start, declared_roots.count, 0, "", "")
+            call_roots: mutable darray[usize] = []
+            for callee in callee_indexes |callee, functions, report, call_roots|:
+                continue if callee >= functions.effect_counts.count
+                callee_start: usize = functions.effect_starts[callee]
+                callee_count: usize = functions.effect_counts[callee]
+                continue if callee_start > functions.all_effects.count or callee_count > functions.all_effects.count - callee_start
+                callee_effect_roots: mutable darray[usize] = []
+                for offset in 0..<callee_count |offset, functions, callee_start, report, callee_effect_roots|:
+                    callee_effect_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect", "", 0, 0, 0, 0, 0, 0, functions.all_effects[callee_start + offset], ""))
+                callee_children_start: usize = report.kernel_children.count
+                report.kernel_children.extend(callee_effect_roots)
+                callee_row: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-row", "", 0, 0, 0, callee_children_start, callee_effect_roots.count, 0, "", "")
+                call_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect-call", "", callee_row, 0, 0, 0, 0, 0, functions.names[callee], ""))
+            containment_children_start: usize = report.kernel_children.count
+            report.kernel_children.extend(call_roots)
+            containment: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-containment", "", declared_row, 0, 0, containment_children_start, call_roots.count, 0, function_name, "")
+            proof_add_effect_goal_attempt(report, containment, line, function_name)
+            report.proof_obligation(true)
 
         def proof_record_declaration(declaration: Ast::Decl, file: Ast::File&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
             summary: mutable ProofDeclarationSummary = proof_declaration_summary("declaration", "", 0)
             match declaration:
-                Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                Ast::Decl.Func(name, parameters, _, _, declared_effects, _, position):
                     summary <- proof_declaration_summary("function", name, position.line)
                     summary.lemma <- proof_lemma_index(lemmas, name) < lemmas.names.count
                     summary.kind <- "lemma" if summary.lemma
@@ -5870,6 +5968,11 @@ extend ElisaProof:
                     summary.parameters_count <- parameters.count
                     for parameter in parameters |report, summary|:
                         report.declaration_parameters.push(parameter.name)
+                    summary.effects_start <- report.declaration_effects.count
+                    summary.effects_count <- declared_effects.count
+                    summary.effects_declared <- declared_effects.count > 0
+                    for effect in declared_effects |report|:
+                        report.declaration_effects.push(effect)
                     if summary.lemma:
                         lemma_index: usize = proof_lemma_index(lemmas, name)
                         if lemma_index < lemmas.names.count:

@@ -202,6 +202,45 @@ run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
+run_probe effect_containment examples/effect_containment.elisa 0
+run_probe rejected_effect_containment examples/rejected_effect_containment.elisa 1
+
+# A declared effect row is evidence only when every direct call resolves to a declared callee
+# whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.
+python3 - "$REPORT_DIR/effect_containment.json" "$REPORT_DIR/rejected_effect_containment.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["replay"]["gaps"] == 0
+assert report["summary"]["semantic_errors"] == 0
+certified = {goal["name"] for goal in report["goals"] if goal["rule"] == "effect-containment"}
+if not {"wider_row", "union_row", "exact_row", "no_calls", "calls_rowless"} <= certified:
+    raise SystemExit("dogfood failed: a containable effect row was not certified")
+rows = {d["name"]: d["effects"] for d in report["declaration_details"] if d["kind"] == "function"}
+if rows.get("wider_row") != ["Memory.Allocate", "Abort.Panic"] or rows.get("pure_callee") is not None:
+    raise SystemExit("dogfood failed: declared effect rows were not reported")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"] != 0:
+    raise SystemExit("dogfood failed: adversarial effect fixture did not fail cleanly")
+certified = {goal["name"] for goal in report["goals"] if goal["rule"] == "effect-containment"}
+if certified & {"narrower_than_callee", "one_uncovered_callee", "opaque_callee"}:
+    raise SystemExit("dogfood failed: an uncontained effect row was certified")
+kinds = {finding["name"]: (finding["kind"], finding["status"]) for finding in report["findings"]}
+expected = {
+    "narrower_than_callee": ("effect-row-exceeded", "disproved"),
+    "one_uncovered_callee": ("effect-row-exceeded", "disproved"),
+    "opaque_callee": ("effect-call-opaque", "unsupported"),
+}
+for name, want in expected.items():
+    if kinds.get(name) != want:
+        raise SystemExit("dogfood failed: %s reported %s, wanted %s" % (name, kinds.get(name), want))
+PY
+
 
 # A budget that ran out, a goal no rule decides, and a refuted goal are three different answers.
 # The report must keep them apart so an agent repairs the right thing.
@@ -341,6 +380,17 @@ fi
 "$runtime_dir/congruence-runtime"
 printf 'dogfood congruence_runtime: participating formers carried equalities and excluded formers refused\n'
 
+# Declared effect containment is checked against the kernel directly: contained rows admitted,
+# uncontained rows refused, and every malformed effect graph rejected rather than interpreted.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/effect-runtime.o" "$ROOT_DIR/examples/kernel_effect_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    clang -Wl,-dead_strip -o "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$RUNTIME_OBJ"
+else
+    clang -Wl,-dead_strip -o "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/effect-runtime"
+printf 'dogfood effect_runtime: contained rows admitted and uncontained or malformed rows refused\n'
+
 # Bootstrap coverage: compile the runtime with stage0 as well; an installed stage1
 # runtime is not an implicit bootstrap dependency. The reduced resource trace
 # guards the stage0 miscompile of allocations made through an unannotated mutable
@@ -349,7 +399,7 @@ printf 'dogfood congruence_runtime: participating formers carried equalities and
 bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
 if [[ -n "$bootstrap_compiler" ]]; then
     "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
-    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
+    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
         "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
         clang -Wl,-dead_strip -o "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o"
         set +e

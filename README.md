@@ -303,6 +303,15 @@ The native checker currently supports:
   every inferred subject must be unchanged or strictly descended on each edge, and ambiguous or
   nondecreasing recursion is rejected. Captured value blocks are accepted for this termination
   check only when their captures do not overlap the active strict-subterm binders; and
+- declared effect containment: a function whose `can[...]` row is written is checked to cover the
+  declared row of every function it calls, and the accepted containment is replayed from the
+  certificate by an independent kernel rule over `effect`/`effect-row`/`effect-call` nodes. This
+  is a claim about declared rows only. A callee whose row was never imported is
+  `effect-call-opaque`/`unsupported` rather than empty, an abstract row is `effect-row-abstract`,
+  and an uncovered member is `effect-row-exceeded`/`disproved`; what a body performs without going
+  through a call remains the compiler's effect checker's obligation. See
+  `examples/effect_containment.elisa`, `examples/rejected_effect_containment.elisa`, and the native
+  kernel harness `examples/kernel_effect_runtime.elisa`; and
 - lexical binding safety at proof-state boundaries: initializer/RHS expressions are evaluated
   before a new binding or assignment target is committed, shadowed bindings do not inherit the
   outer symbolic value, and branch joins retain only names soundly available on every path; and

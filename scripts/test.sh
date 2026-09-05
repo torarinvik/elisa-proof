@@ -1503,4 +1503,20 @@ if [[ "$budget_goal_status" -ne 0 ]]; then
     exit 1
 fi
 
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert {"wider_row", "union_row", "exact_row", "no_calls", "calls_rowless"} <= certified; rows = {d["name"]: d["effects"] for d in report["declaration_details"] if d["kind"] == "function"}; assert rows["exact_row"] == ["Memory.Allocate"]; assert rows["pure_callee"] is None'
+effect_containment_status=${PIPESTATUS[1]}
+if [[ "$effect_containment_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a containable declared effect row was not imported or certified\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert not (certified & {"narrower_than_callee", "one_uncovered_callee", "opaque_callee"}); kinds = {f["name"]: (f["kind"], f["status"]) for f in report["findings"]}; assert kinds["narrower_than_callee"] == ("effect-row-exceeded", "disproved"); assert kinds["opaque_callee"] == ("effect-call-opaque", "unsupported")'
+rejected_effect_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_effect_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an uncontained or unresolved effect row was certified\n' >&2
+    exit 1
+fi
+
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

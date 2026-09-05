@@ -1,0 +1,91 @@
+# Exercise declared-effect containment directly against the replay kernel. The rule states that
+# every recorded callee row is contained in the declaring row; nothing else about effects is
+# claimed, and every malformed shape must be refused rather than interpreted.
+include "../src/proof/kernel_core.elisa"
+include "../src/proof/kernel_replay.elisa"
+using ElisaProofKernelCore
+using ElisaProofKernelReplay
+
+const CONTAINED_ROW_REJECTED: i64 = 1
+const WIDER_ROW_REJECTED: i64 = 2
+const EMPTY_CALLEE_ROW_REJECTED: i64 = 3
+const NO_CALLS_REJECTED: i64 = 4
+const DISJOINT_ROW_ADMITTED: i64 = 10
+const PARTIAL_ROW_ADMITTED: i64 = 11
+const EMPTY_DECLARED_ROW_ADMITTED: i64 = 12
+const MALFORMED_CALL_CHILD_ADMITTED: i64 = 13
+const MALFORMED_ROW_CHILD_ADMITTED: i64 = 14
+const UNNAMED_EFFECT_ADMITTED: i64 = 15
+const FACT_CARRYING_CERTIFICATE_ADMITTED: i64 = 16
+const NON_CONTAINMENT_ROOT_ADMITTED: i64 = 17
+
+def effect_row(nodes: mutable darray[ProofKernelNode]&, children: mutable darray[usize]&, names: darray[sview]) -> usize can[Memory.Allocate, Abort.Panic]:
+    roots: mutable darray[usize] = []
+    for name in names |nodes, roots|:
+        roots.push(add_node(nodes, "effect", "", 0, 0, 0, 0, 0, 0, name, ""))
+    start: usize = children.count
+    children.extend(roots)
+    return add_node(nodes, "effect-row", "", 0, 0, 0, start, roots.count, 0, "", "")
+
+def containment(nodes: mutable darray[ProofKernelNode]&, children: mutable darray[usize]&, owner: sview, declared: usize, calls: darray[usize]) -> usize can[Memory.Allocate, Abort.Panic]:
+    start: usize = children.count
+    children.extend(calls)
+    return add_node(nodes, "effect-containment", "", declared, 0, 0, start, calls.count, 0, owner, "")
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[ProofKernelNode] = []
+    children: mutable darray[usize] = []
+
+    memory_and_panic: usize = effect_row(&nodes, &children, ["Memory.Allocate", "Abort.Panic"])
+    memory_only: usize = effect_row(&nodes, &children, ["Memory.Allocate"])
+    panic_only: usize = effect_row(&nodes, &children, ["Abort.Panic"])
+    console_only: usize = effect_row(&nodes, &children, ["Console.Write"])
+    empty_row: usize = effect_row(&nodes, &children, [])
+
+    memory_call: usize = add_node(&nodes, "effect-call", "", memory_only, 0, 0, 0, 0, 0, "allocates", "")
+    panic_call: usize = add_node(&nodes, "effect-call", "", panic_only, 0, 0, 0, 0, 0, "panics", "")
+    console_call: usize = add_node(&nodes, "effect-call", "", console_only, 0, 0, 0, 0, 0, "writes", "")
+    wide_call: usize = add_node(&nodes, "effect-call", "", memory_and_panic, 0, 0, 0, 0, 0, "both", "")
+    empty_call: usize = add_node(&nodes, "effect-call", "", empty_row, 0, 0, 0, 0, 0, "pure", "")
+
+    # A row that covers every recorded callee row is admitted, including the union of two
+    # disjoint callee rows and a callee that declares nothing.
+    exact: usize = containment(&nodes, &children, "exact", memory_only, [memory_call])
+    return CONTAINED_ROW_REJECTED if not proof_kernel_replay_effect_report(&nodes, &children, [], exact)
+    union: usize = containment(&nodes, &children, "union", memory_and_panic, [memory_call, panic_call])
+    return WIDER_ROW_REJECTED if not proof_kernel_replay_effect_report(&nodes, &children, [], union)
+    rowless: usize = containment(&nodes, &children, "rowless", memory_only, [empty_call])
+    return EMPTY_CALLEE_ROW_REJECTED if not proof_kernel_replay_effect_report(&nodes, &children, [], rowless)
+    silent: usize = containment(&nodes, &children, "silent", panic_only, [])
+    return NO_CALLS_REJECTED if not proof_kernel_replay_effect_report(&nodes, &children, [], silent)
+
+    # A callee effect outside the declaring row is never contained, whether the rows are
+    # disjoint or the callee merely declares one extra effect.
+    disjoint: usize = containment(&nodes, &children, "disjoint", memory_only, [console_call])
+    return DISJOINT_ROW_ADMITTED if proof_kernel_replay_effect_report(&nodes, &children, [], disjoint)
+    partial: usize = containment(&nodes, &children, "partial", memory_only, [wide_call])
+    return PARTIAL_ROW_ADMITTED if proof_kernel_replay_effect_report(&nodes, &children, [], partial)
+    nothing_declared: usize = containment(&nodes, &children, "nothing", empty_row, [memory_call])
+    return EMPTY_DECLARED_ROW_ADMITTED if proof_kernel_replay_effect_report(&nodes, &children, [], nothing_declared)
+
+    # Malformed graphs are refused rather than interpreted: a containment child that is not a
+    # call entry, a row member that is not an effect, and an effect leaf with no name.
+    stray: usize = add_node(&nodes, "int", "", 0, 0, 0, 0, 0, 7, "", "")
+    malformed_call: usize = containment(&nodes, &children, "malformed", memory_only, [stray])
+    return MALFORMED_CALL_CHILD_ADMITTED if proof_kernel_replay_effect_report(&nodes, &children, [], malformed_call)
+    bad_row_start: usize = children.count
+    children.push(stray)
+    bad_row: usize = add_node(&nodes, "effect-row", "", 0, 0, 0, bad_row_start, 1, 0, "", "")
+    bad_row_call: usize = add_node(&nodes, "effect-call", "", bad_row, 0, 0, 0, 0, 0, "bad", "")
+    malformed_row: usize = containment(&nodes, &children, "malformed_row", memory_only, [bad_row_call])
+    return MALFORMED_ROW_CHILD_ADMITTED if proof_kernel_replay_effect_report(&nodes, &children, [], malformed_row)
+    unnamed_row: usize = effect_row(&nodes, &children, [""])
+    unnamed_call: usize = add_node(&nodes, "effect-call", "", unnamed_row, 0, 0, 0, 0, 0, "unnamed", "")
+    unnamed: usize = containment(&nodes, &children, "unnamed", memory_and_panic, [unnamed_call])
+    return UNNAMED_EFFECT_ADMITTED if proof_kernel_replay_effect_report(&nodes, &children, [], unnamed)
+
+    # The rule admits no hypotheses, and it applies only to a containment root.
+    true_fact: usize = add_node(&nodes, "bool", "", 0, 0, 0, 0, 0, 1, "", "")
+    return FACT_CARRYING_CERTIFICATE_ADMITTED if proof_kernel_replay_effect_report(&nodes, &children, [true_fact], exact)
+    return NON_CONTAINMENT_ROOT_ADMITTED if proof_kernel_replay_effect_report(&nodes, &children, [], memory_only)
+    return 0

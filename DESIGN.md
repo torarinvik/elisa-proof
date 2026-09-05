@@ -377,6 +377,15 @@ The proof kernel is intentionally fail-closed:
     calls, field initializers, and record construction/update retain their child graphs and
     metadata under substitution; an invalid child range or unsupported substitution shape is a
     replay failure, never a quantified assumption.
+27. A declared effect row is contained, not inferred. When a function writes `can[...]`, the
+    checker proves that its row covers the declared row of every function it calls, and the
+    kernel re-derives that containment from `effect`/`effect-row`/`effect-call` nodes alone. The
+    claim is exactly "the declared rows of this function's callees are members of this function's
+    declared row" and nothing more: a callee whose row was never imported makes the obligation
+    `unsupported` instead of treating the missing row as empty, an abstract row has no comparable
+    members and is refused, and what a body performs without going through a call is the
+    compiler's effect checker's obligation, not this one's. A function with no written row states
+    no claim and is not checked.
 
 The arithmetic kernel also has a bounded affine-difference rule for one bare identifier plus a
 constant. It may establish a relation such as `x + 1 > x` only after fixed-width overflow safety
