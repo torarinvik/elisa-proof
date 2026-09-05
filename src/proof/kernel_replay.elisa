@@ -2240,8 +2240,13 @@ module ElisaProofKernelReplay:
         # the scope; otherwise `destroy r` inside a plain nested block could disappear with the
         # snapshot and make a later use of an r-owned binding look live again.
         def proof_kernel_replay_resource_scope_preserves_parent(parent: ProofKernelReplayResourceState&, child: ProofKernelReplayResourceState&) -> bool:
-            for region in parent.active_regions:
-                return false if not any active in child.active_regions where active == region
+            # A scope join discards the child resource state. Therefore the active region stack
+            # must be exactly the inherited stack at the join: membership alone would allow a
+            # forged child to leak a fresh local region, or to reorder lifetimes before its state
+            # disappears. Nested region blocks must close their own regions before returning.
+            return false if child.active_regions.count != parent.active_regions.count
+            for index in 0..<parent.active_regions.count |index, parent, child|:
+                return false if child.active_regions[index] != parent.active_regions[index]
             # The child is a snapshot whose non-move state is discarded at scope exit. An
             # inherited binding therefore cannot be redirected to a different region in the
             # child: otherwise the parent would retain the old metadata while the executed
@@ -3047,7 +3052,7 @@ module ElisaProofKernelReplay:
                 effects.push(ProofKernelReplayResourceEffect{kind: "write", place: owner_origin.place}) if owner_origin.known
             return true
 
-        def proof_kernel_replay_resource_report_impl[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+        def proof_kernel_replay_resource_report_impl[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, require_balanced: bool) -> bool:
             return false if facts.count != 0
             return false if not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
@@ -3060,7 +3065,16 @@ module ElisaProofKernelReplay:
                 roots.push(child.value)
             state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
             effects: mutable darray[ProofKernelReplayResourceEffect] = []
-            return proof_kernel_replay_resource_events(nodes, children, roots, &state, &effects, 0)
+            return false if not proof_kernel_replay_resource_events(nodes, children, roots, &state, &effects, 0)
+            return true if not require_balanced
+            # The top-level function boundary closes every local region implicitly. A resource
+            # certificate that leaves one open is unbalanced even if no binding currently points
+            # into it. Region parameters are the only capabilities allowed to remain active after
+            # replay; they belong to the caller and are intentionally not closed here.
+            for active_region in state.active_regions |active_region, state|:
+                return false if not proof_kernel_replay_resource_region_external(state, active_region)
+            return false if proof_kernel_replay_resource_has_pending_join(state)
+            return true
 
         # Replay one structural recursive edge. The AST checker supplies the typed match-binder
         # provenance; this kernel checks the source-neutral ranking relation that is actually
@@ -3104,7 +3118,17 @@ module ElisaProofKernelReplay:
 
         public:
             def proof_kernel_replay_resource_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
-                return proof_kernel_replay_resource_report_impl(nodes, children, facts, goal_root)
+                # Full resource summaries are function-boundary certificates. They must not
+                # leave a lexical region open; only explicit external region parameters may
+                # survive the boundary.
+                return proof_kernel_replay_resource_report_impl(nodes, children, facts, goal_root, true)
+
+            # Prefix replay is intentionally separate from report admission. It is used only by
+            # callers that incrementally assemble a resource trace before its final close/result
+            # transitions exist. Such a prefix may have local regions open, but it is never a
+            # successful proof certificate on its own.
+            def proof_kernel_replay_resource_prefix[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_resource_report_impl(nodes, children, facts, goal_root, false)
 
             def proof_kernel_replay_structural_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
                 return proof_kernel_replay_structural_report_impl(nodes, children, facts, goal_root)

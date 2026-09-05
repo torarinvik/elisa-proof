@@ -115,6 +115,11 @@ The proof kernel is intentionally fail-closed:
    infer an ambient arena. A callee's `resource-region-return` and the caller's
    `resource-call-result` are replayed against that formal/actual map, so `T& @r` results from
    direct `new[r]` or direct region paths remain live only while the mapped caller region is live.
+   Full resource-safety reports must balance every local region at the function boundary; only
+   explicit external region parameters may remain active. Prefix replay is exposed separately for
+   incremental summary construction and is never itself a proof admission result. Nested scope
+   joins likewise require the child region stack to equal the inherited parent stack exactly, so a
+   discarded snapshot cannot leak or reorder a lifetime.
    Field, conditional, aggregate, and other richer returned-reference expressions remain outside
    the resource kernel until their identities and lifetime summaries are explicit.
    Continuing control-flow joins emit explicit move-join transitions for inherited bindings moved
