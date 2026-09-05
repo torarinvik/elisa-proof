@@ -208,6 +208,8 @@ run_probe shared_borrow_calls examples/shared_borrow_calls.elisa 0
 run_probe rejected_shared_borrow_calls examples/rejected_shared_borrow_calls.elisa 1
 run_probe writable_lend_calls examples/writable_lend_calls.elisa 0
 run_probe rejected_writable_lend_calls examples/rejected_writable_lend_calls.elisa 1
+run_probe region_lend_calls examples/region_lend_calls.elisa 0
+run_probe rejected_region_lend_calls examples/rejected_region_lend_calls.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -487,6 +489,40 @@ for name in ("swap_pair", "read_and_write", "touch_borrowed"):
     if name not in opaque:
         raise SystemExit("dogfood failed: %s was not refused" % name)
 print("dogfood writable_lend_calls: an exclusive lend is confined to a whole-place write")
+PY
+
+# A lifetime parameter does not stop a call from being a lend. The callee may allocate into a
+# mapped caller region and can never close one, so the claim is the lifetime pinning itself:
+# every formal lifetime resolves to a region active at the call and to the actual's own region.
+python3 - "$REPORT_DIR/region_lend_calls.json" "$REPORT_DIR/rejected_region_lend_calls.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: region-polymorphic lending did not prove cleanly")
+nodes = report["kernel"]["nodes"]
+children = report["kernel"]["children"]
+lends = [node for node in nodes if node["kind"] == "resource-call-lend" and node["right"] > 0]
+if not lends:
+    raise SystemExit("dogfood failed: no lifetime-carrying lend reached the arena")
+for node in lends:
+    if node["children_count"] != node["auxiliary"] * 2 + node["right"]:
+        raise SystemExit("dogfood failed: a lend child list does not match its parameter and lifetime counts")
+    entries = [nodes[child] for child in children[node["children_start"] + node["auxiliary"] * 2:node["children_start"] + node["children_count"]]]
+    if any(entry["kind"] != "resource-call-region" or entry["operator"] != "param" or not entry["name"] or not entry["secondary_name"] for entry in entries):
+        raise SystemExit("dogfood failed: a lifetime map entry is malformed")
+    if len({entry["name"] for entry in entries}) != len(entries):
+        raise SystemExit("dogfood failed: a formal lifetime was pinned twice")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: lifetime boundary fixture did not fail cleanly")
+if any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"]):
+    raise SystemExit("dogfood failed: an unpinned lifetime was recorded as a lend")
+print("dogfood region_lend_calls: a lifetime parameter is pinned, never assumed")
 PY
 
 

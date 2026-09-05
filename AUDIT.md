@@ -567,11 +567,21 @@ rooted at a mutable formal. A write to the whole lent place therefore subsumes e
 summary for that callee could ever have exported, so the caller can take it without seeing one.
 
 `proof_resource_call_is_confined_lend` admits a call when no argument is a `move`, a `new[r]`
-allocation, an opaque borrow or a region value, the callee declares no region parameters, its
-return type is neither a reference nor region-bound, every by-value formal receives a value, every
-shared formal's place has no overlapping live mutable borrow, every exclusive formal's place is one
-the caller may write with no overlapping live borrow at all, and two lent places overlap only when
-neither is exclusive. The premise is the callee's declared parameter and return modes:
+allocation or an opaque borrow, its return type is neither a reference nor region-bound, every
+by-value formal receives a value, every shared formal's place has no overlapping live mutable
+borrow, every exclusive formal's place is one the caller may write with no overlapping live borrow
+at all, and two lent places overlap only when neither is exclusive.
+
+A lifetime parameter does not stop this. A region-polymorphic callee may allocate into a mapped
+caller region, which the caller cannot observe, and it can never close one: a lifetime parameter is
+external in the callee's own frame and no certificate may close an external region. What it stores
+through an exclusive formal is bounded exactly as on the summary path, which also composes a callee
+write without inspecting the written value — the compiler's lifetime typing, not the resource
+layer, is what keeps a shorter-lived reference out of a longer-lived place, on both paths alike. So
+the added obligation is the pinning itself: every formal lifetime must resolve to a caller region
+active at the call, and every actual carrying a region must land on a formal declared with that
+same lifetime. `proof_resource_collect_call_regions` enforces both directions, including for a
+callee with no lifetime parameters, where any region-carrying actual is refused outright. The premise is the callee's declared parameter and return modes:
 compiler-typing metadata, imported exactly the way the resource header already imports the current
 function's own parameter modes.
 
@@ -579,11 +589,13 @@ The call does not disappear from the certificate. `proof_resource_record_lend_ca
 `resource-call-lend` event whose children are the actuals followed by the callee's declared mode
 for each of the same formals, one pair per parameter, and `proof_kernel_replay_resource_lend`
 re-derives every permission from them rather than trusting the producer: the node carries no callee
-summary root and no region map, its child list is exactly twice its parameter count, each actual is
-a `resource-call-arg` decoded by the same routine the summary path uses, each mode is a
-`resource-call-formal` whose name matches its actual, a by-value formal receives no capability at
-all, a fresh region allocation is refused, the exclusive-lend permissions and the pairwise
-disjointness are checked against the replayed state, and the event root is consumed once. A shared
+summary root, its child list is exactly twice its parameter count plus its lifetime count, each
+actual is a `resource-call-arg` decoded by the same routine the summary path uses, each mode is a
+`resource-call-formal` whose name matches its actual and whose secondary name is its declared
+lifetime, a by-value formal receives no capability at all, a fresh region allocation is refused,
+every lifetime is pinned once to a region active in the replayed state and to the lent binding's
+own region, the exclusive-lend permissions and the pairwise disjointness are checked against that
+state, and the event root is consumed once. A shared
 formal writes nothing; an exclusive one pushes a whole-place `write` effect through the same
 origin-resolution the direct write path uses.
 
@@ -601,10 +613,10 @@ up is not reachable from the current producer — such a call has a summary and 
 path.
 
 The summary path is unchanged and still preferred: the lend rule is consulted only when no mapped
-callee summary is available. An escaping result and region-polymorphic calls keep their existing
-diagnostics. On the kernel's own source the proven count moved from 757 to 878 of 2070 and
-`borrow-call-opaque` from 622 to 235, with replay gaps unchanged at zero and 326 lend events
-recorded, 178 of them carrying an exclusive formal.
+callee summary is available. An escaping result keeps its existing diagnostic. On the kernel's own
+source the proven count moved from 757 to 885 of 2023, `borrow-call-opaque` from 622 to 204 and
+`region-call-opaque` from 280 to 252, with replay gaps unchanged at zero and 358 lend events
+recorded, 178 of them carrying an exclusive formal and 32 a lifetime map.
 
 Coverage. `examples/shared_borrow_calls.elisa` proves self-recursion over a shared collection, two
 shared references at once, a mutable holder lending a shared reborrow, the same place lent twice in
@@ -617,28 +629,41 @@ exclusive borrow, the same place lent exclusively twice, a shared lend beside an
 the same place, and an exclusive lend across a live borrow are each refused with a diagnostic and
 emit no event. Disabling the producer's pairwise-overlap check admits the two aliasing cases and
 nothing else; disabling its exclusive-borrow check admits the third and nothing else.
-`examples/rejected_borrow_call.elisa` now records that neither caller is opaque any more while the
-callee's own indexed obligation still fails and both callers are reported as depending on an
-unverified summary.
+`examples/region_lend_calls.elisa` proves a region-polymorphic recursive read and a two-lifetime
+call lending one place shared and one exclusively; `examples/rejected_region_lend_calls.elisa`
+refuses a lifetime with no actual to pin it and a region value reaching a formal that declares
+none. `examples/rejected_borrow_call.elisa` now records that neither caller is opaque any more
+while the callee's own indexed obligation still fails and both callers are reported as depending on
+an unverified summary.
 
 `examples/kernel_resource_bootstrap_runtime.elisa` drives the kernel rule directly under stage1 and
-stage0 with fourteen cases — two admitted lends, one shared and one exclusive, then a moved place,
+stage0 with eighteen cases — three admitted lends, one shared, one exclusive and one lifetime-
+pinned, then a moved place,
 a capability handed to a by-value formal, a miscounted child list, a reused event root, an unbound
 place, a permuted mode list, a shared lend across a live exclusive borrow, a fresh region
 allocation, an exclusive lend of a place the caller may not write, the same place lent exclusively
 twice, a shared lend beside an exclusive one over the same place, and an exclusive lend across a
-live borrow, each refused. Removing the shared or exclusive borrow-overlap check, the name pairing,
-the by-value-formal check, the writable-permission check, or either half of the pairwise rule each
-makes it exit with the matching code; the miscount, region-allocation and exclusive-formal-shape
-cases are each caught by two independent checks and need both removed before they show.
+live borrow, a lifetime pinned to a region that is not active, a lent place whose own region is not
+the one its lifetime is pinned to, and a formal lifetime pinned twice, each refused. Removing the
+shared or exclusive borrow-overlap check, the name pairing, the by-value-formal check, the
+writable-permission check, the lifetime pin, the duplicate-lifetime check, or either half of the
+pairwise rule each makes it exit with the matching code; the miscount, region-allocation,
+exclusive-formal-shape and dead-lifetime cases are each caught by two independent checks and need
+both removed before they show.
 
-Not covered. The remaining 235 `borrow-call-opaque` are calls the rule refuses on purpose or cannot
+Not covered. The remaining 204 `borrow-call-opaque` are calls the rule refuses on purpose or cannot
 reach: a lent place that is already borrowed, two overlapping lent places, an escaping reference
-result, and a `borrow-opaque` actual whose place the producer cannot name. Region-polymorphic calls
-are untouched, and are now the largest resource-safety gap at 280 `region-call-opaque`. The
-whole-place write is deliberately coarse: a callee that writes one field of a lent struct is
-recorded as writing all of it, which can conflict with a `preserves` clause that a real summary
-would have satisfied.
+result, and a `borrow-opaque` actual whose place the producer cannot name. The whole-place write is
+deliberately coarse: a callee that writes one field of a lent struct is recorded as writing all of
+it, which can conflict with a `preserves` clause that a real summary would have satisfied.
+
+The 252 remaining `region-call-opaque` are dominated by one shape the rule cannot reach: a *local*
+lent to a lifetime-annotated formal. `proof_kernel_replay_resource_events(nodes, children, roots,
+&callee_state, &callee_effects, depth + 1)` lends `&callee_state`, a frame local with no region, to
+`state: mutable ProofKernelReplayResourceState& @s`, and `proof_resource_collect_call_regions`
+finds no actual carrying `@s` to pin it to. Closing this needs a frame lifetime — a notion that a
+local's own extent instantiates a formal lifetime for the duration of the call — which the resource
+state does not model today.
 
 The callee's declared modes remain a compiler-typing import: the kernel checks that the recorded
 modes are ones it can re-derive permissions for, that they pair with the actuals, and that every
@@ -647,6 +672,39 @@ source — a producer that misreads a signature records a wrong but internally c
 Closing that needs the callee's parameter header in the arena, keyed so it cannot be mistaken for a
 converged summary; for a self-recursive call, which is the case the rule exists to serve, the
 header is already present as the resource root being replayed.
+
+## Open defect: a region-polymorphic callee summary replays as a gap
+
+Found while writing the lifetime lend fixtures, and present before that work. A call to a
+region-polymorphic callee that *does* have a converged summary is admitted by the producer and
+refused by the replay kernel, so the caller's certificate is reported as a replay gap. Minimal
+reproducer:
+
+```elisa
+struct Cell:
+    value: mutable i64
+
+def peek[@r](cell: Cell& @r) -> i64:
+    return cell.value
+
+def region_reader() -> i64 can[Memory.Allocate, Abort.Panic]:
+    region r(4096):
+        cell: Cell& = new[r] Cell{value: 3}
+        return peek(cell)
+```
+
+`peek` proves and replays; `region_reader` proves and does not, giving
+`proved_with_replay_gaps` with `replay.gaps == 1`. The caller trace is well formed — region open,
+`resource-region-alloc` binding `cell` into `r`, a `resource-call` carrying one
+`resource-call-region` pinning `r` to `r`, region close — and `peek`'s own certificate carries the
+expected `resource-region-param`, `resource-bind external-shared`, `resource-use` and
+`resource-region-return`. The refusal is somewhere in `proof_kernel_replay_resource_call`
+composing that callee, and it was previously unreachable because almost no region-polymorphic
+callee ever obtained a summary to compose.
+
+This is a producer/kernel disagreement, not a false claim: the gap is counted and the verdict
+degrades accordingly. The lifetime lend fixtures stay clear of it deliberately, so it is not
+masked by them.
 
 ## Coverage still required
 

@@ -456,10 +456,13 @@ write the whole lent place, whatever the callee's body does. That second path is
 to a recursive component, which can never consume one of its own summaries. It is recorded as an
 explicit `resource-call-lend` transition carrying the actuals and the callee's declared mode for
 each of the same formals, and replay re-derives every permission from them. An exclusive lend needs
-a place the caller may write, with no overlapping live borrow and no overlapping co-lend; a call
-whose result escapes as a reference and region-polymorphic calls still require the callee's
-converged summary. See `examples/shared_borrow_calls.elisa`, `examples/writable_lend_calls.elisa`,
-`examples/rejected_shared_borrow_calls.elisa` and `examples/rejected_writable_lend_calls.elisa`.
+a place the caller may write, with no overlapping live borrow and no overlapping co-lend. A
+lifetime parameter does not stop the rule — the callee may allocate into a mapped caller region and
+can never close one — but every formal lifetime must be pinned to a region active at the call and
+to the lent binding's own region. A call whose result escapes as a reference still requires the
+callee's converged summary. See `examples/shared_borrow_calls.elisa`,
+`examples/writable_lend_calls.elisa`, `examples/region_lend_calls.elisa` and the matching
+`rejected_*` fixtures.
 
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its

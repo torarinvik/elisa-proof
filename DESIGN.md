@@ -65,7 +65,8 @@ The proof kernel is intentionally fail-closed:
    already holds is admitted from the callee's declared parameter and return modes and recorded
    as an explicit lend transition, since a reference confers no move and the capability ends with
    the call — a shared lend changes nothing and an exclusive one is over-approximated by a write
-   to the whole lent place; opaque calls and writes through a framed or
+   to the whole lent place, with every formal lifetime pinned to a region active at the call;
+   opaque calls and writes through a framed or
    preserved alias are rejected rather than treated as pure. Tracked local aliases are resolved
    through the symbolic binding map, while unknown reference-producing expressions are opaque.
 6. Assignments and effectful control-flow joins discard facts and forget symbolic values that this

@@ -1044,12 +1044,26 @@ extend ElisaProof:
         def proof_resource_call_is_confined_lend(functions: ProofFunctionTable&, callee_index: usize, mapped: darray[Ast::Expr]&, state: mutable ProofResourceState&, report: mutable ProofReport&) -> bool:
             return false if callee_index >= functions.param_counts.count or callee_index >= functions.param_starts.count
             return false if mapped.count != functions.param_counts[callee_index]
-            # A region-polymorphic callee may allocate into, or close, a caller region.
-            return false if callee_index >= functions.region_param_counts.count or functions.region_param_counts[callee_index] > 0
+            # A region-polymorphic callee may allocate into a caller region, which the caller
+            # cannot observe, and it cannot close one: a lifetime parameter is external in the
+            # callee's own frame and no trace may close an external region. What it stores into a
+            # lent place is bounded exactly as on the summary path, which also composes a callee
+            # write without inspecting the written value.
+            return false if callee_index >= functions.region_param_counts.count
             # A returned reference is a capability that outlives the call and would need the
             # callee's own summary to place.
             return false if callee_index >= functions.return_references.count or functions.return_references[callee_index]
             return false if callee_index >= functions.return_regions.count or functions.return_regions[callee_index] != ""
+            # Each formal lifetime must be pinned to an active caller region by a region-annotated
+            # actual, and an actual that carries a region must land on a formal declared with that
+            # same lifetime. The collector enforces both directions, including for a callee with
+            # no lifetime parameters, where any region-carrying actual is refused outright.
+            formal_regions: mutable darray[sview] = []
+            actual_regions: mutable darray[sview] = []
+            return false if not proof_resource_collect_call_regions(state, functions, callee_index, mapped, &formal_regions, &actual_regions)
+            return false if formal_regions.count != functions.region_param_counts[callee_index]
+            for region_index in 0..<actual_regions.count |region_index, actual_regions, state|:
+                return false if actual_regions[region_index] == "" or not proof_resource_region_is_active(state, actual_regions[region_index])
             param_start: usize = functions.param_starts[callee_index]
             lent_places: mutable darray[ProofResourcePlace] = []
             lent_known: mutable darray[bool] = []
@@ -1062,9 +1076,11 @@ extend ElisaProof:
                 argument: Ast::Expr = mapped[parameter_index]
                 kind: sview = proof_resource_call_argument_kind(argument, state, report)
                 return false if kind != "value" and kind != "reference" and kind != "borrow"
-                # A fresh `new[r]` actual has a lifetime the callee controls, and any other region
-                # value would need the callee's own trace to place.
-                return false if proof_resource_expr_contains_region_value(argument, state)
+                # A fresh `new[r]` actual has a lifetime the callee controls; it is already ruled
+                # out by the argument kind. A region value reaching a formal with no declared
+                # lifetime would need the callee's own trace to place.
+                formal_region: sview = proof_resource_function_parameter_region(functions, callee_index, parameter_index)
+                return false if formal_region == "" and proof_resource_expr_contains_region_value(argument, state)
                 lent_places.push(proof_resource_empty_place())
                 lent_known.push(false)
                 lent_exclusive.push(exclusive_formal)
@@ -1153,9 +1169,16 @@ extend ElisaProof:
                 return false if exclusive_formal and not reference_formal
                 shared_mode: sview = "external-shared" if reference_formal else "value"
                 mode: sview = "external-mutable" if exclusive_formal else shared_mode
-                formal: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-formal", mode, 0, 0, 0, 0, 0, 0, functions.all_params[slot], "")
+                formal_region: sview = proof_resource_function_parameter_region(functions, callee_index, parameter_index)
+                formal: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-formal", mode, 0, 0, 0, 0, 0, 0, functions.all_params[slot], formal_region)
                 report.kernel_children.push(formal)
-            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-lend", "", 0, 0, mapped.count, start, mapped.count * 2, 0, callee_name, "")
+            lend_formal_regions: mutable darray[sview] = []
+            lend_actual_regions: mutable darray[sview] = []
+            return false if not proof_resource_collect_call_regions(state, functions, callee_index, mapped, &lend_formal_regions, &lend_actual_regions)
+            for region_index in 0..<lend_formal_regions.count |region_index, lend_formal_regions, lend_actual_regions, report|:
+                region_child: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-region", "param", 0, 0, 0, 0, 0, 0, lend_formal_regions[region_index], lend_actual_regions[region_index])
+                report.kernel_children.push(region_child)
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-lend", "", 0, lend_formal_regions.count, mapped.count, start, mapped.count * 2 + lend_formal_regions.count, 0, callee_name, "")
             state.trace_events.push(event)
             return true
 
