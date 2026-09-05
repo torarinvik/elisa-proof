@@ -54,9 +54,31 @@ and public `decide` tactic replay. It is part of dogfood's native test layer.
 
 Stage1 native tests and the full normal-worktree test matrix pass for this repair; the
 shared-front-end build errors noted below did not recur. Snapshot-based dogfood also passes.
-A stage0 parity attempt cannot yet compile the existing single-line match arms in arena shape
-validation (`1: return ...`); it fails before linking. Stage0 parity remains unverified and the
-scripts' advertised bootstrap fallback still needs compatibility work.
+The initial stage0 parity attempt could not compile single-line match arms in arena shape
+validation (`1: return ...`). These now use ordinary indented match bodies, preserving pattern
+matching while allowing the bootstrap parser to read them.
+
+### Repaired: partial range predicates used at hostile-input boundaries
+
+Fourteen replay call sites used `ElisaProofKernelCore::range_valid` to check untrusted slices,
+despite that helper's precondition requiring the range to be valid already. Stage0 rejected the
+first such call in `proof_kernel_replay_unsigned_marker_info`. All replay references now use
+the existing total `proof_kernel_replay_child_range_valid` helper, including structural equality,
+substitution, quantifier enumeration, and tactic instantiation. Stage1 test/dogfood suites pass;
+the comparison harness also compiles, links, and passes under stage0 with a stage0-built runtime.
+Dogfood now performs that targeted bootstrap check whenever stage0 is installed.
+
+### Open: stage0 full arena-harness crash
+
+After the syntax/precondition fixes, `examples/kernel_arena_runtime.elisa` compiles under stage0
+but exits 139 when linked with stage0-compiled `native_runtime_support.elisa`. The stage1 harness
+passes. LLDB identifies an invalid read in `proof_kernel_replay_resource_has_pending_join`,
+called by `proof_kernel_replay_resource_report_impl`, then `proof_kernel_replay_resource_report`.
+This is not yet minimized or attributed to compiler code generation versus prover/runtime
+memory handling. Full bootstrap parity must not be claimed until it is resolved.
+An isolated empty `resource-safety` trace succeeds under stage0, so the failure is not triggered
+by every resource-state initialization; reduction must retain the relevant resource transitions
+or preceding allocations from the full harness.
 
 ### Repaired: unsigned assumptions entering signed decision procedures
 

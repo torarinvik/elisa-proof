@@ -221,6 +221,20 @@ fi
 "$runtime_dir/comparison-runtime"
 printf 'dogfood comparison_runtime: all six comparisons checked through goal and tactic replay\n'
 
+# This is targeted bootstrap coverage, not a claim that the entire prover or
+# resource-arena harness is stage0-compatible. Compile its runtime with stage0
+# as well; an installed stage1 runtime is not an implicit bootstrap dependency.
+bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
+if [[ -n "$bootstrap_compiler" ]]; then
+    "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
+    "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-comparison.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1
+    clang -Wl,-dead_strip -o "$runtime_dir/bootstrap-comparison" "$runtime_dir/bootstrap-comparison.o" "$runtime_dir/bootstrap-runtime.o"
+    "$runtime_dir/bootstrap-comparison"
+    printf 'dogfood bootstrap_comparison: stage0 goal/tactic comparison checks passed\n'
+else
+    printf 'dogfood bootstrap_comparison: skipped (elisac-stage0 unavailable)\n'
+fi
+
 # Exercise the Elisa-native proof-state action layer itself. This is intentionally an
 # executable harness rather than a report-only probe: both branches of split/cases must solve,
 # rewrite requires an explicit equality, and a rejected action must leave the state unsolved.
