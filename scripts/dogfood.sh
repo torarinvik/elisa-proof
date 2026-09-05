@@ -91,6 +91,8 @@ run_probe kernel_core src/proof/kernel_core.elisa 0
 run_probe kernel_core_fixture examples/dogfood_kernel_core.elisa 0
 run_probe quantifier_hypothesis examples/quantifier_hypothesis.elisa 0
 run_probe rejected_float_reflexivity examples/rejected_float_reflexivity.elisa 1
+run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
+run_probe integer_alias examples/integer_alias.elisa 0
 
 # This fixture intentionally contains unsupported surface around the standalone replay module.
 # A non-zero command verdict is expected, but every certificate it does emit must replay.

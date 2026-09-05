@@ -5493,13 +5493,34 @@ extend ElisaProof:
                 proof_invalidate_moved_roots(moved_roots, names, values, facts, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
                 proof_restore_type_bound_facts_except(statement_facts, facts, names, report, name, declared_name) if moved_roots.count == 0
 
+        const PROOF_TYPE_AUDIT_DEPTH_LIMIT: usize = 64
+
+        # Alias spelling must not hide a floating parameter from the proof-language gate.
+        # Search nested declaration scopes too; ambiguous names are handled conservatively.
+        # Cyclic or excessively deep aliases remain unsupported rather than being guessed safe.
+        def proof_type_may_contain_float(expression: Ast::Expr, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return true if proof_expr_mentions_name(expression, "f32") or proof_expr_mentions_name(expression, "f64")
+            for declaration in declarations |expression, all_declarations, depth|:
+                match declaration:
+                    Ast::Decl.Alias(name, target, _):
+                        if proof_expr_mentions_name(expression, name) or proof_callable_name(expression) == name:
+                            return true if proof_type_may_contain_float(target, all_declarations, all_declarations, depth + 1)
+                    Ast::Decl.Module(_, body, _):
+                        return true if proof_type_may_contain_float(expression, body, all_declarations, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return true if proof_type_may_contain_float(expression, body, all_declarations, depth + 1)
+                    _:
+                        pass
+            return false
+
         def proof_check_function(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, position: Ast::Pos, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
             # The logical kernel currently models ordinary equality and integer arithmetic,
             # not IEEE NaN or rounding. Erasing a floating parameter to an untyped identifier
             # would make even x == x an unsound theorem. Stop before publishing obligations
             # that a source-bound tactic could otherwise repair under the wrong semantics.
             for parameter in parameters |report, function_name, position|:
-                if proof_expr_mentions_name(parameter.type_expression, "f32") or proof_expr_mentions_name(parameter.type_expression, "f64"):
+                if proof_type_may_contain_float(parameter.type_expression, file.top_decls, file.top_decls, 0):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "floating-point parameter verification requires IEEE floating-point semantics")
                     return
