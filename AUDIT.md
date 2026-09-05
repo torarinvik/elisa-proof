@@ -902,26 +902,43 @@ postcondition against the current goal, discharge each instantiated precondition
 hypotheses, and close the goal — is the missing piece, and it is what would let the repair
 vocabulary be *derived* from the source's own theorem catalog instead of enumerated.
 
-The blocker is store locality. A prototype reached the point of finding the theorem, confirming it
-verified, and validating its array ranges, and then failed at the conclusion match — because
-`Ast::Expr` values are opaque handles into the parser store that produced them, and the tactic
-engine deliberately runs in a *fresh* store. That is the same constraint the source-bound tactic
-path already works around by exporting the goal and its facts to the JSON expression interchange
-and reparsing them in the tactic store. The theorem catalog needs exactly that treatment: the
-verified theorems' parameter names, preconditions and postconditions have to be exported and
-reparsed alongside the goal state before any tactic can read them.
+Two prototypes were built and reverted. The first found a plumbing constraint; the second solved
+it and found the real one, which is not plumbing at all.
 
-Two pieces of that are now understood rather than guessed. The matcher itself can be made
-store-independent by taking the parameter-name list instead of `(report, theorem)` — a mechanical
-change that leaves `--suggest` working. And the trace replay needs the catalog too: a `lemma` step
-records which theorem it used, and `proof_tactic_replay` must be able to re-derive it, or the step
-is not independently checked and the trace must be refused rather than trusted.
+The plumbing constraint is store locality. `Ast::Expr` values are opaque handles into the parser
+store that produced them, and the tactic engine deliberately runs in a *fresh* store, so a tactic
+cannot read the report's theorem expressions — the first prototype matched nothing for that reason.
+The fix is the one the source-bound path already uses for the goal state: export the verified
+theorems' parameter names, preconditions and postconditions to the JSON expression interchange and
+reparse them in the tactic store. The second prototype did this, and with it the tactic worked: the
+engine reported the script `valid`, the goal `solved`, the recorded trace independently
+`trace_replayed`, and the propositional kernel `kernel_replayed`.
 
-The prototype was reverted rather than landed. A partially wired step in the checked engine is
-exactly the stub this project does not want, and the tactic needs its own adversarial fixtures
-before it is worth having: an unverified theorem must not be usable, a conclusion that does not
-match must refuse, a precondition that does not discharge must refuse, and a trace naming a
-theorem the source no longer verifies must fail replay rather than silently apply another.
+It was refused by the last gate, and the refusal is correct. `proof_kernel_replay.elisa` carries a
+whitelist of tactic actions the source-neutral kernel knows how to check, and `lemma` is not among
+them. Adding it there would mean the trusted kernel accepting a step whose justification — the
+theorem's own verified proof — is not in the arena the kernel checks. That is exactly "claiming
+proof without trusted-kernel justification", and it is not a gate to widen.
+
+So the design is now specified rather than guessed. A lemma step must carry its justification the
+way the *checker* already does: a lemma-derived fact carries a `lemma-summary` fact trace, and
+`replay.elisa` validates it by re-checking the lemma's own certificate and its dependency chain
+(`proof_replay_lemma_summary_is_valid`, `proof_replay_dependency_is_checked`). The tactic step's
+kernel encoding has to reference the theorem's certificate root the same way, and the kernel rule
+then has something to check: that the instantiated conclusion equals the goal, that each
+instantiated premise is among the facts, and that the referenced certificate is itself replayed.
+Until that chain exists, the whitelist stays as it is and the repair vocabulary stays enumerated.
+
+Three sub-results are now settled. The matcher can be made store-independent by taking the
+parameter-name list instead of `(report, theorem)`, which leaves `--suggest` working unchanged. The
+catalog export must carry only *verified* theorems, so an unverified one is absent from the tactic's
+world rather than merely rejected by it. And the trace replay needs the catalog too, because a
+`lemma` step records which theorem it used and `proof_tactic_replay` must re-derive it or refuse.
+
+Both prototypes were reverted rather than landed. The tactic still needs its own adversarial
+fixtures before it is worth having: an unverified theorem must not be usable, a conclusion that
+does not match must refuse, a precondition that does not discharge must refuse, and a trace naming
+a theorem the source no longer verifies must fail replay rather than silently apply another.
 
 `split` and `cases` still need nested branch scripts, which the text grammar has no syntax for, so
 a branching proof must be written as JSON and the vocabulary is branch-free. And nothing yet
