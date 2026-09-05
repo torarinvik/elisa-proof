@@ -92,8 +92,10 @@ The proof kernel is intentionally fail-closed:
    and use of the consumed owner. Region-returning call results also receive the token from a
    fresh return allocation or transfer it from a returned direct owner; borrowed results receive
    no token. Region aliases and region assignments currently carry no source-path metadata, so
-   field/index sources are rejected rather than widened to whole-root capabilities. Borrowed or
-   external references have no such token and cannot be upgraded by alias metadata.
+   field/index sources are rejected rather than widened to whole-root capabilities. Region
+   assignment also rejects a target that is itself an active borrow handle; rebinding such a
+   handle without modeling borrow release would leave stale alias metadata in the trace. Borrowed
+   or external references have no such token and cannot be upgraded by alias metadata.
    Child resource snapshots additionally mark inherited region identities as protected, so a nested
    `destroy r` followed by a same-named reopen cannot be hidden by the child join even when no
    binding currently carries `r`.
