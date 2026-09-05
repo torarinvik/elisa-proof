@@ -1079,6 +1079,44 @@ receiving a copy whose nested region values the callee could keep — is retaine
 has no fixture, because a by-value actual carrying a region is rejected earlier by the argument-kind
 gate before this rule sees it.
 
+## Measured: what `expression-unsupported` actually is
+
+An unsupported statement does not merely go unproven — it sets `flow.valid <- false` and
+invalidates its enclosing path, so each one costs everything after it in that function. There are
+192 of them on `examples/kernel_replay_standalone.elisa`, second only to the region and summary
+diagnostics, and until now nothing recorded *which* shapes they were.
+
+Peeling the gates with the instrumentation method (see the memory note on measuring refusals) gives
+a complete split, and it redirected the obvious plan twice:
+
+| count | gate | meaning |
+| --- | --- | --- |
+| 113 | `proof_expr_supported` → `Ast::Expr.Block` | a block-valued expression statement |
+| 46 | `proof_runtime_expression_calls_allowed` | a call in a `return`/statement value |
+| 32 | `proof_runtime_branch_calls_allowed` | a call in an `if` condition that may be skipped |
+| 1 | `Ast::Expr.Invalid` | — |
+
+The first redirection: **zero** refusals come from `while`, `for`, `match` or `assert` conditions.
+The recorded next step after the branch-condition work was to extend that rule to those forms after
+auditing their handlers. That would have gained nothing, and the `while` handler turns out to
+already frame its calls, forget values and emit `loop-condition-opaque` — the gate there is not
+what is costing anything.
+
+The second: the 113 are not an exotic shape. Mapped back to source they are all ordinary
+`for x in xs |captures|:` loops, and they arrive at the value gate as `Ast::Stmt.Expr` carrying a
+block — `Ast::Stmt.For` accounts for *none* of the refusals. So the loop form that the kernel's own
+source uses everywhere is the one the statement walker does not model, and each occurrence
+invalidates its function's path. That is very likely where a large share of the 191
+`function-summary-unverified` comes from as well, since a function whose path is invalid exports no
+summary and every caller then reports one.
+
+This is not a cheap fix and should not be attempted as one. A block-valued loop can `break`,
+`continue` and `return`, so it cannot be treated as a straight-line havoc the way an opaque call
+is: the existing `flow.valid <- false` is doing real work. What it needs is the treatment
+`Ast::Stmt.For` already gets — a missing invariant reported, the body checked in an isolated entry
+state, and the path left valid — which means recognizing the block form and routing it to the same
+handler rather than widening the shape gate.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
