@@ -111,6 +111,19 @@ if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert r
     printf 'proof test matrix failed: region temporary escape report was incomplete\n' >&2
     exit 1
 fi
+set +e
+rejected_reference_return_alias_report="$standalone_probe_dir/rejected-reference-return-alias.json"
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_reference_return_alias.elisa" >"$rejected_reference_return_alias_report"
+rejected_reference_return_alias_status=$?
+set -e
+if [[ "$rejected_reference_return_alias_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: reference-return alias was accepted as an independent capability\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "resource-use-after-move" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$rejected_reference_return_alias_report"; then
+    printf 'proof test matrix failed: reference-return alias report was incomplete\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert kinds.count("resource-region-open") == 1 and kinds.count("resource-region-close") == 1 and "resource-region-alloc" in kinds and "resource-region-bind" in kinds and "resource-region-alloc-discard" in kinds'
 region_statement_probe_status=${PIPESTATUS[1]}
 if [[ "$region_statement_probe_status" -ne 0 ]]; then

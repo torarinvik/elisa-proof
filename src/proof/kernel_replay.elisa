@@ -2704,7 +2704,9 @@ module ElisaProofKernelReplay:
                     returned_region: mutable sview = ""
                     returned_mutable: mutable bool = false
                     returned_mutable_known: mutable bool = false
-                    for callee_child_index in 0..<callee_located.node.children_count |callee_child_index, callee_located, children, nodes, returned_region, returned_mutable, returned_mutable_known|:
+                    returned_formal: mutable sview = ""
+                    returned_allocation: mutable bool = false
+                    for callee_child_index in 0..<callee_located.node.children_count |callee_child_index, callee_located, children, nodes, returned_region, returned_mutable, returned_mutable_known, returned_formal, returned_allocation|:
                         callee_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, callee_located.node.children_start + callee_child_index)
                         return false if not callee_child.known
                         callee_child_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, callee_child.value)
@@ -2715,6 +2717,17 @@ module ElisaProofKernelReplay:
                             returned_region <- callee_child_node.node.name
                             returned_mutable <- callee_child_node.node.auxiliary == 1
                             returned_mutable_known <- true
+                            witness: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, callee_child_node.node.left)
+                            return false if not witness.known
+                            if witness.node.kind == "resource-use":
+                                return false if witness.node.name == "" or returned_allocation
+                                return false if returned_formal != "" and returned_formal != witness.node.name
+                                returned_formal <- witness.node.name
+                            elif witness.node.kind == "resource-region-return-alloc":
+                                return false if returned_formal != ""
+                                returned_allocation <- true
+                            else:
+                                return false
                     return false if returned_region == ""
                     mapped_region: mutable sview = ""
                     for call_child_index in call.auxiliary..<call.children_count |call_child_index, call, children, nodes, returned_region, mapped_region|:
@@ -2729,6 +2742,35 @@ module ElisaProofKernelReplay:
                     return false if (node.auxiliary & 2) == 0
                     return false if not returned_mutable_known or ((node.auxiliary & 4) != 0) != returned_mutable
                     return false if not proof_kernel_replay_resource_binding_name_available(state, node.name)
+                    result_alias: mutable bool = false
+                    result_source_slot: mutable usize = state.binding_names.count
+                    result_source_place: mutable ProofKernelReplayResourcePlace = proof_kernel_replay_resource_empty_place()
+                    if returned_formal != "":
+                        returned_argument: mutable (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = (false, ElisaProofKernelCore::ProofKernelNode{kind: "", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""})
+                        for call_child_index in 0..<call.auxiliary |call_child_index, call, children, nodes, returned_formal, returned_argument|:
+                            call_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + call_child_index)
+                            return false if not call_child.known
+                            call_child_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, call_child.value)
+                            return false if not call_child_node.known or call_child_node.node.kind != "resource-call-arg"
+                            if call_child_node.node.name == returned_formal:
+                                return false if returned_argument.known
+                                returned_argument <- (true, call_child_node.node)
+                        return false if not returned_argument.known
+                        return false if returned_argument.node.operator != "borrow" and returned_argument.node.operator != "reference" and returned_argument.node.operator != "region-new"
+                        actual: (known: bool, place: ProofKernelReplayResourcePlace, slot: usize, has_slot: bool, mutable_reference: bool) = proof_kernel_replay_resource_call_actual(state, nodes, children, returned_argument.node)
+                        return false if not actual.known
+                        if returned_argument.node.operator != "region-new":
+                            return false if actual.place.root == ""
+                            result_alias <- true
+                            result_source_slot <- actual.slot
+                            result_source_place <- actual.place
+                            if (node.auxiliary & 4) != 0:
+                                return false if proof_kernel_replay_resource_has_borrow_overlap(nodes, state, actual.place, actual.slot if returned_argument.node.operator == "reference" else state.binding_names.count)
+                            else:
+                                return false if proof_kernel_replay_resource_has_mutable_borrow_overlap(nodes, state, actual.place, actual.slot if returned_argument.node.operator == "reference" else state.binding_names.count)
+                            if returned_argument.node.operator == "reference":
+                                return false if not actual.has_slot or actual.slot >= state.binding_moved.count or state.binding_moved[actual.slot]
+                                state.binding_moved[actual.slot] <- true
                     state.binding_names.push(node.name)
                     state.binding_scope_depth.push(state.scope_depth)
                     state.binding_reference.push(true)
@@ -2738,12 +2780,12 @@ module ElisaProofKernelReplay:
                     state.binding_region.push(node.secondary_name)
                     state.binding_region_live.push(true)
                     state.binding_region_owner.push(false)
-                    state.borrow_target_slots.push(state.binding_names.count - 1)
-                    state.borrow_target_places.push(proof_kernel_replay_resource_empty_place())
-                    state.borrow_mutable.push(false)
-                    state.borrow_present.push(false)
+                    state.borrow_target_slots.push(result_source_slot if result_alias else state.binding_names.count - 1)
+                    state.borrow_target_places.push(result_source_place if result_alias else proof_kernel_replay_resource_empty_place())
+                    state.borrow_mutable.push((node.auxiliary & 4) != 0 if result_alias else false)
+                    state.borrow_present.push(result_alias)
                     state.pending_join_moves.push(false)
-                    state.binding_origin_places.push(proof_kernel_replay_resource_empty_place())
+                    state.binding_origin_places.push(result_source_place if result_alias else proof_kernel_replay_resource_empty_place())
                     state.resource_call_results.push(node.left)
                     continue
                 if node.kind == "resource-call":
