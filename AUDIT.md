@@ -4,7 +4,7 @@ Passing the current suites is regression evidence, not completion of the full au
 The objective covers all existing implementation code, scripts, proof fixtures, and their
 assumptions about the compiler. No module below is yet certified as fully audited.
 
-## Confirmed open defect: unsigned local substitution
+## Contained defect; full repair open: unsigned local substitution
 
 Reproducer: `examples/rejected_unsigned_local.elisa`.
 
@@ -14,8 +14,18 @@ Reproducer: `examples/rejected_unsigned_local.elisa`.
 
 Observed at revision `8f3dfbf`: exit 0, three proven obligations, three replayed certificates,
 zero replay gaps. The proof is false: after `x: u8 = 255`, `x + 1 > x` fails under wrapping
-unsigned arithmetic. The fixture deliberately records a currently failing safety requirement;
-it has not been added to the passing dogfood matrix.
+unsigned arithmetic. The current preflight rejects functions containing explicit unsigned local
+declarations before publishing logical obligations or summaries. The fixture is now in dogfood,
+along with rebinding, compound assignment, branch, shadowing, loop, and bounded-safe cases.
+The tests require zero proven obligations and zero certificates, not just a nonzero exit status.
+
+This is conservative containment, not completed type preservation: even bounded-safe unsigned
+locals are temporarily unsupported. The core `add_node` helper is affected; six obligations in
+the remaining core and nineteen in its call-site fixture still prove and independently replay.
+Tests explicitly require that the only finding in those two fixtures belongs to `add_node`.
+The standalone replay audit also loses verification of `proof_kernel_replay_difference_query`,
+which has unsigned locals. Its test now requires the explicit type-erasure finding while keeping
+the other nine previously required verified helpers and all certificate replay checks.
 
 The declaration path in `proof_check_returns` substitutes the initializer into its value table.
 It records the unsigned type marker against the original local name, but subsequent expression

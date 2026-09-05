@@ -85,10 +85,24 @@ print(f"dogfood {label}: status={report['status']} obligations={report['summary'
 PY
 }
 
-# These are the currently formalized, source-neutral slices. They must be fully proved and
-# independently replayed; no AST-backed checker result is substituted for this evidence.
-run_probe kernel_core src/proof/kernel_core.elisa 0
-run_probe kernel_core_fixture examples/dogfood_kernel_core.elisa 0
+# The bounds slices still prove independently. The insertion helper's unsigned
+# local is explicitly unsupported until symbolic bindings retain numeric types.
+run_probe kernel_core src/proof/kernel_core.elisa 1
+run_probe kernel_core_fixture examples/dogfood_kernel_core.elisa 1
+python3 - "$REPORT_DIR/kernel_core.json" "$REPORT_DIR/kernel_core_fixture.json" <<'PY'
+import json
+import sys
+
+for path, proven in zip(sys.argv[1:], (6, 19)):
+    with open(path, encoding="utf-8") as handle:
+        report = json.load(handle)
+    assert report["status"] == "failed"
+    assert report["verification_state"] == "unsupported"
+    assert report["summary"]["proven"] == proven
+    assert [(f["name"], f["kind"]) for f in report["findings"]] == [
+        ("add_node", "contract-expression-unsupported")
+    ]
+PY
 run_probe quantifier_hypothesis examples/quantifier_hypothesis.elisa 0
 run_probe rejected_float_reflexivity examples/rejected_float_reflexivity.elisa 1
 run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
@@ -100,6 +114,25 @@ run_probe unsigned_alias examples/unsigned_alias.elisa 0
 run_probe rejected_unsigned_alias examples/rejected_unsigned_alias.elisa 1
 run_probe unsigned_refinement examples/unsigned_refinement.elisa 0
 run_probe rejected_unsigned_refinement examples/rejected_unsigned_refinement.elisa 1
+run_probe rejected_unsigned_local examples/rejected_unsigned_local.elisa 1
+run_probe rejected_unsigned_local_states examples/rejected_unsigned_local_states.elisa 1
+
+# Rejection alone is insufficient: source-bound tactics must not receive an
+# erased arithmetic goal that could be repaired into a false source theorem.
+python3 - "$REPORT_DIR/rejected_unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local_states.json" <<'PY'
+import json
+import sys
+
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as handle:
+        report = json.load(handle)
+    if report["replay"]["certificates"] != 0 or report["summary"]["proven"] != 0:
+        raise SystemExit("dogfood failed: unsigned local preflight emitted a proof")
+    if report["status"] != "failed" or report["verification_state"] != "unsupported":
+        raise SystemExit("dogfood failed: unsigned local preflight did not report unsupported")
+    if report["goals"] or report["summary"]["semantic_errors"] != 0:
+        raise SystemExit("dogfood failed: unsigned local fixture exposed a goal or had semantic errors")
+PY
 
 # This fixture intentionally contains unsupported surface around the standalone replay module.
 # A non-zero command verdict is expected, but every certificate it does emit must replay.

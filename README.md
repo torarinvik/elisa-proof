@@ -371,6 +371,12 @@ The native checker currently supports:
 - recursive, deduplicated `include` expansion resolved relative to the including file; and
 - the compiler's complete semantic diagnostic pass after the proof pass.
 
+Functions declaring unsigned locals (including aliases and refinements) currently report
+`unsupported` before logical obligations are published. Substituting their initializers would
+erase fixed-width arithmetic semantics. This also temporarily excludes `kernel_core.add_node`;
+the core bounds predicates and their call-site proofs still verify and replay. Full typed symbolic
+bindings are required to restore these functions, including bounded-safe unsigned locals.
+
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its
 strongest built-in refinement/invariant mode, but the custom kernel still has no SMT backend,
