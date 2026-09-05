@@ -1007,6 +1007,40 @@ produces **6 replay gaps** — the kernel independently re-derives every one of 
 rule the producer alone believed could not pass as a proof. On the kernel's own source the proven
 count moved from 891 to 896 with replay gaps unchanged at zero.
 
+## Added: a lifetime pinned to the caller's own frame
+
+A region-polymorphic call was mapped only when some actual already carried the formal's lifetime as
+an active region. A borrow of a caller *local* carries no region, so `visit(&local, 0)` against
+`cell: mutable Cell& @s` had nothing to pin `@s` with and was `region-call-opaque` — even though a
+caller local outlives any call that borrows it, which is the entire content of the claim.
+
+`proof_resource_frame_lifetime_pinnable` and `proof_kernel_replay_frame_region_name` add that case.
+The mapping records `@call-frame`, a name outside the identifier grammar so no source region can
+collide with it, and it is deliberately *not* a region with an extent: there is nothing to open or
+close, because the frame outlives the call by construction. What both sides check in its place is
+that every actual receiving the lifetime is a place the caller holds outright — a live, unmoved
+binding carrying no region of its own — and that some actual receives it at all.
+
+The fallback runs only after the ordinary pinning has already failed, so no call that maps today
+changes behavior; this widens the rule strictly.
+
+Coverage. `examples/frame_lifetime.elisa` proves an exclusive and a shared borrow of a local into a
+lifetime parameter and two lifetimes pinned by two distinct locals.
+`examples/rejected_frame_lifetime.elisa` refuses a local moved away before the call and a lifetime
+no formal carries, and records no frame mapping at all in either case. Disabling the producer's
+pinning drops the accepted fixture from proving; disabling the *kernel's* rule leaves the producer
+proving all eleven and yields three replay gaps, so the kernel re-derives the frame claim itself.
+
+**On the corpus this moved almost nothing: proven 896 to 897, and `region-call-opaque` stayed at
+252.** That corrects the diagnosis recorded in the confined-lend entry, which named this shape as
+the dominant cause. It is not. The 252 are dominated by 79 calls inside
+`proof_kernel_replay_resource_events` and 46 inside `proof_kernel_replay_tactic_step_impl` reported
+as "no converged lifetime summary", meaning the callee has no summary *and* the confined-lend rule
+refused them — and the lend rule refuses them for some reason other than lifetime pinning, since
+their lifetimes are carried by ordinary reference parameters. Whatever that reason is has not been
+measured yet, and the next attempt on this gap should start by measuring it rather than by
+extending a rule.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

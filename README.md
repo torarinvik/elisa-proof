@@ -521,6 +521,13 @@ must be present as facts — so the producer and the replay kernel state it iden
 operands must be witnessed primitive scalars because `*` on a struct operand is a user `__mul__`
 under no sign law. See `examples/product_sign.elisa` and `examples/rejected_product_sign.elisa`.
 
+A lifetime parameter may be pinned to the caller's own frame when no actual carries a region: a
+caller local outlives any call that borrows it. The mapping records `@call-frame` and is not a
+region with an extent — both the producer and the replay kernel instead check that every actual
+receiving the lifetime is a place the caller holds outright, a live unmoved binding with no region,
+and that some actual receives it. See `examples/frame_lifetime.elisa` and
+`examples/rejected_frame_lifetime.elisa`.
+
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its
 strongest built-in refinement/invariant mode, but the custom kernel still has no SMT backend,

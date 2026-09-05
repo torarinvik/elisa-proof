@@ -122,7 +122,7 @@ if [[ "$json_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: JSON report is not a valid structured proof state\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
+for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
     "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -1631,6 +1631,29 @@ rejected_product_sign_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_product_sign_status" -ne 0 ]]; then
     printf 'proof test matrix failed: an unsound product sign was concluded\n' >&2
+    exit 1
+fi
+
+# A lifetime parameter may be pinned to the caller's own frame: a caller local outlives any call
+# that borrows it. The frame is not a region with an extent, so both sides check the same thing in
+# its place — the actual is a place the caller holds outright.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/frame_lifetime.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["proven"] == report["summary"]["obligations"]; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; nodes = report["kernel"]["nodes"]; assert any(node["kind"] == "resource-call-region" and node["secondary_name"] == "@call-frame" for node in nodes)'
+frame_lifetime_status=${PIPESTATUS[1]}
+set -e
+if [[ "$frame_lifetime_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: frame lifetime pinning\n' >&2
+    exit 1
+fi
+
+# A moved binding is no longer a place the caller holds, and a lifetime no formal carries is pinned
+# by nothing at all.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_frame_lifetime.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("resource-use-after-move", "lends_moved_local") in findings; assert ("region-call-opaque", "lends_moved_local") in findings; assert ("region-call-opaque", "unreceived_lifetime") in findings; assert not any(node["kind"] == "resource-call-region" and node["secondary_name"] == "@call-frame" for node in report["kernel"]["nodes"])'
+rejected_frame_lifetime_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_frame_lifetime_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a lifetime was pinned to a frame that vouches for nothing\n' >&2
     exit 1
 fi
 

@@ -215,6 +215,8 @@ run_probe condition_call_positions examples/condition_call_positions.elisa 0
 run_probe rejected_condition_call_positions examples/rejected_condition_call_positions.elisa 1
 run_probe product_sign examples/product_sign.elisa 0
 run_probe rejected_product_sign examples/rejected_product_sign.elisa 1
+run_probe frame_lifetime examples/frame_lifetime.elisa 0
+run_probe rejected_frame_lifetime examples/rejected_frame_lifetime.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -601,6 +603,34 @@ if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or 
 if any(goal["proven"] and goal["rule"] != "resource-safety" for goal in report["goals"]):
     raise SystemExit("dogfood failed: an unsound product sign was concluded")
 print("dogfood product_sign: a product's sign follows from its operands' signs and nothing else")
+PY
+
+# A frame-pinned lifetime is a claim about the caller's frame, not about a region, so the mapping
+# names `@call-frame` and every such call must still replay. A refused shape must record no such
+# mapping at all.
+python3 - "$REPORT_DIR/frame_lifetime.json" "$REPORT_DIR/rejected_frame_lifetime.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: frame lifetime pinning did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a frame-pinned call was left unreplayed")
+frame_maps = [node for node in report["kernel"]["nodes"] if node["kind"] == "resource-call-region" and node["secondary_name"] == "@call-frame"]
+if not frame_maps:
+    raise SystemExit("dogfood failed: no frame-pinned lifetime reached the arena")
+if any(node["operator"] != "param" or not node["name"] for node in frame_maps):
+    raise SystemExit("dogfood failed: a frame mapping is malformed")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: frame lifetime boundary fixture did not fail cleanly")
+if any(node["kind"] == "resource-call-region" and node["secondary_name"] == "@call-frame" for node in report["kernel"]["nodes"]):
+    raise SystemExit("dogfood failed: a lifetime was pinned to a frame that vouches for nothing")
+print("dogfood frame_lifetime: a caller's frame pins a lifetime only for a place it holds outright")
 PY
 
 # The rendered proof must agree with the report for *every* goal, not a sampled one: `qed` appears
