@@ -1018,7 +1018,7 @@ extend ElisaProof:
         # The same mapping, with the frame-lifetime fallback. It is tried only after the ordinary
         # pinning has already failed, so no call that maps today changes behavior: this widens the
         # rule strictly, and only for a lifetime nothing else could pin.
-        def proof_resource_collect_call_regions_framed(state: ProofResourceState&, functions: ProofFunctionTable&, function_index: usize, mapped: darray[Ast::Expr]&, formal_regions: mutable darray[sview]&, actual_regions: mutable darray[sview]&, frame_pinned: mutable bool&, report: mutable ProofReport&) -> bool:
+        def proof_resource_collect_call_regions_framed(state: ProofResourceState&, functions: ProofFunctionTable&, function_index: usize, mapped: darray[Ast::Expr]&, formal_regions: mutable darray[sview]&, actual_regions: mutable darray[sview]&, frame_pinned: mutable bool&, report: mutable ProofReport&, lending: bool) -> bool:
             frame_pinned <- false
             return true if proof_resource_collect_call_regions(state, functions, function_index, mapped, formal_regions, actual_regions)
             formal_regions.clear()
@@ -1045,12 +1045,21 @@ extend ElisaProof:
                 return false if actual_region == ""
                 formal_regions.push(formal_region)
                 actual_regions.push(actual_region)
-            for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, function_index, formal_regions, state|:
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, functions, function_index, formal_regions, state, lending|:
                 candidate: sview = proof_resource_expr_region(mapped[parameter_index], state)
                 parameter_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
                 new_parts: (known: bool, operand: Ast::Expr, region: sview) = proof_resource_region_new_parts(mapped[parameter_index])
-                return false if candidate != "" and parameter_region == "" and not new_parts.known
-                return false if candidate != "" and not new_parts.known and not any formal_region in formal_regions where formal_region == parameter_region
+                # A region-owned actual reaching a formal that declares *no* lifetime is a
+                # capability the callee cannot name: with no lifetime parameter to bind it to, it
+                # can neither allocate into that region nor return anything from it, and a lend
+                # already requires the callee to return no reference and no region. The reference
+                # is still liveness-checked as an ordinary borrow on both sides. On the summary
+                # path the callee's own trace is what places such an actual, so the refusal stands.
+                lifetime_free_callee: bool = proof_resource_function_region_param_count(functions, function_index) == 0
+                return false if candidate != "" and parameter_region == "" and not new_parts.known and not lending
+                return false if candidate != "" and parameter_region == "" and not new_parts.known and not lifetime_free_callee
+                return false if candidate != "" and not new_parts.known and parameter_region != "" and not any formal_region in formal_regions where formal_region == parameter_region
+            return true if lending
             return frame_pinned
 
         def proof_resource_add_region_call_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> usize:
@@ -1069,7 +1078,7 @@ extend ElisaProof:
             formal_regions: mutable darray[sview] = []
             actual_regions: mutable darray[sview] = []
             frame_pinned: mutable bool = false
-            return false if not proof_resource_collect_call_regions_framed(state, functions, function_index, mapped, &formal_regions, &actual_regions, &frame_pinned, report)
+            return false if not proof_resource_collect_call_regions_framed(state, functions, function_index, mapped, &formal_regions, &actual_regions, &frame_pinned, report, false)
             return false if not proof_resource_call_source_compatible(state, report, callee_root, function_index, mapped, functions)
             param_start: usize = functions.param_starts[function_index]
             encoded_arguments: mutable darray[usize] = []
@@ -1137,7 +1146,7 @@ extend ElisaProof:
             formal_regions: mutable darray[sview] = []
             actual_regions: mutable darray[sview] = []
             lend_frame_pinned: mutable bool = false
-            return false if not proof_resource_collect_call_regions_framed(state, functions, callee_index, mapped, &formal_regions, &actual_regions, &lend_frame_pinned, report)
+            return false if not proof_resource_collect_call_regions_framed(state, functions, callee_index, mapped, &formal_regions, &actual_regions, &lend_frame_pinned, report, true)
             return false if formal_regions.count != functions.region_param_counts[callee_index]
             for region_index in 0..<actual_regions.count |region_index, actual_regions, state|:
                 return false if actual_regions[region_index] == "" or not proof_resource_region_is_active(state, actual_regions[region_index])
@@ -1154,10 +1163,19 @@ extend ElisaProof:
                 kind: sview = proof_resource_call_argument_kind(argument, state, report)
                 return false if kind != "value" and kind != "reference" and kind != "borrow"
                 # A fresh `new[r]` actual has a lifetime the callee controls; it is already ruled
-                # out by the argument kind. A region value reaching a formal with no declared
-                # lifetime would need the callee's own trace to place.
+                # out by the argument kind. A region value reaching a formal that declares no
+                # lifetime is a capability the callee cannot name: with no lifetime parameter to
+                # bind it to it can neither allocate into that region nor return anything from it,
+                # and a lend already requires the callee to return no reference and no region. That
+                # holds for a *lent* place, whose region liveness both sides still check as an
+                # ordinary borrow; a by-value formal receives a copy whose nested region values the
+                # callee could keep, so the refusal stands there.
                 formal_region: sview = proof_resource_function_parameter_region(functions, callee_index, parameter_index)
-                return false if formal_region == "" and proof_resource_expr_contains_region_value(argument, state)
+                return false if formal_region == "" and not reference_formal and proof_resource_expr_contains_region_value(argument, state)
+                # ...and only when the callee declares no lifetime at all. A callee that has one
+                # can name regions, so an unannotated formal carrying a *different* region could be
+                # mixed with them; `examples/rejected_region_lend_calls.elisa` pins that refusal.
+                return false if formal_region == "" and functions.region_param_counts[callee_index] > 0 and proof_resource_expr_contains_region_value(argument, state)
                 lent_places.push(proof_resource_empty_place())
                 lent_known.push(false)
                 lent_exclusive.push(exclusive_formal)
@@ -1252,7 +1270,7 @@ extend ElisaProof:
             lend_formal_regions: mutable darray[sview] = []
             lend_actual_regions: mutable darray[sview] = []
             lend_frame_pinned: mutable bool = false
-            return false if not proof_resource_collect_call_regions_framed(state, functions, callee_index, mapped, &lend_formal_regions, &lend_actual_regions, &lend_frame_pinned, report)
+            return false if not proof_resource_collect_call_regions_framed(state, functions, callee_index, mapped, &lend_formal_regions, &lend_actual_regions, &lend_frame_pinned, report, true)
             for region_index in 0..<lend_formal_regions.count |region_index, lend_formal_regions, lend_actual_regions, report|:
                 region_child: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-region", "param", 0, 0, 0, 0, 0, 0, lend_formal_regions[region_index], lend_actual_regions[region_index])
                 report.kernel_children.push(region_child)

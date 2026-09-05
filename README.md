@@ -528,6 +528,13 @@ receiving the lifetime is a place the caller holds outright, a live unmoved bind
 and that some actual receives it. See `examples/frame_lifetime.elisa` and
 `examples/rejected_frame_lifetime.elisa`.
 
+A lend may carry a region-owned actual into a formal that declares no lifetime, but only when the
+callee declares no lifetime at all: such a callee can name no region, so it can neither allocate
+into it nor return anything from it, while the reference's own liveness is still checked as an
+ordinary borrow. A callee that has a lifetime parameter, and the summary path in every case, still
+require the lifetime to be declared. See `examples/unnamed_lifetime_lend.elisa` and
+`examples/rejected_unnamed_lifetime_lend.elisa`.
+
 Unknown expressions and opaque calls remain unproven; unresolved call results are made opaque in
 the symbolic environment rather than being reused as facts. The compiler semantic pass is run with its
 strongest built-in refinement/invariant mode, but the custom kernel still has no SMT backend,

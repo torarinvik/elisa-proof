@@ -1041,6 +1041,44 @@ their lifetimes are carried by ordinary reference parameters. Whatever that reas
 measured yet, and the next attempt on this gap should start by measuring it rather than by
 extending a rule.
 
+## Added: lending a region the callee cannot name
+
+The confined-lend rule refused a region-owned actual reaching a formal that declares no lifetime,
+in two places at once — once while collecting the call's lifetimes and once in the lend rule
+itself. That made a region-allocated value unusable at any summary-less callee without a lifetime
+parameter, and it is what actually accounted for the region-opaque bulk. The previous entry said
+the cause had not been measured; it has been now.
+
+The measurement is the method worth keeping. Instrumenting each `return false` in the lend rule to
+emit a distinctly named finding, then counting them over `examples/kernel_replay_standalone.elisa`,
+gave a first-failing-gate histogram: the region collector accounted for 237 refusals and nothing
+else came close. Relaxing that gate alone changed nothing, because the refusal simply moved to the
+*same rule restated* inside the lend gate, 159 refusals — which the second peel found. Refusals
+peel; one histogram is not a diagnosis.
+
+The relaxation is narrow. A region-owned actual may reach a formal with no declared lifetime only
+when the callee declares **no lifetime at all**: such a callee can name no region, so it can
+neither allocate into that region nor return anything from it, and a lend already requires it to
+return no reference and no region. The reference's own liveness is still checked on both sides as
+an ordinary borrow. A callee that *does* have a lifetime parameter can name regions, so an
+unannotated formal carrying a different one could be mixed with them —
+`examples/rejected_region_lend_calls.elisa` pins that refusal, and the first version of this change
+broke it, which is how the boundary was found. The summary path is untouched: there the callee's
+own trace is what places such an actual, so the refusal stands.
+
+On the kernel's own source `region-call-opaque` moved from 252 to 107 and `borrow-call-opaque` from
+204 to 59, failing obligations from 1992 to 1706, proven 897 to 901, with replay gaps unchanged at
+zero and `trusted_assumptions` still empty.
+
+Coverage. `examples/unnamed_lifetime_lend.elisa` lends a region-allocated value both shared and
+exclusively to callees that export no summary, and requires every resource goal proven with no
+`region-call-opaque` or `borrow-call-opaque` finding; undoing the relaxation drops both callers.
+`examples/rejected_unnamed_lifetime_lend.elisa` gives the same shape a callee that *does* export a
+summary and requires it still refused. Not covered: the by-value half of the rule — a formal
+receiving a copy whose nested region values the callee could keep — is retained by construction but
+has no fixture, because a by-value actual carrying a region is rejected earlier by the argument-kind
+gate before this rule sees it.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

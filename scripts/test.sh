@@ -110,7 +110,7 @@ if [[ "$nested_region_destroy_compiler_status" -eq 0 ]]; then
     printf 'proof test matrix failed: compiler accepted nested destruction/reopening of an inherited region\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/kernel_replay_standalone.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["proven"] >= 890; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; declarations = {declaration["name"] for declaration in report["declaration_details"] if declaration["kind"] == "function" and declaration["verified"]}; required = {"proof_kernel_replay_node_at", "proof_kernel_replay_bool_at", "proof_kernel_replay_bool_set", "proof_kernel_replay_child_at", "proof_kernel_replay_child_range_valid", "proof_kernel_replay_scalar_kind", "proof_kernel_replay_arena_shape_valid", "proof_kernel_replay_arena_child_kind_valid", "proof_kernel_replay_model_value_at", "proof_kernel_replay_difference_query"}; assert required <= declarations; assert not any(f["kind"] == "contract-expression-unsupported" and "unsigned local" in f["message"] for f in report["findings"]); assert report["trust"]["trusted_assumptions"] == []'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/kernel_replay_standalone.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["proven"] >= 895; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; declarations = {declaration["name"] for declaration in report["declaration_details"] if declaration["kind"] == "function" and declaration["verified"]}; required = {"proof_kernel_replay_node_at", "proof_kernel_replay_bool_at", "proof_kernel_replay_bool_set", "proof_kernel_replay_child_at", "proof_kernel_replay_child_range_valid", "proof_kernel_replay_scalar_kind", "proof_kernel_replay_arena_shape_valid", "proof_kernel_replay_arena_child_kind_valid", "proof_kernel_replay_model_value_at", "proof_kernel_replay_difference_query"}; assert required <= declarations; assert not any(f["kind"] == "contract-expression-unsupported" and "unsigned local" in f["message"] for f in report["findings"]); assert report["trust"]["trusted_assumptions"] == []'
 kernel_replay_standalone_probe_status=${PIPESTATUS[1]}
 if [[ "$kernel_replay_standalone_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: standalone replay audit has certificate gaps\n' >&2
@@ -1654,6 +1654,27 @@ rejected_frame_lifetime_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_frame_lifetime_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a lifetime was pinned to a frame that vouches for nothing\n' >&2
+    exit 1
+fi
+
+# A region-owned actual reaching a formal that declares no lifetime is a capability the callee
+# cannot name, so a *lend* may carry it; the callee's own trace is what places it on the summary
+# path, where the refusal stands.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/unnamed_lifetime_lend.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; resource = {goal["name"]: goal["proven"] for goal in report["goals"] if goal["rule"] == "resource-safety"}; assert resource.get("lends_region_value") is True; assert resource.get("lends_region_value_exclusively") is True; kinds = {finding["kind"] for finding in report["findings"]}; assert "region-call-opaque" not in kinds; assert "borrow-call-opaque" not in kinds'
+unnamed_lifetime_status=${PIPESTATUS[1]}
+set -e
+if [[ "$unnamed_lifetime_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: lending a region-owned actual to an unnamed lifetime\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_unnamed_lifetime_lend.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "lends_region_value_to_summary") in findings'
+rejected_unnamed_lifetime_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_unnamed_lifetime_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: the summary path admitted an unnamed lifetime\n' >&2
     exit 1
 fi
 

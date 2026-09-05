@@ -217,6 +217,8 @@ run_probe product_sign examples/product_sign.elisa 0
 run_probe rejected_product_sign examples/rejected_product_sign.elisa 1
 run_probe frame_lifetime examples/frame_lifetime.elisa 0
 run_probe rejected_frame_lifetime examples/rejected_frame_lifetime.elisa 1
+run_probe unnamed_lifetime_lend examples/unnamed_lifetime_lend.elisa 1
+run_probe rejected_unnamed_lifetime_lend examples/rejected_unnamed_lifetime_lend.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -631,6 +633,33 @@ if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or 
 if any(node["kind"] == "resource-call-region" and node["secondary_name"] == "@call-frame" for node in report["kernel"]["nodes"]):
     raise SystemExit("dogfood failed: a lifetime was pinned to a frame that vouches for nothing")
 print("dogfood frame_lifetime: a caller's frame pins a lifetime only for a place it holds outright")
+PY
+
+# The lend rule may carry a region-owned actual into a formal that declares no lifetime; the
+# summary path may not. Both verdicts must replay.
+python3 - "$REPORT_DIR/unnamed_lifetime_lend.json" "$REPORT_DIR/rejected_unnamed_lifetime_lend.json" <<'PY'
+import json
+import sys
+
+lent, summarised = sys.argv[1:]
+with open(lent, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: unnamed-lifetime lend did not replay cleanly")
+resource = {goal["name"]: goal["proven"] for goal in report["goals"] if goal["rule"] == "resource-safety"}
+for name in ("lends_region_value", "lends_region_value_exclusively"):
+    if resource.get(name) is not True:
+        raise SystemExit("dogfood failed: %s was not admitted as a lend" % name)
+kinds = {finding["kind"] for finding in report["findings"]}
+if "region-call-opaque" in kinds or "borrow-call-opaque" in kinds:
+    raise SystemExit("dogfood failed: an unnamed-lifetime lend was still reported opaque")
+with open(summarised, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: summary-path boundary fixture did not fail cleanly")
+if not any(finding["kind"] == "region-call-opaque" for finding in report["findings"]):
+    raise SystemExit("dogfood failed: the summary path admitted an unnamed lifetime")
+print("dogfood unnamed_lifetime_lend: a lend may carry a region the callee cannot name; a summary may not")
 PY
 
 # The rendered proof must agree with the report for *every* goal, not a sampled one: `qed` appears
