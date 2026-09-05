@@ -929,6 +929,136 @@ extend ElisaProof:
                 _:
                     return Ast::Expr.Invalid
 
+        # Summary instantiation is simultaneous: a callee contract `f(first, second)` called
+        # as `f(second, first)` must produce the caller expression with those two values swapped,
+        # not apply the first replacement and then rewrite inside the value introduced by it.
+        # The main checker already has this property through its array substitution helper. Keep
+        # an independent replay implementation here so the certificate validator checks the
+        # same semantics without sharing the producer's implementation.
+        def proof_replay_substitution_would_capture(binder: sview, names: darray[sview]&, values: darray[Ast::Expr]&) -> bool:
+            for index in 0..<values.count |index, names, values, binder|:
+                return true if index < names.count and names[index] != binder and names[index] != "" and proof_expr_mentions_name(values[index], binder)
+            return false
+
+        def proof_replay_substitute_many[@r](expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&) -> Ast::Expr @r:
+            match expression:
+                Ast::Expr.Invalid or Ast::Expr.Absent or Ast::Expr.IntLit(_) or Ast::Expr.FloatLit(_) or Ast::Expr.StringLit(_) or Ast::Expr.CharLit(_) or Ast::Expr.BoolLit(_) or Ast::Expr.ShorthandMember(_, _):
+                    return expression
+                Ast::Expr.Ident(expression_name, _):
+                    index: mutable usize = names.count
+                    while index > 0 |index, names, values|:
+                        index <- index - 1
+                        if index < values.count and names[index] == expression_name:
+                            match values[index]:
+                                Ast::Expr.Absent:
+                                    return expression
+                                _:
+                                    return values[index]
+                    return expression
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_replay_substitute_many(inner, names, values), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_replay_substitute_many(operand, names, values), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_replay_substitute_many(left, names, values), operator, proof_replay_substitute_many(right, names, values), position)
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for argument in arguments |substituted, names, values|:
+                        substituted.push(proof_replay_substitute_many(argument, names, values))
+                    return Ast::Expr.Call(proof_replay_substitute_many(callee, names, values), substituted, argument_names, position)
+                Ast::Expr.Field(object, field, position):
+                    substituted_object: Ast::Expr = proof_replay_substitute_many(object, names, values)
+                    match substituted_object:
+                        Ast::Expr.Construct(_, fields, _):
+                            for initializer in fields |field, names, values|:
+                                return proof_replay_substitute_many(initializer.value, names, values) if initializer.name == field
+                        Ast::Expr.RecordUpdate(base, fields, _):
+                            for initializer in fields |field, names, values|:
+                                return proof_replay_substitute_many(initializer.value, names, values) if initializer.name == field
+                            return Ast::Expr.Field(proof_replay_substitute_many(base, names, values), field, position)
+                        _:
+                            pass
+                    return Ast::Expr.Field(substituted_object, field, position)
+                Ast::Expr.Scope(base, member, position):
+                    return Ast::Expr.Scope(proof_replay_substitute_many(base, names, values), member, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_replay_substitute_many(object, names, values), proof_replay_substitute_many(index, names, values), position)
+                Ast::Expr.Slice(object, low, high, position):
+                    return Ast::Expr.Slice(proof_replay_substitute_many(object, names, values), proof_replay_substitute_many(low, names, values), proof_replay_substitute_many(high, names, values), position)
+                Ast::Expr.IndexN(object, arguments, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for argument in arguments |substituted, names, values|:
+                        substituted.push(proof_replay_substitute_many(argument, names, values))
+                    return Ast::Expr.IndexN(proof_replay_substitute_many(object, names, values), substituted, position)
+                Ast::Expr.Move(operand, position):
+                    return Ast::Expr.Move(proof_replay_substitute_many(operand, names, values), position)
+                Ast::Expr.RegionNew(operand, region, position):
+                    return Ast::Expr.RegionNew(proof_replay_substitute_many(operand, names, values), region, position)
+                Ast::Expr.Array(elements, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for element in elements |substituted, names, values|:
+                        substituted.push(proof_replay_substitute_many(element, names, values))
+                    return Ast::Expr.Array(substituted, position)
+                Ast::Expr.Tuple(elements, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for element in elements |substituted, names, values|:
+                        substituted.push(proof_replay_substitute_many(element, names, values))
+                    return Ast::Expr.Tuple(substituted, position)
+                Ast::Expr.SetLit(elements, position):
+                    substituted: mutable darray[Ast::Expr] @r = []
+                    for element in elements |substituted, names, values|:
+                        substituted.push(proof_replay_substitute_many(element, names, values))
+                    return Ast::Expr.SetLit(substituted, position)
+                Ast::Expr.DictLit(entries, position):
+                    substituted: mutable darray[Ast::DictEntry] @r = []
+                    for entry in entries |substituted, names, values|:
+                        substituted.push(Ast::DictEntry{key: proof_replay_substitute_many(entry.key, names, values), value: proof_replay_substitute_many(entry.value, names, values)})
+                    return Ast::Expr.DictLit(substituted, position)
+                Ast::Expr.Construct(type_expression, fields, position):
+                    substituted: mutable darray[Ast::FieldInit] @r = []
+                    for field in fields |substituted, names, values|:
+                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute_many(field.value, names, values)})
+                    return Ast::Expr.Construct(type_expression, substituted, position)
+                Ast::Expr.RecordUpdate(base, fields, position):
+                    substituted: mutable darray[Ast::FieldInit] @r = []
+                    for field in fields |substituted, names, values|:
+                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute_many(field.value, names, values)})
+                    return Ast::Expr.RecordUpdate(proof_replay_substitute_many(base, names, values), substituted, position)
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    return Ast::Expr.If(proof_replay_substitute_many(condition, names, values), proof_replay_substitute_many(then_expression, names, values), proof_replay_substitute_many(else_expression, names, values), position)
+                Ast::Expr.GetElse(guarded, _, _):
+                    return proof_replay_substitute_many(guarded, names, values)
+                Ast::Expr.Comprehension(variable, iterable, condition, body, position):
+                    return Ast::Expr.Invalid if proof_replay_substitution_would_capture(variable, names, values)
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    shadow_names.push(variable)
+                    shadow_values.push(Ast::Expr.Ident(variable, position))
+                    return Ast::Expr.Comprehension(variable, proof_replay_substitute_many(iterable, names, values), proof_replay_substitute_many(condition, shadow_names, shadow_values), proof_replay_substitute_many(body, shadow_names, shadow_values), position)
+                Ast::Expr.Refinement(base, predicate, position):
+                    return Ast::Expr.Refinement(proof_replay_substitute_many(base, names, values), proof_replay_substitute_many(predicate, names, values), position)
+                Ast::Expr.Block(statements, block_value, captures, position):
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    substituted_statements: mutable darray[Ast::Stmt] @r = []
+                    for statement in statements |shadow_names, shadow_values, substituted_statements|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
+                                return Ast::Expr.Invalid if proof_replay_substitution_would_capture(local_name, shadow_names, shadow_values)
+                                substituted_initializer: Ast::Expr = proof_replay_substitute_many(initializer, shadow_names, shadow_values)
+                                substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
+                                shadow_names.push(local_name)
+                                shadow_values.push(Ast::Expr.Ident(local_name, statement_position))
+                            _:
+                                return Ast::Expr.Invalid
+                    return Ast::Expr.Block(substituted_statements, proof_replay_substitute_many(block_value, shadow_names, shadow_values), captures, position)
+                _:
+                    return Ast::Expr.Invalid
+
         def proof_replay_quantifier_values(kind: sview, facts: darray[Ast::Expr]&, body: Ast::Expr, binder: sview, values: darray[Ast::Expr]&) -> bool:
             return false if values.count == 0 and kind == "exists"
             return false if values.count > 65536
@@ -943,8 +1073,9 @@ extend ElisaProof:
             return false if entries.count == 0 and kind == "exists"
             return false if entries.count > 32768
             for entry in entries |entry, facts, body, key_binder, value_binder, kind|:
-                key_instance: Ast::Expr = proof_replay_substitute(body, key_binder, entry.key)
-                instance: Ast::Expr = proof_replay_substitute(key_instance, value_binder, entry.value)
+                substitution_names: darray[sview] = [key_binder, value_binder]
+                substitution_values: darray[Ast::Expr] = [entry.key, entry.value]
+                instance: Ast::Expr = proof_replay_substitute_many(body, substitution_names, substitution_values)
                 proven: bool = proof_replay_goal_depth(facts, instance, 0)
                 return false if kind == "forall" and not proven
                 return true if kind == "exists" and proven
@@ -1161,11 +1292,15 @@ extend ElisaProof:
             return false if theorem.ensures_start > report.theorem_ensures.count or theorem.ensures_count > report.theorem_ensures.count - theorem.ensures_start
             return false if trace.summary_bindings_count != theorem.parameters_count or trace.summary_requires_count != theorem.requires_count or trace.summary_ensure_index >= theorem.ensures_count
             instance: mutable Ast::Expr = report.theorem_ensures[theorem.ensures_start + trace.summary_ensure_index]
-            for index in 0..<theorem.parameters_count |index, theorem, report, trace, instance|:
+            substitution_names: mutable darray[sview] = []
+            substitution_values: mutable darray[Ast::Expr] = []
+            for index in 0..<theorem.parameters_count |index, theorem, report, trace, substitution_names, substitution_values|:
                 expected_name: sview = report.theorem_parameters[theorem.parameters_start + index]
                 actual_name: sview = report.fact_trace_summary_names[trace.summary_bindings_start + index]
                 return false if expected_name != actual_name
-                instance <- proof_replay_substitute(instance, expected_name, report.fact_trace_summary_values[trace.summary_bindings_start + index])
+                substitution_names.push(expected_name)
+                substitution_values.push(report.fact_trace_summary_values[trace.summary_bindings_start + index])
+            instance <- proof_replay_substitute_many(instance, substitution_names, substitution_values)
             return false if not proof_replay_expr_equal(instance, trace.expression)
             for require_index in 0..<theorem.requires_count |require_index, theorem, report, trace, dependency_stack, dependency_depth|:
                 required: mutable Ast::Expr = report.theorem_requires[theorem.requires_start + require_index]
@@ -1203,13 +1338,17 @@ extend ElisaProof:
                 return false if report.fact_trace_summary_names[trace.summary_bindings_start + index] != report.executable_parameters[summary.parameters_start + index]
             return false if report.fact_trace_summary_names[trace.summary_bindings_start + summary.parameters_count] != "result"
             instance: mutable Ast::Expr = report.executable_ensures[summary.ensures_start + trace.summary_ensure_index]
-            for index in 0..<trace.summary_bindings_count |index, report, trace, instance|:
-                instance <- proof_replay_substitute(instance, report.fact_trace_summary_names[trace.summary_bindings_start + index], report.fact_trace_summary_values[trace.summary_bindings_start + index])
+            parameter_names: mutable darray[sview] = []
+            parameter_values: mutable darray[Ast::Expr] = []
+            for index in 0..<summary.parameters_count |index, summary, report, trace, parameter_names, parameter_values|:
+                parameter_names.push(report.fact_trace_summary_names[trace.summary_bindings_start + index])
+                parameter_values.push(report.fact_trace_summary_values[trace.summary_bindings_start + index])
+            instance <- proof_replay_substitute_many(instance, parameter_names, parameter_values)
+            instance <- proof_replay_substitute(instance, "result", report.fact_trace_summary_values[trace.summary_bindings_start + summary.parameters_count])
             return false if not proof_replay_expr_equal(instance, trace.expression)
             for require_index in 0..<summary.requires_count |require_index, summary, report, trace, dependency_stack, dependency_depth|:
                 required: mutable Ast::Expr = report.executable_requires[summary.requires_start + require_index]
-                for parameter_index in 0..<summary.parameters_count |parameter_index, summary, report, trace, required|:
-                    required <- proof_replay_substitute(required, report.executable_parameters[summary.parameters_start + parameter_index], report.fact_trace_summary_values[trace.summary_bindings_start + parameter_index])
+                required <- proof_replay_substitute_many(required, parameter_names, parameter_values)
                 goal_id: usize = report.fact_trace_summary_require_goal_ids[trace.summary_requires_start + require_index]
                 return false if goal_id >= report.goal_attempts.count
                 attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
