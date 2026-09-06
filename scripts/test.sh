@@ -1752,6 +1752,26 @@ if [[ "$rejected_shared_extent_global_status" -ne 0 ]]; then
     exit 1
 fi
 
+# Structural transitivity reaches goals the difference engine cannot name, and reaches nothing
+# built out of a user comparison.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/comparison_chain.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["verification_state"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["findings"] == []; assert report["trust"]["trusted_assumptions"] == []'
+comparison_chain_status=${PIPESTATUS[1]}
+set -e
+if [[ "$comparison_chain_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a comparison chain did not reach an unnameable bound\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_comparison_chain.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert goals[("struct_order_is_not_transitive", "goal")] is False; assert goals[("struct_non_strict_order_is_not_transitive", "goal")] is False; assert goals[("non_strict_chain_gives_no_strict_goal", "goal")] is False; assert goals[("wrong_direction_chain", "goal")] is False'
+rejected_comparison_chain_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_comparison_chain_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a comparison chain claimed a user comparison or a direction it does not have\n' >&2
+    exit 1
+fi
+
 # A skippable call, an unrecognized shape, and a guard whose fact names the same impure call as a
 # later obligation are each refused; two calls of one impure function are not one term.
 set +e

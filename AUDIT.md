@@ -1228,6 +1228,52 @@ whose postcondition the caller cannot use because the callee exports no verified
 index obligations sit behind the 348 `function-summary-unverified`, which is the next thing to
 attack, and neither of these two changes could have moved them.
 
+## The difference engine can only chain what it can name
+
+Measured, again with probes rather than by reading. `a < b`, `b <= c` over three names proves.
+Change `c` to `items.count` and it does not. Neither does `a < b`, `b <= items.count` written as an
+index guard, which is the single most common bounds shape in this codebase. The cause is one line
+of representation: `ProofAffine.base` is an `sview` naming one bare identifier, so a field place is
+not an atom, and the whole difference-bound engine is blind to `items.count`. Its kernel counterpart
+names atoms the same way, so the blindness is symmetric.
+
+Widening the atom to a field place is the principled fix and it is a large one: `ProofBound`,
+`ProofDifference`, `ProofAffine`, the difference matrix and every one of their kernel mirrors are
+keyed by a single name. Structural transitivity gets the same goals with none of that. Two recorded
+comparisons are chained through a middle term matched by the structural equality the kernel already
+replays, so the rule needs no atom at all: `proof_comparison_chain_goal` in the producer and
+`proof_kernel_replay_comparison_chain` in the kernel, added at the matching position in the two
+goal dispatchers.
+
+The rule is not "transitivity". `<` and `<=` are the primitive integer order only for witnessed
+scalars; on a struct they dispatch to a user comparison that is under no transitivity law, exactly
+as reflexivity and symmetry are. All three terms therefore carry the same scalar-witness guard the
+neighbouring comparison rules use, and the composition is explicit: strict if either step is strict,
+and a non-strict chain never discharges a strict goal.
+
+Cost, which was a genuine mistake first time round. The first version scanned the facts once per
+candidate and put the witness check in the outer loop; on this corpus, where a frame carries
+hundreds of facts and most comparison goals have a side the engine cannot name, that made
+`kernel_replay_standalone` unrunnable -- twelve consecutive attempts against four for the build
+without it. Two changes fixed it: the goal is skipped outright when both sides *are* nameable atoms
+(the difference engine already had its chance), and each endpoint's candidate facts are collected in
+one pass and then paired, rather than rescanning every fact per candidate. Both candidate sets are
+capped, and a spent cap refuses, which can only lose a proof. After that, `linear.elisa` runs in
+750ms against a 692ms baseline and `resources.elisa` in 17s against 17s.
+
+Coverage. `examples/comparison_chain.elisa` proves four goals the difference engine cannot reach,
+including the index-guard shape, and requires zero replay gaps and no trusted assumptions -- the
+kernel rule is what makes those certificates replay.
+`examples/rejected_comparison_chain.elisa` pins the four ways this could be wrong: a strict and a
+non-strict chain over a struct, a non-strict chain offered against a strict goal, and two facts
+pointing the same way through the middle term rather than through the chain.
+
+What it bought on the kernel's own source: 1168/2458 against 1160/2430. The 28 extra obligations are
+this change's own code being checked; the pre-existing corpus barely moves. The shape that dominates
+there is `left.children_start + index < children.count`, and a sum of two non-constant atoms is not
+affine in this representation at all -- a second, separate gap that structural transitivity does not
+touch.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

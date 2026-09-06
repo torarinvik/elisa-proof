@@ -2631,6 +2631,100 @@ module ElisaProofKernelReplay:
         def proof_kernel_replay_primitive_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, right: usize) -> bool:
             return proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, left, 0) and proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, right, 0)
 
+        # Replay of the producer's structural transitivity. The difference engine here names its
+        # atoms exactly as the producer's does, so a premise over a field term is invisible to it
+        # for the same reason; chaining through a structurally equal middle term needs no atom.
+        #
+        # `<` and `<=` are the primitive integer order only for witnessed scalars -- on a struct
+        # they are a user comparison under no transitivity law -- so all three terms are put
+        # through the same witness guard the neighbouring rules use.
+        const PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET: usize = 32
+
+        def proof_kernel_replay_chain_ascending(operator: sview) -> bool:
+            return operator == "<" or operator == "<="
+
+        def proof_kernel_replay_chain_discharges(first: sview, second: sview, goal: sview) -> bool:
+            return true if first == "<" or second == "<"
+            return goal == "<="
+
+        # One ascending step out of a fact. With `from_lower` the fact must read
+        # `anchor op middle`, otherwise `middle op anchor`. A `>`/`>=` fact is the same step
+        # written backwards and is accepted mirrored.
+        def proof_kernel_replay_chain_step(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, fact: usize, anchor: usize, from_lower: bool) -> (known: bool, middle: usize, operator: sview):
+            unknown: (known: bool, middle: usize, operator: sview) = (false, 0, "")
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+            return unknown if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return unknown if node.kind != "binary"
+            return unknown if not proof_kernel_replay_arena_shape_valid(node)
+            ascending: mutable bool = proof_kernel_replay_chain_ascending(node.operator)
+            normalized: mutable sview = node.operator
+            low: mutable usize = node.left
+            high: mutable usize = node.right
+            if node.operator == ">":
+                ascending <- true
+                normalized <- "<"
+                low <- node.right
+                high <- node.left
+            if node.operator == ">=":
+                ascending <- true
+                normalized <- "<="
+                low <- node.right
+                high <- node.left
+            return unknown if not ascending
+            if from_lower:
+                return (true, high, normalized) if proof_kernel_replay_expr_equal(nodes, children, low, anchor, 0)
+                return unknown
+            return (true, low, normalized) if proof_kernel_replay_expr_equal(nodes, children, high, anchor, 0)
+            return unknown
+
+        def proof_kernel_replay_comparison_chain(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
+            goal_operator: mutable sview = operator
+            lower: mutable usize = left
+            upper: mutable usize = right
+            if operator == ">":
+                goal_operator <- "<"
+                lower <- right
+                upper <- left
+            if operator == ">=":
+                goal_operator <- "<="
+                lower <- right
+                upper <- left
+            return false if not proof_kernel_replay_chain_ascending(goal_operator)
+            # Mirrors the producer's filter: the difference engine above already chains every
+            # goal whose two sides it can name, so this tier only ever answers for one it cannot.
+            lower_affine: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, lower, 0)
+            upper_affine: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, upper, 0)
+            return false if lower_affine.known and lower_affine.base != "" and upper_affine.known and upper_affine.base != ""
+            return false if not proof_kernel_replay_primitive_comparison(nodes, children, facts, lower, upper)
+            # Same shape and the same cap as the producer: one pass per endpoint to collect the
+            # facts that actually mention it, then pair only those. A spent cap refuses, which
+            # only ever loses a replay -- it can never admit one.
+            lower_middles: mutable darray[usize] = []
+            lower_operators: mutable darray[sview] = []
+            for fact in facts |nodes, children, lower, lower_middles, lower_operators|:
+                break if lower_middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
+                step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, lower, true)
+                continue if not step.known
+                lower_middles.push(step.middle)
+                lower_operators.push(step.operator)
+            return false if lower_middles.count == 0
+            upper_middles: mutable darray[usize] = []
+            upper_operators: mutable darray[sview] = []
+            for fact in facts |nodes, children, upper, upper_middles, upper_operators|:
+                break if upper_middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
+                step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, upper, false)
+                continue if not step.known
+                upper_middles.push(step.middle)
+                upper_operators.push(step.operator)
+            return false if upper_middles.count == 0
+            for first_index in 0..<lower_middles.count |nodes, children, facts, goal_operator, lower_middles, lower_operators, upper_middles, upper_operators|:
+                for second_index in 0..<upper_middles.count |nodes, children, facts, goal_operator, first_index, lower_middles, lower_operators, upper_middles, upper_operators|:
+                    continue if not proof_kernel_replay_chain_discharges(lower_operators[first_index], upper_operators[second_index], goal_operator)
+                    continue if not proof_kernel_replay_expr_equal(nodes, children, lower_middles[first_index], upper_middles[second_index], 0)
+                    return true if proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, lower_middles[first_index], 0)
+            return false
+
         def proof_kernel_replay_congruence_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, exhausted: mutable bool&) -> bool:
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
             return false if not located.known
@@ -2825,6 +2919,7 @@ module ElisaProofKernelReplay:
                 return true if proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right) and proof_kernel_replay_affine_comparison(nodes, node.left, node.operator, node.right, facts)
                 return true if proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right) and proof_kernel_replay_difference_comparison(nodes, node.left, node.operator, node.right, facts)
                 return true if proof_kernel_replay_product_sign(nodes, children, facts, node.left, node.operator, node.right)
+                return true if proof_kernel_replay_comparison_chain(nodes, children, facts, node.left, node.operator, node.right)
                 # Ground congruence closure is the last equality tier. It runs only after the
                 # fixed-width safety guards above have rejected every wrapping premise and goal,
                 # so equal operands of different widths can never be propagated through a former.

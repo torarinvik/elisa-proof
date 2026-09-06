@@ -1291,6 +1291,117 @@ extend ElisaProof:
                 return proof_product_sign_fact(product.left, TokenKind.Lt, facts) and proof_product_sign_fact(product.right, TokenKind.Gt, facts)
             return false
 
+        # Chain two recorded comparisons through a shared middle term. The difference engine
+        # already does this, but only over atoms it can name: its affine form carries one bare
+        # identifier, so `limit <= items.count` is invisible to it and `index < limit` cannot
+        # reach `index < items.count`. Structural transitivity needs no atom at all -- the middle
+        # term is matched with the same structural equality the kernel replays.
+        #
+        # The whole rule rests on `<` and `<=` being the primitive integer order, which they are
+        # only for witnessed scalars: on a struct they are a user `__lt__`/`__le__` under no
+        # transitivity law. Every one of the three terms therefore needs its own scalar witness,
+        # exactly as the other comparison rules require.
+        const PROOF_CHAIN_CANDIDATE_BUDGET: usize = 32
+
+        def proof_chain_strict(operator: TokenKind) -> bool:
+            return operator == TokenKind.Lt
+
+        def proof_chain_ascending(operator: TokenKind) -> bool:
+            return operator == TokenKind.Lt or operator == TokenKind.LtEq
+
+        # `a op1 b` and `b op2 c` compose to a strict `a < c` when either step is strict, and to
+        # `a <= c` otherwise. A strict conclusion also discharges a non-strict goal; a non-strict
+        # one never discharges a strict goal.
+        def proof_chain_discharges(first: TokenKind, second: TokenKind, goal: TokenKind) -> bool:
+            strict: bool = proof_chain_strict(first) or proof_chain_strict(second)
+            return true if strict
+            return goal == TokenKind.LtEq
+
+        def proof_comparison_chain_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            goal_operator: mutable TokenKind = operator
+            lower: mutable Ast::Expr = left
+            upper: mutable Ast::Expr = right
+            if operator == TokenKind.Gt:
+                goal_operator <- TokenKind.Lt
+                lower <- right
+                upper <- left
+            if operator == TokenKind.GtEq:
+                goal_operator <- TokenKind.LtEq
+                lower <- right
+                upper <- left
+            return false if not proof_chain_ascending(goal_operator)
+            # The difference engine already chains everything it can name, so this tier is only
+            # ever the answer for a goal it could not represent. Requiring one unnameable side
+            # keeps the search off every ordinary comparison instead of running it twice.
+            lower_affine: ProofAffine = proof_affine_expression(lower)
+            upper_affine: ProofAffine = proof_affine_expression(upper)
+            return false if lower_affine.known and lower_affine.base != "" and upper_affine.known and upper_affine.base != ""
+            return false if not proof_scalar_term_witnessed(lower, facts, 0) or not proof_scalar_term_witnessed(upper, facts, 0)
+            # Every enclosing goal that reaches this tier pays for this search, and a frame in
+            # this codebase carries hundreds of facts. Collect the two candidate sets in one pass
+            # each and pair only those, rather than rescanning every fact per candidate: the sets
+            # are the facts that actually mention an endpoint, which is a handful. Both are capped,
+            # and a spent cap only ever loses a proof.
+            lower_middles: mutable darray[Ast::Expr] = []
+            lower_operators: mutable darray[TokenKind] = []
+            for fact in facts |facts, lower, lower_middles, lower_operators|:
+                break if lower_middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
+                step: (known: bool, middle: Ast::Expr, operator: TokenKind) = proof_chain_step(fact, lower, true, facts)
+                continue if not step.known
+                lower_middles.push(step.middle)
+                lower_operators.push(step.operator)
+            return false if lower_middles.count == 0
+            upper_middles: mutable darray[Ast::Expr] = []
+            upper_operators: mutable darray[TokenKind] = []
+            for fact in facts |facts, upper, upper_middles, upper_operators|:
+                break if upper_middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
+                step: (known: bool, middle: Ast::Expr, operator: TokenKind) = proof_chain_step(fact, upper, false, facts)
+                continue if not step.known
+                upper_middles.push(step.middle)
+                upper_operators.push(step.operator)
+            return false if upper_middles.count == 0
+            for first_index in 0..<lower_middles.count |facts, goal_operator, lower_middles, lower_operators, upper_middles, upper_operators|:
+                for second_index in 0..<upper_middles.count |facts, goal_operator, first_index, lower_middles, lower_operators, upper_middles, upper_operators|:
+                    continue if not proof_chain_discharges(lower_operators[first_index], upper_operators[second_index], goal_operator)
+                    continue if not proof_expr_equal(lower_middles[first_index], upper_middles[second_index])
+                    # The witness is the expensive check and the last one standing, so it runs
+                    # only for a pair that would otherwise discharge the goal.
+                    return true if proof_scalar_term_witnessed(lower_middles[first_index], facts, 0)
+            return false
+
+        # Read one ascending step out of a fact. With `from_lower` the fact must read
+        # `anchor op middle`; otherwise it must read `middle op anchor`. A `>`/`>=` fact is the
+        # same step written backwards and is accepted in its mirrored form.
+        def proof_chain_step(fact: Ast::Expr, anchor: Ast::Expr, from_lower: bool, facts: darray[Ast::Expr]&) -> (known: bool, middle: Ast::Expr, operator: TokenKind):
+            unknown: (known: bool, middle: Ast::Expr, operator: TokenKind) = (false, Ast::Expr.Invalid, TokenKind.Lt)
+            match fact:
+                Ast::Expr.Paren(inner, _):
+                    return proof_chain_step(inner, anchor, from_lower, facts)
+                Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
+                    ascending: mutable bool = proof_chain_ascending(fact_operator)
+                    normalized: mutable TokenKind = fact_operator
+                    low: mutable Ast::Expr = fact_left
+                    high: mutable Ast::Expr = fact_right
+                    if fact_operator == TokenKind.Gt:
+                        ascending <- true
+                        normalized <- TokenKind.Lt
+                        low <- fact_right
+                        high <- fact_left
+                    if fact_operator == TokenKind.GtEq:
+                        ascending <- true
+                        normalized <- TokenKind.LtEq
+                        low <- fact_right
+                        high <- fact_left
+                    return unknown if not ascending
+                    if from_lower:
+                        return (true, high, normalized) if proof_expr_equal(low, anchor)
+                        return unknown
+                    return (true, low, normalized) if proof_expr_equal(high, anchor)
+                    return unknown
+                _:
+                    pass
+            return unknown
+
         def proof_linear_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             return true if proof_primitive_comparison(left, right, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
             left_name: sview = proof_ident_name(left)
@@ -1829,6 +1940,7 @@ extend ElisaProof:
                         return true if proof_fact_proves_comparison_negation(left, operator, right, facts)
                         return true if proof_linear_goal(left, operator, right, facts)
                         return true if proof_product_sign_goal(left, operator, right, facts)
+                        return true if proof_comparison_chain_goal(left, operator, right, facts)
                         # Congruence is the last equality tier and runs only after the
                         # fixed-width safety guards above rejected every wrapping premise/goal.
                         return proof_congruence_goal(facts, goal, annotations, exhausted) if operator == TokenKind.EqEq

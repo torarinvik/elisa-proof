@@ -226,6 +226,8 @@ run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa
 run_probe loop_condition_facts examples/loop_condition_facts.elisa 1
 run_probe rejected_loop_condition_facts examples/rejected_loop_condition_facts.elisa 1
 run_probe rejected_shared_extent_global examples/rejected_shared_extent_global.elisa 1
+run_probe comparison_chain examples/comparison_chain.elisa 0
+run_probe rejected_comparison_chain examples/rejected_comparison_chain.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -762,6 +764,32 @@ goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"
 if goals.get(("borrowed_extent_must_not_survive", "index-upper")) is not False:
     raise SystemExit("dogfood failed: a shared extent survived a mutable global write")
 print("dogfood loop_condition_facts: the body assumes its condition and a shared extent, and nothing more")
+PY
+
+# Structural transitivity is a producer rule with a kernel counterpart: every chained goal must
+# replay, and no chain may be built out of a user comparison.
+python3 - "$REPORT_DIR/comparison_chain.json" "$REPORT_DIR/rejected_comparison_chain.json" <<'PY'
+import json
+import sys
+
+chained, refused = sys.argv[1:]
+with open(chained, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["verification_state"] != "proved" or report["findings"]:
+    raise SystemExit("dogfood failed: comparison chain fixture did not prove clean")
+if report["replay"]["gaps"] or report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a chained goal did not replay in the kernel")
+if report["trust"]["trusted_assumptions"]:
+    raise SystemExit("dogfood failed: a chained goal rested on a trusted assumption")
+with open(refused, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: comparison chain boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for entry in (("struct_order_is_not_transitive", "goal"), ("struct_non_strict_order_is_not_transitive", "goal"), ("non_strict_chain_gives_no_strict_goal", "goal"), ("wrong_direction_chain", "goal")):
+    if goals.get(entry) is not False:
+        raise SystemExit("dogfood failed: %s was chained without the order to do it" % (entry,))
+print("dogfood comparison_chain: transitivity replays in the kernel and is refused for a user comparison")
 PY
 
 # The rendered proof must agree with the report for *every* goal, not a sampled one: `qed` appears
