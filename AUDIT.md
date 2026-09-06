@@ -1274,6 +1274,82 @@ there is `left.children_start + index < children.count`, and a sum of two non-co
 affine in this representation at all -- a second, separate gap that structural transitivity does not
 touch.
 
+## A summary withheld for a construct that was only over-approximated
+
+An earlier entry named the target: `function-summary-unverified`, the largest finding class on the
+kernel's own source -- 348 when it was named, 356 at this change's parent -- with the unproven index
+obligations sitting behind it. That count is an amplifier rather than a population: a function that
+exports no summary costs every caller its own summary in turn, so the question was only what puts
+the first function into the set.
+
+`proof_report_function_is_clean` answers it. *Any* finding against a function withheld its summary.
+That is right for an unproven obligation, and right for `expression-unsupported`, which marks the
+path itself unusable rather than merely widened. It is wrong for the two findings that record a
+construct whose effect was *over-approximated*: `captured-block-unsupported` and
+`loop-invariant-missing`. In both the checker forgets the symbolic values the construct can reach
+and clears the facts over them, and only then goes on -- reasoning from a state weaker than any real
+execution. A contract derived that way is exactly as sound as one derived by a function with no
+findings at all.
+
+Both are unconditional, which is what makes the rule safe to state at the level of a finding kind.
+The captured-block branch emits the finding and calls `proof_forget_captured_values` /
+`proof_clear_facts_keep_type_bounds` in the same straight line. An invariant-less loop initialises
+`loop_exit_valid` to `invariants.count > 0 and ...` and nothing later sets it true, so the
+`proof_forget_values` arm at the loop's exit is the only one it can take.
+
+The summary becomes usable, and the declaration's `verified` flag is exactly what gates that, so the
+flag stays true -- that is the change. What separates a fully checked contract from one derived
+through an over-approximated construct is the `verification_reason`: `contract-verified-widened-state`
+rather than `verified`. A reader who needs that distinction has to read the reason, not the flag --
+and since a caller proving from such a summary is in the same position, the marking travels the call
+graph. Components are scheduled in dependency order,
+so every callee outside the current component already carries its final reason when it is read. The
+file's `verification_state` is unaffected: `proof_finding_status` already ranks both kinds
+`unknown`, which is a floor no amount of summary reuse can lift.
+
+`proof_replay_dependency_is_checked` applies the same filter, so the kernel and the scheduler agree
+about which dependencies are usable. It is restated there rather than shared:
+`proof_replay_finding_only_widens_state` is the only reason `replay.elisa` would have called into
+`check.elisa` at all, and replay's value is that it is a second opinion on the report rather than
+the same code run twice. The two conditions that carry the weight in that function are untouched --
+every goal the dependency recorded must be proven and every certificate it owns must replay.
+
+Lemmas keep the strict rule, under `proof_report_lemma_is_clean`. A lemma body admits only
+contracts, proof calls and assert-by blocks, so `proof_check_lemma_purity` already emits
+`lemma-impure` beside any loop or captured block; the point is that the lemma scheduler should not
+rest on that coincidence, because the relaxation is justified by a havocked execution state and a
+lemma has none.
+
+Coverage. `examples/widened_state_summary.elisa` requires a `for` and a `while` loop's callers to
+import a summary they previously lost, requires the reason to be `contract-verified-widened-state`
+three levels up the call graph, requires a sibling that reaches only checked code to keep `verified`
+so the two reasons stay distinguishable, and requires the file to stay `unknown` with no open goal.
+
+`examples/rejected_widened_state_summary.elisa` pins the boundary from five directions. An unproven
+`ensure` beside a loop keeps its summary withheld -- that `ensure` *is* the summary. An unproven
+index does the same, since the body may not reach its return. A summary also carries a frame, and
+the frame is what lets a caller's disjoint facts survive the call, so a `changes` frame the captured
+block writes outside of, and a `preserves` the captured block writes over, are both still refused --
+`frame-write-outside` and `frame-preserve-write` are raised from inside the very construct the rule
+forgives. The last is the pair the whole change rests on: an unframed widened callee is now
+accepted, and the call boundary alone has to take its caller's stale fact away. It does.
+
+What it bought on the kernel's own source: 1167/2456 against 1168/2458. Eleven functions move from
+unverified to `contract-verified-widened-state`, and `function-summary-unverified` falls from 356 to
+345. Ten of the freed call sites do not turn into proofs -- they reach the next real obstacle
+instead, which is the point. `borrow-call-summary-unsupported` rises 80 to 85, `region-call-opaque`
+107 to 111, and `call-requires-unproven` 15 to 16, the last because a caller that can finally see a
+callee's `requires` now has to discharge it: a summary is imported with its obligations, not instead
+of them. The one obligation lost is `proof_kernel_replay_effect_report`'s single `resource-safety`
+goal. With its callee's summary available the call is modelled as a real borrowing call whose
+summary this checker cannot express, so it refuses rather than emitting the goal. That function was
+unverified before and after, so nothing that was claimed has become unclaimed -- the checker stopped
+proving a goal it now declines to reach.
+
+Both suites pass. `scripts/dogfood.sh`'s `replay_standalone` probe was run separately from the rest
+of that suite, and did execute twice: both runs exit 1, the two reports are byte-identical, and the
+report carries 1167 certificates all replayed with no gaps under independent kernel replay.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

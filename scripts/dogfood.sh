@@ -228,6 +228,8 @@ run_probe rejected_loop_condition_facts examples/rejected_loop_condition_facts.e
 run_probe rejected_shared_extent_global examples/rejected_shared_extent_global.elisa 1
 run_probe comparison_chain examples/comparison_chain.elisa 0
 run_probe rejected_comparison_chain examples/rejected_comparison_chain.elisa 1
+run_probe widened_state_summary examples/widened_state_summary.elisa 1
+run_probe rejected_widened_state_summary examples/rejected_widened_state_summary.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -790,6 +792,60 @@ for entry in (("struct_order_is_not_transitive", "goal"), ("struct_non_strict_or
     if goals.get(entry) is not False:
         raise SystemExit("dogfood failed: %s was chained without the order to do it" % (entry,))
 print("dogfood comparison_chain: transitivity replays in the kernel and is refused for a user comparison")
+PY
+
+# A summary that rests on an over-approximated construct must still replay, must still be refused
+# for any unproven obligation, and must never be reported as plain "verified".
+python3 - "$REPORT_DIR/widened_state_summary.json" "$REPORT_DIR/rejected_widened_state_summary.json" <<'PY'
+import json
+import sys
+
+widened, refused = sys.argv[1:]
+with open(widened, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: widened-state summary fixture did not replay cleanly")
+if report["verification_state"] != "unknown":
+    raise SystemExit("dogfood failed: a widened-state contract was reported as more than unknown")
+if [goal for goal in report["goals"] if not goal["proven"]]:
+    raise SystemExit("dogfood failed: the widened-state summary fixture left a goal open")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for entry in (("caller_may_use_that_summary", "goal"), ("caller_may_use_that_one_too", "goal"), ("two_levels_above", "goal")):
+    if entry not in proven:
+        raise SystemExit("dogfood failed: %s could not use a widened-state summary" % (entry,))
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("loop_is_havocked_but_the_contract_holds", "caller_may_use_that_summary", "missing_invariant_is_havocked_too", "caller_may_use_that_one_too", "two_levels_above"):
+    if reasons.get(owner) != "contract-verified-widened-state":
+        raise SystemExit("dogfood failed: %s was not reported as contract-verified-widened-state" % owner)
+# The marking follows the call graph and stops there: a function that reaches only fully checked
+# code still says "verified", so the two reasons stay distinguishable.
+for owner in ("untouched_leaf", "untouched_caller"):
+    if reasons.get(owner) != "verified":
+        raise SystemExit("dogfood failed: %s lost a plain verified contract to the widened marking" % owner)
+with open(refused, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: widened-state boundary fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+for entry in (("caller_gets_no_summary", "function-summary-unverified"), ("caller_gets_no_summary_from_an_unproven_index", "function-summary-unverified"), ("caller_gets_no_frame", "function-summary-unverified")):
+    if entry not in owners:
+        raise SystemExit("dogfood failed: %s imported a summary from an unproven callee" % (entry,))
+# A summary carries a frame as well as an `ensure`, so both halves have to be checked through the
+# construct the widening rule forgives.
+for entry in (("writes_outside_its_frame", "frame-write-outside"), ("breaks_what_it_preserves", "frame-preserve-write")):
+    if entry not in owners:
+        raise SystemExit("dogfood failed: %s exported a frame its captured block breaks" % (entry,))
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("unproven_ensure_with_a_loop", "unproven_index", "writes_outside_its_frame", "breaks_what_it_preserves"):
+    if reasons.get(owner) in ("verified", "contract-verified-widened-state"):
+        raise SystemExit("dogfood failed: %s was reported as carrying a usable contract" % owner)
+# The pair the whole relaxation rests on: an unframed widened callee is accepted, and the call
+# boundary still has to take its caller's stale fact away.
+if reasons.get("unframed_widened") != "contract-verified-widened-state":
+    raise SystemExit("dogfood failed: an unframed widened callee did not export its summary")
+if ("caller_must_lose_the_fact", "ensure-unproven") not in owners:
+    raise SystemExit("dogfood failed: a fact survived a call into a widened callee that overwrites it")
+print("dogfood widened_state_summary: an over-approximated construct keeps the summary, an unproven obligation does not")
 PY
 
 # The rendered proof must agree with the report for *every* goal, not a sampled one: `qed` appears

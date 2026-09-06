@@ -1772,6 +1772,25 @@ if [[ "$rejected_comparison_chain_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A callee whose only findings widen its own state still exports its summary, and says so.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/widened_state_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; kinds = {f["kind"] for f in report["findings"]}; assert kinds == {"captured-block-unsupported", "loop-invariant-missing"}; assert not [g for g in report["goals"] if not g["proven"]]; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert ("caller_may_use_that_summary", "goal") in proven; assert ("caller_may_use_that_one_too", "goal") in proven; assert ("two_levels_above", "goal") in proven; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["loop_is_havocked_but_the_contract_holds"] == "contract-verified-widened-state"; assert reasons["caller_may_use_that_summary"] == "contract-verified-widened-state"; assert reasons["two_levels_above"] == "contract-verified-widened-state"; assert reasons["untouched_leaf"] == "verified"; assert reasons["untouched_caller"] == "verified"'
+widened_state_summary_status=${PIPESTATUS[1]}
+set -e
+if [[ "$widened_state_summary_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a widened-state contract did not export its summary, or did not say so\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_widened_state_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; assert ("caller_gets_no_summary", "function-summary-unverified") in owners; assert ("caller_gets_no_summary_from_an_unproven_index", "function-summary-unverified") in owners; assert ("writes_outside_its_frame", "frame-write-outside") in owners; assert ("caller_gets_no_frame", "function-summary-unverified") in owners; assert ("breaks_what_it_preserves", "frame-preserve-write") in owners; assert ("caller_must_lose_the_fact", "ensure-unproven") in owners; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; usable = ("verified", "contract-verified-widened-state"); assert reasons["unproven_ensure_with_a_loop"] not in usable; assert reasons["unproven_index"] not in usable; assert reasons["writes_outside_its_frame"] not in usable; assert reasons["breaks_what_it_preserves"] not in usable; assert reasons["unframed_widened"] == "contract-verified-widened-state"; assert reasons["caller_must_lose_the_fact"] not in usable'
+rejected_widened_state_summary_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_widened_state_summary_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an unproven obligation still exported a summary\n' >&2
+    exit 1
+fi
+
 # A skippable call, an unrecognized shape, and a guard whose fact names the same impure call as a
 # later obligation are each refused; two calls of one impure function are not one term.
 set +e

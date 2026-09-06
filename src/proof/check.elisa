@@ -6852,10 +6852,40 @@ extend ElisaProof:
         # source. Establish summary availability from the callee body itself. The scheduler
         # checks dependency-ready functions once, checks recursive SCCs with provisional
         # intra-component summaries, and permanently withholds the whole component on failure.
+        # A finding that only records a construct whose effect was over-approximated is not a
+        # gap in the function's own contract derivation: the checker went on to reason from the
+        # havocked state, which is weaker than any real execution. A summary resting on such a
+        # derivation is therefore as sound as one from a function with no findings at all, and
+        # suppressing it costs every caller its own summary in turn -- the single largest
+        # amplifier in this corpus.
+        #
+        # Everything else stays disqualifying, including `expression-unsupported`, which marks the
+        # path itself unusable rather than merely widened, and every unproven obligation of this
+        # function -- an unproven `ensure` above all, since that *is* the summary.
+        def proof_finding_only_widens_state(kind: sview) -> bool:
+            return true if kind == "captured-block-unsupported"
+            return kind == "loop-invariant-missing"
+
+        # A lemma has no state to widen. Its body may contain only contracts, proof calls and
+        # assert-by blocks, so neither construct above can appear in one without `lemma-impure`
+        # beside it -- but the lemma scheduler is kept on the strict rule rather than left to rest
+        # on that coincidence. The relaxation is justified by a havocked execution state, and a
+        # lemma has none.
+        def proof_report_lemma_is_clean(report: ProofReport&, lemma_name: sview) -> bool:
+            for finding in report.findings:
+                return false if finding.name == lemma_name
+            return true
+
         def proof_report_function_is_clean(report: ProofReport&, function_name: sview) -> bool:
             for finding in report.findings:
-                return false if finding.name == function_name
+                continue if finding.name != function_name
+                return false if not proof_finding_only_widens_state(finding.kind)
             return true
+
+        def proof_report_function_has_widened_finding(report: ProofReport&, function_name: sview) -> bool:
+            for finding in report.findings:
+                return true if finding.name == function_name and proof_finding_only_widens_state(finding.kind)
+            return false
 
         def proof_report_function_has_finding(report: ProofReport&, function_name: sview, kind: sview) -> bool:
             for finding in report.findings:
@@ -6956,7 +6986,7 @@ extend ElisaProof:
                     lemmas.verification_reasons[member] <- "body-missing" if not found
                 component_ok: mutable bool = true
                 for member in component |member, component, lemmas, report, component_ok|:
-                    component_ok <- false if not proof_report_function_is_clean(report, lemmas.names[member])
+                    component_ok <- false if not proof_report_lemma_is_clean(report, lemmas.names[member])
                 for member in component |member, component, lemmas, component_ok, report|:
                     lemmas.verified[member] <- component_ok
                     lemmas.verification_reasons[member] <- "verified" if component_ok
@@ -7004,9 +7034,31 @@ extend ElisaProof:
                 component_ok: mutable bool = true
                 for member in component |member, component, functions, report, component_ok|:
                     component_ok <- false if not proof_report_function_is_clean(report, functions.names[member])
-                for member in component |member, component, functions, component_ok|:
+                # A caller whose proof rests on a widened-state summary is in the same position as
+                # the callee, so the marking travels the call graph. Components are scheduled in
+                # dependency order, so every callee outside this component already carries its
+                # final reason by the time it is read here.
+                component_widened: mutable bool = false
+                for member in component |member, component, functions, report, component_widened|:
+                    component_widened <- true if proof_report_function_has_widened_finding(report, functions.names[member])
+                    call_start: usize = functions.call_starts[member]
+                    call_count: usize = functions.call_counts[member]
+                    continue if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start
+                    for offset in 0..<call_count |offset, call_start, functions, member, component_widened|:
+                        called: sview = functions.all_calls[call_start + offset]
+                        continue if called == "__opaque_call__"
+                        called_index: usize = proof_function_index(functions, called)
+                        continue if called_index >= functions.verification_reasons.count
+                        continue if proof_functions_same_recursive_component(functions, member, called_index)
+                        component_widened <- true if functions.verification_reasons[called_index] == "contract-verified-widened-state"
+                for member in component |member, component, functions, component_ok, component_widened|:
                     functions.verified[member] <- component_ok
-                    functions.verification_reasons[member] <- "verified" if component_ok
+                    # `verified` is what gates summary availability, so it stays true here -- that
+                    # is the whole change. What separates a fully checked contract from one derived
+                    # through an over-approximated construct is the reason, not the flag, so a
+                    # reader who needs that distinction has to read the reason.
+                    functions.verification_reasons[member] <- "verified" if component_ok and not component_widened
+                    functions.verification_reasons[member] <- "contract-verified-widened-state" if component_ok and component_widened
                     functions.verification_reasons[member] <- "recursive-component-unverified" if not component_ok and functions.verification_reasons[member] == "pending"
                     functions.verification_reasons[member] <- "body-unverified" if not component_ok and not functions.recursive[member]
                     functions.verification_reasons[member] <- "dependency-unverified" if not component_ok and (proof_report_function_has_finding(report, functions.names[member], "function-summary-unverified") or proof_report_function_has_finding(report, functions.names[member], "lemma-summary-unverified"))
