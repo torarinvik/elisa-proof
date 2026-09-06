@@ -234,6 +234,8 @@ run_probe region_statement_call examples/region_statement_call.elisa 0
 run_probe rejected_region_statement_call examples/rejected_region_statement_call.elisa 1
 run_probe region_lifetime_free_callee examples/region_lifetime_free_callee.elisa 0
 run_probe rejected_region_lifetime_free_callee examples/rejected_region_lifetime_free_callee.elisa 1
+run_probe short_circuit_guard examples/short_circuit_guard.elisa 0
+run_probe rejected_short_circuit_guard examples/rejected_short_circuit_guard.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -915,6 +917,34 @@ if ("a_lifetime_free_callee_may_not_return_a_reference", "region-call-opaque") n
 if ("overlapping_mutable_actuals", "borrow-call-alias") not in owners:
     raise SystemExit("dogfood failed: two overlapping mutable actuals were admitted")
 print("dogfood region_lifetime_free_callee: a lifetime-free callee may borrow a region, not keep it")
+PY
+
+python3 - "$REPORT_DIR/short_circuit_guard.json" "$REPORT_DIR/rejected_short_circuit_guard.json" <<'PY'
+import json
+import sys
+
+guarded, unguarded = sys.argv[1:]
+with open(guarded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: short-circuit guard fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a short-circuit guard certificate was left unreplayed")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("guarded_and", "guarded_or", "guarded_if", "guarded_early_return", "guards_two_reads"):
+    if (owner, "index-upper") not in proven:
+        raise SystemExit("dogfood failed: %s did not discharge its bound from its own guard" % owner)
+with open(unguarded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: short-circuit guard boundary fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+for owner in ("off_by_one", "guards_another_name", "or_runs_when_the_guard_fails", "guard_comes_after", "guard_has_a_call"):
+    if (owner, "index-upper-unproven") not in owners:
+        raise SystemExit("dogfood failed: %s bounded something its guard does not guard" % owner)
+if any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"]):
+    raise SystemExit("dogfood failed: a misplaced guard discharged an index bound")
+print("dogfood short_circuit_guard: a guard bounds the operand it guards and nothing else")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

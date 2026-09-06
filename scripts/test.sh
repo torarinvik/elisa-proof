@@ -1832,6 +1832,25 @@ if [[ "$rejected_region_lifetime_free_callee_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A short-circuit guard bounds the operand it guards, in the position that needs no statement.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/short_circuit_guard.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "index-upper") in proven for owner in ("guarded_and", "guarded_or", "guarded_if", "guarded_early_return", "guards_two_reads"))'
+short_circuit_guard_status=${PIPESTATUS[1]}
+set -e
+if [[ "$short_circuit_guard_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a short-circuit guard did not bound the operand it guards\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_short_circuit_guard.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; refused = ("off_by_one", "guards_another_name", "or_runs_when_the_guard_fails", "guard_comes_after", "guard_has_a_call"); assert all((owner, "index-upper-unproven") in owners for owner in refused); assert {kind for _, kind in owners} == {"index-upper-unproven"}; assert not any(g["proven"] and g["rule"] == "index-upper" for g in report["goals"])'
+rejected_short_circuit_guard_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_short_circuit_guard_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a guard bounded something it does not guard\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

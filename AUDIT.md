@@ -2157,6 +2157,58 @@ Not covered: the 29 `region-call-opaque` that remain are the other two messages 
 a call with no converged lifetime summary at all, and one requiring an exact verified region
 summary. `borrow-call-opaque` at 59 is untouched.
 
+## A short-circuit guard did not bound the operand it guards
+
+### What was wrong
+
+```
+def guarded(xs: darray[i64]&, index: usize) -> bool:
+    return index < xs.count and xs[index] > 0
+```
+
+`index-upper-unproven`. The same guard as an `if`, and the same guard as an early return, both
+discharged the bound; only the spelling that needs no statement did not. That spelling is how a
+bounds check is written when the answer is one expression, and it is how every accessor over a
+parallel state array in the kernel's own resource replay is written:
+`slot < state.binding_region_live.count and state.binding_region_live[slot]`, nine such functions,
+each unverified on its own account and each dragging its callers into `dependency-unverified`
+behind it.
+
+### What changed
+
+`proof_check_index_safety_value` reads the operator of a `Binary` node. For `and` it checks the
+right operand against the facts plus the left; for `or`, plus the negation of the left. That is the
+evaluation rule stated as a fact: the right operand of `and` runs only when the left is true, of
+`or` only when it is false. The condition is recorded through `proof_add_branch_condition_facts`,
+the same path an `if` uses, so its provenance is a `branch-condition` and its certificates replay
+without a new rule in the kernel.
+
+The guard has to be a stable term for the reason a branch condition does. A call in it is a second
+call by the time the fact is used, so a guard carrying one -- or a `move`, or an unsupported form
+-- records nothing and the right operand is checked against the facts that already stood.
+
+### Fixtures
+
+`examples/short_circuit_guard.elisa` requires the bound from an `and` guard, from an `or` guard,
+from the `if` and early-return spellings that already worked, and from a conjunction that guards
+two reads through a recorded count equality.
+`examples/rejected_short_circuit_guard.elisa` pins the five ways a guard can fail to be one: `<=`
+where `<` is needed, a guard over a different name, a guard on the *left* of `or` where the right
+operand runs exactly when it fails, a guard written after the read, and a guard naming a call. No
+`index-upper` goal in that fixture may be proven at all.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: proven rises from 1218 to 1282 and failures fall
+from 793 to 712, with `index-upper-unproven` 221 to 157 and `function-summary-unverified` 337 to
+320. Six functions move from `body-unverified` to `verified`, taking the root-cause set from 15 to
+9. All 1282 certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
+
+Not covered: the same guard does not yet bound anything but an index -- a `requires` on a call in
+the right operand is still checked against the outer facts -- and the rule reads only the
+immediate left operand, so a guard two conjuncts away reaches the read only because
+`proof_add_branch_condition_facts` splits a conjunction into its components.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
