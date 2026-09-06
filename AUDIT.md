@@ -1438,6 +1438,190 @@ still forgets the frame; and the alias set is flow-insensitive, so a local whose
 taken anywhere in the body is forgotten at every call in that body, including calls that cannot see
 it.
 
+## A call on the right of a short-circuit refused the whole statement
+
+### What was wrong
+
+`proof_runtime_calls_evaluate_unconditionally` admitted an impure call in a branch condition only
+where its evaluation was unconditional, and on the right of `and` / `or` only a pure call. The
+return, statement, declaration and assignment value gate (`proof_runtime_expression_calls_allowed`)
+was narrower still: the value had to *be* the call, or be pure. Anything else was
+`expression-unsupported`, which does not merely go unproven -- it sets `flow.valid <- false` and
+invalidates the enclosing path, so every obligation after it in that function is lost and the
+function exports no summary.
+
+The shape this refused is the kernel's dominant guard: `return false if not a(...) or not b(...)`
+and `if a(...) and b(...):` with `b` taking a reference. 115 of the corpus's `expression-unsupported`
+findings were this, and the earlier measurement of that finding kind had already identified them
+as the largest remaining source.
+
+### What changed
+
+A call on the right of a short-circuit may or may not have run. The sound model is: check its
+frames and preconditions as if it ran, apply its havoc as if it ran, and keep nothing that only
+the run could establish. `proof_check_frame_calls_in_expression`'s `Binary` arm now does exactly
+that for an impure right operand: it walks the operand against the current facts, then keeps of
+the result only the facts that were already standing before the walk -- the ones the havoc could
+not remove, which are true whether or not the call happened. A callee's `ensure` is dropped, since
+it holds only on the path where the callee executed and this is not a branch that records one.
+The precondition is checked against the facts without the left operand, which is stricter than
+the run needs and therefore sound.
+
+`proof_runtime_calls_evaluate_unconditionally` admits such an operand when it would be admitted
+unconditionally, and a new `proof_runtime_value_calls_allowed` applies that rule to the value
+forms whose handlers already walk every call in evaluation order and substitute the value only
+afterwards. The `while`, `for`, `match`, `assert` and `assert ... by:` forms keep the root-only
+rule: `rejected_assert_nested_call` records why an assertion cannot be widened this way, and the
+others have not been audited for a nested call.
+
+Is the dropped `ensure` ever needed for soundness rather than precision? No -- a callee's result
+ensure is a statement about the call term, which the enclosing `and` / `or` only consults on the
+path where the call ran, and its frame's state facts are already removed by the havoc. Keeping
+the ensure would be sound too; dropping it is simply the conservative side, and the adversarial
+fixture below shows that nothing is lost that a false claim could exploit either way.
+
+### A gap this exposed, and its fix
+
+With the guard shape admitted, the corpus produced its first replay gap: one certificate the
+kernel refused. The goal was a trivial `0 <= 127` precondition inside `if a(nodes, p.root, 0) and
+a(nodes, t.root, 0):`. The binding `t` came from an unverified callee, so its value was the opaque
+placeholder the body checker keeps after a failed substitution. The whole condition therefore
+mentioned the placeholder, `proof_kernel_expression_supported` rejected it, and it was omitted
+from the certificate as designed -- but `proof_add_branch_condition_facts` had also derived the
+admissible conjunct `a(nodes, p.root, 0)` *from that condition as its premise*. The conjunct
+entered the certificate, its trace named a premise replay could never validate, and the kernel
+gapped. `examples/rejected_branch_conjunct_placeholder.elisa`'s shape gaps on the previous
+binary with no call in the condition at all: the defect was latent, the new admission merely
+reached it.
+
+Two changes close it. `proof_add_branch_condition_facts` records each admissible conjunct of an
+inadmissible condition as a `branch-condition` fact in its own right: control reached this point
+through the condition, so each conjunct holds for exactly the reason the condition does, and the
+kernel validates a primitive branch fact by its arena alone. `proof_add_derived_fact_from` refuses
+any derivation whose premise the kernel cannot represent, so no other derived kind can repeat the
+mistake; the fact is simply unavailable, which is the conservative direction.
+
+### Fixtures
+
+`examples/short_circuit_call.elisa` proves the guard, declaration and return shapes with an impure
+callee on the right, and a caller that uses the returning shape's summary; the previous build
+refused all four functions. `examples/rejected_short_circuit_call.elisa` pins that a skipped call
+establishes nothing (`counter == 5` before, `result == 0` claimed: unproven through `and`, `or` and
+a guard), that its havoc is applied (`result == 5` claimed after a call that zeroes it: unproven),
+and that its precondition is still an obligation (`call-requires-unproven` on a call that may be
+skipped) -- five findings and nothing else.
+
+`examples/branch_conjunct_placeholder.elisa` needs the admissible conjunct to bound a depth and
+requires the goal to prove *and replay*; the previous build certifies it with a gap.
+`examples/rejected_branch_conjunct_placeholder.elisa` pins that the conjunct carrying the
+placeholder is recorded in no form and nothing is derived from the condition.
+
+All four are asserted in `scripts/test.sh` and repeated against `scripts/dogfood.sh`'s reports.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`, measured on a build carrying only this change,
+against the previous commit's binary: proven moves from 1177/2456 to 1228/2395. The next entry
+takes those 1228/2395 as its own baseline; the combined figure for this commit is at its end. `expression-unsupported` falls from 115 to 11. Three functions
+change reason to `verified` (`collect_differences`, `proposition_shape`,
+`proposition_state_valid`); `function-summary-unverified` falls 345 to 332; the index rules gain
+28 lower and 22 upper bounds in bodies that were previously invalid paths. As before, ten of the
+freed call sites reach the next real obstacle instead of a proof: `borrow-call-summary-unsupported`
+85 to 96 and `region-call-opaque` 111 to 121, which is also where the three `resource-safety`
+goals went -- `difference_comparison`, `goal_report` and `quantifier_report` now see a real
+borrowing summary at a call the resource pass refuses, where before they saw an unverified callee;
+all three were unverified before and after. Replay gaps are 0 and `trusted_assumptions` is empty.
+
+Not covered: the same conditional treatment for the arms of a ternary and for a call under a
+`match` guard, both still refused; and the loop, match and assertion forms named above.
+
+## A loop body began every iteration with the values from before the loop
+
+### What was wrong
+
+A loop's body was checked against the state that reached the loop header, and that state was
+never invalidated for the assignments the body itself performs. The symbolic values of bindings
+the body writes, and every fact recorded about them, were live at the top of the body -- so the
+checker reasoned about the *first* iteration and reported the result as if it held for all of
+them.
+
+Three false proofs followed from that, all of them reproduced on the previous commit's binary and
+pinned in `examples/rejected_loop_entry_state.elisa`:
+
+* An entry value reached the body. `total = 0` before `while ...:` let the body prove `total < 10`,
+  which is the precondition of a call the body makes on every iteration. The obligation is
+  `call-requires-unproven` from the second iteration onwards; the checker discharged it from
+  `0 < 10`.
+* The same held for a loop with no capture list. That case matters because a capture list is not
+  what makes a loop able to write an outer binding: `elisac-stage1` compiles an uncaptured loop
+  whose body assigns an outer mutable binding, and compiles an assignment to a `for` binder.
+  Neither form may keep its entry value.
+* A false `invariant` was reported preserved. With `step = 0` live, `step + 1 <= 5` proves from
+  the entry value rather than from the invariant, so an invariant that no iteration preserves was
+  accepted, and everything downstream of it inherited the lie.
+
+The loop *binder* was already resymbolized. The bug was in everything else the body touches.
+
+### What changed
+
+`proof_forget_loop_entry` computes the set of names an iteration can write -- the names aliased
+anywhere in the body (`proof_collect_aliased_names`), the roots of every assignment in the body
+including those nested in inner blocks, branches, loops and match arms
+(`proof_collect_assignment_roots`), and the function's existing `report.aliased_names`. If any of
+those is the unbounded marker `*`, the whole frame is forgotten and only type bounds are kept.
+Otherwise each written name that is still in scope is passed to `proof_resymbolize_binding`, which
+gives it a fresh symbol and purges every value and fact that mentions it, and the type bounds are
+restored afterwards. A body that writes and aliases nothing keeps its entry state unchanged.
+
+It runs on every path that checks a loop body: the invariant-less `while`, the `while` with
+invariants, the termination pass, and both `for` paths. It runs *before* the loop's own entry
+facts are added, so the loop condition, the established invariants and the binder range are
+asserted over the forgotten state and survive -- an invariant is now proved by induction rather
+than from the values that happened to reach the header.
+
+Getting it in the right place needed one structural correction. The source forms
+`for x in xs |caps|:` and `while c |caps|:` do not parse as a loop with a capture list; they parse
+as a *block* that carries the captures and wraps the loop, so the block is the statement and the
+loop is inside it. Forgetting at block entry would therefore have run before the loop's facts were
+established, and the establishment obligation would have become unprovable. `proof_check_captured_block`
+now carries a `loop_entry` flag: the loop paths recognise the wrapper with
+`proof_single_captured_block` and ask it to forget, substitute the entry conditions and invariants
+over the fresh state, and propagate the body's breaks and continues back to the enclosing flow;
+a captured block in statement position asks it not to, and keeps the write-back over the capture
+list it had before.
+
+### Fixtures
+
+`examples/loop_entry_state.elisa` pins what still proves: a fact about a binding the body never
+writes survives the loop, the loop condition bounds the body, a sound bounded invariant is proved
+preserved, and the binder's range survives. `examples/rejected_loop_entry_state.elisa` pins the
+four refusals -- the entry value in a captured body, the entry value in an uncaptured body, the
+false invariant, and a `break` that must not make the exit condition available. The previous
+commit's binary proves the first three of those goals; this one refuses all four.
+
+### What it bought
+
+Correctness, at a measured cost. On `examples/kernel_replay_standalone.elisa`, against the
+build carrying only the previous entry's change: proven moves from 1228/2395 to 1210/2392.
+Sixteen goal sites are lost and twelve gained; the losses are index bounds in bodies that were
+being discharged from a length equality recorded before the loop, and the gains come from
+invariants that now hold over a fresh state instead of a stale one. Replay gaps are 0 and
+`trusted_assumptions` is empty.
+
+For the commit as a whole, against the previous commit's binary: proven moves from 1177/2456 to
+1210/2392, `expression-unsupported` 115 to 11, `function-summary-unverified` 345 to 333,
+`index-lower-unproven` 59 to 48, `index-upper-unproven` 209 to 222,
+`borrow-call-summary-unsupported` 85 to 95, `region-call-opaque` 111 to 120,
+`index-bounds-opaque` 2 to 0, and `captured-block-unsupported` unchanged at 141.
+
+Not covered: the lost index bounds are recoverable, but only by *proving* that an entry fact is
+loop-invariant rather than assuming it, which is a separate inference this checker does not yet
+perform -- the written set is a syntactic over-approximation and forgets facts about a name the
+body writes even when the fact is untouched by the write. A captured loop's post-loop state is
+still havocked over the whole capture list by the block write-back, so nothing the loop
+established survives it. An unsigned increment still cannot be proved bounded without a constant
+upper bound, so invariants over `usize` counters must state one.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

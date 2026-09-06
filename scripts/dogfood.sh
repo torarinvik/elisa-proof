@@ -225,6 +225,12 @@ run_probe uncaptured_binding examples/uncaptured_binding.elisa 1
 run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 1
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
+run_probe short_circuit_call examples/short_circuit_call.elisa 0
+run_probe rejected_short_circuit_call examples/rejected_short_circuit_call.elisa 1
+run_probe branch_conjunct_placeholder examples/branch_conjunct_placeholder.elisa 1
+run_probe rejected_branch_conjunct_placeholder examples/rejected_branch_conjunct_placeholder.elisa 1
+run_probe loop_entry_state examples/loop_entry_state.elisa 1
+run_probe rejected_loop_entry_state examples/rejected_loop_entry_state.elisa 1
 run_probe loop_condition_facts examples/loop_condition_facts.elisa 1
 run_probe rejected_loop_condition_facts examples/rejected_loop_condition_facts.elisa 1
 run_probe rejected_shared_extent_global examples/rejected_shared_extent_global.elisa 1
@@ -586,9 +592,12 @@ with open(rejected, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: condition-call boundary fixture did not fail cleanly")
 unsupported = {finding["name"] for finding in report["findings"] if finding["kind"] == "expression-unsupported"}
-for name in ("right_of_and", "right_of_or", "conditional_call", "literal_field_call"):
+for name in ("conditional_call", "literal_field_call"):
     if name not in unsupported:
         raise SystemExit("dogfood failed: %s was admitted as an unconditional call" % name)
+for name in ("right_of_and", "right_of_or"):
+    if name in unsupported:
+        raise SystemExit("dogfood failed: %s was refused instead of walked against a copy" % name)
 if any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"]):
     raise SystemExit("dogfood failed: a guard naming an impure call discharged an index bound")
 print("dogfood condition_call_positions: a condition call is modelled only where it certainly runs")
@@ -763,6 +772,87 @@ expected = {"referenced_value_must_not_survive", "value_over_a_referenced_bindin
 if owners != expected:
     raise SystemExit("dogfood failed: a rewritable binding survived the boundary: %s" % sorted(expected - owners))
 print("dogfood call_boundary_binding: a call and a join forget only what can be rewritten")
+PY
+
+# An impure call on the right of a short-circuit is modelled as a call that may have run: checked
+# and havocked as if it did, with nothing only the run establishes surviving.
+python3 - "$REPORT_DIR/short_circuit_call.json" "$REPORT_DIR/rejected_short_circuit_call.json" <<'PY'
+import json
+import sys
+
+kept, dropped = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["summary"]["semantic_errors"] or report["replay"]["gaps"] or report["findings"]:
+    raise SystemExit("dogfood failed: short-circuit fixture did not prove cleanly")
+verified = {declaration["name"] for declaration in report["declaration_details"] if declaration["kind"] == "function" and declaration["verified"]}
+required = {"guard_with_a_skippable_call", "declaration_with_a_skippable_call", "return_with_a_skippable_call", "caller_of_the_returning_shape"}
+if not required <= verified:
+    raise SystemExit("dogfood failed: a short-circuited call still invalidates its path: %s" % sorted(required - verified))
+with open(dropped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: rejected short-circuit fixture did not fail cleanly")
+kinds = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+expected = {("skipped_call_must_not_establish_and", "ensure-unproven"), ("skipped_call_must_not_establish_or", "ensure-unproven"), ("skipped_call_must_not_establish_a_guard", "ensure-unproven"), ("pre_call_value_must_not_survive", "ensure-unproven"), ("skipped_requires_is_still_checked", "call-requires-unproven")}
+if kinds != expected:
+    raise SystemExit("dogfood failed: unexpected verdicts around a skipped call: %s" % sorted(kinds ^ expected))
+print("dogfood short_circuit_call: a skipped call is havocked and checked but establishes nothing")
+PY
+
+# A conjunct beside a placeholder is a branch fact in its own right and replays; the conjunct
+# carrying the placeholder is recorded in no form, and nothing is derived from the condition.
+python3 - "$REPORT_DIR/branch_conjunct_placeholder.json" "$REPORT_DIR/rejected_branch_conjunct_placeholder.json" <<'PY'
+import json
+import sys
+
+kept, dropped = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"] or report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: placeholder conjunct fixture did not replay cleanly")
+goals = [goal for goal in report["goals"] if goal["name"] == "conjunct_beside_a_placeholder" and goal["rule"] == "goal"]
+if not goals or not all(goal["proven"] and goal["replay_status"] == "replayed" for goal in goals):
+    raise SystemExit("dogfood failed: a conjunct beside a placeholder did not prove and replay")
+if any(origin["kind"] == "branch-conjunct" for goal in goals for origin in goal["fact_origins"]):
+    raise SystemExit("dogfood failed: a conjunct was derived from an inadmissible condition")
+with open(dropped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: rejected placeholder fixture did not fail cleanly")
+goals = [goal for goal in report["goals"] if goal["name"] == "placeholder_conjunct_must_not_become_a_fact" and goal["rule"] == "goal"]
+if not goals or all(goal["proven"] for goal in goals) or any(origin["kind"] == "branch-conjunct" for goal in goals for origin in goal["fact_origins"]):
+    raise SystemExit("dogfood failed: a placeholder conjunct became a fact")
+print("dogfood branch_conjunct_placeholder: a conjunct beside a placeholder is a fact of its own, the placeholder is not")
+PY
+
+# A loop body is checked for an arbitrary iteration: a rewritten binding's entry value never
+# stands in for it, and what holds on every iteration is still known.
+python3 - "$REPORT_DIR/loop_entry_state.json" "$REPORT_DIR/rejected_loop_entry_state.json" <<'PY'
+import json
+import sys
+
+kept, dropped = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: loop entry fixture did not replay cleanly")
+goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]
+if not goals or not all(goal["proven"] for goal in goals):
+    raise SystemExit("dogfood failed: a loop body lost a fact that holds on every iteration: %s" % [goal["name"] for goal in goals if not goal["proven"]])
+with open(dropped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: rejected loop entry fixture did not fail cleanly")
+proven = {}
+for goal in report["goals"]:
+    if goal["rule"] == "goal":
+        proven.setdefault(goal["name"], []).append(goal["proven"])
+if proven["entry_value_must_not_reach_the_body"] != [False] or proven["entry_value_must_not_reach_an_uncaptured_body"] != [False]:
+    raise SystemExit("dogfood failed: a loop body used the entry value of a binding it rewrites")
+if False not in proven["false_invariant_must_not_be_preserved"] or all(proven["break_must_not_yield_the_exit_condition"]):
+    raise SystemExit("dogfood failed: a false invariant was preserved, or a break yielded the exit condition")
+print("dogfood loop_entry_state: a loop body sees an arbitrary iteration, never the entry values")
 PY
 
 # An invariant-less loop still assumes its own condition in the body, and a shared borrow keeps

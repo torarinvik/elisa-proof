@@ -928,7 +928,7 @@ rejected_fixed_array_bounds_status=$?
 rejected_slice_bounds_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_fixed_array_slice_bounds.elisa" >/dev/null
 rejected_fixed_array_slice_bounds_status=$?
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/captured_structural_accumulator.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "expression-unsupported" for finding in report["findings"]); assert not any(finding["kind"] == "structural-decreases-unproven" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/captured_structural_accumulator.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert {finding["kind"] for finding in report["findings"]} == {"captured-block-unsupported"}; assert not any(finding["kind"] == "structural-decreases-unproven" for finding in report["findings"]); assert all(goal["proven"] for goal in report["goals"] if goal["rule"] == "structural-safety"); assert report["replay"]["gaps"] == 0'
 captured_structural_accumulator_status=${PIPESTATUS[1]}
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_field_alias.elisa" >/dev/null
 rejected_field_alias_status=$?
@@ -1743,6 +1743,68 @@ if [[ "$rejected_call_boundary_binding_status" -ne 0 ]]; then
     exit 1
 fi
 
+# An impure call on the right of `and`/`or` may not run. It is checked and havocked as if it ran,
+# nothing only the run establishes survives, and the statement no longer invalidates its path.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/short_circuit_call.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == []; assert all(goal["proven"] for goal in report["goals"]); verified = {declaration["name"] for declaration in report["declaration_details"] if declaration["kind"] == "function" and declaration["verified"]}; assert {"guard_with_a_skippable_call", "declaration_with_a_skippable_call", "return_with_a_skippable_call", "caller_of_the_returning_shape"} <= verified'
+short_circuit_call_status=${PIPESTATUS[1]}
+set -e
+if [[ "$short_circuit_call_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a short-circuited impure call still invalidates its path\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_short_circuit_call.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; kinds = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert kinds == {("skipped_call_must_not_establish_and", "ensure-unproven"), ("skipped_call_must_not_establish_or", "ensure-unproven"), ("skipped_call_must_not_establish_a_guard", "ensure-unproven"), ("pre_call_value_must_not_survive", "ensure-unproven"), ("skipped_requires_is_still_checked", "call-requires-unproven")}; assert not any(finding["kind"] == "expression-unsupported" for finding in report["findings"]); goals = {goal["name"]: goal["proven"] for goal in report["goals"] if goal["rule"] == "goal" and goal["name"] != "reset"}; assert goals and not any(goals.values())'
+rejected_short_circuit_call_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_short_circuit_call_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a skipped call established something, or lost its precondition\n' >&2
+    exit 1
+fi
+
+# A branch condition carrying an opaque placeholder never enters a certificate. Its admissible
+# conjuncts are recorded as branch facts in their own right, so a goal that needs one both proves
+# and replays; the conjunct carrying the placeholder is not recorded in any form.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/branch_conjunct_placeholder.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; goals = [goal for goal in report["goals"] if goal["name"] == "conjunct_beside_a_placeholder" and goal["rule"] == "goal"]; assert goals and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in goals); assert any(origin["kind"] == "branch-condition" for goal in goals for origin in goal["fact_origins"]); assert not any(origin["kind"] == "branch-conjunct" for goal in goals for origin in goal["fact_origins"])'
+branch_conjunct_placeholder_status=${PIPESTATUS[1]}
+set -e
+if [[ "$branch_conjunct_placeholder_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a conjunct beside a placeholder did not prove and replay\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_branch_conjunct_placeholder.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {goal["line"]: goal for goal in report["goals"] if goal["name"] == "placeholder_conjunct_must_not_become_a_fact" and goal["rule"] == "goal"}; assert goals and any(not goal["proven"] for goal in goals.values()); assert not any(origin["kind"] == "branch-conjunct" for goal in goals.values() for origin in goal["fact_origins"]); assert ("placeholder_conjunct_must_not_become_a_fact", "ensure-unproven") in {(finding["name"], finding["kind"]) for finding in report["findings"]}'
+rejected_branch_conjunct_placeholder_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_branch_conjunct_placeholder_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a placeholder conjunct became a fact, or a derivation from an inadmissible premise survived\n' >&2
+    exit 1
+fi
+
+# A loop body is checked for an arbitrary iteration: every binding it may rewrite is opaque at
+# entry, and only the loop condition, the established invariants and the untouched bindings are
+# known inside. The entry value of a rewritten binding must not stand in for an iteration.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/loop_entry_state.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]; assert goals and all(goal["proven"] for goal in goals); names = {goal["name"] for goal in goals}; assert {"unwritten_binding_keeps_its_fact", "condition_bounds_the_body", "sound_invariant_is_preserved", "binder_range_survives"} <= names; assert sum(1 for goal in goals if goal["name"] == "sound_invariant_is_preserved") == 2; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported", "loop-invariant-missing"}'
+loop_entry_state_status=${PIPESTATUS[1]}
+set -e
+if [[ "$loop_entry_state_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a loop body lost a fact that holds on every iteration\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_loop_entry_state.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {}; [goals.setdefault(goal["name"], []).append(goal["proven"]) for goal in report["goals"] if goal["rule"] == "goal"]; assert goals["entry_value_must_not_reach_the_body"] == [False]; assert goals["entry_value_must_not_reach_an_uncaptured_body"] == [False]; assert False in goals["false_invariant_must_not_be_preserved"]; assert not all(goals["break_must_not_yield_the_exit_condition"]); owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("entry_value_must_not_reach_the_body", "call-requires-unproven") in owners; assert ("entry_value_must_not_reach_an_uncaptured_body", "call-requires-unproven") in owners; assert ("false_invariant_must_not_be_preserved", "invariant-not-preserved") in owners; assert ("break_must_not_yield_the_exit_condition", "ensure-unproven") in owners'
+rejected_loop_entry_state_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_loop_entry_state_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a loop body used the entry value of a binding it rewrites\n' >&2
+    exit 1
+fi
+
 # An invariant-less loop still runs its body only when the condition holds, and a shared borrow's
 # element count is stable across a call. Together these discharge the dominant loop shape here.
 set +e
@@ -1813,10 +1875,11 @@ if [[ "$rejected_widened_state_summary_status" -ne 0 ]]; then
     exit 1
 fi
 
-# A skippable call, an unrecognized shape, and a guard whose fact names the same impure call as a
-# later obligation are each refused; two calls of one impure function are not one term.
+# A ternary arm, an unrecognized shape, and a guard whose fact names the same impure call as a
+# later obligation are each refused; two calls of one impure function are not one term. The `and`
+# and `or` operands are admitted instead, and establish nothing when skipped.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; unsupported = {name for kind, name in findings if kind == "expression-unsupported"}; assert {"right_of_and", "right_of_or", "conditional_call", "literal_field_call"} <= unsupported; assert ("index-upper-unproven", "bound_after_guard") in findings; assert ("index-upper-unproven", "stored_before_guard") in findings; assert not any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"])'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; unsupported = {name for kind, name in findings if kind == "expression-unsupported"}; assert {"conditional_call", "literal_field_call"} <= unsupported; assert "right_of_and" not in unsupported; assert "right_of_or" not in unsupported; assert ("index-upper-unproven", "bound_after_guard") in findings; assert ("index-upper-unproven", "stored_before_guard") in findings; assert not any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"])'
 rejected_condition_call_positions_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_condition_call_positions_status" -ne 0 ]]; then
