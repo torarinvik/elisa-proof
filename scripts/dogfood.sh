@@ -219,12 +219,12 @@ run_probe frame_lifetime examples/frame_lifetime.elisa 0
 run_probe rejected_frame_lifetime examples/rejected_frame_lifetime.elisa 1
 run_probe unnamed_lifetime_lend examples/unnamed_lifetime_lend.elisa 1
 run_probe rejected_unnamed_lifetime_lend examples/rejected_unnamed_lifetime_lend.elisa 1
-run_probe captured_block examples/captured_block.elisa 1
+run_probe captured_block examples/captured_block.elisa 0
 run_probe rejected_captured_block examples/rejected_captured_block.elisa 1
-run_probe uncaptured_binding examples/uncaptured_binding.elisa 1
+run_probe uncaptured_binding examples/uncaptured_binding.elisa 0
 run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa 1
 run_probe rejected_uncaptured_block_write examples/rejected_uncaptured_block_write.elisa 1
-run_probe call_boundary_binding examples/call_boundary_binding.elisa 1
+run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
 run_probe rejected_short_circuit_call examples/rejected_short_circuit_call.elisa 1
@@ -700,9 +700,8 @@ proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["prov
 for entry in (("obligations_after_the_loop_are_checked", "index-upper"), ("obligations_inside_the_loop_are_checked", "index-upper")):
     if entry not in proven:
         raise SystemExit("dogfood failed: %s was not checked past the captured block" % (entry,))
-kinds = {finding["kind"] for finding in report["findings"]}
-if kinds != {"captured-block-unsupported"}:
-    raise SystemExit("dogfood failed: unexpected findings around a captured block: %s" % sorted(kinds))
+if report["findings"]:
+    raise SystemExit("dogfood failed: unexpected findings around a captured block: %s" % sorted({f["kind"] for f in report["findings"]}))
 with open(havocked, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
@@ -730,9 +729,8 @@ proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["prov
 for entry in (("value_outside_the_capture_list_survives", "goal"), ("fact_outside_the_capture_list_survives", "goal")):
     if entry not in proven:
         raise SystemExit("dogfood failed: %s did not survive a captured block it is outside of" % (entry,))
-kinds = {finding["kind"] for finding in report["findings"]}
-if kinds != {"captured-block-unsupported"}:
-    raise SystemExit("dogfood failed: unexpected findings around an uncaptured binding: %s" % sorted(kinds))
+if report["findings"]:
+    raise SystemExit("dogfood failed: unexpected findings around an uncaptured binding: %s" % sorted({f["kind"] for f in report["findings"]}))
 with open(dropped, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
@@ -768,7 +766,7 @@ for owner in written:
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s proved a goal from a falsified state" % owner)
 kinds = {kind for _, kind in owners}
-if kinds != {"call-requires-unproven", "captured-block-unsupported"}:
+if kinds != {"call-requires-unproven"}:
     raise SystemExit("dogfood failed: unexpected findings around an uncaptured write: %s" % sorted(kinds))
 print("dogfood rejected_uncaptured_block_write: a block write-back covers what its body writes")
 PY
@@ -791,9 +789,8 @@ proven = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["r
 required = {"loop_binder_survives_a_declaration_call", "value_survives_a_declaration_call", "value_survives_an_assignment_call", "value_survives_a_statement_call", "loop_binder_survives_a_guarded_call", "value_survives_a_returning_branch"}
 if not required <= proven:
     raise SystemExit("dogfood failed: call boundary fixture is missing goals: %s" % sorted(required - proven))
-kinds = {finding["kind"] for finding in report["findings"]}
-if kinds != {"captured-block-unsupported"}:
-    raise SystemExit("dogfood failed: unexpected findings at the call boundary: %s" % sorted(kinds))
+if report["findings"]:
+    raise SystemExit("dogfood failed: unexpected findings at the call boundary: %s" % sorted({f["kind"] for f in report["findings"]}))
 with open(dropped, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
@@ -903,7 +900,7 @@ for entry in (("while_condition_bounds_the_body", "index-upper"), ("shared_exten
     if entry not in proven:
         raise SystemExit("dogfood failed: %s did not reach the indexed access" % (entry,))
 kinds = {finding["kind"] for finding in report["findings"]}
-if kinds != {"captured-block-unsupported", "loop-invariant-missing"}:
+if kinds != {"loop-invariant-missing"}:
     raise SystemExit("dogfood failed: unexpected findings around a bounded loop: %s" % sorted(kinds))
 with open(unbounded, encoding="utf-8") as handle:
     report = json.load(handle)
@@ -969,9 +966,14 @@ for entry in (("caller_may_use_that_summary", "goal"), ("caller_may_use_that_one
     if entry not in proven:
         raise SystemExit("dogfood failed: %s could not use a widened-state summary" % (entry,))
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("loop_is_havocked_but_the_contract_holds", "caller_may_use_that_summary", "missing_invariant_is_havocked_too", "caller_may_use_that_one_too", "two_levels_above"):
+for owner in ("missing_invariant_is_havocked_too", "caller_may_use_that_one_too", "two_levels_above"):
     if reasons.get(owner) != "contract-verified-widened-state":
         raise SystemExit("dogfood failed: %s was not reported as contract-verified-widened-state" % owner)
+# A `for` over a collection is modelled by the loop handler whether or not the source spells a
+# capture list, so this pair is plainly verified and no longer exercises the widening.
+for owner in ("loop_is_havocked_but_the_contract_holds", "caller_may_use_that_summary"):
+    if reasons.get(owner) != "verified":
+        raise SystemExit("dogfood failed: %s was not reported as verified" % owner)
 # The marking follows the call graph and stops there: a function that reaches only fully checked
 # code still says "verified", so the two reasons stay distinguishable.
 for owner in ("untouched_leaf", "untouched_caller"):

@@ -1688,8 +1688,64 @@ it writes, so the corpus never exercised the hole -- which is exactly why a fixt
 measurement, is what pins this.
 
 Not covered: the block's own exit state is still discarded rather than merged, so a loop with an
-invariant proves it inside the block's private state and exports nothing. That remains the
-largest single source of `captured-block-unsupported`, 141 of them on the kernel corpus.
+invariant proves it inside the block's private state and exports nothing. The 141
+`captured-block-unsupported` findings this produced on the kernel corpus were a separate defect,
+resolved in the next entry.
+
+## A capture list made the same loop unverifiable
+
+### What was wrong
+
+`for index in 0..<count: total <- total + 1` verified. The same loop written
+`for index in 0..<count |index, total|:` did not: it recorded a failing obligation and a
+`captured-block-unsupported` finding, and its function came back
+`contract-verified-widened-state` instead of `verified`.
+
+The two spellings are the same program. A capture list is how the source names what the loop's
+body closes over; it does not change what the loop does, and it is not even a bound on what the
+body writes -- the entry above this one shows a body assigning an outer binding its list omits and
+the compiled program observing it. But the two spellings take different paths through the checker.
+Without a list the statement is `Stmt.For` and the loop handler runs. With one it is a block that
+wraps the loop, so the captured-block handler ran, walked the body -- which reaches the same loop
+handler, which models the loop identically -- and then recorded its own failure on top.
+
+That failure was not an unverified obligation. Every obligation inside the body is checked on both
+paths. The loop's own approximation is reported on both paths where there is one to report: a
+`while` with no invariant records `loop-invariant-missing` from the loop handler itself. What the
+block adds is a write-back, and a write-back that havocs is a loss of information, not a step left
+unproven. On the kernel's own source this was 141 failing obligations, which is every loop in it.
+
+### What changed
+
+`proof_body_is_one_loop` recognises a block body that is exactly one `While` or `For` statement --
+the wrapper form -- and the captured-block handler skips its obligation and its finding for that
+shape. The write-back itself is unchanged and still runs: the capture list together with what the
+body assigns and references, havocked, with the facts over everything else restored. Every other
+captured block keeps the finding, because for those the exit state really is discarded rather than
+merged.
+
+### Fixtures
+
+`examples/captured_block.elisa`, `examples/captured_structural_accumulator.elisa`,
+`examples/uncaptured_binding.elisa` and `examples/call_boundary_binding.elisa` now prove with no
+findings at all, and their suite assertions say so rather than naming the finding.
+`examples/loop_condition_facts.elisa` and `examples/widened_state_summary.elisa` keep exactly
+`loop-invariant-missing`, which is the loop handler's own report and the thing this must not
+silence. Every adversarial fixture over captured blocks is unchanged and still refuses:
+`rejected_uncaptured_block_write`, `rejected_uncaptured_binding`, `rejected_captured_block`,
+`rejected_loop_entry_state` and `rejected_loop_condition_facts`.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: obligations fall from 2392 to 2251 and failures from
+1195 to 1054, with proven unchanged at 1210 -- 141 obligations that were never anything but this
+finding. `captured-block-unsupported` goes 141 to 0. Not one goal site is lost or gained, and nine
+functions move from `contract-verified-widened-state` to `verified`. Replay gaps stay at 0.
+
+Not covered: a captured block that is not a loop still discards its exit state, and no fixture in
+the tree produces the finding any more, so the remaining path is exercised only by the shape's
+absence. The loop handler's own imprecision is untouched -- a `for` without an invariant still
+forgets its whole frame afterwards.
 
 ## Coverage still required
 

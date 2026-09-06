@@ -928,7 +928,7 @@ rejected_fixed_array_bounds_status=$?
 rejected_slice_bounds_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_fixed_array_slice_bounds.elisa" >/dev/null
 rejected_fixed_array_slice_bounds_status=$?
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/captured_structural_accumulator.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert {finding["kind"] for finding in report["findings"]} == {"captured-block-unsupported"}; assert not any(finding["kind"] == "structural-decreases-unproven" for finding in report["findings"]); assert all(goal["proven"] for goal in report["goals"] if goal["rule"] == "structural-safety"); assert report["replay"]["gaps"] == 0'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/captured_structural_accumulator.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert all(goal["proven"] for goal in report["goals"] if goal["rule"] == "structural-safety"); assert report["replay"]["gaps"] == 0'
 captured_structural_accumulator_status=${PIPESTATUS[1]}
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_field_alias.elisa" >/dev/null
 rejected_field_alias_status=$?
@@ -1682,7 +1682,7 @@ fi
 # block. Refusing it invalidated the enclosing path, which skipped the loop body entirely; the
 # write-back is modelled instead, so obligations inside and after the loop are both checked.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/captured_block.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("obligations_after_the_loop_are_checked", "index-upper") in proven; assert ("obligations_inside_the_loop_are_checked", "index-upper") in proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/captured_block.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("obligations_after_the_loop_are_checked", "index-upper") in proven; assert ("obligations_inside_the_loop_are_checked", "index-upper") in proven; assert not report["findings"]'
 captured_block_status=${PIPESTATUS[1]}
 set -e
 if [[ "$captured_block_status" -ne 0 ]]; then
@@ -1704,7 +1704,7 @@ fi
 # The capture list is the block's whole reach, so a binding it does not name keeps both its
 # symbolic value and its facts across the block; a binding it does name keeps neither.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/uncaptured_binding.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("value_outside_the_capture_list_survives", "goal") in proven; assert ("fact_outside_the_capture_list_survives", "goal") in proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/uncaptured_binding.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("value_outside_the_capture_list_survives", "goal") in proven; assert ("fact_outside_the_capture_list_survives", "goal") in proven; assert not report["findings"]'
 uncaptured_binding_status=${PIPESTATUS[1]}
 set -e
 if [[ "$uncaptured_binding_status" -ne 0 ]]; then
@@ -1724,7 +1724,7 @@ fi
 # The capture list is not a bound on what a block writes: the compiler accepts a block whose body
 # assigns an outer binding the list omits. Every such binding must lose its value and its facts.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_uncaptured_block_write.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; written = ("assigned_without_being_captured", "assigned_under_a_branch", "written_through_a_reference", "assigned_in_a_nested_block", "fact_over_a_written_binding"); assert all((owner, "call-requires-unproven") in owners for owner in written); goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert all(goals[(owner, "goal")] is False for owner in written); assert {kind for _, kind in owners} == {"call-requires-unproven", "captured-block-unsupported"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_uncaptured_block_write.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; written = ("assigned_without_being_captured", "assigned_under_a_branch", "written_through_a_reference", "assigned_in_a_nested_block", "fact_over_a_written_binding"); assert all((owner, "call-requires-unproven") in owners for owner in written); goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert all(goals[(owner, "goal")] is False for owner in written); assert {kind for _, kind in owners} == {"call-requires-unproven"}'
 rejected_uncaptured_block_write_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_uncaptured_block_write_status" -ne 0 ]]; then
@@ -1737,7 +1737,7 @@ fi
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
 # terms of one, and a value an arm overwrote must all still be forgotten.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/call_boundary_binding.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not [goal for goal in report["goals"] if not goal["proven"]]; proven = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] == "goal"}; assert {"loop_binder_survives_a_declaration_call", "value_survives_a_declaration_call", "value_survives_an_assignment_call", "value_survives_a_statement_call", "loop_binder_survives_a_guarded_call", "value_survives_a_returning_branch"} <= proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/call_boundary_binding.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not [goal for goal in report["goals"] if not goal["proven"]]; proven = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] == "goal"}; assert {"loop_binder_survives_a_declaration_call", "value_survives_a_declaration_call", "value_survives_an_assignment_call", "value_survives_a_statement_call", "loop_binder_survives_a_guarded_call", "value_survives_a_returning_branch"} <= proven; assert not report["findings"]'
 call_boundary_binding_status=${PIPESTATUS[1]}
 set -e
 if [[ "$call_boundary_binding_status" -ne 0 ]]; then
@@ -1799,7 +1799,7 @@ fi
 # entry, and only the loop condition, the established invariants and the untouched bindings are
 # known inside. The entry value of a rewritten binding must not stand in for an iteration.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/loop_entry_state.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]; assert goals and all(goal["proven"] for goal in goals); names = {goal["name"] for goal in goals}; assert {"unwritten_binding_keeps_its_fact", "condition_bounds_the_body", "sound_invariant_is_preserved", "binder_range_survives"} <= names; assert sum(1 for goal in goals if goal["name"] == "sound_invariant_is_preserved") == 2; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported", "loop-invariant-missing"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/loop_entry_state.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]; assert goals and all(goal["proven"] for goal in goals); names = {goal["name"] for goal in goals}; assert {"unwritten_binding_keeps_its_fact", "condition_bounds_the_body", "sound_invariant_is_preserved", "binder_range_survives"} <= names; assert sum(1 for goal in goals if goal["name"] == "sound_invariant_is_preserved") == 2; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"loop-invariant-missing"}'
 loop_entry_state_status=${PIPESTATUS[1]}
 set -e
 if [[ "$loop_entry_state_status" -ne 0 ]]; then
@@ -1819,7 +1819,7 @@ fi
 # An invariant-less loop still runs its body only when the condition holds, and a shared borrow's
 # element count is stable across a call. Together these discharge the dominant loop shape here.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/loop_condition_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("while_condition_bounds_the_body", "index-upper") in proven; assert ("shared_extent_survives_a_call_in_the_body", "index-upper") in proven; assert ("shared_extent_survives_a_call", "index-upper") in proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported", "loop-invariant-missing"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/loop_condition_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("while_condition_bounds_the_body", "index-upper") in proven; assert ("shared_extent_survives_a_call_in_the_body", "index-upper") in proven; assert ("shared_extent_survives_a_call", "index-upper") in proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"loop-invariant-missing"}'
 loop_condition_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$loop_condition_facts_status" -ne 0 ]]; then
@@ -1869,7 +1869,7 @@ fi
 
 # A callee whose only findings widen its own state still exports its summary, and says so.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/widened_state_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; kinds = {f["kind"] for f in report["findings"]}; assert kinds == {"captured-block-unsupported", "loop-invariant-missing"}; assert not [g for g in report["goals"] if not g["proven"]]; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert ("caller_may_use_that_summary", "goal") in proven; assert ("caller_may_use_that_one_too", "goal") in proven; assert ("two_levels_above", "goal") in proven; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["loop_is_havocked_but_the_contract_holds"] == "contract-verified-widened-state"; assert reasons["caller_may_use_that_summary"] == "contract-verified-widened-state"; assert reasons["two_levels_above"] == "contract-verified-widened-state"; assert reasons["untouched_leaf"] == "verified"; assert reasons["untouched_caller"] == "verified"'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/widened_state_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; kinds = {f["kind"] for f in report["findings"]}; assert kinds == {"loop-invariant-missing"}; assert not [g for g in report["goals"] if not g["proven"]]; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert ("caller_may_use_that_summary", "goal") in proven; assert ("caller_may_use_that_one_too", "goal") in proven; assert ("two_levels_above", "goal") in proven; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["loop_is_havocked_but_the_contract_holds"] == "verified"; assert reasons["caller_may_use_that_summary"] == "verified"; assert reasons["missing_invariant_is_havocked_too"] == "contract-verified-widened-state"; assert reasons["caller_may_use_that_one_too"] == "contract-verified-widened-state"; assert reasons["two_levels_above"] == "contract-verified-widened-state"; assert reasons["untouched_leaf"] == "verified"; assert reasons["untouched_caller"] == "verified"'
 widened_state_summary_status=${PIPESTATUS[1]}
 set -e
 if [[ "$widened_state_summary_status" -ne 0 ]]; then
