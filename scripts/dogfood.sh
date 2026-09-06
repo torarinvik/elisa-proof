@@ -223,6 +223,9 @@ run_probe captured_block examples/captured_block.elisa 1
 run_probe rejected_captured_block examples/rejected_captured_block.elisa 1
 run_probe uncaptured_binding examples/uncaptured_binding.elisa 1
 run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa 1
+run_probe loop_condition_facts examples/loop_condition_facts.elisa 1
+run_probe rejected_loop_condition_facts examples/rejected_loop_condition_facts.elisa 1
+run_probe rejected_shared_extent_global examples/rejected_shared_extent_global.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -722,6 +725,43 @@ for entry in (("overwritten_binding_must_not_survive", "goal"), ("zero_iteration
     if goals.get(entry) is not False:
         raise SystemExit("dogfood failed: %s survived its own captured block" % (entry,))
 print("dogfood uncaptured_binding: a captured block forgets its capture list and nothing else")
+PY
+
+# An invariant-less loop still assumes its own condition in the body, and a shared borrow keeps
+# its element count across a call -- unless the program declares a mutable global, which is the
+# one path a shared borrow does not exclude.
+python3 - "$REPORT_DIR/loop_condition_facts.json" "$REPORT_DIR/rejected_loop_condition_facts.json" "$REPORT_DIR/rejected_shared_extent_global.json" <<'PY'
+import json
+import sys
+
+bounded, unbounded, aliased = sys.argv[1:]
+with open(bounded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: loop condition fixture did not replay cleanly")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for entry in (("while_condition_bounds_the_body", "index-upper"), ("shared_extent_survives_a_call_in_the_body", "index-upper"), ("shared_extent_survives_a_call", "index-upper")):
+    if entry not in proven:
+        raise SystemExit("dogfood failed: %s did not reach the indexed access" % (entry,))
+kinds = {finding["kind"] for finding in report["findings"]}
+if kinds != {"captured-block-unsupported", "loop-invariant-missing"}:
+    raise SystemExit("dogfood failed: unexpected findings around a bounded loop: %s" % sorted(kinds))
+with open(unbounded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: loop condition boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for entry in (("unrelated_condition_proves_no_bound", "index-upper"), ("mutable_extent_must_not_survive_a_call", "index-upper"), ("entry_value_must_not_reach_the_body", "goal")):
+    if goals.get(entry) is not False:
+        raise SystemExit("dogfood failed: %s claimed more than the loop condition gives" % (entry,))
+with open(aliased, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: shared extent global fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+if goals.get(("borrowed_extent_must_not_survive", "index-upper")) is not False:
+    raise SystemExit("dogfood failed: a shared extent survived a mutable global write")
+print("dogfood loop_condition_facts: the body assumes its condition and a shared extent, and nothing more")
 PY
 
 # The rendered proof must agree with the report for *every* goal, not a sampled one: `qed` appears

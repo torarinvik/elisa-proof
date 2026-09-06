@@ -1721,6 +1721,37 @@ if [[ "$rejected_uncaptured_binding_status" -ne 0 ]]; then
     exit 1
 fi
 
+# An invariant-less loop still runs its body only when the condition holds, and a shared borrow's
+# element count is stable across a call. Together these discharge the dominant loop shape here.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/loop_condition_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("while_condition_bounds_the_body", "index-upper") in proven; assert ("shared_extent_survives_a_call_in_the_body", "index-upper") in proven; assert ("shared_extent_survives_a_call", "index-upper") in proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported", "loop-invariant-missing"}'
+loop_condition_facts_status=${PIPESTATUS[1]}
+set -e
+if [[ "$loop_condition_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a loop condition or a shared extent did not reach the body\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_loop_condition_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert goals[("unrelated_condition_proves_no_bound", "index-upper")] is False; assert goals[("mutable_extent_must_not_survive_a_call", "index-upper")] is False; assert goals[("entry_value_must_not_reach_the_body", "goal")] is False; assert any(f["kind"] == "call-requires-unproven" for f in report["findings"])'
+rejected_loop_condition_facts_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_loop_condition_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a loop condition or a mutable extent claimed too much\n' >&2
+    exit 1
+fi
+
+# A mutable global is the one path a shared borrow does not exclude, so the extent rule is
+# withdrawn from any program that declares one.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_shared_extent_global.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert goals[("borrowed_extent_must_not_survive", "index-upper")] is False'
+rejected_shared_extent_global_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_shared_extent_global_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a shared extent survived a mutable global write\n' >&2
+    exit 1
+fi
+
 # A skippable call, an unrecognized shape, and a guard whose fact names the same impure call as a
 # later obligation are each refused; two calls of one impure function are not one term.
 set +e

@@ -1176,6 +1176,58 @@ invariant proves that invariant inside its private state and exports nothing fro
 state is a larger step than this one: it needs the loop's post-state to be sound for the
 zero-iteration path, which the capture-list argument does not have to reason about at all.
 
+## An invariant-less loop did not assume its own condition
+
+Measured first. Of the 270 unproven index obligations, the shape that dominates is
+`while index < collection.count |...|:` -- the codebase's own loop idiom. A probe pinned the cause
+exactly: `for index in 0..<values.count` proves its indexing, the same loop written as a `while`
+does not, and a plain assignment in the body changes nothing while a *call* in the body loses the
+bound. Two independent gaps, one behind the other.
+
+The first is that the invariant-less branch checked the body without recording the loop condition.
+The invariant branch already records it as a `loop-condition` traced fact; the branch that runs when
+there is no invariant simply did not. The body runs only when the condition holds, so this is the
+same premise, and it is the premise the indexing has to discharge against. A condition containing a
+call is excluded: it may mutate the state the body is then checked in, and its value is already
+reported opaque.
+
+Four adversarial probes fixed what this must *not* give. `while index < 100` over a collection
+proves no bound on that collection. A binding the loop rewrites must not carry its entry value into
+the body -- checked through an index, through a signed local, and through a callee precondition,
+because the body is checked from the loop-entry state and would otherwise reason about the first
+iteration only. All four still refuse.
+
+## A shared borrow's element count is stable across a call
+
+The second gap: `index < values.count` is dropped at every call in the body, because
+`proof_expr_call_stable` admits only scalars of the frame that nothing references, and a `.count` is
+a field of a referenced binding. `proof_expr_call_stable` now also admits `p.count` for a parameter
+`p` bound by a shared borrow, recorded per function in `report.shared_extent_names`. Nothing may
+write through a shared borrow for its lifetime, and the borrow rule the compiler enforces means no
+mutable path to the same object coexists with it, so no callee can resize it. The scalar-term
+witness is still required, so an unwitnessed count is refused exactly as an unwitnessed name is.
+
+That argument has one hole, and the compiler does not close it. A mutable global is reachable
+without being borrowed: a caller may lend `ambient_values` into a frame as `darray[i64]&` while a
+callee empties it directly, and `elisac` accepts that program. It is written out as
+`examples/rejected_shared_extent_global.elisa`. Rather than deciding per call which globals a callee
+can reach, the rule is withdrawn from the whole program as soon as one mutable global is declared.
+`examples/rejected_loop_condition_facts.elisa` additionally pins that a *mutable* borrow earns
+nothing here: a callee may resize it, so its count is not stable.
+
+`examples/rejected_while_body_visibility.elisa` changed with this. It asserted that an index inside
+an invariant-less loop body stays unproven, which was a statement about the old conservatism rather
+than about soundness -- its access is exactly what the loop condition gives. Its access is now one
+past the bound, so it still tests that the body is traversed and the obligation stays visible.
+
+What this bought, honestly: on the kernel's own source, nothing. Proven stays at 1160/2430 with an
+identical refusal histogram. Both gaps are real and both fixtures prove what they should, but the
+kernel's own bounds do not come from a loop condition -- they come from guard helpers such as
+`proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)`,
+whose postcondition the caller cannot use because the callee exports no verified summary. The 270
+index obligations sit behind the 348 `function-summary-unverified`, which is the next thing to
+attack, and neither of these two changes could have moved them.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

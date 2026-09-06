@@ -1080,7 +1080,7 @@ extend ElisaProof:
         # its caller's state only through references and globals, so such a fact holds after
         # the call exactly as before it. Anything else — a field, an element, a container, a
         # call, a name the body may reference — is not stable.
-        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, depth: usize) -> bool:
+        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, depth: usize) -> bool:
             return false if depth >= 64
             match expression:
                 Ast::Expr.IntLit(_):
@@ -1102,15 +1102,28 @@ extend ElisaProof:
                     return false if any existing in aliased where existing == binder
                     return false if not (any candidate in names where candidate == binder)
                     return proof_scalar_term_witnessed(expression, facts, 0)
+                Ast::Expr.Field(_, field_name, _):
+                    # The one place expression a call cannot change: the element count of a
+                    # parameter bound by a shared borrow. Nothing may write through a shared
+                    # borrow for its lifetime, and the borrow rule the compiler enforces means no
+                    # mutable path to the same object coexists with it, so no callee -- whether or
+                    # not it receives the borrow -- can push, pop or resize it. The witness is
+                    # still required, so a count that was never established as a scalar term is
+                    # refused here exactly as an unwitnessed name is.
+                    return false if field_name != "count"
+                    root: sview = proof_place_root_name(expression, 0)
+                    return false if root == ""
+                    return false if not (any shared in shared_extents where shared == root)
+                    return proof_scalar_term_witnessed(expression, facts, 0)
                 Ast::Expr.Paren(inner, _):
-                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, depth + 1)
+                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
-                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, depth + 1)
+                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_call_stable(left, facts, names, parameters, aliased, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, depth + 1)
+                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, depth + 1)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, depth + 1)
+                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, depth + 1)
                 _:
                     return false
 
@@ -1121,7 +1134,7 @@ extend ElisaProof:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
             return if not analyzed
             for fact in source |source, facts, names, parameters, report|:
-                continue if not proof_expr_call_stable(fact, source, names, parameters, report.aliased_names, 0)
+                continue if not proof_expr_call_stable(fact, source, names, parameters, report.aliased_names, report.shared_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -1142,7 +1155,7 @@ extend ElisaProof:
             for index in 0..<values.count |index, names, values, facts, parameters, blocked, position|:
                 values[index] <- Ast::Expr.Invalid if index >= names.count
                 continue if index >= names.count
-                retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, 0)
+                retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, report.shared_extent_names, 0)
                 values[index] <- Ast::Expr.Ident(names[index], position) if not retained
 
         # Re-establish, after a captured block in statement position, every fact the block could
@@ -1158,7 +1171,7 @@ extend ElisaProof:
             blocked.extend(report.aliased_names)
             blocked.extend(captures)
             for fact in source |source, facts, names, parameters, blocked|:
-                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, 0)
+                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -1172,7 +1185,7 @@ extend ElisaProof:
             return if not analyzed
             for fact in primary |primary, secondary, facts, names, parameters, report|:
                 continue if not (any other in secondary where proof_expr_equal(other, fact))
-                continue if not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, 0)
+                continue if not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, report.shared_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -1187,7 +1200,7 @@ extend ElisaProof:
                 bound_name: sview = proof_type_bound_name(fact)
                 retained: mutable bool = false
                 retained <- true if bound_name != "" and ((any candidate in names where candidate == bound_name) or (any parameter in parameters where parameter == bound_name)) and proof_fact_is_type_bound(report, fact, owner)
-                retained <- true if not retained and analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, 0)
+                retained <- true if not retained and analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, report.shared_extent_names, 0)
                 keep.push(retained)
             write_index: mutable usize = 0
             for read_index in 0..<original.count |facts, original, keep, write_index|:
@@ -6107,6 +6120,14 @@ extend ElisaProof:
                             unchecked_loop_names: mutable darray[sview] = proof_copy_names(names)
                             unchecked_loop_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
                             unchecked_loop_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                            # The body runs only when the condition holds, so the condition is a
+                            # fact at every iteration's entry. This is the same premise the
+                            # invariant path already records, and it is what an obligation inside
+                            # the body -- an index against the bound the condition tests, most of
+                            # all -- has to discharge against. A condition that calls is excluded:
+                            # it may mutate the state the body is then checked in, and its own
+                            # value is already reported opaque above.
+                            proof_add_traced_fact(&unchecked_loop_facts, report, loop_condition_value, "loop-condition", position.line, name) if not proof_expr_has_call(condition)
                             proof_check_returns(while_body, &unchecked_loop_names, &unchecked_loop_values, &unchecked_loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &loop_body_flow)
                         else:
                             loop_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
@@ -6576,6 +6597,22 @@ extend ElisaProof:
             report.aliased_names.clear()
             report.aliased_owner <- function_name
             proof_collect_aliased_names(body, functions, &report.aliased_names)
+            # A shared borrow excludes every *borrowed* mutable path to the same object, but not a
+            # mutable global: a caller may lend one shared into this frame while a callee writes
+            # it directly, and the compiler accepts that. So the rule is withdrawn from the whole
+            # program as soon as one mutable global is declared, rather than trying to decide per
+            # call which globals a callee can reach.
+            report.shared_extent_names.clear()
+            program_has_mutable_global: mutable bool = false
+            for annotation in file.enum_annotations |program_has_mutable_global|:
+                program_has_mutable_global <- true if annotation.name == "__global_mutable"
+            if not program_has_mutable_global:
+                for parameter in parameters |report|:
+                    reference: bool = proof_resource_is_reference_type(parameter.type_expression)
+                    continue if not reference
+                    continue if proof_resource_is_mutable_reference_type(parameter.type_expression)
+                    continue if proof_resource_type_has_marker(parameter.type_expression, TokenKind.Mutable)
+                    report.shared_extent_names.push(parameter.name)
             for parameter in parameters |facts, report, function_name, position|:
                 unsigned_width: i64 = proof_unsigned_type_width(parameter.type_expression, report.source_declarations, 0)
                 proof_add_unsigned_binding_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position) if unsigned_width > 0
