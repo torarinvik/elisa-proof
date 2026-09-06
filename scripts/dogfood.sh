@@ -226,6 +226,8 @@ run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa
 run_probe rejected_uncaptured_block_write examples/rejected_uncaptured_block_write.elisa 1
 run_probe loop_element_extent examples/loop_element_extent.elisa 1
 run_probe rejected_loop_element_extent examples/rejected_loop_element_extent.elisa 1
+run_probe comparison_chain_equality examples/comparison_chain_equality.elisa 0
+run_probe rejected_comparison_chain_equality examples/rejected_comparison_chain_equality.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -799,6 +801,34 @@ for owner in ("a_push_in_the_body", "a_call_that_may_push", "a_whole_assignment"
 if any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"]):
     raise SystemExit("dogfood failed: a resized collection discharged an index bound")
 print("dogfood loop_element_extent: an element write keeps the extent and nothing else does")
+PY
+
+python3 - "$REPORT_DIR/comparison_chain_equality.json" "$REPORT_DIR/rejected_comparison_chain_equality.json" <<'PY'
+import json
+import sys
+
+chained, refused = sys.argv[1:]
+with open(chained, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: equality chain fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: an equality-chain certificate was left unreplayed")
+if report["trust"]["trusted_assumptions"]:
+    raise SystemExit("dogfood failed: the equality chain rested on a trusted assumption")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for entry in (("paired_write", "index-upper"), ("equality_reversed", "index-upper"), ("non_strict_through_an_equality", "goal"), ("copy_into_a_paired_collection", "index-upper")):
+    if entry not in proven:
+        raise SystemExit("dogfood failed: %s did not reach its bound through an equality" % (entry,))
+with open(refused, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: equality chain boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for owner in ("struct_equality_is_not_an_order", "equality_alone_is_not_strict", "two_equalities_give_no_strict_goal", "inequality_is_not_a_step", "an_equality_to_the_wrong_term"):
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s chained an equality it may not" % owner)
+print("dogfood comparison_chain_equality: an equality is two non-strict steps and never a strict one")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

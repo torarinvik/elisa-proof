@@ -1752,6 +1752,26 @@ if [[ "$rejected_loop_element_extent_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A bound travels across an equality: the chain reads `b == c` as both non-strict steps. Every
+# goal has to replay, which is what makes the kernel's own equality step load-bearing.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/comparison_chain_equality.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("paired_write", "index-upper") in proven; assert ("equality_reversed", "index-upper") in proven; assert ("non_strict_through_an_equality", "goal") in proven; assert ("copy_into_a_paired_collection", "index-upper") in proven'
+comparison_chain_equality_status=${PIPESTATUS[1]}
+set -e
+if [[ "$comparison_chain_equality_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a bound did not travel across an equality, or did not replay\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_comparison_chain_equality.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = ("struct_equality_is_not_an_order", "equality_alone_is_not_strict", "two_equalities_give_no_strict_goal", "inequality_is_not_a_step", "an_equality_to_the_wrong_term"); goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert all(goals[(owner, "goal")] is False for owner in refused); assert {finding["kind"] for finding in report["findings"]} == {"ensure-unproven"}'
+rejected_comparison_chain_equality_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_comparison_chain_equality_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an equality was read as a strict or a user comparison\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

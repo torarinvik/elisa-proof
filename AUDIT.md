@@ -1888,6 +1888,67 @@ last one is the shape most of the corpus's remaining index refusals are in, thou
 equality itself is missing too -- the code under proof states no contract relating the two
 collections.
 
+## A bound could not travel across an equality
+
+### What was wrong
+
+`ys.count == xs.count` and `index < xs.count` do not give `index < ys.count`. Not in a loop, not
+outside one:
+
+```
+def direct(xs: darray[i64]&, ys: mutable darray[i64]&, index: usize) -> void:
+    requires ys.count == xs.count
+    requires index < xs.count
+    changes ys
+    ys[index] <- 0
+```
+
+`index-upper-unproven`. Two collections a contract says are the same length is the most common
+shape there is for indexing one from the other's bound, and the checker could not do it at all.
+
+The comparison chain composes two recorded comparisons through a shared middle term, which is
+exactly the reasoning needed here, but `proof_chain_step` read only `<`, `<=`, `>` and `>=` out of
+a fact. An equality was not a step, so no chain closed.
+
+### What changed
+
+`proof_chain_step` accepts `==`. An equality is both non-strict steps at once -- `b == c` is
+`b <= c` and `c <= b` -- so it reads as a step from either end of the chain and in either
+direction, and it is always non-strict: an equality alone can never discharge a strict goal, and
+`proof_chain_discharges` already refuses that composition. `proof_kernel_replay_chain_step`
+carries the identical rule, which is what lets the certificates replay rather than be trusted.
+
+The soundness guard is the one the rest of the chain already carries. `==` is the primitive
+integer equality only for a witnessed scalar; on a struct it is a user `__eq__` under no order law
+whatsoever. The two operands of the fact used as a step are the chain's anchor and its middle
+term, and the caller requires a scalar witness for both -- the anchor before the search and the
+middle before concluding -- so a struct equality can never become a step.
+
+### Fixtures
+
+`examples/comparison_chain_equality.elisa` requires the paired-collection write to prove with the
+equality either way round, a non-strict order composed with an equality to give a non-strict
+conclusion, and a whole loop of the paired shape; every certificate has to replay and
+`trusted_assumptions` has to stay empty, which is what makes the kernel's own equality step
+load-bearing rather than decorative. `examples/rejected_comparison_chain_equality.elisa` pins the
+five ways it could be wrong: a struct equality used as an order step, an equality composed with a
+non-strict order offered against a strict goal, two equalities offered against a strict goal, a
+`!=` used as a step, and an equality that names one end of the chain instead of joining both.
+
+### What it bought
+
+The shape above, and its loop form, now prove and replay. On
+`examples/kernel_replay_standalone.elisa` nothing is gained and nothing is lost: proven stays at
+1210, all 1210 certificates replay with 0 gaps, and obligations rise 2251 to 2255 -- the four are
+this change's own kernel code being checked, which is also why `function-summary-unverified` moves
+333 to 337. The corpus does not benefit because the equality it would need is not there to use:
+the parallel arrays that dominate its remaining index refusals are filled by callees that state no
+contract relating their lengths.
+
+Not covered: the chain still needs the two comparisons to share a syntactically equal middle term,
+so `index < xs.count` with `ys.count == xs.count + 0` is not a chain. Nothing here relates two
+collections that no contract relates, which is the corpus's actual problem.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
