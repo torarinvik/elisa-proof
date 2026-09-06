@@ -230,6 +230,8 @@ run_probe comparison_chain_equality examples/comparison_chain_equality.elisa 0
 run_probe rejected_comparison_chain_equality examples/rejected_comparison_chain_equality.elisa 1
 run_probe region_extent_contract examples/region_extent_contract.elisa 0
 run_probe rejected_region_extent_contract examples/rejected_region_extent_contract.elisa 1
+run_probe region_statement_call examples/region_statement_call.elisa 0
+run_probe rejected_region_statement_call examples/rejected_region_statement_call.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -859,6 +861,31 @@ for owner in ("struct_count_is_not_an_extent", "an_element_in_a_contract", "the_
 if ("shared_cannot_be_returned_mutable", "region-return-witness-unsupported") not in owners:
     raise SystemExit("dogfood failed: a shared binding witnessed a mutable-reference return")
 print("dogfood region_extent_contract: a collection extent is contractable, a region-owned value is not")
+PY
+
+python3 - "$REPORT_DIR/region_statement_call.json" "$REPORT_DIR/rejected_region_statement_call.json" <<'PY'
+import json
+import sys
+
+admitted, dropped = sys.argv[1:]
+with open(admitted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: region statement call fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a region statement certificate was left unreplayed")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("pushes_into_a_region_collection", "pushes_through_a_region_struct", "pushes_without_a_lifetime"):
+    if reasons.get(owner) != "verified":
+        raise SystemExit("dogfood failed: %s was refused for naming a region-owned receiver" % owner)
+with open(dropped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: region statement boundary fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+if owners != {("discards_a_region_reference", "region-expression-unsupported")}:
+    raise SystemExit("dogfood failed: a discarded region reference was admitted: %s" % sorted(owners))
+print("dogfood region_statement_call: a call statement may name a region, its result may not carry one")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

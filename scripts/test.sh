@@ -1792,6 +1792,26 @@ if [[ "$rejected_region_extent_contract_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A statement that is just a call may name a region-owned binding; what it may not do is drop a
+# result that carries a region.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_statement_call.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert all(reasons[owner] == "verified" for owner in ("pushes_into_a_region_collection", "pushes_through_a_region_struct", "pushes_without_a_lifetime"))'
+region_statement_call_status=${PIPESTATUS[1]}
+set -e
+if [[ "$region_statement_call_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call statement on a region-owned receiver was refused\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_statement_call.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; assert owners == {("discards_a_region_reference", "region-expression-unsupported")}'
+rejected_region_statement_call_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_region_statement_call_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a discarded region reference was admitted\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

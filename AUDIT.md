@@ -2044,6 +2044,56 @@ predated the contract change and nothing in either suite reached it, because eve
 region-polymorphic function in the corpus and the examples still failed for another reason first.
 Neither fix moves the corpus: 1211/2245, 0 gaps, all 1211 certificates replayed.
 
+## A call statement was refused for naming a region
+
+### What was wrong
+
+`out.push(value)` was `region-expression-unsupported` whenever `out` carried a lifetime. The same
+call with no lifetime parameter verified. Since a method call in statement position is how a
+region-polymorphic function does most of what it does, that single gate accounted for 88 of the
+116 `region-expression-unsupported` findings on the kernel's own source, all of them inside
+functions with a lifetime parameter, and `proof_kernel_replay_resource_events[@r, @e, @s]` alone
+carried those 88.
+
+The gate asked the wrong question. An expression statement evaluates its expression and throws the
+result away, so what it can drop is the *result*. The predicate it used returned true when the
+*callee path* mentioned a region binding, which for a method on a region-owned receiver it always
+does.
+
+Nothing was being checked by the extra refusal. Dumping the transitions the producer emits for
+`out.push(value)` with and without a lifetime shows the same `resource-use` of `out` in both, and
+replay validates that use either way: the two event streams differ only in the lifetime recorded
+on the bind. The receiver's liveness, its writability and its borrow overlap are all decided
+there, by `proof_resource_check_expression`, which runs immediately before the gate.
+
+### What changed
+
+`proof_resource_expr_statement_discards_region_value` replaces the general predicate at the
+statement gate only. For a call it asks whether the call's *result* carries a region, which is the
+question the message was always about; for anything else it is the old region-value check, so a
+bare region-owned expression or a `move` of one is refused exactly as before. The assignment gate,
+which has to reason about what a binding receives, keeps the original predicate untouched.
+
+### Fixtures
+
+`examples/region_statement_call.elisa` requires a push into a region-owned collection, a push
+through a field of a region-owned struct, and the same call with no lifetime at all, all verified
+with no findings and every certificate replayed.
+`examples/rejected_region_statement_call.elisa` is the boundary: a call returning `Cell& @r` whose
+result is discarded is still refused, and that one finding is the only one the fixture may
+produce.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: `region-expression-unsupported` falls from 116 to
+38, obligations from 2245 to 2167 and failures from 1047 to 969. Proven is unchanged at 1211, all
+1211 certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
+
+Not covered: the 38 that remain are the other messages in that rule -- a region value flowing
+through an assignment or an expression without a lifetime summary -- and they are a different
+question from this one. `region-call-opaque` at 110 is untouched: a region-polymorphic call still
+needs a converged lifetime summary and a mapping to a caller region.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
