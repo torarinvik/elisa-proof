@@ -232,6 +232,8 @@ run_probe region_extent_contract examples/region_extent_contract.elisa 0
 run_probe rejected_region_extent_contract examples/rejected_region_extent_contract.elisa 1
 run_probe region_statement_call examples/region_statement_call.elisa 0
 run_probe rejected_region_statement_call examples/rejected_region_statement_call.elisa 1
+run_probe region_lifetime_free_callee examples/region_lifetime_free_callee.elisa 0
+run_probe rejected_region_lifetime_free_callee examples/rejected_region_lifetime_free_callee.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -678,7 +680,7 @@ with open(lent, encoding="utf-8") as handle:
 if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: unnamed-lifetime lend did not replay cleanly")
 resource = {goal["name"]: goal["proven"] for goal in report["goals"] if goal["rule"] == "resource-safety"}
-for name in ("lends_region_value", "lends_region_value_exclusively"):
+for name in ("lends_region_value", "lends_region_value_exclusively", "lends_region_value_to_summary"):
     if resource.get(name) is not True:
         raise SystemExit("dogfood failed: %s was not admitted as a lend" % name)
 kinds = {finding["kind"] for finding in report["findings"]}
@@ -688,9 +690,9 @@ with open(summarised, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: summary-path boundary fixture did not fail cleanly")
-if not any(finding["kind"] == "region-call-opaque" for finding in report["findings"]):
-    raise SystemExit("dogfood failed: the summary path admitted an unnamed lifetime")
-print("dogfood unnamed_lifetime_lend: a lend may carry a region the callee cannot name; a summary may not")
+if ("lends_region_value_to_a_keeper", "region-call-opaque") not in {(f["name"], f["kind"]) for f in report["findings"]}:
+    raise SystemExit("dogfood failed: a callee that keeps what it is lent was admitted")
+print("dogfood unnamed_lifetime_lend: a lend may carry a region the callee cannot name, unless it can keep it")
 PY
 
 # A captured block's body must be checked rather than skipped, and nothing established before it
@@ -886,6 +888,33 @@ owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
 if owners != {("discards_a_region_reference", "region-expression-unsupported")}:
     raise SystemExit("dogfood failed: a discarded region reference was admitted: %s" % sorted(owners))
 print("dogfood region_statement_call: a call statement may name a region, its result may not carry one")
+PY
+
+python3 - "$REPORT_DIR/region_lifetime_free_callee.json" "$REPORT_DIR/rejected_region_lifetime_free_callee.json" <<'PY'
+import json
+import sys
+
+lent, kept = sys.argv[1:]
+with open(lent, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: lifetime-free callee fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a lifetime-free call certificate was left unreplayed")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("region_caller", "caller_that_writes", "region_caller_of_pusher"):
+    if reasons.get(owner) != "verified":
+        raise SystemExit("dogfood failed: %s could not hand a region-owned reference to a lifetime-free callee" % owner)
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: lifetime-free callee boundary fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+if ("a_lifetime_free_callee_may_not_return_a_reference", "region-call-opaque") not in owners:
+    raise SystemExit("dogfood failed: a callee that returns a reference was admitted from its declared modes")
+if ("overlapping_mutable_actuals", "borrow-call-alias") not in owners:
+    raise SystemExit("dogfood failed: two overlapping mutable actuals were admitted")
+print("dogfood region_lifetime_free_callee: a lifetime-free callee may borrow a region, not keep it")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

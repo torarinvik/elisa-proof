@@ -2094,6 +2094,69 @@ through an assignment or an expression without a lifetime summary -- and they ar
 question from this one. `region-call-opaque` at 110 is untouched: a region-polymorphic call still
 needs a converged lifetime summary and a mapping to a caller region.
 
+## A helper without a lifetime could not be handed a region
+
+### What was wrong
+
+`proof_kernel_replay_node_at(nodes, root)` declares no lifetime parameter, and every
+region-polymorphic caller in this codebase hands it a `nodes` that has one. That call was refused.
+So was every call like it: `region-call-opaque` at 110 findings and
+`borrow-call-summary-unsupported` at 95, with `proof_kernel_replay_resource_events[@r, @e, @s]`
+carrying 50 and 36 of them.
+
+The admission for exactly this shape already existed. A region-owned actual reaching a formal with
+no lifetime is a capability the callee cannot name: with nothing to bind it to it can neither
+allocate into that region nor return anything from it, and the lend rule already requires the
+callee to return no reference and no region, with the borrow itself liveness-checked on both
+sides. The problem was where the admission sat. The lend was attempted *only when the summary path
+did not map the arguments*, and for these calls the summary maps fine and then fails to be
+encoded -- the summary path places an actual from the callee's own trace, and a region-owned
+actual has no formal lifetime to be placed against. The two admissions never composed, so a callee
+that had a summary was worse off than one that did not.
+
+### What changed
+
+When the summary path maps a call and `proof_resource_record_call` then refuses it, the confined
+lend is tried before the obligation is recorded. `record_call` returns before it mutates anything
+on that path, so nothing half-written is left behind. What admits the call is the lend rule's own
+guarantee, which never depended on whether the callee also had a summary.
+
+A second change rides with it, from the same probe. A function whose *declared return type* is a
+scalar primitive returns a copy: it cannot carry a lifetime however the expression producing it
+was written. `return cell.value` out of a mutable region-owned parameter was being recorded as a
+region return, which then demanded a witness whose mutability matched a return that is not a
+reference at all, and refused. That marker is no longer emitted for a declared scalar return.
+
+### Fixtures
+
+`examples/region_lifetime_free_callee.elisa` requires a region-polymorphic caller to reach a
+lifetime-free reader, a lifetime-free callee that writes through a mutable region-owned reference,
+and a lifetime-free `push`, all verified with every certificate replayed.
+`examples/rejected_region_lifetime_free_callee.elisa` pins the boundary: a lifetime-free callee
+that *returns a reference* can keep what it is lent and is refused, and two overlapping mutable
+actuals are refused whatever path admits the call.
+
+`examples/rejected_unnamed_lifetime_lend.elisa` changed with this, and the change is the point.
+It existed to pin that the summary path refuses a region-owned actual at a lifetime-free formal,
+and that is no longer a boundary -- it was a limitation of the encoding, not a safety property.
+Its case moved into `examples/unnamed_lifetime_lend.elisa`, where the summary-bearing callee is
+now admitted beside the summary-less one, and the rejected half now holds a callee that returns a
+reference, which is the boundary that actually exists. Before making that move I checked the
+property the old fixture was standing in for: a caller that records a fact about a region-owned
+binding, lends it mutably to a lifetime-free callee that overwrites it, and then claims the old
+value is refused, with and without a lifetime parameter on the caller.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: `borrow-call-summary-unsupported` falls from 95 to
+0 and `region-call-opaque` from 110 to 29. Obligations fall from 2167 to 1998 and failures from
+969 to 793, and proven rises from 1211 to 1218. All 1218 certificates replay, gaps stay 0 and
+`trusted_assumptions` stays empty.
+
+Not covered: the 29 `region-call-opaque` that remain are the other two messages in that rule --
+a call with no converged lifetime summary at all, and one requiring an exact verified region
+summary. `borrow-call-opaque` at 59 is untouched.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

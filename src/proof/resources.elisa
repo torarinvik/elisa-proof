@@ -2059,6 +2059,20 @@ extend ElisaProof:
                             pairwise_alias: bool = proof_resource_call_source_has_pairwise_alias(state, report, summary.root, mapped)
                             recorded: mutable bool = false
                             recorded <- proof_resource_record_call(state, report, callee_name, summary.root, callee_index, mapped, mapped_allocation_roots, functions) if not pairwise_alias
+                            # A summary that maps its arguments can still fail to be *encoded* for
+                            # this call -- most often because a region-owned actual reaches a
+                            # formal that declares no lifetime, which the summary path places from
+                            # the callee's own trace and therefore refuses. That call may still be
+                            # a confined lend, which is admitted from the callee's declared modes
+                            # and needs no body summary at all, and the lend rule already tolerates
+                            # exactly this actual. The path was only ever tried when the summary
+                            # did not map, so the two admissions never composed. `record_call`
+                            # returns before it mutates anything when it refuses, so falling
+                            # through to the lend leaves no half-written call behind.
+                            if not recorded and not pairwise_alias and callee_index < functions.names.count:
+                                fallback_mapped: mutable darray[Ast::Expr] = []
+                                if proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &fallback_mapped):
+                                    recorded <- proof_resource_call_is_confined_lend(functions, callee_index, fallback_mapped, state, report) and proof_resource_record_lend_call(state, report, callee_name, callee_index, fallback_mapped, functions)
                             proof_resource_add_failing_obligation(report, "borrow-call-alias", position, function_name, "mutable call arguments overlap while the callee is running") if pairwise_alias
                             proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call is not mapped to a verified caller region") if (region_argument or region_polymorphic_call) and not recorded
                             proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "the checked callee resource summary could not be encoded for this call") if resource_argument and not recorded and not pairwise_alias
@@ -2814,7 +2828,15 @@ extend ElisaProof:
                                         continue if candidate_mutable != return_mutable_reference
                                         return_witness <- candidate
                                         witness_found <- true
-                            if returned_region != "" and proof_resource_region_is_external(state, returned_region):
+                            # A function whose declared return type is a scalar primitive returns
+                            # a copy. It cannot carry a lifetime however the expression that
+                            # produced it was written, so `return cell.value` out of a region-owned
+                            # binding is not a region return and needs no marker at all. Emitting
+                            # one made the ordinary shape -- read a number out of a region-owned
+                            # parameter -- depend on a witness whose mutability had to match a
+                            # return that is not a reference in the first place.
+                            return_is_scalar: bool = return_function_index < functions.return_scalar.count and functions.return_scalar[return_function_index]
+                            if returned_region != "" and not return_is_scalar and proof_resource_region_is_external(state, returned_region):
                                 proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a region return must be tied to a replayed resource use or returned allocation") if return_witness >= report.kernel_nodes.count
                                 proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if return_witness < report.kernel_nodes.count
                     Ast::Stmt.If(condition, then_body, else_body, _):

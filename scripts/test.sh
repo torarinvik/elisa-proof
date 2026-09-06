@@ -1670,7 +1670,7 @@ if [[ "$unnamed_lifetime_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_unnamed_lifetime_lend.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "lends_region_value_to_summary") in findings'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_unnamed_lifetime_lend.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "lends_region_value_to_a_keeper") in findings'
 rejected_unnamed_lifetime_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_unnamed_lifetime_status" -ne 0 ]]; then
@@ -1809,6 +1809,26 @@ rejected_region_statement_call_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_region_statement_call_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a discarded region reference was admitted\n' >&2
+    exit 1
+fi
+
+# A helper that declares no lifetime may receive a region-owned reference: it cannot allocate into
+# that region or return anything from it. A callee that returns a reference may not.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_lifetime_free_callee.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert all(reasons[owner] == "verified" for owner in ("region_caller", "caller_that_writes", "region_caller_of_pusher"))'
+region_lifetime_free_callee_status=${PIPESTATUS[1]}
+set -e
+if [[ "$region_lifetime_free_callee_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a lifetime-free callee could not receive a region-owned reference\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_lifetime_free_callee.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; assert ("a_lifetime_free_callee_may_not_return_a_reference", "region-call-opaque") in owners; assert ("overlapping_mutable_actuals", "borrow-call-alias") in owners; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lifetime_free_callee_may_not_return_a_reference"] != "verified"; assert reasons["overlapping_mutable_actuals"] != "verified"'
+rejected_region_lifetime_free_callee_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_region_lifetime_free_callee_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a lend admitted a callee that keeps what it is lent\n' >&2
     exit 1
 fi
 
