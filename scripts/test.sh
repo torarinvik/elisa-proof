@@ -2204,4 +2204,27 @@ if [[ "$rejected_effect_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A megabyte of source must produce a verdict rather than a stack overflow. The tool used to die
+# on anything past roughly half a megabyte, which is less than `src/proof/check.elisa` itself: a
+# declaration whose initializer is a conditional expression, inside a captured loop body, leaks
+# stack on every iteration in the compiler this is built with, and the include expander read one
+# byte per iteration through exactly that shape. The generated file is plain and large on purpose;
+# what is under test is that the size is survivable, not what it proves.
+large_source_dir="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-large.XXXXXX")"
+python3 - "$large_source_dir/large.elisa" <<'PY'
+import sys
+(path,) = sys.argv[1:]
+line = "# " + "x" * 78 + "\n"
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write("def large_source_is_survivable() -> i64:\n    ensure result == 1\n    return 1\n")
+    handle.write(line * (1024 * 1024 // len(line)))
+PY
+"$ROOT_DIR/build/elisa-proof" --json "$large_source_dir/large.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert ("large_source_is_survivable", "goal") in {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}'
+large_source_status=${PIPESTATUS[1]}
+rm -rf "$large_source_dir"
+if [[ "$large_source_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a megabyte of source did not produce a verdict\n' >&2
+    exit 1
+fi
+
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

@@ -1747,6 +1747,79 @@ the tree produces the finding any more, so the remaining path is exercised only 
 absence. The loop handler's own imprecision is untouched -- a `for` without an invariant still
 forgets its whole frame afterwards.
 
+## The checker died of a stack overflow on half a megabyte of source
+
+### What was wrong
+
+`elisa-proof` segfaulted on any source file past roughly half a megabyte. Bisected on generated
+files of comment lines: 400 KB produced a verdict, 600 KB produced `SIGSEGV`. That threshold is
+below `src/proof/check.elisa`, which is 605 KB, and only just above
+`examples/kernel_replay_standalone.elisa`, which expands to about 430 KB. Two files in the tree
+crashed it outright: `examples/tactic_runtime.elisa` and
+`examples/lemma_summary_replay_runtime.elisa`, each of which pulls in the compiler as well as the
+proof modules and expands to roughly nine megabytes across 480 files. Nothing in either suite ran
+the checker on those two, so nothing caught it.
+
+A crash is worse than a refusal. The tool produced no report, no finding and no exit status a
+caller could act on, and a checker that dies on large input cannot be trusted to have checked the
+large input it did survive.
+
+The fault address sat on the stack guard page and the faulting instruction was the prologue of a
+leaf function, with only seven frames below it. So this was not deep recursion: a single frame had
+walked the stack pointer down eight megabytes. Reduced against `elisac-stage1`, the cause is one
+construct:
+
+```
+def main() -> i32:
+    index: mutable usize = 0
+    total: mutable usize = 0
+    while index < 700000 |index, total|:
+        byte: usize = 10 if index == 0 else 20
+        total <- total + byte
+        index <- index + 1
+    return 0
+```
+
+This compiles and dies with `SIGSEGV`. A declaration whose initializer is a *conditional
+expression*, inside a *captured* loop body, leaks stack on every iteration. Each of these
+variations runs to completion: the same declaration with a non-conditional initializer; the same
+conditional as an assignment to a binding hoisted out of the loop; the same loop without a capture
+list around the conditional declaration; and an indexed read, an `if`/`else`, a growing captured
+`darray` or two million plain iterations in any combination. It is the pair -- conditional
+initializer, captured loop -- that leaks. That is a code generation defect in the compiler, not in
+this checker.
+
+### What changed
+
+`proof_expand_file` reads the file it is expanding one byte per iteration through exactly that
+shape:
+
+```
+byte: u8 = 10 if at_end else contents[index]
+```
+
+so a source file of *n* bytes leaked *n* times. The binding is now hoisted out of the loop as
+`mutable` and assigned with two guarded assignments, which the reduction above shows does not
+leak. The comment there names the defect so the line is not "simplified" back.
+
+### Coverage
+
+`scripts/test.sh` now generates a megabyte of source into a temporary directory and requires a
+`proved` verdict with a real goal discharged, zero semantic errors and zero replay gaps. It
+generates rather than commits the file, because what is under test is the size, not the content.
+
+### What it bought
+
+Generated inputs at 600 KB, 800 KB, 1 MB and 4 MB all produce a verdict where 600 KB and up used
+to crash. On `examples/kernel_replay_standalone.elisa` nothing moves: 1210/2251, replay gaps 0 --
+this changes no reasoning, only whether the tool survives its input.
+
+Not covered: the two nine-megabyte examples now run instead of crashing, but neither was run to a
+verdict, so the ceiling above four megabytes is untested. The defect is worked around at one call
+site, not fixed: the same shape appears elsewhere in this codebase, and every one of those loops
+still leaks on every iteration -- they are simply bounded by proof state rather than by input
+size. The compiler defect itself is not fixed here and belongs in the compiler.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
