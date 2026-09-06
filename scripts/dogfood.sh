@@ -223,6 +223,7 @@ run_probe captured_block examples/captured_block.elisa 1
 run_probe rejected_captured_block examples/rejected_captured_block.elisa 1
 run_probe uncaptured_binding examples/uncaptured_binding.elisa 1
 run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa 1
+run_probe rejected_uncaptured_block_write examples/rejected_uncaptured_block_write.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 1
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -713,8 +714,9 @@ for entry in (("fact_must_not_survive", "goal"), ("value_must_not_survive", "goa
 print("dogfood captured_block: a captured block's body is checked and its write-back is havocked")
 PY
 
-# The write-back is over the capture list, not the whole frame: a binding the list does not name
-# keeps its value and its facts, and a binding it does name keeps neither.
+# The write-back is over the capture list and the body's own writes, not the whole frame: a
+# binding the block neither names nor writes keeps its value and its facts, and a binding it names
+# or writes keeps neither.
 python3 - "$REPORT_DIR/uncaptured_binding.json" "$REPORT_DIR/rejected_uncaptured_binding.json" <<'PY'
 import json
 import sys
@@ -740,6 +742,35 @@ for entry in (("overwritten_binding_must_not_survive", "goal"), ("zero_iteration
     if goals.get(entry) is not False:
         raise SystemExit("dogfood failed: %s survived its own captured block" % (entry,))
 print("dogfood uncaptured_binding: a captured block forgets its capture list and nothing else")
+PY
+
+python3 - "$REPORT_DIR/rejected_uncaptured_block_write.json" <<'PY'
+import json
+import sys
+
+(path,) = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: uncaptured block write fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+written = (
+    "assigned_without_being_captured",
+    "assigned_under_a_branch",
+    "written_through_a_reference",
+    "assigned_in_a_nested_block",
+    "fact_over_a_written_binding",
+)
+for owner in written:
+    if (owner, "call-requires-unproven") not in owners:
+        raise SystemExit("dogfood failed: %s discharged a precondition from a falsified state" % owner)
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s proved a goal from a falsified state" % owner)
+kinds = {kind for _, kind in owners}
+if kinds != {"call-requires-unproven", "captured-block-unsupported"}:
+    raise SystemExit("dogfood failed: unexpected findings around an uncaptured write: %s" % sorted(kinds))
+print("dogfood rejected_uncaptured_block_write: a block write-back covers what its body writes")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

@@ -1721,6 +1721,17 @@ if [[ "$rejected_uncaptured_binding_status" -ne 0 ]]; then
     exit 1
 fi
 
+# The capture list is not a bound on what a block writes: the compiler accepts a block whose body
+# assigns an outer binding the list omits. Every such binding must lose its value and its facts.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_uncaptured_block_write.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; written = ("assigned_without_being_captured", "assigned_under_a_branch", "written_through_a_reference", "assigned_in_a_nested_block", "fact_over_a_written_binding"); assert all((owner, "call-requires-unproven") in owners for owner in written); goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert all(goals[(owner, "goal")] is False for owner in written); assert {kind for _, kind in owners} == {"call-requires-unproven", "captured-block-unsupported"}'
+rejected_uncaptured_block_write_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_uncaptured_block_write_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a binding written outside a block capture list kept its state\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

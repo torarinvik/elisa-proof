@@ -1166,7 +1166,10 @@ relaxed. Replay gaps stay at zero and `trusted_assumptions` stays empty.
 
 Coverage. `examples/uncaptured_binding.elisa` requires a symbolic value and a `requires`-derived
 fact, both over bindings outside the capture list, to survive the block and discharge a
-postcondition. `examples/rejected_uncaptured_binding.elisa` is the adversarial half and pins the two
+postcondition. The capture-list argument quoted above is false as stated -- a block can assign an
+outer binding its list omits -- and is corrected under "A captured block wrote a binding its
+capture list did not name" below; the write-back set there is the capture list plus what the body
+writes and references. `examples/rejected_uncaptured_binding.elisa` is the adversarial half and pins the two
 ways this could go wrong: a binding the list *does* name whose value the loop overwrites must not
 keep its old value, and a fact the loop body establishes must not escape a loop that may run zero
 times.
@@ -1621,6 +1624,72 @@ body writes even when the fact is untouched by the write. A captured loop's post
 still havocked over the whole capture list by the block write-back, so nothing the loop
 established survives it. An unsigned increment still cannot be proved bounded without a constant
 upper bound, so invariants over `usize` counters must state one.
+
+## A captured block wrote a binding its capture list did not name
+
+### What was wrong
+
+The write-back at a captured block was scoped to the capture list. The reasoning recorded for it
+was that a captured block cannot *name* a binding its list omits, so it can neither read nor write
+one, and a fact over such a binding survives the block untouched. That premise is false for the
+compiler this checker is written against.
+
+`elisac-stage1` compiles
+
+```
+def main() -> i32:
+    outside: mutable i32 = 0
+    for j in 0..<4 |j|:
+        outside <- outside + 1
+    return outside
+```
+
+and the linked program exits 4. The capture list names only the binder, and the body assigns an
+outer binding all the same.
+
+So a fact over such a binding was restored after the block had falsified it, and the checker
+proved things that are not true. The smallest case: a `usize` counter set to zero, incremented in
+a loop whose capture list omits it, and then passed to a callee that `requires x < 10`. The
+obligation was discharged from `0 < 10` and no finding was raised. Writing the identical function
+with the counter *in* the capture list refused it, which is how narrow the hole was.
+
+### What changed
+
+The write-back set is no longer the capture list. It is the capture list together with every root
+the body assigns and every place the body references, collected by the same two walks the loop
+entry uses -- `proof_collect_assignment_roots`, which recurses into nested blocks, branches, loops
+and match arms, and `proof_collect_aliased_names`, which covers `&`, `mutable`, `move`, method
+receivers and arguments to reference or unknown callees. A lambda anywhere in the body still
+yields the `*` sentinel, and that now forgets the frame and keeps only type bounds rather than
+falling through a membership test no name matches. `proof_forget_captured_values` and
+`proof_restore_uncaptured_facts` are unchanged; they are handed the wider set.
+
+What the block still keeps is what it neither names nor writes, which is what the precision this
+replaces was actually for.
+
+### Fixtures
+
+`examples/rejected_uncaptured_block_write.elisa` pins five shapes, each a binding written by a
+block that does not capture it and then passed to a callee with a precondition: a plain
+assignment, an assignment under a branch inside the block, a write through a reference handed to
+a callee, an assignment in a block nested inside the block, and a `requires`-derived fact rather
+than a recorded value. All five must produce `call-requires-unproven` and an unproven goal, and
+the fixture admits no other finding kind. The previous binary proves all five.
+`examples/uncaptured_binding.elisa` is unchanged and still requires both of its postconditions,
+which is the evidence that the wider set did not swallow the precision it was introduced for; its
+header claimed the false premise and now states the real rule.
+
+### What it bought
+
+Soundness, at no measured cost. On `examples/kernel_replay_standalone.elisa` the summary,
+the finding histogram and the set of proven goal sites are identical before and after:
+1210/2392 with 0 replay gaps either way. Every captured block in that corpus already names what
+it writes, so the corpus never exercised the hole -- which is exactly why a fixture, not a
+measurement, is what pins this.
+
+Not covered: the block's own exit state is still discarded rather than merged, so a loop with an
+invariant proves it inside the block's private state and exports nothing. That remains the
+largest single source of `captured-block-unsupported`, 141 of them on the kernel corpus.
 
 ## Coverage still required
 
