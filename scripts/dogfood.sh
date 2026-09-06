@@ -223,6 +223,8 @@ run_probe captured_block examples/captured_block.elisa 1
 run_probe rejected_captured_block examples/rejected_captured_block.elisa 1
 run_probe uncaptured_binding examples/uncaptured_binding.elisa 1
 run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa 1
+run_probe call_boundary_binding examples/call_boundary_binding.elisa 1
+run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe loop_condition_facts examples/loop_condition_facts.elisa 1
 run_probe rejected_loop_condition_facts examples/rejected_loop_condition_facts.elisa 1
 run_probe rejected_shared_extent_global examples/rejected_shared_extent_global.elisa 1
@@ -729,6 +731,38 @@ for entry in (("overwritten_binding_must_not_survive", "goal"), ("zero_iteration
     if goals.get(entry) is not False:
         raise SystemExit("dogfood failed: %s survived its own captured block" % (entry,))
 print("dogfood uncaptured_binding: a captured block forgets its capture list and nothing else")
+PY
+
+# A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
+# scalar nothing references keeps its value, a referenced one and a value over it do not.
+python3 - "$REPORT_DIR/call_boundary_binding.json" "$REPORT_DIR/rejected_call_boundary_binding.json" <<'PY'
+import json
+import sys
+
+kept, dropped = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: call boundary fixture did not replay cleanly")
+unproven = [goal["name"] for goal in report["goals"] if not goal["proven"]]
+if unproven:
+    raise SystemExit("dogfood failed: a binding no callee can reach was forgotten at the boundary: %s" % unproven)
+proven = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] == "goal"}
+required = {"loop_binder_survives_a_declaration_call", "value_survives_a_declaration_call", "value_survives_an_assignment_call", "value_survives_a_statement_call", "loop_binder_survives_a_guarded_call", "value_survives_a_returning_branch"}
+if not required <= proven:
+    raise SystemExit("dogfood failed: call boundary fixture is missing goals: %s" % sorted(required - proven))
+kinds = {finding["kind"] for finding in report["findings"]}
+if kinds != {"captured-block-unsupported"}:
+    raise SystemExit("dogfood failed: unexpected findings at the call boundary: %s" % sorted(kinds))
+with open(dropped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: rejected call boundary fixture did not fail cleanly")
+owners = {finding["name"] for finding in report["findings"] if finding["kind"] == "ensure-unproven"}
+expected = {"referenced_value_must_not_survive", "value_over_a_referenced_binding_must_not_follow_it", "referenced_value_must_not_survive_a_statement_call", "value_overwritten_in_one_arm_must_not_survive", "value_overwritten_in_the_surviving_arm_must_not_survive"}
+if owners != expected:
+    raise SystemExit("dogfood failed: a rewritable binding survived the boundary: %s" % sorted(expected - owners))
+print("dogfood call_boundary_binding: a call and a join forget only what can be rewritten")
 PY
 
 # An invariant-less loop still assumes its own condition in the body, and a shared borrow keeps

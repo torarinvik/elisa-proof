@@ -1350,6 +1350,94 @@ Both suites pass. `scripts/dogfood.sh`'s `replay_standalone` probe was run separ
 of that suite, and did execute twice: both runs exit 1, the two reports are byte-identical, and the
 report carries 1167 certificates all replayed with no gaps under independent kernel replay.
 
+## A call boundary and a branch join forgot what they could not reach
+
+### What was wrong
+
+Two havoc points in `check.elisa` forgot every recorded binding value in the frame, not only the
+ones the construct could rewrite.
+
+At a call boundary -- a declaration or assignment whose initializer contains a call, a statement
+call, a call in an `assert`, an `if` or `match` head, a `for` iterable or an `assert ... by:` guard
+-- the checker gave every pre-existing binding a fresh opaque symbol (`proof_forget_values`,
+`proof_forget_values_before`, `proof_forget_values_except`). The facts at the same boundary were
+already treated more carefully: `proof_clear_facts_after_call` keeps a fact that is call-stable for
+the frame, because a callee reaches the caller's state only through references and globals, so a
+by-value scalar nothing in the body references cannot change across the call. The values were not
+given the same treatment, and the asymmetry was visible: on the kernel's own source a loop binder's
+range was proven on the first line of a loop body and unprovable on the next, because the call
+between them had renamed the binder to a plain symbol the range facts no longer described. Even
+`0 <= index` failed.
+
+At a branch join whose arm may modify state, the checker forgot every value as well, then imported
+the call-stable facts from the arms that reach the join. The arms had been executed symbolically,
+so each arm's end state was available, and a value both reaching arms still agree on is the
+binding's value at the join. This is the shape of every guarded statement call in the kernel
+(`add_lower(...) if left_bound.has_lower`): the arm makes a call, the join forgot the binder.
+
+Neither was unsound. Both were a loss of precision that took the dominant loop-with-calls shape out
+of reach of the index rules, and the `index-lower-unproven` refusals it produced were pure noise:
+nothing in a loop body can make a `for` binder negative.
+
+### What changed
+
+`proof_forget_values_after_call` replaces the three whole-frame forgets at the call boundaries. A
+binding keeps its recorded value when the frame's alias set is usable, the binding's own name is
+not in it, and the value is call-stable under `proof_expr_call_stable` against the aliased names --
+the predicate the fact side of the same boundary already applies, so a value survives exactly where
+a fact over it would. A declaration's own new binding and the slot that receives an assignment's
+call result are handled as before. Without a usable alias set nothing is kept, which is the
+whole-frame forget this replaces.
+
+`proof_restore_branch_values` runs at the branch join after the existing forget. For each binding
+in the pre-branch frame it imports the value from the arms that reach the join when every reaching
+arm carries the same value (`proof_expr_equal`) and that value is call-stable. An arm that
+introduced a binding of its own is not imported from at all, matching the rule the fact import
+already uses, so an arm-local name cannot escape through a value. When only one arm reaches the
+join its value is the whole state and is imported alone.
+
+Neither helper adds a trust rule and neither touches the kernel or the replay: the certificates a
+goal produces are the same shape, replayed by the same rules, with more of the goals now
+certifiable.
+
+### Fixtures
+
+`examples/call_boundary_binding.elisa` requires a loop binder and a recorded literal to survive a
+declaration call, an assignment call, a statement call, a guarded call and a returning branch, each
+discharging a postcondition that the previous build refused in all six functions. The callee writes
+through a reference, so it is not pure and the boundary is a real havoc.
+
+`examples/rejected_call_boundary_binding.elisa` pins the ways this could go wrong. A binding passed
+by reference to the callee must not keep its value; a value recorded as the symbol of a referenced
+binding must not follow that binding's rewrite -- the false postcondition `result == 0` would
+otherwise be derived from the callee's own summary; the same across a statement call; and at a join,
+a value one arm overwrote must not be taken from the arm that left it alone, nor from the pre-branch
+state when the other arm returns. All five fail with `ensure-unproven` and nothing else.
+
+`scripts/test.sh` asserts every goal of the positive fixture proves and exactly those five owners
+fail in the adversarial one; `scripts/dogfood.sh` repeats both against its own reports.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`, measured against a binary built from the previous
+commit, proven moves from 1167/2456 to 1177/2456. The ten goals are all `index-lower`, in
+`close_equalities`, `names_equal`, `goal_depth` and `resource_lend`, and every one is a loop binder
+that had lost its range at a call. `index-lower-unproven` falls from 69 to 59; no other refusal
+count moves, no function changes its verification reason, and the certificate count rises with the
+proven count with replay gaps still 0 and `trusted_assumptions` still empty.
+
+The matching `index-upper` goals in those loops do not move, and the reason is now visible rather
+than hidden behind a forgotten binder: `for index in 0..<left_names.count` bounds the binder by one
+array and the body indexes a second one, `right_names[index]`, whose count the checker has no
+relation for. That is a relational invariant the kernel source does not state, not a forgetting
+problem. The remaining `index-upper-unproven` are almost all of this shape or the
+`children_start + index < children.count` sums an earlier entry already describes.
+
+Not covered: `match` arms are joined without per-arm values, so a guarded call written as a `match`
+still forgets the frame; and the alias set is flow-insensitive, so a local whose reference was
+taken anywhere in the body is forgotten at every call in that body, including calls that cannot see
+it.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

@@ -686,18 +686,6 @@ extend ElisaProof:
                 values[index] <- Ast::Expr.Ident(names[index], position) if index < names.count
                 values[index] <- Ast::Expr.Invalid if index >= names.count
 
-        def proof_forget_values_before(names: darray[sview]&, values: mutable darray[Ast::Expr]&, limit: usize, position: Ast::Pos) -> void:
-            capped_limit: usize = limit if limit < values.count else values.count
-            for index in 0..<capped_limit |index, names, values, position|:
-                values[index] <- Ast::Expr.Ident(names[index], position) if index < names.count
-                values[index] <- Ast::Expr.Invalid if index >= names.count
-
-        def proof_forget_values_except(names: darray[sview]&, values: mutable darray[Ast::Expr]&, keep: usize, position: Ast::Pos) -> void:
-            for index in 0..<values.count |index, names, values, keep, position|:
-                continue if index == keep
-                values[index] <- Ast::Expr.Ident(names[index], position) if index < names.count
-                values[index] <- Ast::Expr.Invalid if index >= names.count
-
         # An else path after `if not condition` carries condition itself, not a redundant
         # double negation. This matters for early-return guards: the surviving path can then
         # publish the predicate that justified a later access or postcondition.
@@ -1158,6 +1146,26 @@ extend ElisaProof:
                 retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, report.shared_extent_names, 0)
                 values[index] <- Ast::Expr.Ident(names[index], position) if not retained
 
+        # Give a fresh opaque symbol, at a call boundary, only to the bindings the callee can
+        # reach. A callee reaches the caller's state through references and globals alone, so a
+        # by-value scalar local that nothing in this body references keeps its recorded value --
+        # but only when that value is itself call-stable against the aliased names, otherwise a
+        # value recorded in terms of a binding the call does rewrite would silently follow it.
+        # This is the same predicate the fact side of the boundary already applies, so a value
+        # survives exactly where a fact over it would. Slots at or past `limit` are left alone
+        # (a declaration's own new binding), and `keep` exempts the slot that receives the
+        # call's result. Without a usable alias set for this frame nothing is kept, which is the
+        # whole-state forget this replaces.
+        def proof_forget_values_after_call(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: darray[Ast::Expr]&, parameters: darray[sview]&, report: ProofReport&, owner: sview, limit: usize, keep: usize, position: Ast::Pos) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            capped_limit: usize = limit if limit < values.count else values.count
+            for index in 0..<capped_limit |index, names, values, facts, parameters, report, analyzed, keep, position|:
+                continue if index == keep
+                values[index] <- Ast::Expr.Invalid if index >= names.count
+                continue if index >= names.count
+                retained: bool = analyzed and not (any existing in report.aliased_names where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, report.aliased_names, report.shared_extent_names, 0)
+                values[index] <- Ast::Expr.Ident(names[index], position) if not retained
+
         # Re-establish, after a captured block in statement position, every fact the block could
         # not have falsified. The capture list is the block's whole reach: a binding it does not
         # name cannot be read or written inside it. Blocking the captured names alongside the
@@ -1174,6 +1182,27 @@ extend ElisaProof:
                 continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
+
+        # Re-establish, at a branch join, the recorded value of every binding whose value each
+        # arm that reaches the join still carries, and that the reaching arms agree on. The arms
+        # were executed symbolically, so a value standing at an arm's exit is the binding's value
+        # on that path; a value both paths share is its value at the join, and when one arm alone
+        # reaches the join its value is the whole state. An arm that introduced a binding of its
+        # own is not imported from at all, and only a call-stable value is imported, so a value
+        # recorded in terms of an arm-local, aliased or unwitnessed name cannot escape with it.
+        def proof_restore_branch_values(values: mutable darray[Ast::Expr]&, names: darray[sview]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, then_reaches: bool, else_reaches: bool, limit: usize, facts: darray[Ast::Expr]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            return if not analyzed
+            return if not then_reaches and not else_reaches
+            capped: mutable usize = limit if limit < values.count else values.count
+            capped <- names.count if names.count < capped
+            capped <- then_values.count if then_reaches and then_values.count < capped
+            capped <- else_values.count if else_reaches and else_values.count < capped
+            for index in 0..<capped |index, values, names, then_values, else_values, then_reaches, else_reaches, facts, parameters, report|:
+                candidate: Ast::Expr = then_values[index] if then_reaches else else_values[index]
+                continue if then_reaches and else_reaches and not proof_expr_equal(then_values[index], else_values[index])
+                continue if not proof_expr_call_stable(candidate, facts, names, parameters, report.aliased_names, report.shared_extent_names, 0)
+                values[index] <- candidate
 
         # Re-establish, at a branch join both arms reach, every fact that both arms still hold.
         # A fact standing at an arm's exit is true on that path, so one held on both paths is
@@ -5814,7 +5843,7 @@ extend ElisaProof:
                         if proof_expr_has_call(initializer):
                             # The new local contains the call result, so retain its binding, but
                             # forget every pre-existing binding that the call may have mutated.
-                            proof_forget_values_before(names, values, prior_value_count, position)
+                            proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, prior_value_count, values.count, position)
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if shadowed
                         proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if not shadowed and proof_expr_has_call(initializer) and not call_applied
                         proof_bind_unsigned_symbol(names, values, facts, report, name, prior_value_count, unsigned_width, value, position) if unsigned_width > 0
@@ -5859,9 +5888,9 @@ extend ElisaProof:
                                 if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and target_slot < values.count:
                                     # Preserve the assigned result, but do not let the call's
                                     # possible mutation of another binding survive this point.
-                                    proof_forget_values_except(names, values, target_slot, position)
+                                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, target_slot, position)
                                 else:
-                                    proof_forget_values(names, values, position)
+                                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position)
                             # An unsigned local keeps its width by staying symbolic; its new
                             # value becomes an equality fact when it is range-safe.
                             rebound_width: i64 = proof_unsigned_marker_width_for_name(facts, target_name) if target_slot < values.count else 0
@@ -5894,7 +5923,7 @@ extend ElisaProof:
                             # state, so check its frame/precondition boundary and discard all
                             # pre-call facts before publishing the assertion itself.
                             proof_check_frame_calls_in_expression(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if assertion_has_call
-                            proof_forget_values(names, values, position) if assertion_has_call
+                            proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if assertion_has_call
                             proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if assertion_has_call
                             if lemma_steps:
                                 assertion_proven: bool = proof_certify_goal(facts, assertion, report, position.line, name, annotations)
@@ -5915,7 +5944,7 @@ extend ElisaProof:
                                     # `assert(expr)` evaluates expr before publishing it. Do not
                                     # retain facts that a nested executable call may have
                                     # invalidated, even when the outer builtin is pure.
-                                    proof_forget_values(names, values, position) if assertion_has_call
+                                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if assertion_has_call
                                     proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if assertion_has_call
                                     if lemma_steps:
                                         call_assertion_proven: bool = proof_certify_goal(facts, assertion_call, report, position.line, name, annotations)
@@ -5933,15 +5962,17 @@ extend ElisaProof:
                                     if not applied_lemma:
                                         applied_function: bool = proof_apply_function(substituted_expression, Ast::Expr.Absent, facts, functions, names, frame_parameters, changes, preserves, report, name, annotations)
                                         proof_check_opaque_call_frame(substituted_expression, names, frame_parameters, changes, preserves, functions, report, name) if not applied_function
-                                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if not applied_function
                                         # A statement call has no result binding to carry forward;
                                         # even a framed summary may have changed an untracked local
                                         # alias, so forget symbolic values at the call boundary.
-                                        proof_forget_values(names, values, position)
+                                        # The values are settled against the pre-call facts, whose
+                                        # witnesses the clear below would keep anyway.
+                                        proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position)
+                                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if not applied_function
                             _:
                                 proof_check_frame_calls_in_expression(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(expression)
                                 substituted_expression <- proof_substitute(expression, names, values) if proof_expr_has_call(expression)
-                                proof_forget_values(names, values, position) if proof_expr_has_call(expression)
+                                proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if proof_expr_has_call(expression)
                                 proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
                         flow.normal <- false if terminal_expression
                     Ast::Stmt.Return(value, position):
@@ -6030,7 +6061,7 @@ extend ElisaProof:
                         condition_has_call: bool = proof_expr_has_call(condition)
                         condition_facts_stable: bool = not condition_has_call or proof_contract_calls_are_pure(condition, functions)
                         proof_check_frame_calls_in_expression(condition, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if condition_has_call
-                        proof_forget_values(names, values, position) if condition_has_call
+                        proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if condition_has_call
                         branch_value_count: usize = values.count
                         then_names: mutable darray[sview] = proof_copy_names(names)
                         then_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
@@ -6092,7 +6123,9 @@ extend ElisaProof:
                             proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                             # The arms were executed symbolically, so a fact still standing at a
                             # surviving arm's exit is true on that path. Import the call-stable
-                            # ones from the paths that actually reach this statement.
+                            # ones from the paths that actually reach this statement, and the
+                            # recorded values those paths agree on.
+                            proof_restore_branch_values(values, names, then_values, else_values, then_falls_through and then_names.count == names.count, else_falls_through and else_names.count == names.count, branch_value_count, facts, frame_parameters, report, name)
                             if then_falls_through and else_falls_through:
                                 proof_restore_branch_stable_facts(then_facts, else_facts, facts, names, frame_parameters, report, name)
                             elif then_falls_through:
@@ -6279,7 +6312,7 @@ extend ElisaProof:
                         iterable_value: mutable Ast::Expr = proof_substitute(iterable, names, values)
                         proof_check_frame_calls_in_expression(iterable, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(iterable)
                         iterable_value <- proof_substitute(iterable, names, values) if proof_expr_has_call(iterable)
-                        proof_forget_values(names, values, Ast::expr_pos(iterable)) if proof_expr_has_call(iterable)
+                        proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(iterable)) if proof_expr_has_call(iterable)
                         for_names: mutable darray[sview] = proof_copy_names(names)
                         for_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
                         for_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
@@ -6354,7 +6387,7 @@ extend ElisaProof:
                         scrutinee_value: mutable Ast::Expr = proof_substitute(scrutinee, names, values)
                         proof_check_frame_calls_in_expression(scrutinee, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(scrutinee)
                         scrutinee_value <- proof_substitute(scrutinee, names, values) if proof_expr_has_call(scrutinee)
-                        proof_forget_values(names, values, Ast::expr_pos(scrutinee)) if proof_expr_has_call(scrutinee)
+                        proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(scrutinee)) if proof_expr_has_call(scrutinee)
                         arms_may_modify: mutable bool = false
                         match_has_normal: mutable bool = false
                         match_valid: mutable bool = true
@@ -6422,7 +6455,7 @@ extend ElisaProof:
                                         # the erased proof body. Its calls cannot be allowed to
                                         # preserve facts established before guard evaluation.
                                         proof_check_frame_calls_in_expression(block_goal, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if runtime_goal_has_call
-                                        proof_forget_values(names, values, Ast::expr_pos(block_goal)) if runtime_goal_has_call
+                                        proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(block_goal)) if runtime_goal_has_call
                                         proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if runtime_goal_has_call
                                         proof_add_traced_fact(facts, report, runtime_goal, "runtime-guard", block_position.line, name) if proof_runtime_fact_is_stable(runtime_goal, functions)
                                     _:

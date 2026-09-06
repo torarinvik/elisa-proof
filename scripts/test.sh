@@ -1721,6 +1721,28 @@ if [[ "$rejected_uncaptured_binding_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A call reaches the caller's state only through references and globals, so a by-value scalar
+# nothing in the body references keeps its recorded value across the call; at a branch join, a
+# value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
+# terms of one, and a value an arm overwrote must all still be forgotten.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/call_boundary_binding.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not [goal for goal in report["goals"] if not goal["proven"]]; proven = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] == "goal"}; assert {"loop_binder_survives_a_declaration_call", "value_survives_a_declaration_call", "value_survives_an_assignment_call", "value_survives_a_statement_call", "loop_binder_survives_a_guarded_call", "value_survives_a_returning_branch"} <= proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported"}'
+call_boundary_binding_status=${PIPESTATUS[1]}
+set -e
+if [[ "$call_boundary_binding_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a binding no callee can reach did not survive the call boundary\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_call_boundary_binding.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {finding["name"] for finding in report["findings"] if finding["kind"] == "ensure-unproven"}; assert owners == {"referenced_value_must_not_survive", "value_over_a_referenced_binding_must_not_follow_it", "referenced_value_must_not_survive_a_statement_call", "value_overwritten_in_one_arm_must_not_survive", "value_overwritten_in_the_surviving_arm_must_not_survive"}; assert all(goal["proven"] for goal in report["goals"] if goal["rule"] != "goal")'
+rejected_call_boundary_binding_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_call_boundary_binding_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a binding a callee or an arm can rewrite survived the boundary\n' >&2
+    exit 1
+fi
+
 # An invariant-less loop still runs its body only when the condition holds, and a shared borrow's
 # element count is stable across a call. Together these discharge the dominant loop shape here.
 set +e
