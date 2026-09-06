@@ -845,7 +845,7 @@ if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"
 if report["replay"]["certificates"] != report["replay"]["replayed"]:
     raise SystemExit("dogfood failed: a region extent certificate was left unreplayed")
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("bounded_without_indexing", "extent_in_an_ensure", "two_lifetimes"):
+for owner in ("bounded_without_indexing", "extent_in_an_ensure", "two_lifetimes", "indexes_under_its_own_precondition"):
     if reasons.get(owner) != "verified":
         raise SystemExit("dogfood failed: %s could not bound its own region-owned parameter" % owner)
 with open(refused, encoding="utf-8") as handle:
@@ -856,6 +856,8 @@ owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
 for owner in ("struct_count_is_not_an_extent", "an_element_in_a_contract", "the_binding_itself", "a_field_of_an_element"):
     if (owner, "region-contract-unsupported") not in owners:
         raise SystemExit("dogfood failed: %s entered a contract as if it were an extent" % owner)
+if ("shared_cannot_be_returned_mutable", "region-return-witness-unsupported") not in owners:
+    raise SystemExit("dogfood failed: a shared binding witnessed a mutable-reference return")
 print("dogfood region_extent_contract: a collection extent is contractable, a region-owned value is not")
 PY
 

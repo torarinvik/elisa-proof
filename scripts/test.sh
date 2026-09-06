@@ -1775,7 +1775,7 @@ fi
 # A region-polymorphic function may state a contract about the extent of its own parameter. Only
 # the extent, and only when the declared type is a collection.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_extent_contract.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert all(reasons[owner] == "verified" for owner in ("bounded_without_indexing", "extent_in_an_ensure", "two_lifetimes"))'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/region_extent_contract.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert all(reasons[owner] == "verified" for owner in ("bounded_without_indexing", "extent_in_an_ensure", "two_lifetimes", "indexes_under_its_own_precondition"))'
 region_extent_contract_status=${PIPESTATUS[1]}
 set -e
 if [[ "$region_extent_contract_status" -ne 0 ]]; then
@@ -1784,7 +1784,7 @@ if [[ "$region_extent_contract_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_extent_contract.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; refused = ("struct_count_is_not_an_extent", "an_element_in_a_contract", "the_binding_itself", "a_field_of_an_element"); assert all((owner, "region-contract-unsupported") in owners for owner in refused); assert {kind for _, kind in owners} == {"region-contract-unsupported"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_extent_contract.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; refused = ("struct_count_is_not_an_extent", "an_element_in_a_contract", "the_binding_itself", "a_field_of_an_element"); assert all((owner, "region-contract-unsupported") in owners for owner in refused); assert ("shared_cannot_be_returned_mutable", "region-return-witness-unsupported") in owners; assert {kind for _, kind in owners} == {"region-contract-unsupported", "region-return-witness-unsupported", "index-upper-unproven"}'
 rejected_region_extent_contract_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_region_extent_contract_status" -ne 0 ]]; then

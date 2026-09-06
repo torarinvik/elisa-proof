@@ -2007,12 +2007,12 @@ On `examples/kernel_replay_standalone.elisa`: obligations 2255 to 2245 and failu
 with `region-call-opaque` 120 to 110. Proven is unchanged at 1211, replay gaps stay 0 and all 1211
 certificates replay.
 
-### A confirmed defect this exposes
+### A defect this exposed, and its fix
 
 A region-polymorphic function that *indexes* its region-owned parameter and is otherwise fully
-verified emits a `resource-safety` certificate the independent kernel cannot replay. The file
-reports `proved_with_replay_gaps`, which is honest -- the tool says the replayer did not confirm
-it -- but it is a producer/kernel mirror that is missing. Fifteen lines reproduce it, on this
+verified emitted a `resource-safety` certificate the independent kernel could not replay. The file
+reported `proved_with_replay_gaps`, which is honest -- the tool says the replayer did not confirm
+it -- but it was a producer/kernel mirror that was missing. Fifteen lines reproduced it, on this
 commit's binary and on the previous one:
 
 ```
@@ -2021,15 +2021,28 @@ def c_indexes[@r](nodes: darray[Node]& @r, index: usize) -> usize:
     return nodes[index].left
 ```
 
-The same function without `@r` replays. The producer allows a return whose value is tied to an
-*external* caller region and forbids only a local one, through
-`proof_resource_expr_contains_local_region_value`; the kernel's
-`proof_kernel_replay_resource_value_term_has_no_region` has no external exemption at all, so it
-refuses the term. The defect predates this change -- it needs only a verified region-polymorphic
-function that indexes -- and nothing in either suite reached it, because every such function in
-the corpus and in the examples still fails for another reason first. The corpus stays at 0 gaps
-and both suites pass. Closing it means giving the kernel the external-region distinction the
-producer already has, which is a separate change to the resource replay and is not made here.
+The same function without `@r` replays. Reading the events the producer emits for it settles what
+was wrong, and it is not what the shape suggests. A return whose value is tied to an external
+caller region is recorded as a `resource-region-return` marker carrying a *witness*: the
+transition that supplies the region value. Replay checks that the witness is a use of a binding in
+the region the marker names. The producer chose that witness by recency -- the last trace event,
+if it happened to be a `resource-use`. `return nodes[index].left` records a use of `nodes` and
+then one of `index`, so the witness was `index`, whose region is empty, and the kernel refused a
+certificate that was in fact about `nodes`.
+
+The producer now scans back through its own transitions for the most recent use whose binding is
+in the returned region, bounded by `PROOF_RESOURCE_RETURN_WITNESS_SCAN`; past the cap the witness
+stays unset and `region-return-witness-unsupported` refuses, which only ever loses a proof. The
+scan carries the kernel's second condition too: replay requires the witness binding's mutability
+to equal the return's, which is what stops a summary from handing the caller write access it never
+held, so a shared binding is no longer offered as the witness for a `mutable T&` return. That case
+also used to produce an unreplayable certificate and now produces a clean refusal.
+
+Both are in the fixtures: `indexes_under_its_own_precondition` proves and replays, and
+`shared_cannot_be_returned_mutable` refuses with `region-return-witness-unsupported`. The defect
+predated the contract change and nothing in either suite reached it, because every
+region-polymorphic function in the corpus and the examples still failed for another reason first.
+Neither fix moves the corpus: 1211/2245, 0 gaps, all 1211 certificates replayed.
 
 ## Coverage still required
 
@@ -2055,7 +2068,4 @@ Recent commits provide targeted evidence for quantifier kind preservation, exact
 binding, rejection of lossy JSON integers, floating-point exclusions, and unsigned alias and
 refinement widths. They do not establish type preservation through every symbolic transformation.
 
-Completion requires coverage of the full table and resolution of every confirmed open defect. One
-is open as of this entry: the missing external-region exemption in the kernel's resource value
-term check, recorded under "A region-polymorphic function could not state a contract about its own
-parameter".
+Completion requires coverage of the full table and resolution of every confirmed open defect.

@@ -347,6 +347,11 @@ extend ElisaProof:
                 _:
                     return false
 
+        # How far back through this frame's transitions a return may look for the use that carries
+        # its region. The right one is a step or two away in every shape this admits; the cap only
+        # bounds the cost of a frame with a long trace.
+        const PROOF_RESOURCE_RETURN_WITNESS_SCAN: usize = 64
+
         def proof_resource_binding_is_scalar(state: ProofResourceState&, slot: usize) -> bool:
             return slot < state.binding_scalar.count and state.binding_scalar[slot]
 
@@ -2759,11 +2764,38 @@ extend ElisaProof:
                                 Ast::Expr.RegionNew(operand, allocated_region, _):
                                     return_witness <- proof_resource_add_region_return_alloc(state, report, operand, allocated_region, position, function_name) if allocated_region != "" and proof_resource_region_is_external(state, allocated_region)
                                 _:
-                                    if state.trace_events.count > 0:
-                                        candidate: usize = state.trace_events[state.trace_events.count - 1]
-                                        if candidate < report.kernel_nodes.count:
-                                            candidate_kind: sview = report.kernel_nodes[candidate].kind
-                                            return_witness <- candidate if candidate_kind == "resource-use"
+                                    # The witness has to be the use of the binding that carries the
+                                    # returned region, not just the last transition the expression
+                                    # happened to produce. `return nodes[index].left` records a use
+                                    # of `nodes` and then one of `index`; only the first is in the
+                                    # region. Independent replay checks exactly that the witness's
+                                    # binding is in the region the marker names, so handing it the
+                                    # other use produced a certificate the kernel refused and a
+                                    # `proved_with_replay_gaps` verdict. Scanning back for the
+                                    # right use is bounded: past the cap the witness stays unset
+                                    # and the obligation below refuses, which only loses a proof.
+                                    witness_found: mutable bool = false
+                                    witness_scan_limit: usize = PROOF_RESOURCE_RETURN_WITNESS_SCAN if state.trace_events.count > PROOF_RESOURCE_RETURN_WITNESS_SCAN else state.trace_events.count
+                                    for offset in 0..<witness_scan_limit |offset, state, report, returned_region, return_mutable_reference, witness_found|:
+                                        continue if witness_found
+                                        candidate: usize = state.trace_events[state.trace_events.count - 1 - offset]
+                                        continue if candidate >= report.kernel_nodes.count
+                                        continue if report.kernel_nodes[candidate].kind != "resource-use"
+                                        candidate_name: sview = report.kernel_nodes[candidate].name
+                                        candidate_slot: usize = proof_resource_lookup(state, candidate_name)
+                                        continue if candidate_slot >= state.binding_names.count
+                                        continue if proof_resource_binding_region(state, candidate_slot) != returned_region
+                                        # The marker records the return's own mutability, and
+                                        # replay requires the witness binding to match it exactly:
+                                        # a shared binding may not witness a `mutable T&` return,
+                                        # which is what stops a summary from handing the caller
+                                        # write access it never had. Requiring the match here too
+                                        # turns what was an unreplayable certificate into a clean
+                                        # refusal from the obligation below.
+                                        candidate_mutable: bool = candidate_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[candidate_slot]
+                                        continue if candidate_mutable != return_mutable_reference
+                                        return_witness <- candidate
+                                        witness_found <- true
                             if returned_region != "" and proof_resource_region_is_external(state, returned_region):
                                 proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a region return must be tied to a replayed resource use or returned allocation") if return_witness >= report.kernel_nodes.count
                                 proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if return_witness < report.kernel_nodes.count
