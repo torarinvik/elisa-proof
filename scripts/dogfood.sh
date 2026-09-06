@@ -787,7 +787,7 @@ if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
 if {finding["kind"] for finding in report["findings"]} != {"loop-invariant-missing"}:
     raise SystemExit("dogfood failed: unexpected findings around an element write")
 proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
-for owner in ("fill_in_place", "fill_under_a_branch", "fill_with_a_while", "a_recorded_count_survives"):
+for owner in ("fill_in_place", "fill_under_a_branch", "fill_with_a_while", "a_recorded_count_survives", "aliased_elsewhere_but_not_in_the_body"):
     if (owner, "index-upper") not in proven:
         raise SystemExit("dogfood failed: %s lost the extent of the collection it writes" % owner)
 with open(resized, encoding="utf-8") as handle:
@@ -795,7 +795,7 @@ with open(resized, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: element extent boundary fixture did not fail cleanly")
 owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
-for owner in ("a_push_in_the_body", "a_call_that_may_push", "a_whole_assignment", "one_whole_write_among_many", "a_reference_taken"):
+for owner in ("a_push_in_the_body", "a_call_that_may_push", "a_whole_assignment", "one_whole_write_among_many", "a_reference_taken", "aliased_elsewhere_and_a_call_here"):
     if (owner, "index-upper-unproven") not in owners:
         raise SystemExit("dogfood failed: %s kept an extent its body can resize" % owner)
 if any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"]):

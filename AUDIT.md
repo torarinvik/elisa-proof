@@ -1873,20 +1873,28 @@ proven at all.
 
 ### What it bought
 
-Nothing measurable on `examples/kernel_replay_standalone.elisa`: 1210/2251, replay gaps 0,
-identical goal sites. The loops there that write elements of what they walk also pass those
-collections to calls elsewhere in the same function, so the frame's aliased set disqualifies them.
-What it buys is the shape above, which is the one an ordinary program is written in, and which
-this checker had stopped proving.
+Nothing measurable on `examples/kernel_replay_standalone.elisa` at first: 1210/2251, replay gaps
+0, identical goal sites, because the loops there that write elements of what they walk also pass
+those collections to calls elsewhere in the same function. Relaxing that constraint, below, takes
+one of them: `index-upper-unproven` 222 to 221 and proven 1210 to 1211. What the rule really buys
+is the shape above, which is the one an ordinary program is written in, and which this checker had
+stopped proving.
 
-Not covered: the frame-wide aliased set is the binding constraint on this rule, and it is coarser
-than it needs to be -- a body containing no calls at all cannot exercise a reference held
-elsewhere, so those roots could keep their extent too. Separately, a bound still does not travel
-across an equality: `ys.count == xs.count` with `index < xs.count` does not give `index < ys.count`,
-with or without a loop, because the chain rule reads only order comparisons out of a fact. That
-last one is the shape most of the corpus's remaining index refusals are in, though there the
-equality itself is missing too -- the code under proof states no contract relating the two
-collections.
+The frame-wide aliased set was the binding constraint on this rule at first, and it was coarser
+than it needed to be. It is in the disqualifier because a reference to the name may be held in
+another binding that something in the body mutates through. Doing that needs the body either to
+name the holder, which puts the holder in the body's own aliased set, or to hand control to a
+callee. `proof_body_has_call` decides the second, and a body with no calls, no references and no
+whole writes cannot reach anything it does not itself name, so the frame's set says nothing about
+it and its element roots keep their extent. That is
+`aliased_elsewhere_but_not_in_the_body` in the fixture, against
+`aliased_elsewhere_and_a_call_here` in the rejected half, which is the same frame with a call
+inside the loop. It moves `index-upper-unproven` on the kernel corpus from 222 to 221.
+
+Not covered: a bound still does not travel across an equality by any route the corpus can use.
+The rule for that is in the next entry, but the parallel arrays behind most of the corpus's
+remaining index refusals have no equality to chain through -- the code under proof states no
+contract relating the two collections' lengths.
 
 ## A bound could not travel across an equality
 

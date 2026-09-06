@@ -1250,6 +1250,45 @@ extend ElisaProof:
                     _:
                         pass
 
+        # Whether any statement in the body evaluates an executable call or an ownership transfer.
+        # Used to decide whether a reference recorded elsewhere in the frame can be exercised
+        # *during* this body: to mutate through a reference the body must either name the binding
+        # holding it -- which the aliasing walk sees -- or hand control to a callee, which this
+        # sees. A body with neither cannot reach anything it does not itself name.
+        def proof_body_has_call(body: darray[Ast::Stmt]&) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return true if proof_expr_has_call(target) or proof_expr_has_move(target)
+                        return true if proof_expr_has_call(value) or proof_expr_has_move(value)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return true if proof_expr_has_call(initializer) or proof_expr_has_move(initializer)
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        return true if proof_body_has_call(block_body)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition)
+                        return true if proof_body_has_call(then_body) or proof_body_has_call(else_body)
+                    Ast::Stmt.While(condition, while_body, _):
+                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition)
+                        return true if proof_body_has_call(while_body)
+                    Ast::Stmt.For(bind, _, iterable, for_body, _):
+                        return true if bind == "parallel"
+                        return true if proof_expr_has_call(iterable) or proof_expr_has_move(iterable)
+                        return true if proof_body_has_call(for_body)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee)
+                        for arm in arms:
+                            return true if proof_expr_has_call(arm.guard) or proof_body_has_call(arm.body)
+                    Ast::Stmt.Return(value, _):
+                        return true if value is returned and (proof_expr_has_call(returned) or proof_expr_has_move(returned))
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression)
+                    _:
+                        pass
+            return false
+
         # A fact that survives an iteration of a body whose only writes to `extent_safe` names are
         # element writes. Every name it mentions is either untouched by the body, or an
         # extent-preserved name read exactly as `name.count` -- `xs[i]` and `xs` itself are not
@@ -1327,12 +1366,19 @@ extend ElisaProof:
             proof_collect_extent_written_roots(body, &element_roots, &whole_roots)
             body_aliased: mutable darray[sview] = []
             proof_collect_aliased_names(body, functions, &body_aliased)
+            # The frame's aliased set is in the disqualifier because a reference to the name may
+            # be held in another binding, and something in the body could mutate through it. That
+            # needs the body either to name the holder -- which puts the holder in the body's own
+            # aliased set -- or to hand control to a callee. A body that does neither, and whose
+            # every write is an element write, cannot reach anything it does not itself name, so
+            # the frame's set says nothing about it.
+            reaches_beyond_itself: bool = body_aliased.count > 0 or whole_roots.count > 0 or proof_body_has_call(body)
             extent_safe: mutable darray[sview] = []
-            for candidate in element_roots |extent_safe, whole_roots, body_aliased, report|:
+            for candidate in element_roots |extent_safe, whole_roots, body_aliased, reaches_beyond_itself, report|:
                 continue if candidate == ""
                 continue if any existing in whole_roots where existing == candidate
                 continue if any existing in body_aliased where existing == candidate
-                continue if any existing in report.aliased_names where existing == candidate
+                continue if reaches_beyond_itself and (any existing in report.aliased_names where existing == candidate)
                 proof_push_aliased(&extent_safe, candidate)
             entry_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
             for target in written |names, values, facts, report, owner, position|:
