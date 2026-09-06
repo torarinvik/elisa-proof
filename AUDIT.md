@@ -1957,6 +1957,80 @@ Not covered: the chain still needs the two comparisons to share a syntactically 
 so `index < xs.count` with `ys.count == xs.count + 0` is not a chain. Nothing here relates two
 collections that no contract relates, which is the corpus's actual problem.
 
+## A region-polymorphic function could not state a contract about its own parameter
+
+### What was wrong
+
+Every logical contract mentioning a region-owned binding was refused with
+`region-contract-unsupported`. That includes the one contract such a function actually needs:
+
+```
+def bounded[@r](nodes: darray[Node]& @r, index: usize) -> usize:
+    requires index < nodes.count
+```
+
+So region-polymorphic code could be written but never specified, and every indexed access inside
+it stayed unproven for want of a precondition it was not permitted to declare. On the kernel
+corpus the region rules refuse 236 sites across 9 and 16 owner functions respectively, and
+`proof_kernel_replay_resource_events[@r, @e, @s]` alone accounts for 142 of them.
+
+The predicate behind the refusal is purely syntactic: an expression contains a region value if any
+identifier in it names a binding with a region. `nodes.count` does, so it was refused. But
+`nodes.count` is the collection's element count -- a machine integer copied out of it. Reading it
+ties nothing to the collection's lifetime.
+
+### What changed
+
+`ProofResourceState` gains `binding_extent`, set from the *declared type* when a parameter or a
+local is a collection: `darray[T]`, `view[T]` or `array[T, N]` under any number of reference and
+storage markers, decided by `proof_resource_type_is_collection`. A type alias is not resolved, so
+an aliased collection keeps the conservative answer. `proof_resource_expr_is_collection_extent`
+then admits exactly `name.count` where `name` is such a binding, and both region-value predicates
+return false for it before anything else.
+
+The marker is driven by the declared type rather than the field's spelling, which is what the
+adversarial fixture turns on: a `struct Holder` whose own field is called `count`, held by
+reference in a region, is still refused.
+
+### Fixtures
+
+`examples/region_extent_contract.elisa` requires a bounds precondition and a postcondition over a
+region-owned parameter's extent, an `ensure` over it, and a contract relating the extents of two
+parameters with different lifetimes; all of it must prove with no findings and every certificate
+must replay. `examples/rejected_region_extent_contract.elisa` pins four refusals: the struct whose
+field is named `count`, an element of the collection, the binding itself, and a field of an
+element.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: obligations 2255 to 2245 and failures 1057 to 1047,
+with `region-call-opaque` 120 to 110. Proven is unchanged at 1211, replay gaps stay 0 and all 1211
+certificates replay.
+
+### A confirmed defect this exposes
+
+A region-polymorphic function that *indexes* its region-owned parameter and is otherwise fully
+verified emits a `resource-safety` certificate the independent kernel cannot replay. The file
+reports `proved_with_replay_gaps`, which is honest -- the tool says the replayer did not confirm
+it -- but it is a producer/kernel mirror that is missing. Fifteen lines reproduce it, on this
+commit's binary and on the previous one:
+
+```
+def c_indexes[@r](nodes: darray[Node]& @r, index: usize) -> usize:
+    return 0 if index >= nodes.count
+    return nodes[index].left
+```
+
+The same function without `@r` replays. The producer allows a return whose value is tied to an
+*external* caller region and forbids only a local one, through
+`proof_resource_expr_contains_local_region_value`; the kernel's
+`proof_kernel_replay_resource_value_term_has_no_region` has no external exemption at all, so it
+refuses the term. The defect predates this change -- it needs only a verified region-polymorphic
+function that indexes -- and nothing in either suite reached it, because every such function in
+the corpus and in the examples still fails for another reason first. The corpus stays at 0 gaps
+and both suites pass. Closing it means giving the kernel the external-region distinction the
+producer already has, which is a separate change to the resource replay and is not made here.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
@@ -1981,4 +2055,7 @@ Recent commits provide targeted evidence for quantifier kind preservation, exact
 binding, rejection of lossy JSON integers, floating-point exclusions, and unsigned alias and
 refinement widths. They do not establish type preservation through every symbolic transformation.
 
-Completion requires coverage of the full table and resolution of every confirmed open defect.
+Completion requires coverage of the full table and resolution of every confirmed open defect. One
+is open as of this entry: the missing external-region exemption in the kernel's resource value
+term check, recorded under "A region-polymorphic function could not state a contract about its own
+parameter".

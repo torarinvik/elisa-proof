@@ -47,6 +47,11 @@ extend ElisaProof:
             # scalar out of a region-owned value does not tie the binding to that region, so
             # region propagation skips these bindings on declaration and assignment.
             binding_scalar: mutable darray[bool]
+            # A binding whose declared type is a collection. Its `.count` is the element count,
+            # a machine integer copied out of the collection, so reading it ties nothing to the
+            # collection's lifetime -- which is what lets a region-polymorphic function state a
+            # bounds contract over its own parameter.
+            binding_extent: mutable darray[bool]
             active_regions: mutable darray[sview]
             # Nested snapshots inherit these region identities. A child may not destroy an
             # inherited region and reopen the same spelling, because the parent would otherwise
@@ -68,7 +73,7 @@ extend ElisaProof:
             trace_events: mutable darray[usize]
 
         def proof_resource_empty() -> ProofResourceState:
-            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], binding_scalar: [], active_regions: [], protected_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
+            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], binding_scalar: [], binding_extent: [], active_regions: [], protected_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
 
         # Copy into an already-created state. Returning a struct that owns several darrays would
         # hide their allocation region from the self-hosting compiler, so all branch snapshots
@@ -83,6 +88,7 @@ extend ElisaProof:
             target.binding_region_live.clear()
             target.binding_region_owner.clear()
             target.binding_scalar.clear()
+            target.binding_extent.clear()
             target.active_regions.clear()
             target.protected_regions.clear()
             target.external_regions.clear()
@@ -101,6 +107,7 @@ extend ElisaProof:
             target.binding_region_live.extend(source.binding_region_live)
             target.binding_region_owner.extend(source.binding_region_owner)
             target.binding_scalar.extend(source.binding_scalar)
+            target.binding_extent.extend(source.binding_extent)
             target.active_regions.extend(source.active_regions)
             target.protected_regions.extend(source.protected_regions)
             target.external_regions.extend(source.external_regions)
@@ -342,6 +349,46 @@ extend ElisaProof:
 
         def proof_resource_binding_is_scalar(state: ProofResourceState&, slot: usize) -> bool:
             return slot < state.binding_scalar.count and state.binding_scalar[slot]
+
+        # A declared collection type: `darray[T]`, `view[T]` and `array[T, N]`, under any number
+        # of reference and storage markers. A type alias is not resolved here, so an aliased
+        # collection simply keeps the conservative answer.
+        def proof_resource_type_is_collection(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_type_is_collection(inner)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_resource_type_is_collection(inner) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return false
+                Ast::Expr.Index(head, _, _):
+                    head_name: sview = proof_ident_name(head)
+                    return head_name == "darray" or head_name == "view"
+                Ast::Expr.IndexN(head, arguments, _):
+                    return false if proof_ident_name(head) != "array" or arguments.count != 2
+                    match arguments[1]:
+                        Ast::Expr.IntLit(_):
+                            return true
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_resource_binding_is_extent_bearing(state: ProofResourceState&, slot: usize) -> bool:
+            return slot < state.binding_extent.count and state.binding_extent[slot]
+
+        # `x.count` on a binding whose declared type is a collection is that collection's element
+        # count: a machine integer copied out of it, tied to no lifetime. Everything else about a
+        # region-owned binding still is.
+        def proof_resource_expr_is_collection_extent(expression: Ast::Expr, state: ProofResourceState&) -> bool:
+            match expression:
+                Ast::Expr.Field(object, field_name, _):
+                    return false if field_name != "count"
+                    root: sview = proof_ident_name(object)
+                    return false if root == ""
+                    slot: usize = proof_resource_lookup(state, root)
+                    return slot < state.binding_names.count and proof_resource_binding_is_extent_bearing(state, slot)
+                _:
+                    return false
 
         def proof_resource_empty_place() -> ProofResourcePlace:
             return ProofResourcePlace{root: "", path_root: 0, depth: 0, whole: false}
@@ -1404,6 +1451,7 @@ extend ElisaProof:
             state.binding_region_live.push(false)
             state.binding_region_owner.push(false)
             state.binding_scalar.push(false)
+            state.binding_extent.push(false)
             state.borrow_target_slots.push(target_slot)
             state.borrow_target_places.push(target_place)
             state.borrow_mutable.push(borrow_is_mutable)
@@ -2306,6 +2354,7 @@ extend ElisaProof:
         # local region remains forbidden at return, so keep that distinction explicit instead of
         # weakening the general region-value predicate used at opaque boundaries.
         def proof_resource_expr_contains_local_region_value(expression: Ast::Expr, state: ProofResourceState&) -> bool:
+            return false if proof_resource_expr_is_collection_extent(expression, state)
             match expression:
                 Ast::Expr.RegionNew(_, region, _):
                     return region != "" and not proof_resource_region_is_external(state, region)
@@ -2361,6 +2410,7 @@ extend ElisaProof:
         # the proof system does not have a lifetime summary for that operation and must reject
         # the boundary rather than treating the result as an ordinary value.
         def proof_resource_expr_contains_region_value(expression: Ast::Expr, state: ProofResourceState&) -> bool:
+            return false if proof_resource_expr_is_collection_extent(expression, state)
             match expression:
                 Ast::Expr.RegionNew(_, _, _):
                     return true
@@ -2668,6 +2718,9 @@ extend ElisaProof:
                         if proof_resource_type_is_scalar(type_expression):
                             scalar_slot: usize = proof_resource_lookup(state, local_name)
                             state.binding_scalar[scalar_slot] <- true if scalar_slot < state.binding_scalar.count
+                        if proof_resource_type_is_collection(type_expression):
+                            extent_slot: usize = proof_resource_lookup(state, local_name)
+                            state.binding_extent[extent_slot] <- true if extent_slot < state.binding_extent.count
                         state.facts.clear() if shadowed or proof_resource_expr_has_call(initializer) or proof_resource_expr_has_move(initializer)
                     Ast::Stmt.Assign(target, _, initializer, position):
                         if not proof_resource_is_discard_target(target) and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
@@ -2840,6 +2893,7 @@ extend ElisaProof:
                 writable: bool = parameter.is_mutable or proof_resource_type_has_marker(parameter.type_expression, TokenKind.Mutable) or is_mutable_reference
                 proof_resource_add_binding_traced(&state, report, parameter.name, is_reference, is_mutable_reference, writable, state.binding_names.count, false, "", proof_resource_empty_place(), 0)
                 parameter_index: usize = state.binding_names.count - 1
+                state.binding_extent[parameter_index] <- true if parameter_index < state.binding_extent.count and proof_resource_type_is_collection(parameter.type_expression)
                 parameter_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
                 proof_resource_set_binding_region(&state, report, parameter.name, parameter_region) if is_reference and parameter_region != ""
             proof_resource_check_statements(body, &state, report, function_name, functions)

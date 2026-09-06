@@ -228,6 +228,8 @@ run_probe loop_element_extent examples/loop_element_extent.elisa 1
 run_probe rejected_loop_element_extent examples/rejected_loop_element_extent.elisa 1
 run_probe comparison_chain_equality examples/comparison_chain_equality.elisa 0
 run_probe rejected_comparison_chain_equality examples/rejected_comparison_chain_equality.elisa 1
+run_probe region_extent_contract examples/region_extent_contract.elisa 0
+run_probe rejected_region_extent_contract examples/rejected_region_extent_contract.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -829,6 +831,32 @@ for owner in ("struct_equality_is_not_an_order", "equality_alone_is_not_strict",
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s chained an equality it may not" % owner)
 print("dogfood comparison_chain_equality: an equality is two non-strict steps and never a strict one")
+PY
+
+python3 - "$REPORT_DIR/region_extent_contract.json" "$REPORT_DIR/rejected_region_extent_contract.json" <<'PY'
+import json
+import sys
+
+bounded, refused = sys.argv[1:]
+with open(bounded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: region extent contract fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a region extent certificate was left unreplayed")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("bounded_without_indexing", "extent_in_an_ensure", "two_lifetimes"):
+    if reasons.get(owner) != "verified":
+        raise SystemExit("dogfood failed: %s could not bound its own region-owned parameter" % owner)
+with open(refused, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: region extent boundary fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+for owner in ("struct_count_is_not_an_extent", "an_element_in_a_contract", "the_binding_itself", "a_field_of_an_element"):
+    if (owner, "region-contract-unsupported") not in owners:
+        raise SystemExit("dogfood failed: %s entered a contract as if it were an extent" % owner)
+print("dogfood region_extent_contract: a collection extent is contractable, a region-owned value is not")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
