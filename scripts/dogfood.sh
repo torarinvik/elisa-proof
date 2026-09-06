@@ -224,6 +224,8 @@ run_probe rejected_captured_block examples/rejected_captured_block.elisa 1
 run_probe uncaptured_binding examples/uncaptured_binding.elisa 0
 run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa 1
 run_probe rejected_uncaptured_block_write examples/rejected_uncaptured_block_write.elisa 1
+run_probe loop_element_extent examples/loop_element_extent.elisa 1
+run_probe rejected_loop_element_extent examples/rejected_loop_element_extent.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -769,6 +771,34 @@ kinds = {kind for _, kind in owners}
 if kinds != {"call-requires-unproven"}:
     raise SystemExit("dogfood failed: unexpected findings around an uncaptured write: %s" % sorted(kinds))
 print("dogfood rejected_uncaptured_block_write: a block write-back covers what its body writes")
+PY
+
+python3 - "$REPORT_DIR/loop_element_extent.json" "$REPORT_DIR/rejected_loop_element_extent.json" <<'PY'
+import json
+import sys
+
+kept, resized = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: element extent fixture did not replay cleanly")
+if {finding["kind"] for finding in report["findings"]} != {"loop-invariant-missing"}:
+    raise SystemExit("dogfood failed: unexpected findings around an element write")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("fill_in_place", "fill_under_a_branch", "fill_with_a_while", "a_recorded_count_survives"):
+    if (owner, "index-upper") not in proven:
+        raise SystemExit("dogfood failed: %s lost the extent of the collection it writes" % owner)
+with open(resized, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: element extent boundary fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+for owner in ("a_push_in_the_body", "a_call_that_may_push", "a_whole_assignment", "one_whole_write_among_many", "a_reference_taken"):
+    if (owner, "index-upper-unproven") not in owners:
+        raise SystemExit("dogfood failed: %s kept an extent its body can resize" % owner)
+if any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"]):
+    raise SystemExit("dogfood failed: a resized collection discharged an index bound")
+print("dogfood loop_element_extent: an element write keeps the extent and nothing else does")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

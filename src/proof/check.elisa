@@ -1211,6 +1211,91 @@ extend ElisaProof:
                     _:
                         pass
 
+        # A root written only through an index keeps its extent. `xs[i] <- v` replaces an element
+        # of a collection that already had one, so `xs.count` is the same afterwards. Every other
+        # write to the root may change it: a whole assignment rebinds it, a field assignment can
+        # replace a nested collection (`h.items <- other`), and a method call or a reference taken
+        # can push or pop. Roots of the second kind are collected separately and disqualify the
+        # name, so one whole write anywhere in the body outweighs any number of element writes.
+        def proof_collect_extent_written_roots(body: darray[Ast::Stmt]&, element: mutable darray[sview]&, whole: mutable darray[sview]&) -> void:
+            for statement in body |element, whole|:
+                match statement:
+                    Ast::Stmt.Assign(target, _, _, _):
+                        root: sview = proof_place_root_name(target, 0)
+                        match target:
+                            Ast::Expr.Index(_, _, _):
+                                proof_push_aliased(element, root)
+                            Ast::Expr.IndexN(_, _, _):
+                                proof_push_aliased(element, root)
+                            _:
+                                proof_push_aliased(whole, root)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        proof_collect_extent_written_roots(block_body, element, whole)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        proof_collect_extent_written_roots(then_body, element, whole)
+                        proof_collect_extent_written_roots(else_body, element, whole)
+                    Ast::Stmt.While(_, while_body, _):
+                        proof_collect_extent_written_roots(while_body, element, whole)
+                    Ast::Stmt.For(_, _, _, for_body, _):
+                        proof_collect_extent_written_roots(for_body, element, whole)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |element, whole|:
+                            proof_collect_extent_written_roots(arm.body, element, whole)
+                    Ast::Stmt.Expr(expression, _):
+                        match expression:
+                            Ast::Expr.Block(statements, _, _, _):
+                                proof_collect_extent_written_roots(statements, element, whole)
+                            _:
+                                pass
+                    _:
+                        pass
+
+        # A fact that survives an iteration of a body whose only writes to `extent_safe` names are
+        # element writes. Every name it mentions is either untouched by the body, or an
+        # extent-preserved name read exactly as `name.count` -- `xs[i]` and `xs` itself are not
+        # stable under an element write, and only a bare identifier's count is: `h.items.count`
+        # would need `h.items` itself to be the preserved root, which this does not claim.
+        def proof_expr_extent_stable(expression: Ast::Expr, written: darray[sview]&, extent_safe: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.IntLit(_):
+                    return true
+                Ast::Expr.BoolLit(_):
+                    return true
+                Ast::Expr.CharLit(_):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return not (any candidate in written where candidate == name)
+                Ast::Expr.Tuple(_, _):
+                    binder: sview = proof_place_root_name(expression, 0)
+                    return false if binder == ""
+                    return not (any candidate in written where candidate == binder)
+                Ast::Expr.Field(object, field_name, _):
+                    if field_name == "count":
+                        base: sview = proof_ident_name(proof_strip_parens(object))
+                        return true if base != "" and (any candidate in extent_safe where candidate == base)
+                    return proof_expr_extent_stable(object, written, extent_safe, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_extent_stable(inner, written, extent_safe, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
+                    return proof_expr_extent_stable(operand, written, extent_safe, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_extent_stable(left, written, extent_safe, depth + 1) and proof_expr_extent_stable(right, written, extent_safe, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_expr_extent_stable(condition, written, extent_safe, depth + 1) and proof_expr_extent_stable(then_expression, written, extent_safe, depth + 1) and proof_expr_extent_stable(else_expression, written, extent_safe, depth + 1)
+                _:
+                    return false
+
+        def proof_restore_extent_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, written: darray[sview]&, extent_safe: darray[sview]&) -> void:
+            return if extent_safe.count == 0
+            for fact in source |fact, facts, written, extent_safe|:
+                continue if not proof_expr_extent_stable(fact, written, extent_safe, 0)
+                duplicate: mutable bool = false
+                for existing in facts |existing, fact, duplicate|:
+                    duplicate <- true if proof_expr_equal(existing, fact)
+                facts.push(fact) if not duplicate
+
         # A loop body is checked once, for an arbitrary iteration, so at its entry every binding
         # the body may rewrite must be an opaque symbol: its value before the loop is the value
         # on the first iteration only, and a fact over it holds there only. The bindings a body
@@ -1233,11 +1318,28 @@ extend ElisaProof:
                 return
             for existing in report.aliased_names |written|:
                 proof_push_aliased(written, existing)
+            # A collection the body only writes elements of still has the extent it had at entry,
+            # so the facts that mention it purely as `name.count` -- the binder's own range among
+            # them -- are re-established after the forgetting. A name aliased anywhere, or written
+            # as a whole anywhere, is not eligible: a call or a whole assignment can resize it.
+            element_roots: mutable darray[sview] = []
+            whole_roots: mutable darray[sview] = []
+            proof_collect_extent_written_roots(body, &element_roots, &whole_roots)
+            body_aliased: mutable darray[sview] = []
+            proof_collect_aliased_names(body, functions, &body_aliased)
+            extent_safe: mutable darray[sview] = []
+            for candidate in element_roots |extent_safe, whole_roots, body_aliased, report|:
+                continue if candidate == ""
+                continue if any existing in whole_roots where existing == candidate
+                continue if any existing in body_aliased where existing == candidate
+                continue if any existing in report.aliased_names where existing == candidate
+                proof_push_aliased(&extent_safe, candidate)
             entry_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
             for target in written |names, values, facts, report, owner, position|:
                 continue if not (any candidate in names where candidate == target)
                 proof_resymbolize_binding(names, values, facts, report, owner, target, position)
             proof_restore_type_bound_facts(entry_facts, facts, names, report, owner)
+            proof_restore_extent_facts(entry_facts, facts, written, extent_safe)
 
         # The wrapper direction of the same shape: a captured block whose body is exactly one loop
         # statement. The source forms `for x in xs |captures|:` and `while c |captures|:` parse as

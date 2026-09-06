@@ -1820,6 +1820,74 @@ site, not fixed: the same shape appears elsewhere in this codebase, and every on
 still leaks on every iteration -- they are simply bounded by proof state rather than by input
 size. The compiler defect itself is not fixed here and belongs in the compiler.
 
+## Writing an element does not change how long a collection is
+
+### What was wrong
+
+Forgetting the loop entry gives every binding an iteration may rewrite a fresh symbol. That is
+what stops a value from before the loop standing in for an arbitrary iteration, and it is what an
+earlier entry here fixed. It also threw away more than it had to. `xs[index] <- 0` puts the root
+`xs` in the written set, so every fact mentioning `xs` was purged -- including the binder's own
+range, `index < xs.count`, which the loop had just established.
+
+The result was that the most ordinary loop there is stopped verifying:
+
+```
+def fill_in_place(xs: mutable darray[i64]&) -> void:
+    changes xs
+    for index in 0..<xs.count |index, xs|:
+        xs[index] <- 0
+```
+
+`index-upper-unproven`, on the write whose bound the loop header states outright. This is a
+regression that entry introduced and this one repairs.
+
+### What changed
+
+An assignment whose target is an index -- `xs[i] <- v`, `h.items[i] <- v` -- replaces an element
+that was already there, so the collection's extent is what it was at entry.
+`proof_collect_extent_written_roots` separates roots written that way from roots written any other
+way: a whole assignment rebinds the collection, and a *field* assignment can replace a nested one,
+so `h.items <- other` is a whole write of `h`. A root is extent-preserved only if it is written
+solely through an index, is not aliased anywhere in the body, and is not in the frame's aliased
+set -- a method call like `push`, a reference taken, or an argument passed by reference all
+disqualify it, because any of those can resize.
+
+For those roots, `proof_restore_extent_facts` re-establishes, after the resymbolization, each
+entry fact that `proof_expr_extent_stable` accepts: every name it mentions is either untouched by
+the body or an extent-preserved root read exactly as `name.count`. `xs` on its own and `xs[i]` are
+not stable under an element write and are refused; only the bare identifier's count is, so
+`h.items.count` is not claimed either. Facts are restored by expression, so their existing traces
+stand and certificates still replay.
+
+### Fixtures
+
+`examples/loop_element_extent.elisa` requires the bound to prove for a `for` loop filling in
+place, for one whose writes sit under a branch, for a `while` whose index comes from the loop
+condition -- itself a fact over `xs.count` -- and for a recorded `xs.count == limit` rather than
+just the binder range. `examples/rejected_loop_element_extent.elisa` pins the six ways the extent
+can move: a `push` in the body, a call that takes the collection by reference, a whole assignment,
+a whole assignment reached only under a branch among element writes, and a reference taken. None
+of them may discharge an index bound, and the fixture requires that no `index-upper` goal in it is
+proven at all.
+
+### What it bought
+
+Nothing measurable on `examples/kernel_replay_standalone.elisa`: 1210/2251, replay gaps 0,
+identical goal sites. The loops there that write elements of what they walk also pass those
+collections to calls elsewhere in the same function, so the frame's aliased set disqualifies them.
+What it buys is the shape above, which is the one an ordinary program is written in, and which
+this checker had stopped proving.
+
+Not covered: the frame-wide aliased set is the binding constraint on this rule, and it is coarser
+than it needs to be -- a body containing no calls at all cannot exercise a reference held
+elsewhere, so those roots could keep their extent too. Separately, a bound still does not travel
+across an equality: `ys.count == xs.count` with `index < xs.count` does not give `index < ys.count`,
+with or without a loop, because the chain rule reads only order comparisons out of a fact. That
+last one is the shape most of the corpus's remaining index refusals are in, though there the
+equality itself is missing too -- the code under proof states no contract relating the two
+collections.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

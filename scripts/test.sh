@@ -1732,6 +1732,26 @@ if [[ "$rejected_uncaptured_block_write_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A loop that only writes elements of the collection it walks keeps that collection's extent, so
+# the binder's own range still bounds the indexed write. Any body that can resize it keeps nothing.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/loop_element_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {finding["kind"] for finding in report["findings"]} == {"loop-invariant-missing"}; assert not [goal for goal in report["goals"] if not goal["proven"]]; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert all((owner, "index-upper") in proven for owner in ("fill_in_place", "fill_under_a_branch", "fill_with_a_while", "a_recorded_count_survives"))'
+loop_element_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$loop_element_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an element write lost the collection extent\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_loop_element_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; resized = ("a_push_in_the_body", "a_call_that_may_push", "a_whole_assignment", "one_whole_write_among_many", "a_reference_taken"); assert all((owner, "index-upper-unproven") in owners for owner in resized); assert not any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"])'
+rejected_loop_element_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_loop_element_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a body that can resize a collection kept its extent\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
