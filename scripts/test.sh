@@ -1701,6 +1701,26 @@ if [[ "$rejected_captured_block_status" -ne 0 ]]; then
     exit 1
 fi
 
+# The capture list is the block's whole reach, so a binding it does not name keeps both its
+# symbolic value and its facts across the block; a binding it does name keeps neither.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/uncaptured_binding.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("value_outside_the_capture_list_survives", "goal") in proven; assert ("fact_outside_the_capture_list_survives", "goal") in proven; kinds = {finding["kind"] for finding in report["findings"]}; assert kinds == {"captured-block-unsupported"}'
+uncaptured_binding_status=${PIPESTATUS[1]}
+set -e
+if [[ "$uncaptured_binding_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an uncaptured binding did not survive a captured block\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_uncaptured_binding.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}; assert goals[("overwritten_binding_must_not_survive", "goal")] is False; assert goals[("zero_iteration_fact_must_not_escape", "goal")] is False'
+rejected_uncaptured_binding_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_uncaptured_binding_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a captured binding survived its own captured block\n' >&2
+    exit 1
+fi
+
 # A skippable call, an unrecognized shape, and a guard whose fact names the same impure call as a
 # later obligation are each refused; two calls of one impure function are not one term.
 set +e

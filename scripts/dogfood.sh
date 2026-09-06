@@ -221,6 +221,8 @@ run_probe unnamed_lifetime_lend examples/unnamed_lifetime_lend.elisa 1
 run_probe rejected_unnamed_lifetime_lend examples/rejected_unnamed_lifetime_lend.elisa 1
 run_probe captured_block examples/captured_block.elisa 1
 run_probe rejected_captured_block examples/rejected_captured_block.elisa 1
+run_probe uncaptured_binding examples/uncaptured_binding.elisa 1
+run_probe rejected_uncaptured_binding examples/rejected_uncaptured_binding.elisa 1
 run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa 1
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
@@ -691,6 +693,35 @@ for entry in (("fact_must_not_survive", "goal"), ("value_must_not_survive", "goa
     if goals.get(entry) is not False:
         raise SystemExit("dogfood failed: %s survived a captured block's write-back" % (entry,))
 print("dogfood captured_block: a captured block's body is checked and its write-back is havocked")
+PY
+
+# The write-back is over the capture list, not the whole frame: a binding the list does not name
+# keeps its value and its facts, and a binding it does name keeps neither.
+python3 - "$REPORT_DIR/uncaptured_binding.json" "$REPORT_DIR/rejected_uncaptured_binding.json" <<'PY'
+import json
+import sys
+
+kept, dropped = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["summary"]["semantic_errors"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: uncaptured binding fixture did not replay cleanly")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for entry in (("value_outside_the_capture_list_survives", "goal"), ("fact_outside_the_capture_list_survives", "goal")):
+    if entry not in proven:
+        raise SystemExit("dogfood failed: %s did not survive a captured block it is outside of" % (entry,))
+kinds = {finding["kind"] for finding in report["findings"]}
+if kinds != {"captured-block-unsupported"}:
+    raise SystemExit("dogfood failed: unexpected findings around an uncaptured binding: %s" % sorted(kinds))
+with open(dropped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: captured binding fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for entry in (("overwritten_binding_must_not_survive", "goal"), ("zero_iteration_fact_must_not_escape", "goal")):
+    if goals.get(entry) is not False:
+        raise SystemExit("dogfood failed: %s survived its own captured block" % (entry,))
+print("dogfood uncaptured_binding: a captured block forgets its capture list and nothing else")
 PY
 
 # The rendered proof must agree with the report for *every* goal, not a sampled one: `qed` appears

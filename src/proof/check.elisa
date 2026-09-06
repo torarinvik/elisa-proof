@@ -1125,6 +1125,43 @@ extend ElisaProof:
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
+        # Give a fresh opaque symbol only to the bindings a captured block can actually write.
+        # The capture list is the block's whole reach, so an uncaptured binding keeps its symbolic
+        # value — but only when that value is itself call-stable against the captured and aliased
+        # names, otherwise a value recorded in terms of a binding the block does rewrite would
+        # silently follow it. Without a usable alias set for this frame nothing is kept, which is
+        # exactly the whole-state havoc this replaces.
+        def proof_forget_captured_values(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: darray[Ast::Expr]&, captures: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            if not analyzed or captures.count == 0:
+                proof_forget_values(names, values, position)
+                return
+            blocked: mutable darray[sview] = []
+            blocked.extend(report.aliased_names)
+            blocked.extend(captures)
+            for index in 0..<values.count |index, names, values, facts, parameters, blocked, position|:
+                values[index] <- Ast::Expr.Invalid if index >= names.count
+                continue if index >= names.count
+                retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, 0)
+                values[index] <- Ast::Expr.Ident(names[index], position) if not retained
+
+        # Re-establish, after a captured block in statement position, every fact the block could
+        # not have falsified. The capture list is the block's whole reach: a binding it does not
+        # name cannot be read or written inside it. Blocking the captured names alongside the
+        # aliased ones reuses the call-stability rule unchanged, so a fact over an aliased or
+        # unwitnessed binding is still refused and a captured reference cannot smuggle one back.
+        def proof_restore_uncaptured_facts(source: darray[Ast::Expr]&, captures: darray[sview]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            return if not analyzed
+            return if captures.count == 0
+            blocked: mutable darray[sview] = []
+            blocked.extend(report.aliased_names)
+            blocked.extend(captures)
+            for fact in source |source, facts, names, parameters, blocked|:
+                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, 0)
+                continue if any existing in facts where proof_expr_equal(existing, fact)
+                facts.push(fact)
+
         # Re-establish, at a branch join both arms reach, every fact that both arms still hold.
         # A fact standing at an arm's exit is true on that path, so one held on both paths is
         # true at the join. Only call-stable facts are imported, so an arm-local binding can
@@ -5607,13 +5644,14 @@ extend ElisaProof:
         #
         # That is strictly better than refusing, which invalidates the whole enclosing path and so
         # costs every obligation after the loop as well as the function's own summary.
-        def proof_captured_block_statement(statement: Ast::Stmt) -> (known: bool, body: darray[Ast::Stmt], position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+        def proof_captured_block_statement(statement: Ast::Stmt) -> (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
             empty: mutable darray[Ast::Stmt] = []
+            empty_captures: mutable darray[sview] = []
             match statement:
                 Ast::Stmt.Expr(expression, _):
                     match expression:
                         Ast::Expr.Block(statements, value, captures, position):
-                            return (false, empty, position) if captures.count == 0
+                            return (false, empty, empty_captures, position) if captures.count == 0
                             # The statement position discards the block's result, but the trailing
                             # value is still evaluated and may carry obligations of its own. Append
                             # it as an ordinary expression statement so the body walk checks it;
@@ -5628,12 +5666,14 @@ extend ElisaProof:
                                     pass
                                 _:
                                     body.push(Ast::Stmt.Expr(value, position))
-                            return (true, body, position)
+                            block_captures: mutable darray[sview] = []
+                            block_captures.extend(captures)
+                            return (true, body, block_captures, position)
                         _:
                             pass
                 _:
                     pass
-            return (false, empty, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+            return (false, empty, empty_captures, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
 
         # different branch's termination step.
         def proof_check_decreases_step(measure_components: darray[Ast::Expr]&, decreases_components: darray[Ast::Expr]&, next_names: darray[sview]&, next_values: darray[Ast::Expr]&, next_facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, report: mutable ProofReport&, name: sview, position: Ast::Pos) -> bool:
@@ -5670,7 +5710,7 @@ extend ElisaProof:
                 proof_statement_move_roots(statement, &moved_roots)
                 statement_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
                 declared_name: sview = proof_statement_declared_name(statement)
-                captured_block: (known: bool, body: darray[Ast::Stmt], position: Ast::Pos) = proof_captured_block_statement(statement)
+                captured_block: (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) = proof_captured_block_statement(statement)
                 if captured_block.known:
                     # The body is checked against the same postconditions, so a `return` inside it
                     # still has to establish them; `break` and `continue` are absorbed by the loop
@@ -5686,8 +5726,14 @@ extend ElisaProof:
                     # obligation is recorded as failing while the enclosing path stays checkable.
                     report.proof_obligation(false)
                     proof_add_finding(report, "captured-block-unsupported", captured_block.position.line, name, "a captured block's write-back is havocked rather than modeled")
-                    proof_forget_values(names, values, captured_block.position)
+                    proof_forget_captured_values(names, values, statement_facts, captured_block.captures, frame_parameters, report, name, captured_block.position)
                     proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                    # A captured block can name only what its capture list names, so a fact over
+                    # bindings the list does not mention survives it. Import those under exactly
+                    # the rule the opaque call boundary uses: `proof_expr_call_stable` refuses an
+                    # aliased or unwitnessed name, so a binding the block could still reach
+                    # through a captured reference is never restored here.
+                    proof_restore_uncaptured_facts(statement_facts, captured_block.captures, facts, names, frame_parameters, report, name)
                     continue
                 if not proof_statement_expressions_supported(statement, functions):
                     unsupported_position: Ast::Pos = proof_statement_position(statement)

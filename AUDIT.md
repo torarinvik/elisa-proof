@@ -1141,9 +1141,40 @@ rather than vanish with the path.
 Not covered. Clearing the outer facts is retained as defence in depth but no fixture isolates it:
 every write-back case reachable through a postcondition is already caught by forgetting symbolic
 values, and an `assert` in a normal body is a runtime assertion rather than an obligation, so it
-cannot be used to observe a surviving fact. The havoc is also whole-state rather than
-capture-scoped — the capture list names exactly which bindings the block can write, so a precise
-version would keep facts about everything else, which is the obvious next improvement here.
+cannot be used to observe a surviving fact.
+
+### The write-back is scoped to the capture list
+
+The first version of the write-back havocked the whole frame, which was far more than the block can
+reach. A captured block cannot *name* a binding its capture list omits, so it can neither read nor
+write one; havocking those bindings discarded facts and symbolic values no execution of the block
+could have falsified. That is what cost `value_outside_the_capture_list_survives`-shaped code its
+postcondition even though the loop never mentions the binding it returns.
+
+`proof_forget_captured_values` now gives a fresh opaque symbol only to the captured names, and
+`proof_restore_uncaptured_facts` re-establishes the facts over the rest. Neither is a new trust
+rule: both run the captured names through `proof_expr_call_stable` alongside `report.aliased_names`,
+the same predicate the opaque call boundary and the branch join already use. So a binding anything
+references is still forgotten — the block may hold that reference through a captured name — and a
+recorded value expressed in terms of a binding the block does rewrite is forgotten with it, rather
+than silently following the new symbol. When the frame has no usable alias set the whole-state havoc
+is what runs, unchanged.
+
+On the kernel's own source this moves proven from 1135/2412 to 1160/2430; the refusal histogram is
+identical, so the gain is entirely in goals that now discharge rather than in refusals that were
+relaxed. Replay gaps stay at zero and `trusted_assumptions` stays empty.
+
+Coverage. `examples/uncaptured_binding.elisa` requires a symbolic value and a `requires`-derived
+fact, both over bindings outside the capture list, to survive the block and discharge a
+postcondition. `examples/rejected_uncaptured_binding.elisa` is the adversarial half and pins the two
+ways this could go wrong: a binding the list *does* name whose value the loop overwrites must not
+keep its old value, and a fact the loop body establishes must not escape a loop that may run zero
+times.
+
+Not covered. The block's own exit state is still discarded rather than merged, so a loop with an
+invariant proves that invariant inside its private state and exports nothing from it. Importing that
+state is a larger step than this one: it needs the loop's post-state to be sound for the
+zero-iteration path, which the capture-list argument does not have to reason about at all.
 
 ## Coverage still required
 
