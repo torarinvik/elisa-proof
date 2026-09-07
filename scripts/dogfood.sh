@@ -268,6 +268,8 @@ run_probe block_statement_region examples/block_statement_region.elisa 0
 run_probe rejected_block_statement_region examples/rejected_block_statement_region.elisa 1
 run_probe forward_scan examples/forward_scan.elisa 0
 run_probe rejected_forward_scan examples/rejected_forward_scan.elisa 1
+run_probe nested_extent examples/nested_extent.elisa 0
+run_probe rejected_nested_extent examples/rejected_nested_extent.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1418,6 +1420,31 @@ if report["status"] != "failed" or report["replay"]["gaps"]:
 if {f["kind"] for f in report["findings"]} != {"index-upper-unproven", "loop-invariant-missing"}:
     raise SystemExit("dogfood failed: a downward scan was given a bound it never states")
 print("dogfood forward_scan: a forward scan carries its bound, a downward one needs an invariant")
+PY
+
+# A root the body writes only elements under keeps every count under it; a whole field write keeps
+# none, including the count the loop is iterating.
+python3 - "$REPORT_DIR/nested_extent.json" "$REPORT_DIR/rejected_nested_extent.json" <<'PY'
+import json
+import sys
+
+kept, lost = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: nested extent fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_loop_over_one_field_writing_another", "the_guard_may_come_first"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost a nested extent to an element write beside it" % owner)
+with open(lost, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: nested extent boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+if reasons.get("a_whole_field_write_loses_every_extent") != "body-unverified":
+    raise SystemExit("dogfood failed: a whole field write kept an extent under its root")
+print("dogfood nested_extent: an element write keeps every count under the root, a whole write none")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

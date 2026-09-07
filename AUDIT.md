@@ -3453,6 +3453,48 @@ Two loops of five lines each cascaded into forty-four fewer summary findings, wh
 root-count reading predicted: the summary bucket is not a cluster to attack directly but the shadow
 of a small number of roots.
 
+## An extent may be nested, and an element write beside it changes nothing
+
+### What was wrong
+
+A loop range is a fact about a length, and the rule that keeps such a fact across a loop entry
+required the length's base to be a bare name. `state.region.count` is not: its base is a field. So
+a loop written `for index in 0..<state.region.count` whose body wrote `state.live[index]` lost its
+own range fact and could not index the collection it was iterating.
+
+The root was in the written set, correctly -- the body does write under `state`, and the values
+recorded in terms of `state` must be resymbolized. What does not follow is that the *lengths* under
+it changed. An element write is an element write whichever collection it lands in, and a write to a
+whole field puts the root in the disqualified set instead, where it already loses every count
+beneath it.
+
+### What changed
+
+The base of a `.count` in the extent-stability test is now the place root rather than a bare name,
+so every collection under an element-only-written root keeps its extent. Every existing guard is
+untouched: a whole write, a reference taken, a call in the body, and a binding this frame aliased
+elsewhere all disqualify the root exactly as before, which is what
+`examples/rejected_loop_element_extent.elisa` has always pinned and still refuses in all six of its
+cases.
+
+### Fixtures
+
+`examples/nested_extent.elisa` iterates one field's length while writing another field's elements,
+with the guard written both before and inside the branch.
+`examples/rejected_nested_extent.elisa` replaces a whole field inside the loop and loses the range
+fact for the field it is iterating, which is the correct answer: that write can replace the
+collection.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: verified functions 120 to 121, unverified roots 5 to
+4, `index-upper` 156 to 154, and failed obligations 548 to 545. Proven rises 1492 to 1494 against
+obligations 2040 to 2039. Gaps stay 0 and `trusted_assumptions` stays empty.
+
+This is a small number for a shape that is everywhere in the resource kernel, and the reason is
+worth stating: most of those loops also call something, and a call in the body disqualifies the
+root before this rule is reached. The nested base was the second lock on that door, not the first.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

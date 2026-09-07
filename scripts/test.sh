@@ -2168,6 +2168,26 @@ if [[ "$rejected_forward_scan_status" -ne 0 ]]; then
     exit 1
 fi
 
+# The extent a loop range is written against may be nested. A root the body writes only elements
+# under keeps every count under it; a whole write to a field keeps none.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/nested_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"a_loop_over_one_field_writing_another", "the_guard_may_come_first"}'
+nested_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$nested_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a nested extent was lost to an element write beside it\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_nested_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_whole_field_write_loses_every_extent"] == "body-unverified"'
+rejected_nested_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_nested_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a whole field write kept an extent under its root\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
