@@ -2108,6 +2108,26 @@ if [[ "$rejected_collection_builtin_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A call in a loop condition has no statement boundary either, and an opaque condition leaves the
+# loop with no post-state claim at all. Binding the call before the loop keeps the condition.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/bound_loop_condition.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"loop-invariant-missing"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_bound_limit_leaves_the_condition_readable"] == "contract-verified-widened-state"'
+bound_loop_condition_status=${PIPESTATUS[1]}
+set -e
+if [[ "$bound_loop_condition_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a bound loop condition was still opaque\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_bound_loop_condition.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"loop-condition-opaque", "loop-invariant-missing"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_call_in_the_condition_is_opaque"] == "body-unverified"'
+rejected_bound_loop_condition_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_bound_loop_condition_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call in a loop condition was read as a condition\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

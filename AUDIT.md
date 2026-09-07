@@ -3250,6 +3250,59 @@ as the new refusal fires once. Proven stays at 1480 and verified functions at 11
 The number to read here is not the proof count. It is that a method-shaped call can no longer pass
 through this pass without either a model of its receiver or a refusal.
 
+## A call in a loop condition, and two loops the compiler will not let carry an invariant
+
+### What was wrong
+
+`function-summary-unverified` stood at 341, which is not a cluster of its own: it is the cascade
+from thirteen unverified roots. Reading the roots by finding count rather than by name shows most
+of them owe two or three obligations, not dozens. Three looked closable.
+
+`proof_kernel_replay_congruence_find` loops on `steps <= proof_kernel_replay_congruence_term_limit()`.
+A call in a loop condition is the same shape as a call in any other larger expression -- there is
+no statement boundary to apply a summary or a havoc at -- but the consequence is worse here: the
+condition is reported opaque, and an opaque condition leaves the loop with no post-state claim at
+all, so nothing after it holds either.
+
+### What changed
+
+The limit is bound before the loop. It is the same program: the callee is a constant of its
+arguments, which is what a limit function is.
+
+### The two that did not change, and why
+
+`proof_kernel_replay_resource_lookup` and `proof_kernel_replay_resource_region_active` are the same
+downward scan:
+
+    index: mutable usize = state.binding_names.count
+    while index > 0:
+        index <- index - 1
+        return index if state.binding_names[index] == name
+
+Each owes one index bound and one `loop-invariant-missing`, and `invariant index <= ...count` is
+exactly the missing fact. Adding it does not compile: `elisac-stage1` declined both bodies with
+`(contract statement)`. Both loops carry a `return` inside them, which is the only feature they
+share that the accepted invariant examples in `examples/` do not. The invariants are reverted and
+the two roots stay open; closing them needs either that restriction lifted or the loops rewritten
+to leave the return outside, which is subject-code surgery on a lookup in the resource kernel and
+is not worth doing blind.
+
+### Fixtures
+
+`examples/bound_loop_condition.elisa` and its rejected pair are the same loop written both ways.
+The bound one keeps its condition and reaches `contract-verified-widened-state`; the other is
+`body-unverified` and carries `loop-condition-opaque` beside it. Neither proves outright -- both
+still want an invariant -- which is why the fixtures assert on the finding sets and the
+verification reasons rather than on a clean proof.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: failed obligations 636 to 629,
+`function-summary-unverified` 341 to 334, `loop-condition-opaque` 2 to 1, and the unverified roots
+8 to 7. Two functions move from failing to `contract-verified-widened-state`. Proven stays at 1480
+and obligations fall 2116 to 2109, because an opaque condition is itself a failing obligation.
+Gaps stay 0 and `trusted_assumptions` stays empty.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

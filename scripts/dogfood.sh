@@ -262,6 +262,8 @@ run_probe nested_call_value examples/nested_call_value.elisa 0
 run_probe rejected_nested_call_value examples/rejected_nested_call_value.elisa 1
 run_probe collection_builtin examples/collection_builtin.elisa 0
 run_probe rejected_collection_builtin examples/rejected_collection_builtin.elisa 1
+run_probe bound_loop_condition examples/bound_loop_condition.elisa 1
+run_probe rejected_bound_loop_condition examples/rejected_bound_loop_condition.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1331,6 +1333,34 @@ for owner in ("a_push_while_a_borrow_is_live", "a_region_argument_withdraws_the_
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s admitted a builtin call it does not model" % owner)
 print("dogfood collection_builtin: a builtin writes its receiver, and the borrow rules see it")
+PY
+
+# A call in a loop condition is opaque, and an opaque condition leaves the loop with no post-state
+# claim; the same loop over a bound limit keeps its condition.
+python3 - "$REPORT_DIR/bound_loop_condition.json" "$REPORT_DIR/rejected_bound_loop_condition.json" <<'PY'
+import json
+import sys
+
+bound, opaque = sys.argv[1:]
+with open(bound, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["replay"]["gaps"] or report["summary"]["semantic_errors"]:
+    raise SystemExit("dogfood failed: bound loop condition fixture did not run cleanly")
+if {f["kind"] for f in report["findings"]} != {"loop-invariant-missing"}:
+    raise SystemExit("dogfood failed: a bound loop condition was still reported opaque")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+if reasons.get("a_bound_limit_leaves_the_condition_readable") != "contract-verified-widened-state":
+    raise SystemExit("dogfood failed: a bound loop condition lost its post-state claim")
+with open(opaque, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["replay"]["gaps"] or report["summary"]["semantic_errors"]:
+    raise SystemExit("dogfood failed: opaque loop condition fixture did not run cleanly")
+if {f["kind"] for f in report["findings"]} != {"loop-condition-opaque", "loop-invariant-missing"}:
+    raise SystemExit("dogfood failed: a call in a loop condition was read as a condition")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+if reasons.get("a_call_in_the_condition_is_opaque") != "body-unverified":
+    raise SystemExit("dogfood failed: an opaque loop condition was admitted")
+print("dogfood bound_loop_condition: a bound limit keeps the condition, a call in one does not")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
