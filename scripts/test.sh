@@ -1947,6 +1947,27 @@ if [[ "$rejected_negated_guard_status" -ne 0 ]]; then
     exit 1
 fi
 
+# An order between two places guards its own subtraction; a conjunction is read as its conjuncts;
+# a proposition beside its negation closes the branch a disjunctive premise refutes; and an
+# unsigned expression certified not to wrap is nonnegative.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/place_order.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"a_place_guards_its_own_subtraction", "a_conjunction_is_read_as_its_conjuncts", "a_denied_disjunct_leaves_the_other", "a_guarded_difference_is_nonnegative", "a_callee_range_check", "a_summary_the_caller_guarded_on"}'
+place_order_status=${PIPESTATUS[1]}
+set -e
+if [[ "$place_order_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a guard stated between two places was unreadable\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_place_order.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; refused = ("a_place_order_in_the_wrong_direction", "a_place_order_on_another_pair", "a_disjunct_is_not_a_conjunct", "a_negation_denies_only_itself", "nonnegative_is_not_positive", "an_unguarded_summary_asserts_nothing"); assert all(reasons[owner] == "body-unverified" for owner in refused)'
+rejected_place_order_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_place_order_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a fact list was read for more than it states\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

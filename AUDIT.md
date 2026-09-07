@@ -2723,6 +2723,77 @@ is a place expression, so the cluster is now blocked on exactly one thing: keyin
 and an order atom by a place path rather than a name. That is the affine rekey the audit has been
 naming, and it is now the only step between this rule and these findings.
 
+## Four readings of a fact list that were already stated in it
+
+### What was wrong
+
+The previous entry left the 26 `children[start + index]` findings blocked on one thing: the call
+sites read `children[node.children_start + index]`, and `ProofAffine.base` and the order atom test
+each accept one bare identifier. Widening those to a place key means threading a second component
+through every bound, difference and matrix lookup in both engines. Measuring the cluster first
+showed that is not what it needs.
+
+The subtraction guard is the whole of it. `children.count - node.children_start` is range-safe
+when a fact orders the pair, `start <= children.count` is exactly what such code writes, and the
+guard is decided by `proof_difference_comparison`, which needs both sides affine. A structural
+match needs neither: a collected order is a comparison between two atoms and contains no
+arithmetic at all, so reading one directly imports nothing the guard would then be deciding about
+itself. Only the atom test had to widen, and only to a place.
+
+Three further readings were missing beside it, each of something the fact list already stated.
+
+### What changed
+
+**A field of a bare name is an order atom.** It is a place, not arithmetic: reading it twice in
+one fact set reads the same value, because a field write clears the facts, and a call keeps only
+what `proof_expr_call_stable` certifies. The peer rule already named exactly this shape. Field
+places are inert for every existing collector -- `proof_ident_name` answers `""` for one and
+`proof_affine_expression` declines it -- so they reach only the new structural match.
+
+**A conjunction is read as its conjuncts.** The structural rules matched a top-level comparison,
+so `requires a <= b and c <= d` was invisible where the same two facts written apart were not.
+`proof_conjunct_facts` is a reading of the list, not an addition to it.
+
+**A proposition beside its own negation is inconsistent.** This is arithmetic-free, so it is split
+out of `proof_facts_inconsistent` and runs before the fixed-width guard, and the disjunctive case
+split moves ahead of that guard with it. That ordering is the point: a callee's postcondition
+arrives as `not result or p`, the caller has already guarded on the result, and the branch that
+assumes `not result` must be able to close without its own facts being range-safe -- which they
+are not, because `p` is where the guard for the subtraction in `p` lives. Every premise a tier
+actually consumes still passes the guard, in the branch that consumes it.
+
+**A non-wrapping unsigned expression is nonnegative.** Its mathematical value is its machine value
+and an unsigned machine value is at least zero. The certification is the same guard every other
+rule is gated on, so the rule reads an answer already computed. It is the lower bound on an index
+whose upper bound was already proved, and it is deliberately not a strict one.
+
+Each has its kernel mirror.
+
+### Fixtures
+
+`examples/place_order.elisa` carries all four and the call-summary shape they combine into: a
+callee written as a two-guard range check, and a caller that guards on it and then indexes.
+The previous commit's binary refuses every one.
+
+`examples/rejected_place_order.elisa` is the boundary: a place order in the wrong direction, one
+naming another pair, a disjunct read as a conjunct, a negation of one proposition offered against
+another, a nonnegative value read as positive, and a summary whose guard the caller never
+established. All six are refused, with no semantic errors and no replay gaps.
+
+### What it bought, and what it did not
+
+On `examples/kernel_replay_standalone.elisa`: proven 1403 to 1423 and verified functions 111 to
+115, against obligations 2097 to 2124. All 1423 certificates replay, gaps stay 0 and
+`trusted_assumptions` stays empty.
+
+The index clusters are unchanged at 157 and 48, and the two probes that still fail say why. The
+upper bound now proves for a caller that guards on the range check and indexes `start + index`,
+so the rule reaches the shape. It does not reach these call sites, and two things stand between:
+the guard there is written `return <call> if not child_range_valid(...)`, whose returned
+expression is itself a call, and a local bound to a place carries `limit == children.count` as an
+equality the structural rules do not rewrite through. The lower bound needs neither: it needs an
+unsigned width marker for a field place, and markers are keyed by bare name.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

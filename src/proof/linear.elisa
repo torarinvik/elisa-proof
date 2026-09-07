@@ -293,6 +293,14 @@ extend ElisaProof:
                     return true
                 Ast::Expr.Ident(_, _):
                     return true
+                Ast::Expr.Field(object, field_name, _):
+                    # A field of a bare name is a place, not arithmetic, so it carries the same
+                    # guarantee an identifier does: reading it twice in one fact set reads the
+                    # same value, because any write to it, and any call that is not stable for
+                    # it, discards these facts first. `values.count` is the term this admits in
+                    # practice, and it is the bound every loop over a collection is written
+                    # against. The peer rule already names exactly this shape.
+                    return field_name != "" and proof_ident_name(proof_strip_parens(object)) != ""
                 Ast::Expr.Paren(inner, _):
                     return proof_unsigned_order_atom(inner)
                 _:
@@ -384,13 +392,25 @@ extend ElisaProof:
                             return true if proof_peer_unsigned_width(sum_witness.bound, facts) == width
                     if operator == TokenKind.Minus:
                         orders: mutable darray[Ast::Expr] = []
-                        for fact in facts |orders|:
+                        # Read the facts the same way the structural rules do: conjuncts
+                        # flattened, and a disjunction one side of which an existing fact denies
+                        # contributing the other. A callee's postcondition arrives as
+                        # `not result or ...` and the caller has already guarded on the result, so
+                        # without this the order the subtraction needs is stated and unreadable.
+                        readable: darray[Ast::Expr] = proof_conjunct_facts(facts)
+                        for fact in readable |orders|:
                             proof_collect_unsigned_order_facts(fact, &orders)
                         # The order tier is gated on its operands' primitive type witness, which
                         # is a type statement rather than an order fact. Carry the markers across
                         # with the orders; they are inert for every bound and alias collector.
                         for fact in facts |orders|:
                             orders.push(fact) if proof_scalar_marker_name(fact) != "" or proof_unsigned_marker_name(fact) != ""
+                        # The order the subtraction needs may be stated between two places, and
+                        # the affine tiers below name one bare identifier, so they cannot read it.
+                        # A collected order is a comparison between two atoms and contains no
+                        # arithmetic, so matching one directly imports nothing this guard would
+                        # then be deciding about itself.
+                        return true if proof_has_order_fact(right, left, false, orders)
                         return true if proof_linear_goal(right, TokenKind.LtEq, left, orders)
                     interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
                     return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
@@ -594,13 +614,14 @@ extend ElisaProof:
         # ex-falso here is sound Hoare reasoning (a function with impossible preconditions has
         # no executions), and it also makes contradictory branch complements useful without
         # teaching the kernel a general-purpose theorem prover.
-        def proof_facts_inconsistent(facts: darray[Ast::Expr]&) -> bool:
-            bounds: mutable darray[ProofBound] = []
-            for fact in facts |bounds|:
-                proof_collect_bounds(fact, &bounds)
-            proof_close_equalities(facts, &bounds)
-            for bound in bounds:
-                return true if bound.has_lower and bound.has_upper and bound.lower > bound.upper
+        # The part of inconsistency that needs no arithmetic: a false literal, or a proposition
+        # beside its own negation. Nothing is evaluated and no interval is consulted, so this may
+        # run before the fixed-width guard -- it cannot be misled by a modular premise, because it
+        # never reads one as a number. That ordering is what closes the branch a disjunctive
+        # premise refutes: a callee's `not result or p` beside the caller's own `result` leaves
+        # `p` in the only branch that survives, and the branch that assumed `not result` is shut
+        # without its facts ever having to be range-safe.
+        def proof_facts_propositionally_inconsistent(facts: darray[Ast::Expr]&) -> bool:
             for fact in facts:
                 match fact:
                     Ast::Expr.BoolLit(value):
@@ -613,7 +634,18 @@ extend ElisaProof:
                                 pass
                     _:
                         pass
+            for fact in facts |facts|:
+                return true if proof_fact_denies(fact, facts)
             return false
+
+        def proof_facts_inconsistent(facts: darray[Ast::Expr]&) -> bool:
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            for bound in bounds:
+                return true if bound.has_lower and bound.has_upper and bound.lower > bound.upper
+            return proof_facts_propositionally_inconsistent(facts)
 
         # Return a conservative interval for affine expressions. Lower and upper knowledge are
         # tracked independently: a fact such as x >= 0 is enough for a later lower-bound goal,
@@ -1518,9 +1550,58 @@ extend ElisaProof:
                 _:
                     return (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
 
+        # A conjunction asserts both of its sides, so a rule that scans facts for a shape has to
+        # see inside one. The structural rules matched only a top-level comparison, so a single
+        # `requires a <= b and c <= d` was invisible where the same two facts written separately
+        # were not. Flattening is a reading of the fact list, not an addition to it: every
+        # conjunct was already asserted, and the range guard certifies the whole conjunction
+        # before any rule reads either half.
+        def proof_push_conjuncts(expression: Ast::Expr, conjuncts: mutable darray[Ast::Expr]&, depth: usize) -> void:
+            stripped: Ast::Expr = proof_strip_parens(expression)
+            if depth < 32:
+                match stripped:
+                    Ast::Expr.Binary(left, operator, right, _):
+                        if operator == TokenKind.And:
+                            proof_push_conjuncts(left, conjuncts, depth + 1)
+                            proof_push_conjuncts(right, conjuncts, depth + 1)
+                            return
+                    _:
+                        pass
+            conjuncts.push(stripped)
+
+        # `not e` where the expression is one, seen through parentheses.
+        def proof_negated_operand(expression: Ast::Expr) -> (known: bool, operand: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            match proof_strip_parens(expression):
+                Ast::Expr.Unary(operator, operand, _):
+                    return (true, operand) if operator == TokenKind.Not
+                    return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        # A candidate an existing fact denies outright: the fact is its negation, or it is the
+        # negation of the fact. Only a literal denial counts -- no tier is consulted, so this
+        # cannot decide anything the fact list did not already state.
+        def proof_fact_denies(candidate: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            negated: (known: bool, operand: Ast::Expr) = proof_negated_operand(candidate)
+            for fact in facts |fact, candidate, negated|:
+                return true if negated.known and proof_expr_equal(fact, negated.operand)
+                fact_negated: (known: bool, operand: Ast::Expr) = proof_negated_operand(fact)
+                return true if fact_negated.known and proof_expr_equal(fact_negated.operand, candidate)
+            return false
+
+        # The facts a structural rule may read directly, with conjunctions flattened. A
+        # disjunctive premise is not resolved here: the goal solver already opens one by case
+        # split, and each branch reaches these rules with the disjunct as an ordinary fact.
+        def proof_conjunct_facts(facts: darray[Ast::Expr]&) -> darray[Ast::Expr] can[Memory.Allocate, Abort.Panic]:
+            conjuncts: mutable darray[Ast::Expr] = []
+            for fact in facts |conjuncts|:
+                proof_push_conjuncts(fact, &conjuncts, 0)
+            return conjuncts
+
         # `term <= bound` or `term < bound` recorded as a fact, in either spelling.
         def proof_has_order_fact(term: Ast::Expr, bound: Ast::Expr, strict_only: bool, facts: darray[Ast::Expr]&) -> bool:
-            for fact in facts |fact, term, bound, strict_only|:
+            conjuncts: darray[Ast::Expr] = proof_conjunct_facts(facts)
+            for fact in conjuncts |fact, term, bound, strict_only|:
                 match fact:
                     Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
                         if fact_operator == TokenKind.Lt and proof_expr_equal(fact_left, term) and proof_expr_equal(fact_right, bound):
@@ -1537,7 +1618,8 @@ extend ElisaProof:
             return false
 
         def proof_sum_witness_for(first: Ast::Expr, second: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, bound: Ast::Expr, strict: bool) can[Memory.Allocate, Abort.Panic]:
-            for fact in facts |fact, first, second, facts|:
+            conjuncts: darray[Ast::Expr] = proof_conjunct_facts(facts)
+            for fact in conjuncts |fact, first, second, facts|:
                 match fact:
                     Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
                         continue if fact_operator != TokenKind.Lt and fact_operator != TokenKind.LtEq
@@ -1576,6 +1658,27 @@ extend ElisaProof:
             forward: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_witness_for(left, right, facts)
             return forward if forward.known
             return proof_sum_witness_for(right, left, facts)
+
+        # An unsigned expression that is certified not to wrap has a mathematical value equal to
+        # its machine value, and an unsigned machine value is nonnegative. The certification is
+        # the same guard every other rule here is gated on, so the rule adds no new assumption:
+        # it only reads the answer the guard already computed. Without it a lower-bound obligation
+        # on `start + index` is refused even where the matching upper bound is proved, because no
+        # affine tier can name a sum of two terms.
+        def proof_unsigned_nonnegative_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            zero_left: (known: bool, value: i64) = proof_constant_int(left)
+            zero_right: (known: bool, value: i64) = proof_constant_int(right)
+            term: mutable Ast::Expr = Ast::Expr.Invalid
+            if zero_left.known and zero_left.value == 0 and (operator == TokenKind.LtEq or operator == TokenKind.Lt):
+                term <- right
+            elif zero_right.known and zero_right.value == 0 and (operator == TokenKind.GtEq or operator == TokenKind.Gt):
+                term <- left
+            else:
+                return false
+            # A strict goal claims the value is not zero, which no width argument establishes.
+            return false if operator == TokenKind.Lt or operator == TokenKind.Gt
+            return false if proof_unsigned_width_in_expression(term, facts) == 0
+            return proof_unsigned_expression_safe(term, facts)
 
         def proof_sum_bound_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             return false if operator != TokenKind.Lt and operator != TokenKind.LtEq
@@ -2160,14 +2263,11 @@ extend ElisaProof:
             # expression unless every arithmetic subterm is shown to remain in its declared
             # range. Directly asserted facts were handled above and remain valid path assumptions.
             return true if proof_unsigned_goal_identity(goal, facts)
-            # Signed decision procedures consume premises as well as the goal.
-            # A true wrapping premise may be false over integers; treating it as
-            # such can discard every actual execution and prove an arbitrary goal.
-            for fact in facts:
-                return false if not proof_unsigned_expression_safe(fact, facts)
-            return true if proof_facts_inconsistent(facts)
-            return true if proof_fact_proves_call_summary(facts, goal)
-            return false if not proof_unsigned_expression_safe(goal, facts)
+            # Propositional inconsistency first. It reads no term as a number, so no wrapping
+            # premise can mislead it, and a contradictory branch must be able to close before the
+            # guard below asks its facts to be range-safe -- the branch a disjunctive premise
+            # refutes often cannot answer that, and does not have to.
+            return true if proof_facts_propositionally_inconsistent(facts)
             disjunction_index: mutable usize = facts.count
             disjunction_left: mutable Ast::Expr = Ast::Expr.Absent
             disjunction_right: mutable Ast::Expr = Ast::Expr.Absent
@@ -2191,6 +2291,16 @@ extend ElisaProof:
                 left_facts.push(disjunction_left)
                 right_facts.push(disjunction_right)
                 return proof_goal_depth(left_facts, goal, annotations, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(right_facts, goal, annotations, depth, budget, split_depth + 1, exhausted)
+            # Signed decision procedures consume premises as well as the goal.
+            # A true wrapping premise may be false over integers; treating it as
+            # such can discard every actual execution and prove an arbitrary goal.
+            # Each branch of a split above re-enters here, so every premise a tier
+            # below actually consumes has passed this guard in its own branch.
+            for fact in facts:
+                return false if not proof_unsigned_expression_safe(fact, facts)
+            return true if proof_facts_inconsistent(facts)
+            return true if proof_fact_proves_call_summary(facts, goal)
+            return false if not proof_unsigned_expression_safe(goal, facts)
             quantifier_kind: sview = proof_quantifier_kind(goal, annotations)
             if quantifier_kind != "" and depth >= 4:
                 exhausted <- true
@@ -2264,6 +2374,7 @@ extend ElisaProof:
                         return true if proof_comparison_chain_goal(left, operator, right, facts)
                         return true if proof_strict_shift_goal(left, operator, right, facts)
                         return true if proof_sum_bound_goal(left, operator, right, facts)
+                        return true if proof_unsigned_nonnegative_goal(left, operator, right, facts)
                         # Congruence is the last equality tier and runs only after the
                         # fixed-width safety guards above rejected every wrapping premise/goal.
                         return proof_congruence_goal(facts, goal, annotations, exhausted) if operator == TokenKind.EqEq

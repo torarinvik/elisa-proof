@@ -246,6 +246,8 @@ run_probe settled_operand examples/settled_operand.elisa 0
 run_probe rejected_settled_operand examples/rejected_settled_operand.elisa 1
 run_probe negated_guard_order examples/negated_guard_order.elisa 0
 run_probe rejected_negated_guard_order examples/rejected_negated_guard_order.elisa 1
+run_probe place_order examples/place_order.elisa 0
+run_probe rejected_place_order examples/rejected_place_order.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1091,6 +1093,35 @@ for owner in ("a_negation_of_the_wrong_order", "an_inequality_is_not_an_order", 
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s read more out of a negated guard than it says" % owner)
 print("dogfood negated_guard_order: a negated guard is an order, and only over the pair it names")
+PY
+
+# A place order guards its own subtraction, a conjunction is read as its conjuncts, a negation
+# closes the branch it refutes, and a non-wrapping unsigned value is nonnegative -- each saying
+# only what it says.
+python3 - "$REPORT_DIR/place_order.json" "$REPORT_DIR/rejected_place_order.json" <<'PY'
+import json
+import sys
+
+readable, literal = sys.argv[1:]
+with open(readable, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: place order fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a place-order certificate was left unreplayed")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_place_guards_its_own_subtraction", "a_conjunction_is_read_as_its_conjuncts", "a_denied_disjunct_leaves_the_other", "a_guarded_difference_is_nonnegative", "a_summary_the_caller_guarded_on"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s could not read a fact its list states" % owner)
+with open(literal, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: place order boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_place_order_in_the_wrong_direction", "a_place_order_on_another_pair", "a_disjunct_is_not_a_conjunct", "a_negation_denies_only_itself", "nonnegative_is_not_positive", "an_unguarded_summary_asserts_nothing"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s read a fact list for more than it states" % owner)
+print("dogfood place_order: a place order guards its own subtraction, and says nothing further")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
