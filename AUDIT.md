@@ -3303,6 +3303,53 @@ On `examples/kernel_replay_standalone.elisa`: failed obligations 636 to 629,
 and obligations fall 2116 to 2109, because an opaque condition is itself a failing obligation.
 Gaps stay 0 and `trusted_assumptions` stays empty.
 
+## The 35 region-expression findings are captured loops, and removing them exposes a real gap
+
+### What they are
+
+`region-expression-unsupported` stood at 37 and had resisted every static reading: the reported
+positions land on `continue`, `return` and declaration lines, none of which is an expression
+statement, and three rounds of instrumentation were needed to name the shape. Two of the 37 are
+genuine assignment findings. The other 35 are all one thing: `Ast::Expr.Block`.
+
+`for x in xs |captures|:` parses as a block, and in statement position that is
+`Stmt.Expr(Expr.Block(...))`. The boundary rule asks whether a discarded expression statement
+*contains* a region value, and `proof_resource_expr_contains_region_value`'s block arm answers by
+scanning the block's statements. So the question being asked of every captured loop was "does any
+statement in this loop body mention a region-owned binding", and the answer was reported as a
+region value thrown away.
+
+A block statement discards its own value and nothing else. For a loop that value is absent. The
+body is ordinary statements, and it is already walked by `proof_resource_check_expression` on the
+line above the test. The fix is one arm:
+
+    Ast::Expr.Block(_, value, _, _):
+        return proof_resource_expr_contains_region_value(value, state)
+
+Measured: `region-expression-unsupported` 37 to 2, failed obligations 629 to 594, proven 1480 to
+1484.
+
+### Why it is not in this commit
+
+It takes the replay gap count from 0 to 1.
+
+Four functions gain a resource certificate under the fix. Three replay. The fourth,
+`proof_kernel_replay_structural_report_impl`, produces a `resource-v1` trace of 31 events that ends
+on three unclosed `resource-scope` events, and `proof_kernel_replay_resource_report_impl` refuses a
+boundary with a scope still open. Its captured loop carries `return false if ...` inside the body,
+and the resource walk stops at the early return without closing the scopes the loop opened.
+
+The refusal was masking that. Removing the refusal is right; the trace is wrong either way, and it
+was wrong before this was measured. Landing the fix first would ship a replay gap, which is the one
+number this project does not trade, so the fix is held and the defect is recorded here instead.
+
+### What closing it requires
+
+The resource pass must close every scope a captured block opened when the block exits early, the
+same way the proof pass models a `break` or `continue` transfer against the nearest loop's
+invariant. Until then these 35 obligations stay refused for the wrong reason, and the count is a
+placeholder for one scope-balancing defect rather than thirty-five region problems.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
