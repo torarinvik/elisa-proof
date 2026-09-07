@@ -3405,6 +3405,54 @@ On `examples/kernel_replay_standalone.elisa`: `region-expression-unsupported` 37
 obligations 629 to 594, proven 1480 to 1484, against obligations 2109 to 2078. All 1484
 certificates replay, gaps are 0, and `trusted_assumptions` stays empty.
 
+## A loop invariant cannot be written here at all, so two loops are written not to need one
+
+### Correcting the previous entry
+
+Two entries ago the audit recorded that `invariant index <= ...count` on
+`proof_kernel_replay_resource_lookup` and `proof_kernel_replay_resource_region_active` made
+`elisac-stage1` decline both bodies, and guessed the cause was the `return` inside the loop, since
+that was the only feature those loops did not share with the accepted invariant examples.
+
+That guess was wrong, and the corrected fact is stronger. Compiling five minimal cases directly
+shows `elisac-stage1` declines any function body carrying a loop `invariant` -- `while` or `for`,
+with a capture list or without, with a `return` in the body or without. A function-level `requires`
+compiles. So a loop invariant cannot appear in any compiled source of this project, and every
+`loop-invariant-missing` finding in the kernel names a fact that cannot be stated where it is
+needed.
+
+### What changed
+
+Both loops are downward scans whose index bound is exactly what an invariant would have supplied.
+Written forward over `0..<count`, the bound comes from the loop range instead:
+
+    found: mutable usize = names.count
+    for index in 0..<names.count:
+        found <- index if names[index] == wanted
+    return found
+
+Keeping the last match returns the slot the downward scan returned -- the highest matching index,
+which is the innermost binding under shadowing -- so the answer is unchanged. The existence check
+does not depend on order at all. What both give up is the early exit; the tables they scan are a
+function's bindings and a frame's active regions, which are tens of entries.
+
+### Fixtures
+
+`examples/forward_scan.elisa` carries both rewrites. `examples/rejected_forward_scan.elisa` carries
+the shape that cannot be written, and keeps both of its findings: the invariant it has no way to
+state, and the index bound that invariant would have given it. That fixture is the record of the
+constraint, not a wish for the loop to verify.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: verified functions 116 to 120, unverified roots 7 to
+5, `function-summary-unverified` 334 to 290, `loop-invariant-missing` 11 to 9, `index-upper` 158 to
+156, and failed obligations 594 to 548 against obligations 2078 to 2040. Proven rises 1484 to 1492.
+
+Two loops of five lines each cascaded into forty-four fewer summary findings, which is what the
+root-count reading predicted: the summary bucket is not a cluster to attack directly but the shadow
+of a small number of roots.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

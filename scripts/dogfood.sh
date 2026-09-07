@@ -266,6 +266,8 @@ run_probe bound_loop_condition examples/bound_loop_condition.elisa 1
 run_probe rejected_bound_loop_condition examples/rejected_bound_loop_condition.elisa 1
 run_probe block_statement_region examples/block_statement_region.elisa 0
 run_probe rejected_block_statement_region examples/rejected_block_statement_region.elisa 1
+run_probe forward_scan examples/forward_scan.elisa 0
+run_probe rejected_forward_scan examples/rejected_forward_scan.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1392,6 +1394,30 @@ for owner in ("a_discarded_region_value_is_refused", "parentheses_do_not_hide_it
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s admitted a discarded region value" % owner)
 print("dogfood block_statement_region: a block discards its own value, and a length is a scalar")
+PY
+
+# A loop invariant cannot appear in a compiled source here, so a loop needing one for its index
+# bound is written not to need it.
+python3 - "$REPORT_DIR/forward_scan.json" "$REPORT_DIR/rejected_forward_scan.json" <<'PY'
+import json
+import sys
+
+forward, downward = sys.argv[1:]
+with open(forward, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: forward scan fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_forward_scan_keeps_the_last_match", "an_existence_check_does_not_depend_on_order"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s did not carry its own index bound" % owner)
+with open(downward, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: downward scan fixture did not fail cleanly")
+if {f["kind"] for f in report["findings"]} != {"index-upper-unproven", "loop-invariant-missing"}:
+    raise SystemExit("dogfood failed: a downward scan was given a bound it never states")
+print("dogfood forward_scan: a forward scan carries its bound, a downward one needs an invariant")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

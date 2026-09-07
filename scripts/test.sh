@@ -2148,6 +2148,26 @@ if [[ "$rejected_block_statement_region_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A loop invariant cannot appear in a compiled source of this project, so a loop whose index bound
+# needs one must be written not to need it. A forward scan keeping the last match is that rewrite.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/forward_scan.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"a_forward_scan_keeps_the_last_match", "an_existence_check_does_not_depend_on_order"}'
+forward_scan_status=${PIPESTATUS[1]}
+set -e
+if [[ "$forward_scan_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a forward scan did not carry its own index bound\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_forward_scan.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-upper-unproven", "loop-invariant-missing"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_downward_scan_needs_an_invariant"] == "body-unverified"'
+rejected_forward_scan_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_forward_scan_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a downward scan was given a bound it never states\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
