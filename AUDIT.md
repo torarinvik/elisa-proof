@@ -2533,6 +2533,65 @@ the `void` case -- but proving it needs `start + count <= total` from `count <= 
 which is the two-variable sum again. The contract and the rule that would use it are blocked on the
 same missing piece.
 
+## A sum of two terms is bounded by what its guarded subtraction names
+
+### What was wrong
+
+`ProofAffine.base` is one bare identifier, so `start + index` is not a term any tier can name, and
+`children[node.children_start + index]` is the most common indexed access in the kernel's own
+replay module. The previous measurement called this the one cluster where widening the affine atom
+is the general repair rather than one option. It is still the general repair. It is not the only
+one.
+
+### What changed
+
+Both facts that bound such a sum are structural, so `proof_sum_bound_goal` searches for them
+structurally, the same way the comparison chain and the strict shift reach terms the atom cannot
+name. The rule is: `m <= C - a` together with `a <= C` gives `a + m <= C`, and a term under `m`
+inherits the bound, so `b < m <= C - a` gives `a + b < C`. The guard on the subtraction is what
+makes `C - a` meaningful for an unsigned type, and it is exactly what such code already writes
+beside it.
+
+The search returns the bounding term as well as the strictness, because the same answer settles
+the range question: the sum is at most `C`, so it cannot wrap whenever `C` is a term of the same
+unsigned width. That is the relational argument the peer rule uses for `a + 1`, and it is the only
+kind a 64-bit unsigned value can have. Both the goal tier and the unsigned guard consult it.
+`proof_kernel_replay_sum_bound` is the mirror.
+
+### The premise this rule will not read
+
+The obvious formulation is the other one: from `a + m <= C` and `b < m`, conclude `a + b < C`. It
+was implemented first, and it is unsound. For a fixed-width type `a + m <= C` is a claim about a
+sum that may already have wrapped: at `start = MAX, count = 1, total = 0` for `usize`, the premise
+holds modulo 2^64 while the mathematical sum does not, and reading it as an integer bound proves
+`start + 0 < 0`. The same objection is why bound propagation is confined to the goal tier, and it
+is what `examples/rejected_unsigned_fact_explosion.elisa` has been pinning all along. The
+subtraction form says the same thing with no sum in the premise, and the rejected fixture pins the
+wrapped reading by name.
+
+### Fixtures
+
+`examples/sum_bound.elisa` requires the transposed subtraction, a term inheriting the bound
+through a strict step, the same for a signed sum, and the operands commuted.
+`examples/rejected_sum_bound.elisa` pins four refusals: the modular premise above, a subtraction
+with no guard on it, a non-strict step offered against a strict goal, and a bound on a different
+term.
+
+### What it bought, and what it did not
+
+On `examples/kernel_replay_standalone.elisa`: proven 1388 to 1394 and verified functions 109 to
+110, against obligations 2061 to 2088, which is this change's own code in both engines. All 1394
+certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
+
+The 26 findings this cluster was measured at are not among them, and the reason is not the rule.
+`proof_kernel_replay_child_range_valid` decides exactly the premise the rule needs and returns a
+bare `bool`, so the fact does not exist. Giving it one runs into the shape of its own body: the
+postcondition has to be `not result or count <= total - start`, and on the early-return path where
+`start > total` that subtraction is unguarded, so the goal is refused before any tier sees it.
+`ensure not result or start <= total` alone does verify, which is half of what the rule needs.
+Closing the cluster therefore needs the validator restructured so the subtraction is guarded on
+every path it appears on -- subject-code surgery at 26 call sites, not a checker change.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

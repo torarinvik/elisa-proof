@@ -240,6 +240,8 @@ run_probe bound_propagation examples/bound_propagation.elisa 0
 run_probe rejected_bound_propagation examples/rejected_bound_propagation.elisa 1
 run_probe strict_shift examples/strict_shift.elisa 0
 run_probe rejected_strict_shift examples/rejected_strict_shift.elisa 1
+run_probe sum_bound examples/sum_bound.elisa 0
+run_probe rejected_sum_bound examples/rejected_sum_bound.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1003,6 +1005,32 @@ for owner in ("needs_a_strict_fact", "gives_no_strict_conclusion", "moves_by_one
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s took a shift that does not follow" % owner)
 print("dogfood strict_shift: a strict fact shifts by one, non-strictly, to its own bound")
+PY
+
+python3 - "$REPORT_DIR/sum_bound.json" "$REPORT_DIR/rejected_sum_bound.json" <<'PY'
+import json
+import sys
+
+bounded, wrapped = sys.argv[1:]
+with open(bounded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: sum bound fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a sum-bound certificate was left unreplayed")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("transpose_the_subtraction", "a_term_under_the_bound", "the_same_for_a_signed_sum", "commuted"):
+    if (owner, "goal") not in proven:
+        raise SystemExit("dogfood failed: %s did not bound its sum" % owner)
+with open(wrapped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: sum bound boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for owner in ("a_modular_premise_is_not_a_bound", "the_subtraction_needs_its_guard", "a_non_strict_step_gives_no_strict_goal", "a_bound_on_another_term"):
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s bounded a sum nothing bounds" % owner)
+print("dogfood sum_bound: a guarded subtraction bounds a sum, a wrapped premise does not")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

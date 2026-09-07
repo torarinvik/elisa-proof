@@ -341,6 +341,13 @@ extend ElisaProof:
                         unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base(left, right)
                         if unit.known:
                             return true if proof_unsigned_increment_has_strict_peer(unit.base, width, facts)
+                        # A sum of two non-constant terms has no interval here, and for a 64-bit
+                        # unsigned value it never can. What it can have is a bound: the same search
+                        # that discharges `a + b <= C` also names the `C`, and a sum bounded by a
+                        # term of its own width is in range without any magnitude being known.
+                        sum_witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(left, right, facts)
+                        if sum_witness.known and proof_peer_is_nameable(sum_witness.bound):
+                            return true if proof_peer_unsigned_width(sum_witness.bound, facts) == width
                     if operator == TokenKind.Minus:
                         orders: mutable darray[Ast::Expr] = []
                         for fact in facts |orders|:
@@ -1447,6 +1454,114 @@ extend ElisaProof:
         # The shift is only sound if `a + 1` does not wrap, which is exactly what the unsigned peer
         # rule decides from this same fact, and for a signed term the ordinary overflow guard does.
         # A goal that is `<` rather than `<=` is not this rule: `a < R` does not give `a + 1 < R`.
+        # A sum of two non-constant terms is not an affine form here -- `ProofAffine.base` is one
+        # identifier -- so `children_start + index < children.count` reaches no tier that can name
+        # it. Both facts that bound such a sum are themselves structural, so the search is too.
+        #
+        # Shape A, the offset chain: `a + n <= C` and `b < n` give `a + b < C`, because
+        # `a + b < a + n <= C`.
+        # Shape B, the subtraction transposed: `b <= C - a` with `a <= C` gives `a + b <= C`. The
+        # second premise is what makes `C - a` meaningful for an unsigned type, and it is exactly
+        # the guard such code already writes beside the subtraction.
+        #
+        # Both return the bounding term as well as the strictness, because the same search answers
+        # the range question: the sum is at most `C`, so it cannot wrap whenever `C` is a term of
+        # the same unsigned width. That is the relational argument the peer rule uses for `a + 1`,
+        # and it is the only kind available for a 64-bit unsigned value.
+        def proof_sum_operands(expression: Ast::Expr) -> (known: bool, left: Ast::Expr, right: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, left, right) if operator == TokenKind.Plus
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
+
+        def proof_difference_operands(expression: Ast::Expr) -> (known: bool, left: Ast::Expr, right: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, left, right) if operator == TokenKind.Minus
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
+
+        # `term <= bound` or `term < bound` recorded as a fact, in either spelling.
+        def proof_has_order_fact(term: Ast::Expr, bound: Ast::Expr, strict_only: bool, facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts |fact, term, bound, strict_only|:
+                match fact:
+                    Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
+                        if fact_operator == TokenKind.Lt and proof_expr_equal(fact_left, term) and proof_expr_equal(fact_right, bound):
+                            return true
+                        if fact_operator == TokenKind.Gt and proof_expr_equal(fact_right, term) and proof_expr_equal(fact_left, bound):
+                            return true
+                        continue if strict_only
+                        if fact_operator == TokenKind.LtEq and proof_expr_equal(fact_left, term) and proof_expr_equal(fact_right, bound):
+                            return true
+                        if fact_operator == TokenKind.GtEq and proof_expr_equal(fact_right, term) and proof_expr_equal(fact_left, bound):
+                            return true
+                    _:
+                        pass
+            return false
+
+        def proof_sum_witness_for(first: Ast::Expr, second: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, bound: Ast::Expr, strict: bool) can[Memory.Allocate, Abort.Panic]:
+            for fact in facts |fact, first, second, facts|:
+                match fact:
+                    Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
+                        continue if fact_operator != TokenKind.Lt and fact_operator != TokenKind.LtEq
+                        # Shape B: some term is bounded by `bound - first`, with `first <= bound`
+                        # recorded beside it -- the guard that makes the subtraction meaningful for
+                        # an unsigned type, and the one such code already writes. The bounded term
+                        # is `second` itself, or a term `second` is under in turn: a range check
+                        # states `count <= total - start` once and every index into it is `< count`.
+                        #
+                        # The premise is deliberately this shape rather than `first + second <=
+                        # bound`. For an unsigned type the latter is a *modular* claim about a sum
+                        # that may already have wrapped, so it cannot be read as a bound on the
+                        # mathematical sum, and using it to justify its own range is the mistake
+                        # `examples/rejected_unsigned_fact_explosion.elisa` pins.
+                        difference: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_difference_operands(fact_right)
+                        if difference.known and proof_expr_equal(difference.right, first) and proof_has_order_fact(first, difference.left, false, facts):
+                            if proof_expr_equal(fact_left, second):
+                                return (true, difference.left, fact_operator == TokenKind.Lt)
+                            if proof_has_order_fact(second, fact_left, true, facts):
+                                return (true, difference.left, true)
+                            if fact_operator == TokenKind.Lt and proof_has_order_fact(second, fact_left, false, facts):
+                                return (true, difference.left, true)
+                            if proof_has_order_fact(second, fact_left, false, facts):
+                                return (true, difference.left, false)
+                        # There is deliberately no rule reading `first + middle <= bound` as a
+                        # premise. For a fixed-width type that is a claim about a sum that may
+                        # already have wrapped: at `start = MAX, count = 1, total = 0` the premise
+                        # `start + count <= total` holds modulo 2^64 while the mathematical sum does
+                        # not, and reading it as an integer bound proves `start + 0 < 0`. The
+                        # subtraction form above says the same thing without a sum in it.
+                    _:
+                        pass
+            return (false, Ast::Expr.Invalid, false)
+
+        def proof_sum_upper_witness(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, bound: Ast::Expr, strict: bool) can[Memory.Allocate, Abort.Panic]:
+            forward: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_witness_for(left, right, facts)
+            return forward if forward.known
+            return proof_sum_witness_for(right, left, facts)
+
+        def proof_sum_bound_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if operator != TokenKind.Lt and operator != TokenKind.LtEq
+            operands: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_sum_operands(left)
+            return false if not operands.known
+            witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(operands.left, operands.right, facts)
+            return false if not witness.known
+            return false if not proof_expr_equal(witness.bound, right)
+            return false if operator == TokenKind.Lt and not witness.strict
+            return proof_sum_range_safe(left, operands.left, operands.right, facts)
+
+        # The sum is at most its witness bound, so for an unsigned type it is in range whenever
+        # that bound is a term of the same width. A signed sum keeps the ordinary guard.
+        def proof_sum_range_safe(sum: Ast::Expr, first: Ast::Expr, second: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            width: i64 = proof_unsigned_width_in_expression(sum, facts)
+            return proof_unsigned_expression_safe(sum, facts) if width == 0
+            witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(first, second, facts)
+            return false if not witness.known
+            return proof_peer_is_nameable(witness.bound) and proof_peer_unsigned_width(witness.bound, facts) == width
+
         def proof_strict_shift_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             return false if operator != TokenKind.LtEq
             shifted: (known: bool, base: Ast::Expr) = proof_shifted_unit_base(left)
@@ -2114,6 +2229,7 @@ extend ElisaProof:
                         return true if proof_product_sign_goal(left, operator, right, facts)
                         return true if proof_comparison_chain_goal(left, operator, right, facts)
                         return true if proof_strict_shift_goal(left, operator, right, facts)
+                        return true if proof_sum_bound_goal(left, operator, right, facts)
                         # Congruence is the last equality tier and runs only after the
                         # fixed-width safety guards above rejected every wrapping premise/goal.
                         return proof_congruence_goal(facts, goal, annotations, exhausted) if operator == TokenKind.EqEq

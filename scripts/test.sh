@@ -1889,6 +1889,25 @@ if [[ "$rejected_strict_shift_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A sum of two non-constant terms is bounded by the term its guarded subtraction names.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/sum_bound.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "goal") in proven for owner in ("transpose_the_subtraction", "a_term_under_the_bound", "the_same_for_a_signed_sum", "commuted"))'
+sum_bound_status=${PIPESTATUS[1]}
+set -e
+if [[ "$sum_bound_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a guarded subtraction did not bound its own sum\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_sum_bound.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(g["name"], g["rule"]): g["proven"] for g in report["goals"]}; refused = ("a_modular_premise_is_not_a_bound", "the_subtraction_needs_its_guard", "a_non_strict_step_gives_no_strict_goal", "a_bound_on_another_term"); assert all(goals[(owner, "goal")] is False for owner in refused); assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}'
+rejected_sum_bound_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_sum_bound_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a wrapped sum was read as an integer bound\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

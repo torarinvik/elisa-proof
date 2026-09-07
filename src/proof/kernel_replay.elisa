@@ -428,6 +428,12 @@ module ElisaProofKernelReplay:
                     unit: (known: bool, base: usize) = proof_kernel_replay_unsigned_unit_increment_base(nodes, node.left, node.right)
                     if unit.known:
                         return true if proof_kernel_replay_unsigned_increment_has_strict_peer(nodes, children, unit.base, width, facts)
+                    # A sum of two non-constant terms has no interval here and never can for a
+                    # 64-bit unsigned value. What it can have is a bound, and the same search that
+                    # discharges `a + b <= C` names the `C`.
+                    sum_witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness(nodes, children, node.left, node.right, facts)
+                    if sum_witness.known and proof_kernel_replay_peer_is_nameable(nodes, sum_witness.bound):
+                        return true if proof_kernel_replay_peer_unsigned_width(nodes, children, sum_witness.bound, facts) == width
                 if node.operator == "-":
                     orders: mutable darray[usize] = []
                     for fact in facts |nodes, orders|:
@@ -2797,6 +2803,73 @@ module ElisaProofKernelReplay:
         # structurally rather than through an atom, which is what lets it reach a field place the
         # difference engine cannot name. The shift is sound only if `a + 1` does not wrap, which is
         # the same guard the producer consults, and a `<` goal is not this rule.
+        # Mirror of the producer's sum bound. A sum of two non-constant terms is not an affine form
+        # here either, and both facts that bound one are structural, so the search is too:
+        # `m <= C - a` with `a <= C` gives `a + m <= C`, and a term under `m` inherits it. There is
+        # deliberately no rule reading `a + m <= C` as a premise -- for a fixed-width type that is a
+        # claim about a sum that may already have wrapped.
+        def proof_kernel_replay_binary_operands(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, operator: sview) -> (known: bool, left: usize, right: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0, 0) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (false, 0, 0) if node.kind != "binary" or node.operator != operator
+            return (true, node.left, node.right)
+
+        def proof_kernel_replay_has_order_fact(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, term: usize, bound: usize, strict_only: bool, facts: darray[usize]) -> bool:
+            for fact in facts |fact, nodes, children, term, bound, strict_only|:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+                continue if not located.known
+                node: ElisaProofKernelCore::ProofKernelNode = located.node
+                continue if node.kind != "binary"
+                if node.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, node.left, term, 0) and proof_kernel_replay_expr_equal(nodes, children, node.right, bound, 0):
+                    return true
+                if node.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, node.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, node.left, bound, 0):
+                    return true
+                continue if strict_only
+                if node.operator == "<=" and proof_kernel_replay_expr_equal(nodes, children, node.left, term, 0) and proof_kernel_replay_expr_equal(nodes, children, node.right, bound, 0):
+                    return true
+                if node.operator == ">=" and proof_kernel_replay_expr_equal(nodes, children, node.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, node.left, bound, 0):
+                    return true
+            return false
+
+        def proof_kernel_replay_sum_witness_for(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, first: usize, second: usize, facts: darray[usize]) -> (known: bool, bound: usize, strict: bool):
+            for fact in facts |fact, nodes, children, first, second, facts|:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+                continue if not located.known
+                node: ElisaProofKernelCore::ProofKernelNode = located.node
+                continue if node.kind != "binary"
+                continue if node.operator != "<" and node.operator != "<="
+                difference: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, node.right, "-")
+                continue if not difference.known
+                continue if not proof_kernel_replay_expr_equal(nodes, children, difference.right, first, 0)
+                continue if not proof_kernel_replay_has_order_fact(nodes, children, first, difference.left, false, facts)
+                if proof_kernel_replay_expr_equal(nodes, children, node.left, second, 0):
+                    return (true, difference.left, node.operator == "<")
+                if proof_kernel_replay_has_order_fact(nodes, children, second, node.left, true, facts):
+                    return (true, difference.left, true)
+                if node.operator == "<" and proof_kernel_replay_has_order_fact(nodes, children, second, node.left, false, facts):
+                    return (true, difference.left, true)
+                if proof_kernel_replay_has_order_fact(nodes, children, second, node.left, false, facts):
+                    return (true, difference.left, false)
+            return (false, 0, false)
+
+        def proof_kernel_replay_sum_upper_witness(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left: usize, right: usize, facts: darray[usize]) -> (known: bool, bound: usize, strict: bool):
+            forward: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_witness_for(nodes, children, left, right, facts)
+            return forward if forward.known
+            return proof_kernel_replay_sum_witness_for(nodes, children, right, left, facts)
+
+        def proof_kernel_replay_sum_bound(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
+            return false if operator != "<" and operator != "<="
+            operands: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, left, "+")
+            return false if not operands.known
+            witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness(nodes, children, operands.left, operands.right, facts)
+            return false if not witness.known
+            return false if not proof_kernel_replay_expr_equal(nodes, children, witness.bound, right, 0)
+            return false if operator == "<" and not witness.strict
+            width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, left, facts, 0)
+            return proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, left) if width == 0
+            return proof_kernel_replay_peer_is_nameable(nodes, witness.bound) and proof_kernel_replay_peer_unsigned_width(nodes, children, witness.bound, facts) == width
+
         def proof_kernel_replay_shifted_unit_base(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, base: usize):
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
             return (false, 0) if not located.known
@@ -3063,6 +3136,7 @@ module ElisaProofKernelReplay:
                 return true if proof_kernel_replay_product_sign(nodes, children, facts, node.left, node.operator, node.right)
                 return true if proof_kernel_replay_comparison_chain(nodes, children, facts, node.left, node.operator, node.right)
                 return true if proof_kernel_replay_strict_shift(nodes, children, facts, node.left, node.operator, node.right)
+                return true if proof_kernel_replay_sum_bound(nodes, children, facts, node.left, node.operator, node.right)
                 # Ground congruence closure is the last equality tier. It runs only after the
                 # fixed-width safety guards above have rejected every wrapping premise and goal,
                 # so equal operands of different widths can never be propagated through a former.
