@@ -1872,7 +1872,7 @@ fi
 
 # `a < R` gives `a + 1 <= R` for any term R, matched structurally so a field place is reachable.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/strict_shift.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "goal") in proven for owner in ("shift_to_a_field", "shift_to_a_name", "shift_from_a_reversed_fact"))'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/strict_shift.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "goal") in proven for owner in ("shift_to_a_field", "shift_to_a_name", "shift_from_a_reversed_fact", "shift_to_a_collection_extent"))'
 strict_shift_status=${PIPESTATUS[1]}
 set -e
 if [[ "$strict_shift_status" -ne 0 ]]; then
@@ -1881,7 +1881,7 @@ if [[ "$strict_shift_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_strict_shift.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(g["name"], g["rule"]): g["proven"] for g in report["goals"]}; refused = ("needs_a_strict_fact", "gives_no_strict_conclusion", "moves_by_one_only", "bounds_another_term"); assert all(goals[(owner, "goal")] is False for owner in refused); assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_strict_shift.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(g["name"], g["rule"]): g["proven"] for g in report["goals"]}; refused = ("needs_a_strict_fact", "gives_no_strict_conclusion", "moves_by_one_only", "bounds_another_term", "another_collection_extent"); assert all(goals[(owner, "goal")] is False for owner in refused); assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}'
 rejected_strict_shift_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_strict_shift_status" -ne 0 ]]; then

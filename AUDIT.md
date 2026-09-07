@@ -2427,12 +2427,23 @@ On `examples/kernel_replay_standalone.elisa`: proven 1385 to 1388 against obliga
 which is this change's own code. Verified functions 106 to 108. All 1388 certificates replay, gaps
 stay 0 and `trusted_assumptions` stays empty.
 
-Not covered: `index + 1 <= values.count` over `usize` is still refused, and now for one reason
-rather than two. The shift reaches the goal, but the overflow guard in front of it needs
-`values.count` to carry an unsigned width, and the width markers are keyed by bare name -- a field
-place has none. Recording a width for a collection's extent would close it, and would rest on the
-same typing fact the extent rule already uses. The affine rekey remains the general repair; this
-tier and the comparison chain are two rules working around it.
+`index + 1 <= values.count` over `usize` needed one more thing: the guard in front of the shift
+asks whether `values.count` is a peer of the same unsigned width, and width markers are keyed by
+bare name, so a field place had none.
+
+`proof_peer_unsigned_width` answers that question and only that question. A collection's element
+count is a `usize`, so it reports the platform width for `name.count`, which is safe in the
+direction the peer rule uses it: the rule needs `peer <= TYPE_MAX(base)`, and a peer reported
+*wider* than it is can only make the test fail. It deliberately does not reach
+`proof_unsigned_width_in_expression`. Putting it there instead was tried first and measured: it
+makes every arithmetic term containing `.count` subject to the unsigned wrap guard, and the corpus
+went from 1388 proven to 1349 -- thirty-nine proofs lost to buy one shape. The narrow version costs
+nothing and buys the same shape. `shift_to_a_collection_extent` in the fixture is that shape, and
+`another_collection_extent` in the rejected half is a fact about a *different* collection, which
+gives nothing.
+
+The affine rekey remains the general repair; this tier, the comparison chain and this width query
+are three rules working around it.
 
 ## Coverage still required
 

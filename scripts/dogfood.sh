@@ -991,7 +991,7 @@ if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"
 if report["replay"]["certificates"] != report["replay"]["replayed"]:
     raise SystemExit("dogfood failed: a strict-shift certificate was left unreplayed")
 proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
-for owner in ("shift_to_a_field", "shift_to_a_name", "shift_from_a_reversed_fact"):
+for owner in ("shift_to_a_field", "shift_to_a_name", "shift_from_a_reversed_fact", "shift_to_a_collection_extent"):
     if (owner, "goal") not in proven:
         raise SystemExit("dogfood failed: %s did not shift its strict fact" % owner)
 with open(refused, encoding="utf-8") as handle:
@@ -999,7 +999,7 @@ with open(refused, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: strict shift boundary fixture did not fail cleanly")
 goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
-for owner in ("needs_a_strict_fact", "gives_no_strict_conclusion", "moves_by_one_only", "bounds_another_term"):
+for owner in ("needs_a_strict_fact", "gives_no_strict_conclusion", "moves_by_one_only", "bounds_another_term", "another_collection_extent"):
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s took a shift that does not follow" % owner)
 print("dogfood strict_shift: a strict fact shifts by one, non-strictly, to its own bound")
