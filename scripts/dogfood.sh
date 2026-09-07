@@ -1287,7 +1287,7 @@ with open(bound, encoding="utf-8") as handle:
 if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: nested call fixture did not prove cleanly")
 verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
-for owner in ("a_call_bound_first_is_modelled", "the_binding_keeps_the_state_after_it"):
+for owner in ("a_call_bound_first_is_modelled", "the_binding_keeps_the_state_after_it", "a_call_bound_before_a_conditional_is_modelled"):
     if owner not in verified:
         raise SystemExit("dogfood failed: %s did not model a call bound to a local" % owner)
 with open(buried, encoding="utf-8") as handle:
@@ -1297,7 +1297,7 @@ if report["status"] != "failed" or report["replay"]["gaps"]:
 if {f["kind"] for f in report["findings"]} != {"expression-unsupported"}:
     raise SystemExit("dogfood failed: a call with no statement boundary was not reported")
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("a_call_nested_in_a_tuple_is_refused", "the_refusal_reaches_past_the_statement"):
+for owner in ("a_call_nested_in_a_tuple_is_refused", "the_refusal_reaches_past_the_statement", "a_call_inside_a_conditional_is_refused"):
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s admitted a call it cannot model" % owner)
 print("dogfood nested_call_value: a call needs a statement boundary, and a binding gives it one")

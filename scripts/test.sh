@@ -2071,7 +2071,7 @@ fi
 # A call is modelled at a statement boundary. Buried in a larger value expression it has none, so
 # it is refused; bound to a local first it is the same program where the checker can model it.
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/nested_call_value.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"emit", "a_call_may_be_the_whole_value", "a_call_bound_first_is_modelled", "the_binding_keeps_the_state_after_it"}'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/nested_call_value.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"emit", "a_call_may_be_the_whole_value", "a_call_bound_first_is_modelled", "the_binding_keeps_the_state_after_it", "a_call_bound_before_a_conditional_is_modelled"}'
 nested_call_value_status=${PIPESTATUS[1]}
 set -e
 if [[ "$nested_call_value_status" -ne 0 ]]; then
@@ -2080,7 +2080,7 @@ if [[ "$nested_call_value_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_nested_call_value.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"expression-unsupported"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_call_nested_in_a_tuple_is_refused"] == "body-unverified"; assert reasons["the_refusal_reaches_past_the_statement"] == "body-unverified"'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_nested_call_value.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"expression-unsupported"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_call_nested_in_a_tuple_is_refused"] == "body-unverified"; assert reasons["the_refusal_reaches_past_the_statement"] == "body-unverified"; assert reasons["a_call_inside_a_conditional_is_refused"] == "body-unverified"'
 rejected_nested_call_value_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_nested_call_value_status" -ne 0 ]]; then

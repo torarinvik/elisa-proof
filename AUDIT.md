@@ -3108,6 +3108,49 @@ Four remain, in `proof_kernel_replay_congruence_class` and `proof_kernel_replay_
 The reported positions there do not land on the offending statement, so finding them needs the same
 probe-and-compare the last two entries used rather than reading the line.
 
+## The kernel is now inside the fragment that checks it
+
+### What was wrong
+
+Four `expression-unsupported` findings remained, in
+`proof_kernel_replay_congruence_class` and `proof_kernel_replay_resource_events`. The reported
+positions did not land on the offending statement, so the last entry said finding them needed the
+probe-and-compare the two before it used. It did.
+
+One was the same shape the previous entry closed: a call inside a returned tuple. The other three
+are its sibling. A conditional expression's arms are not statements either, so a call in one has no
+boundary for the checker to apply a summary or a havoc at:
+
+    inherited_region: sview = binding_region(state, target_slot) if borrow_is_present else external
+    places.push(source_place if alias else empty_place())
+
+### What changed
+
+Each call is bound before the expression that used it. Both helpers were checked first:
+`proof_kernel_replay_resource_empty_place` is a constructor over no state, and
+`proof_kernel_replay_resource_binding_region` is a bounds-checked read returning `""` outside the
+table. Evaluating either unconditionally yields the value the guarded arm would have produced, so
+the rewrites are equivalent, not merely equivalent-looking.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: `expression-unsupported` 4 to **0**, failed
+obligations 681 to 676, and `region-expression-unsupported` 38 to 37. Obligations fall 2159 to 2154
+with proven unchanged at 1478, because the havocked regions were producing obligations no rule
+could ever discharge.
+
+Every statement in the kernel replay module is now inside the fragment the checker verifies. That
+is worth stating plainly: until this commit the checker could not read parts of its own kernel, and
+each unreadable statement discarded every fact after it in that function's body. The gap between
+what the module says and what the checker was able to read is closed.
+
+### The fixtures
+
+`examples/nested_call_value.elisa` now carries the conditional case beside the tuple case, and
+`examples/rejected_nested_call_value.elisa` pins its refusal. Together with the `no_op_statement`
+pair they record the whole boundary: a call is modelled where it is a statement's value or a
+declaration's initializer, and nowhere else.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
