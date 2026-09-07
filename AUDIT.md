@@ -3543,6 +3543,51 @@ One obligation is a small return for the reach of the rule, and the reason is th
 removed arm names: at most of these sites the fact that would have survived mentions the call whose
 summary it is, and that term is still discarded.
 
+## Where a callee's summary is lost, measured rather than argued
+
+### The question
+
+The previous entry recorded that a callee summary applied to an unbound call reads
+`not f(...) or p`, that the call term is never call-stable, and that this is what discards the
+summary at the next call in the body. It named the fix as recording the pure-call witness where the
+fact is built rather than only where a goal is decided. That fix was written and measured.
+
+### What was measured
+
+Two changes together: the witness recorded beside the summary fact in `proof_apply_function`, and a
+call arm in `proof_expr_call_stable` admitting a witnessed call term whose arguments are themselves
+stable. Built, run on the corpus, and compared against the commit before it:
+
+| | before | after |
+| --- | --- | --- |
+| proven | 1495 | 1495 |
+| failed obligations | 544 | 544 |
+| every finding bucket | unchanged | unchanged |
+
+Zero. Both are reverted. Neither is left in the tree, for the same reason the previous inert arm was
+removed: unreachable code in a security-critical path is a liability, and a rule with no fixture
+that can exercise it is not a rule this project keeps.
+
+### What the measurement established
+
+The fact does reach the caller's state -- a probe with the guard and no intervening call carries
+`not range_valid(...) or (...)` and proves its index bound. After an intervening call the fact is
+gone and no witness for the call term is present in its place, so the site that built it is not the
+one the witness was added to. `proof_apply_function` has ten call sites; the one that carries an
+unbound call's summary into the real fact list is not the site at its end that this change
+instrumented, and this entry does not claim to know which of the ten it is.
+
+What is now established, and was not before, is that the missing piece is a *provenance* question
+rather than a rule: the summary fact and its witness must be built together, wherever that is. The
+by-value field rule committed beside this one is what makes that worth finding -- the field markers
+in that probe now survive the call, so the summary is the only thing still lost.
+
+### What survived
+
+The measurement itself is the product here. A probe that isolates the shape, a corpus comparison
+that shows zero, and a reverted diff are a better record than a plausible rule with no evidence, and
+the next attempt starts from a narrower question than this one did.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
