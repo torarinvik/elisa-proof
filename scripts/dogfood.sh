@@ -963,7 +963,7 @@ if report["replay"]["certificates"] != report["replay"]["replayed"]:
 if report["trust"]["trusted_assumptions"]:
     raise SystemExit("dogfood failed: bound propagation rested on a trusted assumption")
 proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
-for owner in ("increment_under_a_bounded_limit", "increment_through_a_chain", "lower_bound_travels"):
+for owner in ("increment_under_a_bounded_limit", "increment_through_a_chain", "lower_bound_travels", "unsigned_increment_under_a_strict_peer", "unsigned_increment_under_a_reversed_peer"):
     if (owner, "goal") not in proven:
         raise SystemExit("dogfood failed: %s did not reach the overflow guard with its interval" % owner)
 with open(invented, encoding="utf-8") as handle:
@@ -971,7 +971,7 @@ with open(invented, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: bound propagation boundary fixture did not fail cleanly")
 goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
-for owner in ("unsigned_increment_without_a_bound", "lower_bound_does_not_bound_above", "non_strict_premise_is_not_shiftable", "bound_on_an_unrelated_name"):
+for owner in ("unsigned_step_of_two", "unsigned_increment_under_a_non_strict_peer", "unsigned_peer_of_another_name", "lower_bound_does_not_bound_above", "non_strict_premise_is_not_shiftable", "bound_on_an_unrelated_name"):
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s was given an interval nothing established" % owner)
 print("dogfood bound_propagation: a constraint carries an interval it already implies, and no other")

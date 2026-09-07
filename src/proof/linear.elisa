@@ -337,6 +337,10 @@ extend ElisaProof:
                     # minuend is at least the subtrahend, even when the values are wider than
                     # this prover's i64 interval domain. Preserve useful range proofs such as
                     # `count <= total - start` under the explicit `start <= total` precondition.
+                    if operator == TokenKind.Plus:
+                        unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base(left, right)
+                        if unit.known:
+                            return true if proof_unsigned_increment_has_strict_peer(unit.base, width, facts)
                     if operator == TokenKind.Minus:
                         orders: mutable darray[Ast::Expr] = []
                         for fact in facts |orders|:
@@ -364,6 +368,13 @@ extend ElisaProof:
             for fact in facts |bounds|:
                 proof_collect_bounds(fact, &bounds)
             proof_close_equalities(facts, &bounds)
+            # Deliberately no bound propagation here. A difference constraint is read off a fact
+            # such as `y == x + 1`, which for an unsigned type is a *modular* equality: it is true
+            # at `x == 255, y == 0` for a `u8` and says nothing about the integers. Propagating it
+            # would hand this guard an interval that only holds if the term does not wrap, which is
+            # the very question the guard is deciding, and `examples/rejected_unsigned_fact_explosion.elisa`
+            # then proves `x == 0` from `x == 255`. The goal tier may propagate because it runs
+            # after every affine term in the goal has been certified non-wrapping.
             return proof_unsigned_expression_safe_with_bounds(expression, facts, bounds)
 
         # Reflexivity, symmetry, and coherence with arithmetic are not universal in Elisa. `==`,
@@ -735,6 +746,51 @@ extend ElisaProof:
         # loses a proof.
         const PROOF_BOUND_PROPAGATION_ROUNDS: usize = 4
 
+        # `a + 1` cannot overflow when a fact bounds `a` strictly below a value of the same unsigned
+        # width: `a < Y` gives `a + 1 <= Y`, and `Y` is at most the type's maximum by typing alone.
+        # This is the addition counterpart of the guarded-subtraction rule, and like it the
+        # argument is relational rather than numeric -- which is the whole point. A 64-bit unsigned
+        # value has no representable interval in this prover's i64 domain, so an interval argument
+        # can never admit `index + 1` for a `usize`, however the facts are arranged, while this one
+        # needs no magnitude at all.
+        # The expression form of the same relational argument: `a + 1` is in range when a fact says
+        # `a < Y` for a `Y` of the same unsigned width, because `Y` is at most the type's maximum
+        # by typing. No interval is involved, which is what lets it work for `usize` -- a 64-bit
+        # unsigned value has no representable interval in this prover's i64 domain at all.
+        def proof_unsigned_unit_increment_base(left: Ast::Expr, right: Ast::Expr) -> (known: bool, base: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            right_constant: (known: bool, value: i64) = proof_constant_int(right)
+            return (true, left) if right_constant.known and right_constant.value == 1
+            left_constant: (known: bool, value: i64) = proof_constant_int(left)
+            return (true, right) if left_constant.known and left_constant.value == 1
+            return (false, Ast::Expr.Invalid)
+
+        def proof_unsigned_increment_has_strict_peer(base: Ast::Expr, width: i64, facts: darray[Ast::Expr]&) -> bool:
+            return false if width == 0
+            for fact in facts |fact, base, width, facts|:
+                match fact:
+                    Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
+                        # The peer is required to be a bare name. A peer that mentioned the base
+                        # could justify itself -- `a < a + 1` is exactly the claim whose range this
+                        # rule is deciding -- and a name cannot.
+                        if fact_operator == TokenKind.Lt and proof_expr_equal(fact_left, base) and proof_ident_name(fact_right) != "":
+                            return true if proof_unsigned_width_in_expression(fact_right, facts) == width
+                        if fact_operator == TokenKind.Gt and proof_expr_equal(fact_right, base) and proof_ident_name(fact_left) != "":
+                            return true if proof_unsigned_width_in_expression(fact_left, facts) == width
+                    _:
+                        pass
+            return false
+
+        def proof_affine_unsigned_peer_safe(affine: ProofAffine, constraints: darray[ProofDifference]&, facts: darray[Ast::Expr]&) -> bool:
+            return false if not affine.known or affine.negative or affine.offset != 1 or affine.base == ""
+            width: i64 = proof_unsigned_marker_width_for_name(facts, affine.base)
+            return false if width == 0
+            for constraint in constraints |constraint, affine, width, facts|:
+                continue if constraint.left != affine.base or constraint.right == ""
+                # `left - right <= -1` is `left < right`, which is the strictness the argument needs.
+                continue if constraint.bound > -1
+                return true if proof_unsigned_marker_width_for_name(facts, constraint.right) == width
+            return false
+
         def proof_close_bounds_through_differences(constraints: darray[ProofDifference]&, bounds: mutable darray[ProofBound]&) -> void:
             return if constraints.count == 0
             for round in 0..<PROOF_BOUND_PROPAGATION_ROUNDS |round, constraints, bounds|:
@@ -881,7 +937,9 @@ extend ElisaProof:
             # The constraints are collected before the overflow guard runs, because they are what
             # gives a name an interval when no fact states one about it directly.
             proof_close_bounds_through_differences(constraints, &bounds)
-            return false if not proof_affine_safe(left_affine, bounds) or not proof_affine_safe(right_affine, bounds)
+            left_safe: bool = proof_affine_safe(left_affine, bounds) or proof_affine_unsigned_peer_safe(left_affine, constraints, facts)
+            right_safe: bool = proof_affine_safe(right_affine, bounds) or proof_affine_unsigned_peer_safe(right_affine, constraints, facts)
+            return false if not left_safe or not right_safe
             nodes: mutable darray[sview] = [""]
             for constraint in constraints |nodes|:
                 nodes.push(constraint.left) if constraint.left != "" and proof_difference_node_index(nodes, constraint.left) == nodes.count

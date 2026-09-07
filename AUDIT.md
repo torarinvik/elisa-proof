@@ -2316,13 +2316,71 @@ obligations 2041 to 2042, with the histogram otherwise unchanged, 0 gaps and all
 replayed. The kernel's own loops count with `usize` against `collection.count`, and no constant
 bounds them, so propagation has nothing to carry.
 
-That last point is the limit, and it is a property of the numeric domain rather than of this pass.
+That last point looked like a limit of the numeric domain. It was not, and the next entry closes
+it: the range argument for an increment does not have to be numeric at all.
+
+## An unsigned increment needed no interval, only a peer
+
+### What was wrong
+
+`index + 1 <= count` over `usize`, from `index < count`, was refused however the facts were
+arranged. The reason recorded in the previous entry was the numeric domain:
 `proof_unsigned_width_max` caps a 64-bit unsigned value at the signed maximum, because that is the
-widest interval this proof AST can hold; an unsigned value with no proof interval consequently
-cannot enter an arithmetic proof at all, and `index + 1 <= names.count` over `usize` is refused
-however the facts are arranged. Closing that means widening the numeric domain of both the producer
-and the kernel, which is a redesign rather than a gap, and it is what still blocks the kernel's
-last recursive component.
+widest interval this proof AST holds, so no interval argument can ever admit `index + 1` for a
+`usize`.
+
+That reason is correct and the conclusion drawn from it was wrong. The engine already contained a
+counterexample to its own framing: a guarded unsigned *subtraction* is admitted from
+`right <= left`, with the comment "range-safe even when its operands are wider than the kernel's
+i64 interval representation". The argument there is relational. The same argument works for
+addition and nobody had written it.
+
+`a < Y` with `a` and `Y` of the same unsigned width gives `a + 1 <= Y`, and `Y` is at most the
+type's maximum by typing alone. So `a + 1` is in range, with no magnitude mentioned anywhere.
+
+### What changed
+
+`proof_unsigned_increment_has_strict_peer` decides exactly that, and the `+` branch of
+`proof_unsigned_expression_safe_with_bounds` consults it before falling through to the interval
+test, mirroring the `-` branch beside it. `proof_affine_unsigned_peer_safe` is the same rule for
+the difference tier, which reads the strict relation off the constraint it has already built.
+Both have kernel mirrors, which is what lets the certificates replay;
+`proof_kernel_replay_difference_comparison` gained the `children` parameter it needed to read a
+width.
+
+The peer must be a bare name. A peer that mentioned the base could justify itself -- `a < a + 1`
+is precisely the claim whose range is being decided -- and a name cannot.
+
+### The suite caught a real break on the way
+
+The first attempt also propagated derived intervals into this guard, on the same reasoning as the
+goal tier. `examples/rejected_unsigned_fact_explosion.elisa` then proved `x == 0` from `x == 255`.
+Its premises -- `x == 255`, `y == x + 1`, `y == 0` -- all hold for a `u8` at those values, because
+`y == x + 1` is a *modular* equality. Read as an integer difference constraint it gives `x <= -1`,
+which with `x >= 0` is an inconsistent interval, and an inconsistent interval proves anything.
+Propagation is therefore confined to the goal tier, which runs only after every affine term in the
+goal has been certified non-wrapping; the guard that decides *whether* a term wraps may not be
+justified by constraints that assume it does not. The comment at that call site says so.
+
+### Fixtures
+
+`examples/bound_propagation.elisa` gains the unsigned increment under a strict peer, with the peer
+on either side of the comparison. `examples/rejected_bound_propagation.elisa` replaces its former
+"this is the documented limit" case with the three ways the peer rule can be misapplied: a step of
+two, which no strict peer justifies; a non-strict peer, which leaves `index == count` where the
+claim is false; and a peer bounding a different name.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: proven rises from 1378 to 1385 against obligations
+rising 2042 to 2052, which is this change's own code being checked. Verified functions go from 104
+to 106. All 1385 certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
+
+Not covered: the peer must be a bare name, so `index < values.count` does not admit `index + 1` --
+a field place is not an identifier, and that is the same representation limit the comparison chain
+was written around. The kernel's own loops count against `collection.count`, so they are on the
+wrong side of it, and the last recursive component stays open for that reason rather than for the
+one recorded before.
 
 ## Coverage still required
 
