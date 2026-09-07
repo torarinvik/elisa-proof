@@ -2263,6 +2263,67 @@ recorded elsewhere in this file: `index + 1 <= names.count` does not follow from
 `index < names.count` for an unsigned type without a constant upper bound. That is a checker gap,
 not a missing contract, and it is what stops the last recursive component from closing.
 
+## An interval that followed from two facts never reached the overflow guard
+
+### What was wrong
+
+`index + 1` may not enter an arithmetic proof unless the engine can show it does not overflow, and
+the guard asks for a constant interval on the base. The interval pass collected only the bounds a
+fact states about a name *directly*, so
+
+```
+requires index < count
+requires count <= 1000
+requires index >= 0
+ensure result <= count
+return index + 1
+```
+
+was refused. `index <= 999` follows from the first two premises, and the engine builds exactly the
+constraint graph that derives it -- but it built it *after* running the guard, and only to answer
+the goal.
+
+Reduced further, the engine handles a constant offset that is already in the premise
+(`a + 1 <= b` proves `a + 1 <= b`) and weakens strictness (`a < b` proves `a <= b`), and fails the
+moment an offset has to move (`a < b` does not prove `a + 1 <= b`). The failure is the guard, not
+the difference reasoning.
+
+### What changed
+
+`proof_close_bounds_through_differences` propagates intervals along the constraints before the
+guard runs: `x - y <= c` with `y <= U` gives `x <= U + c`, and with `x >= L` gives `y >= L - c`.
+Each step is an ordinary interval inference that can only narrow an interval already implied, so
+nothing is admitted that the facts did not already carry. The pass is capped at four rounds, which
+keeps it linear; a bound needing more rounds is simply not derived, which only loses a proof. The
+constraint collection moves above the guard for the same reason.
+`proof_kernel_replay_close_bounds_through_differences` is the identical rule in the kernel, which
+is what lets the certificates replay.
+
+### Fixtures
+
+`examples/bound_propagation.elisa` requires the increment under a bounded limit, the same through
+a two-constraint chain, and the lower direction; every certificate must replay and
+`trusted_assumptions` must stay empty. `examples/rejected_bound_propagation.elisa` pins four
+refusals: a lower bound on the far name carries nothing upward, a non-strict premise does not
+shift, a bound on an unrelated name reaches nothing, and the unsigned increment with no constant
+bound anywhere stays refused.
+
+### What it bought, and what it did not
+
+The shape above, which is every bounded loop's increment. On
+`examples/kernel_replay_standalone.elisa` it is worth one goal: proven 1377 to 1378 against
+obligations 2041 to 2042, with the histogram otherwise unchanged, 0 gaps and all 1378 certificates
+replayed. The kernel's own loops count with `usize` against `collection.count`, and no constant
+bounds them, so propagation has nothing to carry.
+
+That last point is the limit, and it is a property of the numeric domain rather than of this pass.
+`proof_unsigned_width_max` caps a 64-bit unsigned value at the signed maximum, because that is the
+widest interval this proof AST can hold; an unsigned value with no proof interval consequently
+cannot enter an arithmetic proof at all, and `index + 1 <= names.count` over `usize` is refused
+however the facts are arranged. Closing that means widening the numeric domain of both the producer
+and the kernel, which is a redesign rather than a gap, and it is what still blocks the kernel's
+last recursive component.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

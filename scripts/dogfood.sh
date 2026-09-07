@@ -236,6 +236,8 @@ run_probe region_lifetime_free_callee examples/region_lifetime_free_callee.elisa
 run_probe rejected_region_lifetime_free_callee examples/rejected_region_lifetime_free_callee.elisa 1
 run_probe short_circuit_guard examples/short_circuit_guard.elisa 0
 run_probe rejected_short_circuit_guard examples/rejected_short_circuit_guard.elisa 1
+run_probe bound_propagation examples/bound_propagation.elisa 0
+run_probe rejected_bound_propagation examples/rejected_bound_propagation.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -945,6 +947,34 @@ for owner in ("off_by_one", "guards_another_name", "or_runs_when_the_guard_fails
 if any(goal["proven"] and goal["rule"] == "index-upper" for goal in report["goals"]):
     raise SystemExit("dogfood failed: a misplaced guard discharged an index bound")
 print("dogfood short_circuit_guard: a guard bounds the operand it guards and nothing else")
+PY
+
+python3 - "$REPORT_DIR/bound_propagation.json" "$REPORT_DIR/rejected_bound_propagation.json" <<'PY'
+import json
+import sys
+
+derived, invented = sys.argv[1:]
+with open(derived, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: bound propagation fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a propagated-bound certificate was left unreplayed")
+if report["trust"]["trusted_assumptions"]:
+    raise SystemExit("dogfood failed: bound propagation rested on a trusted assumption")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("increment_under_a_bounded_limit", "increment_through_a_chain", "lower_bound_travels"):
+    if (owner, "goal") not in proven:
+        raise SystemExit("dogfood failed: %s did not reach the overflow guard with its interval" % owner)
+with open(invented, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: bound propagation boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for owner in ("unsigned_increment_without_a_bound", "lower_bound_does_not_bound_above", "non_strict_premise_is_not_shiftable", "bound_on_an_unrelated_name"):
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s was given an interval nothing established" % owner)
+print("dogfood bound_propagation: a constraint carries an interval it already implies, and no other")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

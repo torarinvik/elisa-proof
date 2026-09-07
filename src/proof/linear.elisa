@@ -725,6 +725,30 @@ extend ElisaProof:
         # Prove that an affine expression is evaluated without fixed-width overflow for every
         # value in the current interval. Only the endpoint relevant to the offset is required:
         # positive offsets need an upper bound, negative offsets a lower bound.
+        # A difference constraint carries a bound from one name to another: `x - y <= c` with
+        # `y <= U` gives `x <= U + c`, and with `x >= L` gives `y >= L - c`. The interval pass
+        # collects only the bounds a fact states about a name directly, so `index < count` beside
+        # `count <= 1000` left `index` with no upper bound at all -- and the overflow guard, which
+        # asks for exactly that, refused `index + 1` even though 999 was derivable. Each step is an
+        # ordinary interval inference and can only narrow an interval that already held. The round
+        # cap keeps this linear; a bound that needs more rounds is simply not derived, which only
+        # loses a proof.
+        const PROOF_BOUND_PROPAGATION_ROUNDS: usize = 4
+
+        def proof_close_bounds_through_differences(constraints: darray[ProofDifference]&, bounds: mutable darray[ProofBound]&) -> void:
+            return if constraints.count == 0
+            for round in 0..<PROOF_BOUND_PROPAGATION_ROUNDS |round, constraints, bounds|:
+                for constraint in constraints |constraint, bounds|:
+                    continue if constraint.left == "" or constraint.right == ""
+                    right_bound: ProofBound = proof_bound_for(bounds, constraint.right)
+                    if right_bound.has_upper:
+                        derived_upper: (known: bool, value: i64) = proof_add_safe(right_bound.upper, constraint.bound)
+                        proof_add_upper(bounds, constraint.left, derived_upper.value) if derived_upper.known
+                    left_bound: ProofBound = proof_bound_for(bounds, constraint.left)
+                    if left_bound.has_lower:
+                        derived_lower: (known: bool, value: i64) = proof_sub_safe(left_bound.lower, constraint.bound)
+                        proof_add_lower(bounds, constraint.right, derived_lower.value) if derived_lower.known
+
         def proof_affine_safe(affine: ProofAffine, bounds: darray[ProofBound]&) -> bool:
             return false if not affine.known
             return true if affine.base == ""
@@ -851,10 +875,13 @@ extend ElisaProof:
             proof_close_equalities(facts, &bounds)
             left_affine: ProofAffine = proof_affine_expression(left)
             right_affine: ProofAffine = proof_affine_expression(right)
-            return false if not proof_affine_safe(left_affine, bounds) or not proof_affine_safe(right_affine, bounds)
             for fact in facts |bounds, constraints|:
                 proof_collect_difference_constraints(fact, bounds, &constraints)
             return false if constraints.count > 4096
+            # The constraints are collected before the overflow guard runs, because they are what
+            # gives a name an interval when no fact states one about it directly.
+            proof_close_bounds_through_differences(constraints, &bounds)
+            return false if not proof_affine_safe(left_affine, bounds) or not proof_affine_safe(right_affine, bounds)
             nodes: mutable darray[sview] = [""]
             for constraint in constraints |nodes|:
                 nodes.push(constraint.left) if constraint.left != "" and proof_difference_node_index(nodes, constraint.left) == nodes.count

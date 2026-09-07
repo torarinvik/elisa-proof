@@ -1851,6 +1851,25 @@ if [[ "$rejected_short_circuit_guard_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A difference constraint carries an interval to the name the overflow guard asks about.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/bound_propagation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "goal") in proven for owner in ("increment_under_a_bounded_limit", "increment_through_a_chain", "lower_bound_travels"))'
+bound_propagation_status=${PIPESTATUS[1]}
+set -e
+if [[ "$bound_propagation_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a derivable interval did not reach the overflow guard\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_bound_propagation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(g["name"], g["rule"]): g["proven"] for g in report["goals"]}; refused = ("unsigned_increment_without_a_bound", "lower_bound_does_not_bound_above", "non_strict_premise_is_not_shiftable", "bound_on_an_unrelated_name"); assert all(goals[(owner, "goal")] is False for owner in refused); assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}'
+rejected_bound_propagation_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_bound_propagation_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: propagation invented an interval\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
