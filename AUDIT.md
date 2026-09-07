@@ -3588,6 +3588,53 @@ The measurement itself is the product here. A probe that isolates the shape, a c
 that shows zero, and a reverted diff are a better record than a plausible rule with no evidence, and
 the next attempt starts from a narrower question than this one did.
 
+## The summary-provenance question, narrowed twice more
+
+### What the previous entry left open
+
+It said the summary fact reaches the caller's state, is lost at the next call because its call term
+carries no witness, and that `proof_apply_function` has ten call sites of which it did not know
+which builds that fact. Two of those are now answered and a third is not.
+
+### The site is found
+
+`proof_check_frame_calls_in_expression`'s call arm applies the summary into a probe list and then
+does `facts.clear(); facts.extend(probe_facts) if applied`. That is the path a call in a branch
+condition takes, and it is where `return x if not f(...)` gets its summary. The witness was added
+there, and then moved after the type-bound and call-stable restores in case the arguments were not
+yet witnessed when it first ran.
+
+Neither position changes anything. The corpus is identical: proven 1495, failed 544, every bucket
+unchanged. The witness is still not recorded.
+
+### Why, narrowed to one condition
+
+Four probes over the same shape:
+
+| callee | argument shape | witness recorded |
+| --- | --- | --- |
+| no contract | scalars | yes |
+| no contract | a struct field | yes |
+| carries an `ensure` | scalars | **no** |
+
+So place arguments are not the obstacle and the recording site is not the obstacle. A callee that
+carries an `ensure` is not classified as a pure call, and a callee whose summary we want to keep
+always carries one. The two mechanisms exclude each other by construction, which is why every
+attempt so far has measured zero.
+
+Where it is *not*: `proof_function_is_directly_pure` refuses a function with `requires`, `changes`
+or `preserves`, and `ensure` is not among those; `proof_pure_body_direct` admits an `ensure`
+contract statement whose expression has no call and no `old`. Both of those admit the probe's
+callee. The exclusion is somewhere else in the purity fixed point and this entry does not claim to
+have found it.
+
+### Why nothing is committed
+
+Two positions of one addition, both measured at zero, both reverted. What is committed is the
+question, which has gone from "why is the summary lost" to "which step of the purity fixed point
+excludes a callee that carries an `ensure`", and a probe file shape that answers it in seconds
+rather than in a twenty-five minute corpus run.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
