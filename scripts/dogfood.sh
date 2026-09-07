@@ -242,6 +242,8 @@ run_probe strict_shift examples/strict_shift.elisa 0
 run_probe rejected_strict_shift examples/rejected_strict_shift.elisa 1
 run_probe sum_bound examples/sum_bound.elisa 0
 run_probe rejected_sum_bound examples/rejected_sum_bound.elisa 1
+run_probe settled_operand examples/settled_operand.elisa 0
+run_probe rejected_settled_operand examples/rejected_settled_operand.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1031,6 +1033,34 @@ for owner in ("a_modular_premise_is_not_a_bound", "the_subtraction_needs_its_gua
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s bounded a sum nothing bounds" % owner)
 print("dogfood sum_bound: a guarded subtraction bounds a sum, a wrapped premise does not")
+PY
+
+# `or` and `and` short-circuit: an operand the left one settles owes no range argument, and a
+# left operand that settles nothing still owes the right one its own.
+python3 - "$REPORT_DIR/settled_operand.json" "$REPORT_DIR/rejected_settled_operand.json" <<'PY'
+import json
+import sys
+
+settled, live = sys.argv[1:]
+with open(settled, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: settled operand fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a settled-operand certificate was left unreplayed")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("empty_range_is_valid", "a_settled_conjunct", "the_live_operand_is_still_owed"):
+    if (owner, "goal") not in proven:
+        raise SystemExit("dogfood failed: %s was charged for an unreachable operand" % owner)
+with open(live, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: settled operand boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for owner in ("or_left_false_still_owes_the_right", "and_left_true_still_owes_the_right", "a_settled_operand_does_not_settle_a_sibling", "an_unsettled_left_keeps_the_gate"):
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s let a neighbour settle a live operand" % owner)
+print("dogfood settled_operand: a settled operand is free, a live one still owes its range")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

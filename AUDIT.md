@@ -2592,6 +2592,74 @@ postcondition has to be `not result or count <= total - start`, and on the early
 Closing the cluster therefore needs the validator restructured so the subtraction is guarded on
 every path it appears on -- subject-code surgery at 26 call sites, not a checker change.
 
+## An operand a short circuit never evaluates owes no range argument
+
+### What was wrong
+
+The unsigned range gate walks the whole expression: every fact, and the goal, must have every
+unsigned subterm provably inside its type's range before any tier is allowed to look at it. The
+walk did not model `or` and `and`, which short-circuit. It charged an operand for arithmetic that
+the machine never performs.
+
+The previous entry closed a sum rule and then reported that the 26 `children[start + index]`
+findings stayed open, because the fact the rule needs does not exist:
+`proof_kernel_replay_child_range_valid` returns a bare `bool`. It said the postcondition that
+would create the fact, `ensure not result or count <= total - start`, is refused on the early
+return where `start > total` leaves the subtraction unguarded. That diagnosis was one step short.
+The goal on that path reads `not false or count <= total - start`. Its left operand is already
+true, so the subtraction on the right is not evaluated there at all.
+
+### What changed
+
+`proof_unsigned_expression_safe_with_bounds` now folds a settled left operand. It still charges
+the left operand in full. If the left is a boolean constant that decides the operator -- true for
+`or`, false for `and` -- the right operand is unreachable and is not walked. Otherwise the walk
+continues into it unchanged. `proof_constant_bool` reads the constant through the `not` that
+contract substitution leaves behind, which is how `result` becomes `false` on a returning path.
+`proof_kernel_replay_constant_bool` and the same fold in
+`proof_kernel_replay_unsigned_expression_safe` are the mirror.
+
+### Why a skipped operand cannot carry an unsound fact
+
+The fold is the only place the gate stops walking, and the gate is what licenses the fact
+collectors to read a term as integer arithmetic. `proof_collect_bounds`,
+`proof_collect_unsigned_order_facts` and `proof_collect_difference_constraints` all split `and`
+unconditionally, so a fact of the form `false and P` would hand them `P` while the gate passed the
+whole. Every such fact is unreachable. A `requires` in that shape is a precondition no caller can
+discharge; a branch or loop condition in that shape guards dead code; a callee `ensure` in that
+shape says the callee does not return, which the callee had to prove to be verified at all. None
+of them describes a state a program reaches. `or` is not affected either way: no collector
+descends through it.
+
+As a goal the fold decides nothing. `proof_goal_depth` splits `and` into both conjuncts and `or`
+into either, so `false and P` still owes `false` and `true or P` was already discharged by its left
+operand. The fold changes which goals are attempted, never which are proved.
+
+### Fixtures
+
+`examples/settled_operand.elisa` carries the shape the validator needs, the same shape written as
+a conjunct, and a third function whose left operand stops settling the answer, so the right one is
+still owed and still has to bring its guard. The previous commit's binary refuses the first two and
+proves the third.
+
+`examples/rejected_settled_operand.elisa` is the boundary. `false or X` and `true and X` still owe
+`X`; an opaque left operand settles nothing and the gate still refuses the subtraction beneath it;
+and a settled operand says nothing about the sibling conjunct standing beside it. All four are
+refused, with no semantic errors and no replay gaps.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: proven 1394 to 1400 and verified functions 110 to
+111, against obligations 2088 to 2094, which is this change's own code in both engines. All 1400
+certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
+
+This does not by itself close the 26-finding cluster. It removes the reason the previous entry
+gave for leaving it open: the postcondition `ensure not result or count <= total - start` now
+verifies on a body that returns `false` outright. What remains is the two-guard body, where a
+negated early return does not make the subtraction range-safe for the statement after it, while
+the same condition written as `requires start <= total` does. That asymmetry, not the disjunction,
+is now the blocker.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

@@ -1908,6 +1908,25 @@ if [[ "$rejected_sum_bound_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `or` and `and` short-circuit, so an operand the left one settles owes no range argument.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/settled_operand.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "goal") in proven for owner in ("empty_range_is_valid", "a_settled_conjunct", "the_live_operand_is_still_owed"))'
+settled_operand_status=${PIPESTATUS[1]}
+set -e
+if [[ "$settled_operand_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an unreachable operand was still charged for its range\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_settled_operand.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(g["name"], g["rule"]): g["proven"] for g in report["goals"]}; refused = ("or_left_false_still_owes_the_right", "and_left_true_still_owes_the_right", "a_settled_operand_does_not_settle_a_sibling", "an_unsettled_left_keeps_the_gate"); assert all(goals[(owner, "goal")] is False for owner in refused); assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}'
+rejected_settled_operand_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_settled_operand_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a live operand was settled by its neighbour\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
