@@ -1988,6 +1988,26 @@ if [[ "$rejected_unsigned_place_status" -ne 0 ]]; then
     exit 1
 fi
 
+# An empty literal is empty. The term is the value, so nothing can alias it or make its count
+# something else, and a length invariant starts from exactly this.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/literal_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"an_empty_literal_is_empty", "a_length_invariant_starts_at_zero"}'
+literal_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$literal_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an empty literal was not known to be empty\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_literal_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; refused = ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_named_count_is_not_a_length", "a_literal_length_is_not_an_element_bound", "a_non_empty_literal_length_is_not_read"); assert all(reasons[owner] == "body-unverified" for owner in refused)'
+rejected_literal_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_literal_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a literal length was read where there is no literal\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

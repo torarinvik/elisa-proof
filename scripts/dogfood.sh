@@ -250,6 +250,8 @@ run_probe place_order examples/place_order.elisa 0
 run_probe rejected_place_order examples/rejected_place_order.elisa 1
 run_probe unsigned_place examples/unsigned_place.elisa 0
 run_probe rejected_unsigned_place examples/rejected_unsigned_place.elisa 1
+run_probe literal_extent examples/literal_extent.elisa 0
+run_probe rejected_literal_extent examples/rejected_literal_extent.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1152,6 +1154,34 @@ for owner in ("a_signed_field_is_not_nonnegative", "a_field_is_not_positive", "a
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s read a place marker for more than it says" % owner)
 print("dogfood unsigned_place: an unsigned field is nonnegative, and the marker says nothing more")
+PY
+
+# An empty literal is empty, and that is the whole of what the literal says: not a length after a
+# push, not a length for a parameter, and not a bound on any element.
+python3 - "$REPORT_DIR/literal_extent.json" "$REPORT_DIR/rejected_literal_extent.json" <<'PY'
+import json
+import sys
+
+literal, absent = sys.argv[1:]
+with open(literal, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: literal extent fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a literal-extent certificate was left unreplayed")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("an_empty_literal_is_empty", "a_length_invariant_starts_at_zero"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s did not know its literal was empty" % owner)
+with open(absent, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: literal extent boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_named_count_is_not_a_length", "a_literal_length_is_not_an_element_bound", "a_non_empty_literal_length_is_not_read"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s read a length where no literal states one" % owner)
+print("dogfood literal_extent: an empty literal is empty, and says nothing past that")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

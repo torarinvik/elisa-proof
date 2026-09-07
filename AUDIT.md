@@ -2854,6 +2854,57 @@ resize the collection, and the checker is right to drop it. Closing these needs 
 promise it does not shrink the collection, which in turn needs recursive function summaries --
 `recursive-summary-unsupported` is the finding that names it.
 
+## An empty literal is empty, and what it costs to say more
+
+### What was wrong
+
+The largest remaining finding bucket is parallel arrays: a loop bounded by one array's count
+indexing another, where nothing relates the two lengths. The relation has to come from a loop
+invariant, and a loop invariant has to be established before it can be preserved. It could not be
+established at all. A binding declared `values: mutable darray[usize] = []` reaches a goal as
+`[].count` after substitution -- the checker already knows the value -- and there was no rule that
+reads a literal's own length.
+
+### What changed
+
+`proof_constant_int` reads the length of an empty collection literal, and
+`proof_kernel_replay_constant_int` mirrors it over the arena's `array` node. This is the one length
+statement that needs no model of the language's builtins and no aliasing argument: the term *is*
+the value, so nothing can alias it, mutate it, or make its count something else.
+
+### Why only the empty one
+
+A non-empty literal carries its length just as plainly, and reading it needs that length as an
+`i64`. The conversion is outside the expression fragment this checker verifies itself in. Writing
+one in `proof_constant_int` was measured: `proof_kernel_replay_constant_int` became
+`recursive-component-unverified`, 16 functions lost verification, `function-summary-unverified`
+went 344 to 430, and the corpus fell from 1435 proven to 1370. The empty case needs no conversion,
+and after narrowing to it the corpus is unchanged at 1435 proven and 115 verified functions, with
+gaps still 0.
+
+That measurement is worth keeping for its own sake: a rule added to `proof_constant_int` is a rule
+added to the root of the arithmetic cone, and an unsupported expression there is not a local cost.
+
+### Fixtures
+
+`examples/literal_extent.elisa` carries the empty literal and a loop whose length invariant is
+established from it. `examples/rejected_literal_extent.elisa` is the boundary: a length after a
+push, a parameter that has no literal, a struct field that happens to be spelled `count`, an
+element bound that a length does not give, and the non-empty literal whose length is true but not
+read.
+
+### What the parallel-array cluster still needs
+
+Establishment is now possible; preservation is not. `a.push(x)` must yield `a.count == old + 1`,
+and `b.count` must survive a call that does not receive `b`. The first is a statement about a
+language builtin's effect and would be a new boundary fact kind, in the same category as the type
+markers: taken as given, traced to its source, and recorded here. The second is the existing
+call-stability question, and the framing that avoids a new aliasing axiom is that a callee cannot
+change a binding it is not given -- which `proof_expr_call_stable` already encodes for by-value
+scalars and could encode for a local collection's extent. Both are needed together; neither is
+useful alone. After them the subject code still has to state the invariants, which is where the
+`loop-invariant-missing` findings sit.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
