@@ -3203,6 +3203,53 @@ did before this commit. It predates this change and this change does not reach i
 deciding what a method-shaped call means when its receiver is not a parameter of the callee, which
 is the same question the resource summary format leaves open.
 
+## Every method-shaped call now answers for its receiver
+
+### What was wrong
+
+The previous entry closed the builtin case and recorded the door it left open: when a declaration
+carries the leaf name, the call takes the summary path, where the receiver is not among the
+arguments and the mapping fails, and if no argument independently carries a resource, nothing is
+recorded and nothing is reported. That is the same invisible write, reached differently.
+
+The general statement is stronger than the case that prompted it. **The receiver of a method-shaped
+call is never among the callee's arguments**, so no argument mapping can describe what the call
+does to it. Either the effect is modelled by name or it is not modelled at all, and until now the
+second case was silent.
+
+### What changed
+
+A call written as a method on a place is refused unless its receiver effect is accounted for. Three
+outcomes, and no fourth:
+
+- one of the collection builtins this model names -- `push`, `extend`, `clear`, `resize`, `pop` and
+  now `truncate`, which was missing -- records a write to the receiver;
+- a primitive width conversion records nothing, because it has no storage to write;
+- anything else fails an obligation saying the receiver may be written and no summary maps a
+  receiver.
+
+The third outcome is what closes the hole. It also gives an unmodelled *builtin* the same
+treatment: `values.sort()` is now refused rather than passed over, which is the honest answer for a
+method whose effect this model does not name.
+
+### Fixtures
+
+`examples/collection_builtin.elisa` gains `truncate` and a width conversion.
+`examples/rejected_collection_builtin.elisa` gains `values.sort()`, an unmodelled builtin, refused.
+The fixture that matters most is still the one from the previous entry: a push made while a shared
+borrow is live, which verified two commits ago.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: failed obligations 644 to 636, with
+`region-call-opaque` 29 to 20 as `truncate` stops being opaque, and `borrow-call-opaque` 28 to 29
+as the new refusal fires once. Proven stays at 1480 and verified functions at 116; obligations fall
+2124 to 2116, because a reported-opaque call is itself an obligation. Gaps stay 0 and
+`trusted_assumptions` stays empty.
+
+The number to read here is not the proof count. It is that a method-shaped call can no longer pass
+through this pass without either a model of its receiver or a refusal.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

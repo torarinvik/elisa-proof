@@ -733,11 +733,31 @@ extend ElisaProof:
         def proof_resource_collection_builtin(callee: Ast::Expr) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
             match proof_strip_parens(callee):
                 Ast::Expr.Field(receiver, method, _):
-                    return (false, Ast::Expr.Invalid) if method != "push" and method != "extend" and method != "clear" and method != "resize" and method != "pop"
+                    return (false, Ast::Expr.Invalid) if method != "push" and method != "extend" and method != "clear" and method != "resize" and method != "pop" and method != "truncate"
                     return (false, Ast::Expr.Invalid) if proof_resource_place_root(receiver) == ""
                     return (true, receiver)
                 _:
                     return (false, Ast::Expr.Invalid)
+
+        # Any call written as a method on a place. The receiver of one is not among the callee's
+        # arguments, so no argument mapping can ever describe what the call does to it: either the
+        # receiver's effect is modelled here by name, or it is not modelled at all.
+        def proof_resource_method_receiver(callee: Ast::Expr) -> (known: bool, receiver: Ast::Expr, method: sview) can[Memory.Allocate, Abort.Panic]:
+            match proof_strip_parens(callee):
+                Ast::Expr.Field(receiver, method, _):
+                    return (false, Ast::Expr.Invalid, "") if method == "" or proof_resource_place_root(receiver) == ""
+                    return (true, receiver, method)
+                _:
+                    return (false, Ast::Expr.Invalid, "")
+
+        # A primitive width conversion. It reads its receiver and returns a new value; there is no
+        # storage for it to write, so it needs no receiver model and must not be refused for
+        # lacking one.
+        def proof_resource_pure_conversion(method: sview) -> bool:
+            return true if method == "i8" or method == "i16" or method == "i32" or method == "i64" or method == "isize"
+            return true if method == "u8" or method == "u16" or method == "u32" or method == "u64" or method == "usize"
+            return true if method == "f32" or method == "f64" or method == "bool" or method == "sview"
+            return false
 
         # An argument that transfers ownership. The collection model reads its arguments; it does
         # not model a value moved into the collection, so a `move` argument is refused.
@@ -2089,8 +2109,18 @@ extend ElisaProof:
                     # a builtin -- the index's ambiguity sentinel does not distinguish those.
                     builtin: (known: bool, receiver: Ast::Expr) = proof_resource_collection_builtin(callee)
                     builtin_admitted: bool = builtin.known and proof_resource_function_name_count(functions, callee_name) == 0 and not region_argument and not region_polymorphic_call and not proof_resource_argument_moves(arguments)
+                    # The receiver of a method-shaped call is not among the callee's arguments, so
+                    # no argument mapping describes what the call does to it. Either the effect is
+                    # modelled above by name, or the call may write a place nothing in this state
+                    # saw -- which is what every builtin call did before the model existed. A width
+                    # conversion is the one method with no storage to write. Everything else is
+                    # refused rather than passed over in silence.
+                    method_call: (known: bool, receiver: Ast::Expr, method: sview) = proof_resource_method_receiver(callee)
+                    unmodelled_receiver: bool = method_call.known and not builtin_admitted and not proof_resource_pure_conversion(method_call.method)
                     if builtin_admitted:
                         proof_resource_check_write(builtin.receiver, state, report, function_name, position, functions)
+                    elif unmodelled_receiver:
+                        proof_resource_add_failing_obligation(report, "borrow-call-opaque", position, function_name, "a method-shaped call may write its receiver, and no summary maps a receiver")
                     elif resource_argument or region_argument or region_polymorphic_call:
                         summary: (known: bool, root: usize) = proof_resource_summary_is_ready(functions, report, function_name, callee_name)
                         mapped: mutable darray[Ast::Expr] = []

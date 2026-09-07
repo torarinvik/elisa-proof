@@ -1317,17 +1317,17 @@ with open(modelled, encoding="utf-8") as handle:
 if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: collection builtin fixture did not prove cleanly")
 verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
-for owner in ("a_push_is_a_write_to_its_receiver", "a_copy_clears_and_extends", "a_borrow_taken_after_the_write_is_fine"):
+for owner in ("a_push_is_a_write_to_its_receiver", "a_copy_clears_and_extends", "a_borrow_taken_after_the_write_is_fine", "a_truncate_is_a_write", "a_conversion_has_no_receiver_to_write"):
     if owner not in verified:
         raise SystemExit("dogfood failed: %s did not model a collection builtin" % owner)
 with open(withdrawn, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: collection builtin boundary fixture did not fail cleanly")
-if {f["kind"] for f in report["findings"]} != {"borrow-write-conflict", "region-call-opaque"}:
+if {f["kind"] for f in report["findings"]} != {"borrow-write-conflict", "borrow-call-opaque"}:
     raise SystemExit("dogfood failed: a builtin write escaped the borrow rules")
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("a_push_while_a_borrow_is_live", "a_region_argument_withdraws_the_admission"):
+for owner in ("a_push_while_a_borrow_is_live", "a_region_argument_withdraws_the_admission", "an_unmodelled_builtin_is_refused"):
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s admitted a builtin call it does not model" % owner)
 print("dogfood collection_builtin: a builtin writes its receiver, and the borrow rules see it")
