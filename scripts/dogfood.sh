@@ -256,6 +256,8 @@ run_probe owned_extent examples/owned_extent.elisa 0
 run_probe rejected_owned_extent examples/rejected_owned_extent.elisa 1
 run_probe captured_scalar examples/captured_scalar.elisa 0
 run_probe rejected_captured_scalar examples/rejected_captured_scalar.elisa 1
+run_probe no_op_statement examples/no_op_statement.elisa 0
+run_probe rejected_no_op_statement examples/rejected_no_op_statement.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1242,6 +1244,34 @@ for owner in ("a_capture_the_body_assigns_is_forgotten", "a_capture_handed_to_a_
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s kept a fact its captured body falsified" % owner)
 print("dogfood captured_scalar: a read-only capture keeps its facts, a written binding does not")
+PY
+
+# A statement the checker cannot read is refused and havocs what follows it; a match whose arms
+# agree, written as one condition, keeps the state before it.
+python3 - "$REPORT_DIR/no_op_statement.json" "$REPORT_DIR/rejected_no_op_statement.json" <<'PY'
+import json
+import sys
+
+readable, unreadable = sys.argv[1:]
+with open(readable, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: no-op statement fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_condition_keeps_the_state", "every_arm_returning_keeps_it_too"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost the state before a match" % owner)
+with open(unreadable, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: no-op boundary fixture did not fail cleanly")
+if {f["kind"] for f in report["findings"]} != {"expression-unsupported"}:
+    raise SystemExit("dogfood failed: an unreadable statement was not reported as unsupported")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_pass_arm_is_refused", "the_refusal_reaches_past_the_match"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s admitted a statement the checker cannot read" % owner)
+print("dogfood no_op_statement: an unreadable statement is refused, and a plain condition is not")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

@@ -3008,6 +3008,62 @@ Whatever drops the precondition there is not any of those, and this entry does n
 found it. What is established is that the capture list was one cause, that it was measurably a
 cause, and that it is no longer one.
 
+## A `pass` is unreadable, and one of them was havocking a whole function
+
+### What was found
+
+Thirteen of the sixteen remaining `call-requires-unproven` findings were the same goal,
+`depth + 1 <= 127`, inside `proof_kernel_replay_goal_depth`, and the fact list at each lacked that
+function's own `requires depth <= 127`. Four probes reproduced the surrounding shape -- a captured
+loop, an uncaptured one, a body passing a collection mutably, a self-recursive call inside the loop
+-- and all of them verified, so the previous entry recorded the cause as unfound.
+
+It is `pass`. The frontend parses `pass` to `Ast::Stmt.Expr(Ast::Expr.Invalid)`, and
+`proof_expr_supported` refuses `Expr.Invalid`, which fails the obligation, sets `flow.valid` false,
+and havocs the state for every statement after it in the body. One `pass`, in the default arm of
+one `match`, was discarding the precondition for the whole rest of the function.
+
+### Why the checker is not being changed to accept it
+
+`Ast::Stmt.Expr(Ast::Expr.Invalid)` is produced at five places in the frontend. Four are
+empty-body placeholders. The fifth is a recovery node for a keyword-shaped prefix form written
+without a block, and for every spelling except `region` it records no parse error -- the comment
+there says downstream walkers treat the expression as non-executable. At this AST layer a `pass`
+and a construct the frontend dropped without complaint are the same statement, so admitting one
+admits the other, and the checker would be verifying a function whose body it had not read. The
+refusal is the safe side of that choice and it stays. The fix belongs in the frontend, as a
+distinct statement node for `pass`.
+
+### What changed
+
+The one `match` in the kernel with a `pass` default had three arms doing the same thing, so it is
+now the single condition it always was:
+
+    reflexive: bool = operator == "==" or operator == "<=" or operator == ">="
+    if reflexive:
+        return true if ...definitionally_equal(...)
+
+Behaviour-identical, and the kernel now contains no `pass` at all.
+
+### Fixtures
+
+`examples/no_op_statement.elisa` shows the two shapes that keep the state: a match whose arms agree
+written as one condition, and a match whose every arm returns.
+`examples/rejected_no_op_statement.elisa` pins the refusal itself and its reach -- a `pass` arm is
+refused, and the precondition that held before the match is gone at a call below it. That fixture
+exists so a future change to this behaviour is a deliberate one.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: proven 1439 to 1486 against obligations 2141 to
+2173, and `call-requires-unproven` 16 to 3. Obligations rose because the region after the `match`
+was previously havocked and produced none. `expression-unsupported` is 11 to 10; the remaining ten
+are other constructs, in `proof_kernel_replay_replace_exact`, `..._congruence_class` and
+`..._resource_events`, and each is worth the same treatment: find what the frontend cannot hand the
+checker, and write the subject code inside the fragment instead.
+
+All 1486 certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

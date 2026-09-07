@@ -2048,6 +2048,26 @@ if [[ "$rejected_captured_scalar_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `pass` is indistinguishable at this AST layer from a construct the frontend dropped, so it is
+# refused and the refusal havocs everything after it. A match whose arms agree is one condition.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/no_op_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"needs_bound", "a_condition_keeps_the_state", "every_arm_returning_keeps_it_too"}'
+no_op_statement_status=${PIPESTATUS[1]}
+set -e
+if [[ "$no_op_statement_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a match whose arms agree lost the state before it\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_no_op_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"expression-unsupported"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_pass_arm_is_refused"] == "body-unverified"; assert reasons["the_refusal_reaches_past_the_match"] == "body-unverified"'
+rejected_no_op_statement_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_no_op_statement_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an unreadable statement was admitted\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
