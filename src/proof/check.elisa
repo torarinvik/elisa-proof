@@ -1131,23 +1131,26 @@ extend ElisaProof:
                     return false if not (any candidate in names where candidate == binder)
                     return proof_scalar_term_witnessed(expression, facts, 0)
                 Ast::Expr.Field(_, field_name, _):
-                    # The one place expression a call cannot change: the element count of a
-                    # parameter bound by a shared borrow. Nothing may write through a shared
-                    # borrow for its lifetime, and the borrow rule the compiler enforces means no
-                    # mutable path to the same object coexists with it, so no callee -- whether or
-                    # not it receives the borrow -- can push, pop or resize it. The witness is
-                    # still required, so a count that was never established as a scalar term is
-                    # refused here exactly as an unwitnessed name is.
-                    return false if field_name != "count"
+                    return false if field_name == ""
                     root: sview = proof_place_root_name(expression, 0)
                     return false if root == ""
-                    # A local that owns its collection and is named by no reference, receiver or
-                    # opaque argument is a binding no callee can reach at all -- the same argument
-                    # the by-value scalar case above makes, applied to the extent instead of the
-                    # value. `proof_collect_aliased_names` records a method receiver, so the
-                    # collection a `push` is called on is excluded by its own use.
-                    local: bool = (any owned in local_extents where owned == root) and not (any existing in aliased where existing == root) and (any candidate in names where candidate == root)
-                    return false if not local and not (any shared in shared_extents where shared == root)
+                    # A binding that holds its value rather than a reference to one, and that is
+                    # named by no reference, receiver or opaque argument, is a binding no callee
+                    # can reach at all -- the same argument the by-value scalar case above makes,
+                    # applied to a field of it. `proof_collect_aliased_names` records a method
+                    # receiver, so a collection a `push` is called on is excluded by its own use.
+                    # This is what carries `node.children_start` across a call: `node` is a struct
+                    # a callee has no path to, so its fields are as stable as a scalar local.
+                    value_root: bool = (any owned in local_extents where owned == root) and not (any existing in aliased where existing == root) and (any candidate in names where candidate == root)
+                    # The other place a call cannot change: the element count of a parameter bound
+                    # by a shared borrow. Nothing may write through a shared borrow for its
+                    # lifetime, and the borrow rule the compiler enforces means no mutable path to
+                    # the same object coexists with it, so no callee -- whether or not it receives
+                    # the borrow -- can push, pop or resize it.
+                    shared_extent: bool = field_name == "count" and (any shared in shared_extents where shared == root)
+                    return false if not value_root and not shared_extent
+                    # The witness is still required, so a place that was never established as a
+                    # scalar term is refused here exactly as an unwitnessed name is.
                     return proof_scalar_term_witnessed(expression, facts, 0)
                 Ast::Expr.Array(elements, _):
                     # A literal collection is a value, not storage. Nothing a callee can reach
@@ -6278,13 +6281,13 @@ extend ElisaProof:
                         proof_bind_scalar_symbol(names, values, prior_value_count, position) if local_scalar_kind == 1 and unsigned_width <= 0
                         local_witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
                         proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(local_name, position), type_expression, position.line, name, position, &local_witness_budget, 0) if local_scalar_kind != 1
-                        # A local that owns its collection is a binding no callee can name, so its
-                        # extent survives a call the way a by-value scalar does. The entry is
-                        # rewritten on every declaration of the spelling, so a redeclaration to a
-                        # reference type withdraws it rather than inheriting the earlier claim.
+                        # A local that holds its value rather than a reference to one is a binding
+                        # no callee can name, so its fields and its extent survive a call the way
+                        # a by-value scalar does. The entry is rewritten on every declaration of
+                        # the spelling, so a redeclaration to a reference type withdraws it rather
+                        # than inheriting the earlier claim.
                         proof_drop_local_extent(report, local_name)
-                        local_container: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, report.source_declarations, 0)
-                        if local_container.known and not proof_resource_is_reference_type(type_expression):
+                        if not proof_resource_is_reference_type(type_expression):
                             report.local_extent_names.push(local_name)
                     Ast::Stmt.Assign(target, operator, initializer, position):
                         target_name: sview = proof_ident_name(target)
@@ -7149,6 +7152,10 @@ extend ElisaProof:
             # call which globals a callee can reach.
             report.shared_extent_names.clear()
             report.local_extent_names.clear()
+            # A parameter passed by value is this frame's own storage, so a callee has no path to
+            # it and its fields are as stable across a call as a by-value scalar is.
+            for parameter in parameters |report|:
+                report.local_extent_names.push(parameter.name) if not proof_resource_is_reference_type(parameter.type_expression)
             program_has_mutable_global: mutable bool = false
             for annotation in file.enum_annotations |program_has_mutable_global|:
                 program_has_mutable_global <- true if annotation.name == "__global_mutable"

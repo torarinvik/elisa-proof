@@ -3495,6 +3495,54 @@ This is a small number for a shape that is everywhere in the resource kernel, an
 worth stating: most of those loops also call something, and a call in the body disqualifies the
 root before this rule is reached. The nested base was the second lock on that door, not the first.
 
+## A field of a binding this frame owns
+
+### What was wrong
+
+A call reaches caller state through arguments, a method receiver and globals, and the checker keeps
+a by-value scalar across one because a callee has no path to a binding it was not given. That
+argument was never applied to a field. The rule returned false for any field but `.count`, and
+admitted that one only for a parameter bound by a shared borrow, so a fact about
+`node.children_start` was discarded at the first call in the body whatever the call was.
+
+A callee that cannot reach `node` cannot reach `node.children_start` either.
+
+### What changed
+
+The set that recorded "a local that owns its collection" now records any binding that holds its
+value rather than a reference to one -- parameters as well as locals, and no longer only container
+types. A field of such a binding is call-stable when the binding is not aliased, is still live, and
+the place carries a scalar-term witness, which are the same three conditions the by-value scalar
+case checks. The shared-borrow `.count` path is unchanged beside it.
+
+### What was tried and removed
+
+A call term in a fact is never call-stable, which is what keeps a callee's summary --
+`not f(...) or p` -- from surviving the next call in the body. A pure-call witness certifies that a
+call denotes one value over witnessed arguments, and admitting a call term on that evidence is
+sound. It is also inert: those witnesses are recorded for calls in a *goal*, and a summary's call
+term lives in a *fact*, which never receives one. The arm was written, measured at zero, and
+removed rather than left in a security-critical path as unreachable code. Closing that case needs
+the witness recorded where the fact is built, which is a different change from this one.
+
+### Fixtures
+
+`examples/value_root_field.elisa` keeps two fields of a by-value parameter across a call that
+grows an unrelated collection. `examples/rejected_value_root_field.elisa` refuses the same shape
+for a mutable reference and for a shared one: the rule is about what this frame owns, not about the
+borrow discipline.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: proven 1494 to 1495, `index-upper` 154 to 153, failed
+obligations 545 to 544. Gaps stay 0 and `trusted_assumptions` stays empty. Every adversarial fixture
+that pins call stability -- the call boundary, the owned extent, the captured scalar, the loop
+element extent -- refuses exactly what it refused before.
+
+One obligation is a small return for the reach of the rule, and the reason is the same one the
+removed arm names: at most of these sites the fact that would have survived mentions the call whose
+summary it is, and that term is still discarded.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

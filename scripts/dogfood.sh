@@ -270,6 +270,8 @@ run_probe forward_scan examples/forward_scan.elisa 0
 run_probe rejected_forward_scan examples/rejected_forward_scan.elisa 1
 run_probe nested_extent examples/nested_extent.elisa 0
 run_probe rejected_nested_extent examples/rejected_nested_extent.elisa 1
+run_probe value_root_field examples/value_root_field.elisa 0
+run_probe rejected_value_root_field examples/rejected_value_root_field.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1445,6 +1447,32 @@ reasons = {d["name"]: d["verification_reason"] for d in report["declaration_deta
 if reasons.get("a_whole_field_write_loses_every_extent") != "body-unverified":
     raise SystemExit("dogfood failed: a whole field write kept an extent under its root")
 print("dogfood nested_extent: an element write keeps every count under the root, a whole write none")
+PY
+
+# A binding that holds its value is this frame's storage, so a callee cannot reach its fields; a
+# binding that holds a reference does not own what it names.
+python3 - "$REPORT_DIR/value_root_field.json" "$REPORT_DIR/rejected_value_root_field.json" <<'PY'
+import json
+import sys
+
+owned, referenced = sys.argv[1:]
+with open(owned, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: value root fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_field_of_a_value_parameter_survives_a_call", "a_second_field_survives_it_too"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost a field of a binding it owns" % owner)
+with open(referenced, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: value root boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_field_of_a_mutable_reference_does_not_survive", "a_field_of_a_shared_reference_does_not_either"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s kept a field of a reference across a call" % owner)
+print("dogfood value_root_field: a field of an owned binding survives a call, a reference's does not")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

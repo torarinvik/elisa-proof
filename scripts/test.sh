@@ -2188,6 +2188,26 @@ if [[ "$rejected_nested_extent_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A binding that holds its value is this frame's storage, so a callee has no path to its fields
+# either. A binding that holds a reference does not own what it names.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/value_root_field.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"grow", "a_field_of_a_value_parameter_survives_a_call", "a_second_field_survives_it_too"}'
+value_root_field_status=${PIPESTATUS[1]}
+set -e
+if [[ "$value_root_field_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a field of a value binding was lost to a call\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_value_root_field.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_field_of_a_mutable_reference_does_not_survive"] == "body-unverified"; assert reasons["a_field_of_a_shared_reference_does_not_either"] == "body-unverified"'
+rejected_value_root_field_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_value_root_field_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a field of a reference was kept across a call\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
