@@ -2209,6 +2209,60 @@ the right operand is still checked against the outer facts -- and the rule reads
 immediate left operand, so a guard two conjuncts away reaches the read only because
 `proof_add_branch_condition_facts` splits a conjunction into its components.
 
+## The kernel's own recursive helpers declared no termination measure
+
+### What was wrong
+
+`recursive-summary-unsupported`, 21 findings across four functions, all of them in the kernel's
+own replay module. The message is "recursive executable summaries require matching checked
+lexicographic termination measures", and the machinery it names already exists: a call inside a
+recursive component may consume the callee's summary once both declarations carry measures of the
+same arity that the checker has itself verified, or once the structural walker has certified both.
+
+The four functions carried neither. `proof_kernel_replay_unsigned_width_in_expression`,
+`proof_kernel_replay_unsigned_expression_safe`,
+`proof_kernel_replay_resource_index_expression_valid` and
+`proof_kernel_replay_resource_place` all guard `depth >= 127` (or `>= 128`) and recurse with
+`depth + 1`, which is exactly the shape their siblings -- `proof_kernel_replay_substitute`,
+`proof_kernel_replay_collect_name_equalities` -- already declare a measure for. Nothing in the
+checker was missing. The code under proof simply did not state what it does.
+
+### What changed
+
+Each of the four gained `requires depth <= 127` (128 for the one whose own guard is 128) and
+`decreases 127 - depth`, matching the established pattern in the same file. That is a change to
+the code being proved, not to the checker: the contracts state a property the functions already
+satisfied, and the checker then discharges the recursive calls against them.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: `recursive-summary-unsupported` falls from 21 to 1
+and `function-summary-unverified` from 320 to 304. Proven rises from 1282 to 1377 and failures
+fall from 712 to 677, against obligations that rise from 1981 to 2041 -- the new contracts are
+themselves obligations. Verified functions go from 99 to 103, and the recursive components that
+cannot export a contract from 7 to 5. All 1377 certificates replay, gaps stay 0 and
+`trusted_assumptions` stays empty.
+
+### One measure the compiler refused
+
+`proof_kernel_replay_bounded_model_visit` recurses on an index toward `names.count`, so its
+measure is `names.count - index`. Adding it took `recursive-summary-unsupported` to 0 and
+`elisac-stage1` accepted it, but `elisac-stage0` -- which `dogfood.sh` uses to rebuild the runtime
+and every kernel harness, to keep an installed stage1 from becoming an implicit bootstrap
+dependency -- rejected it outright: "cannot prove the `decreases` measure strictly decreases across
+the mutually-recursive cycle", and separately could not establish `0 <= names.count` at the call.
+The measure is reverted. It bought nothing measurable in any case -- proven was unchanged and the
+refusal it removed reappeared as an unproven precondition at the self-call -- and a source file the
+bootstrap compiler will not accept is not a trade worth making. The remaining finding is that one
+function.
+
+### Not covered
+
+The unproven preconditions that remain at recursive calls are the unsigned-increment limitation
+recorded elsewhere in this file: `index + 1 <= names.count` does not follow from
+`index < names.count` for an unsigned type without a constant upper bound. That is a checker gap,
+not a missing contract, and it is what stops the last recursive component from closing.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
