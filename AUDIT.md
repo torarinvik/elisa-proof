@@ -3064,6 +3064,50 @@ checker, and write the subject code inside the fragment instead.
 
 All 1486 certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
 
+## A call needs a statement boundary, and dead code was making obligations
+
+### What was wrong
+
+The previous entry closed one of eleven `expression-unsupported` findings and said the other ten
+deserved the same treatment: find what the frontend cannot hand the checker, and write the subject
+code inside the fragment instead. Six of the ten were one construct, all in
+`proof_kernel_replay_replace_exact`.
+
+A call that mutates through a reference is modelled at a statement boundary: the checker applies
+the callee's summary or havocs what the call could reach, then continues. That machinery has one
+shape to work with -- the call is the statement's value, or a declaration's initializer. A call
+buried inside a larger value expression has no such boundary, so `proof_statement_value_supported`
+refuses it, and the refusal havocs every statement after it in the body.
+`return (true, ElisaProofKernelCore::add_node(...))` is exactly that shape, six times over.
+
+### What changed
+
+Each of the five remaining sites binds the call first and returns the binding. It is the same
+program in the order it already ran, and it puts the call back where the checker can model it.
+
+The sixth was in a second `if node.kind == "quantifier":` block that could never run: the block
+above it returns on both of its paths. It is deleted. Dead code in a replay kernel is worth
+removing on its own, and this one was also manufacturing obligations -- which is why the totals
+below fall rather than rise.
+
+### Fixtures
+
+`examples/nested_call_value.elisa` shows the two shapes the checker models: the call as a whole
+statement value, and the call bound to a local first, with the state after the binding intact.
+`examples/rejected_nested_call_value.elisa` pins the refusal and its reach.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: `expression-unsupported` 10 to 4, and failed
+obligations 687 to 681. Obligations fall 2173 to 2159 and proven 1486 to 1478 because the deleted
+block is no longer generating either. `proof_kernel_replay_replace_exact` now carries no
+unsupported statement at all and is blocked only by an unverified dependency. Gaps stay 0,
+`trusted_assumptions` stays empty, and the report is byte-identical across runs.
+
+Four remain, in `proof_kernel_replay_congruence_class` and `proof_kernel_replay_resource_events`.
+The reported positions there do not land on the offending statement, so finding them needs the same
+probe-and-compare the last two entries used rather than reading the line.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

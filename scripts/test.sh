@@ -2068,6 +2068,26 @@ if [[ "$rejected_no_op_statement_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A call is modelled at a statement boundary. Buried in a larger value expression it has none, so
+# it is refused; bound to a local first it is the same program where the checker can model it.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/nested_call_value.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"emit", "a_call_may_be_the_whole_value", "a_call_bound_first_is_modelled", "the_binding_keeps_the_state_after_it"}'
+nested_call_value_status=${PIPESTATUS[1]}
+set -e
+if [[ "$nested_call_value_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call bound to a local was not modelled\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_nested_call_value.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"expression-unsupported"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_call_nested_in_a_tuple_is_refused"] == "body-unverified"; assert reasons["the_refusal_reaches_past_the_statement"] == "body-unverified"'
+rejected_nested_call_value_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_nested_call_value_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call with no statement boundary was admitted\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

@@ -258,6 +258,8 @@ run_probe captured_scalar examples/captured_scalar.elisa 0
 run_probe rejected_captured_scalar examples/rejected_captured_scalar.elisa 1
 run_probe no_op_statement examples/no_op_statement.elisa 0
 run_probe rejected_no_op_statement examples/rejected_no_op_statement.elisa 1
+run_probe nested_call_value examples/nested_call_value.elisa 0
+run_probe rejected_nested_call_value examples/rejected_nested_call_value.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1272,6 +1274,33 @@ for owner in ("a_pass_arm_is_refused", "the_refusal_reaches_past_the_match"):
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s admitted a statement the checker cannot read" % owner)
 print("dogfood no_op_statement: an unreadable statement is refused, and a plain condition is not")
+PY
+
+# A call is modelled at a statement boundary; buried in a larger value it has none and is refused.
+python3 - "$REPORT_DIR/nested_call_value.json" "$REPORT_DIR/rejected_nested_call_value.json" <<'PY'
+import json
+import sys
+
+bound, buried = sys.argv[1:]
+with open(bound, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: nested call fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_call_bound_first_is_modelled", "the_binding_keeps_the_state_after_it"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s did not model a call bound to a local" % owner)
+with open(buried, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: nested call boundary fixture did not fail cleanly")
+if {f["kind"] for f in report["findings"]} != {"expression-unsupported"}:
+    raise SystemExit("dogfood failed: a call with no statement boundary was not reported")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_call_nested_in_a_tuple_is_refused", "the_refusal_reaches_past_the_statement"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s admitted a call it cannot model" % owner)
+print("dogfood nested_call_value: a call needs a statement boundary, and a binding gives it one")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
