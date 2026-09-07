@@ -718,6 +718,38 @@ extend ElisaProof:
                 index <- index + 1
             return found
 
+        # How many declared functions carry this leaf name. `proof_resource_function_index` answers
+        # the ambiguity sentinel for both "no such function" and "two with this leaf", and the
+        # builtin admission below must not confuse them: a builtin is a name *no* declaration has.
+        def proof_resource_function_name_count(functions: ProofFunctionTable&, name: sview) -> usize:
+            found: mutable usize = 0
+            for candidate in functions.names |candidate, name, found|:
+                found <- found + 1 if candidate == name
+            return found
+
+        # A collection builtin invoked as a method on a place: `values.push(x)`, `a.extend(b)`,
+        # `a.clear()`, `a.resize(n)`, `a.pop()`. The receiver is returned so the call can be
+        # recorded as what it is -- a write to that place.
+        def proof_resource_collection_builtin(callee: Ast::Expr) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            match proof_strip_parens(callee):
+                Ast::Expr.Field(receiver, method, _):
+                    return (false, Ast::Expr.Invalid) if method != "push" and method != "extend" and method != "clear" and method != "resize" and method != "pop"
+                    return (false, Ast::Expr.Invalid) if proof_resource_place_root(receiver) == ""
+                    return (true, receiver)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        # An argument that transfers ownership. The collection model reads its arguments; it does
+        # not model a value moved into the collection, so a `move` argument is refused.
+        def proof_resource_argument_moves(arguments: darray[Ast::Expr]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            for argument in arguments:
+                match proof_strip_parens(argument):
+                    Ast::Expr.Move(_, _):
+                        return true
+                    _:
+                        pass
+            return false
+
         def proof_resource_function_region_param_count(functions: ProofFunctionTable&, function_index: usize) -> usize:
             return functions.region_param_counts[function_index] if function_index < functions.region_param_counts.count
             return 0
@@ -2040,7 +2072,26 @@ extend ElisaProof:
                     callee_name: sview = proof_callable_name(callee)
                     callee_index: usize = proof_resource_function_index(functions, callee_name)
                     region_polymorphic_call: bool = callee_index < functions.region_param_counts.count and functions.region_param_counts[callee_index] > 0
-                    if resource_argument or region_argument or region_polymorphic_call:
+                    # A collection builtin is not a declared function and has no summary, so every
+                    # such call on a reference-rooted place was reported opaque. Its effect is
+                    # exactly a write to the receiver and a read of each argument: it mutates the
+                    # receiver's storage, it reads what it is given, and it moves nothing, because
+                    # Elisa spells a transfer `move` and an argument without one is not consumed.
+                    # The arguments have already been checked above, which is where their reads are
+                    # recorded, so only the receiver write is added here -- through the ordinary
+                    # write path, so an immutable reference, an overlapping live borrow and a
+                    # read-only binding are all refused exactly as they are for `place <- value`.
+                    #
+                    # The admission is withdrawn wherever the model would be answering a different
+                    # question: a region-carrying argument is an escape question, and a moved
+                    # argument is a transfer into the collection. It is also withdrawn unless *no*
+                    # declaration carries the leaf name, so a user method can never be mistaken for
+                    # a builtin -- the index's ambiguity sentinel does not distinguish those.
+                    builtin: (known: bool, receiver: Ast::Expr) = proof_resource_collection_builtin(callee)
+                    builtin_admitted: bool = builtin.known and proof_resource_function_name_count(functions, callee_name) == 0 and not region_argument and not region_polymorphic_call and not proof_resource_argument_moves(arguments)
+                    if builtin_admitted:
+                        proof_resource_check_write(builtin.receiver, state, report, function_name, position, functions)
+                    elif resource_argument or region_argument or region_polymorphic_call:
                         summary: (known: bool, root: usize) = proof_resource_summary_is_ready(functions, report, function_name, callee_name)
                         mapped: mutable darray[Ast::Expr] = []
                         mapped_allocation_roots: mutable darray[usize] = []

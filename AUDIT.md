@@ -3151,6 +3151,58 @@ what the module says and what the checker was able to read is closed.
 pair they record the whole boundary: a call is modelled where it is a statement's value or a
 declaration's initializer, and nowhere else.
 
+## A collection builtin writes its receiver, and until now nobody saw it
+
+### What was wrong
+
+`borrow-call-opaque` was the largest untouched bucket at 59, and the message says the callee has no
+converged resource summary, which reads like the recursive-component limitation. It is not. Every
+one of them is a call to a *collection builtin* -- `push`, `extend`, `clear`, `resize`, `pop` -- on
+a place whose root is a reference. A builtin is not a declared function, so
+`proof_resource_function_index` finds nothing, no summary exists, and the call falls to the branch
+that reports it opaque.
+
+Reporting it opaque fails an obligation, which is the safe-looking half. The unsafe half is that
+the write those methods perform was never recorded at all. `examples/rejected_collection_builtin.elisa`
+carries the consequence: a `push` made while a shared borrow of the same collection was live
+**verified** under the previous commit. Nothing conflicted with the borrow, because nothing was
+written as far as the resource state knew.
+
+### What changed
+
+A call whose callee is one of those methods on a place is recorded as what it is: a write to the
+receiver, through `proof_resource_check_write`, the same path an assignment takes. The arguments
+were already checked in the loop above, which is where their reads are recorded. Being an ordinary
+write, it now answers to the ordinary rules -- an immutable reference, an overlapping live borrow
+and a non-writable binding are all refused exactly as they are for `place <- value`.
+
+This is an assumption about the language's builtins and is recorded here as one: these methods
+mutate the receiver's storage, read what they are given, and move nothing. The last clause is not
+a guess -- Elisa spells a transfer `move`, and an argument without one is not consumed.
+
+The admission is withdrawn in three cases, so the model never answers a question it does not model:
+a region-carrying argument, which is an escape question; a `move` argument, which is a transfer
+into the collection; and a leaf name that *any* declaration carries. That last guard needs its own
+counter, because `proof_resource_function_index` answers the same sentinel for "no such function"
+and "two functions share this leaf", and a user method must never be mistaken for a builtin.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: `borrow-call-opaque` 59 to 28, failed obligations 676
+to 644, verified functions 115 to 116, proven 1478 to 1480 against obligations 2154 to 2124 -- the
+obligation count falls because a reported-opaque call is itself a failing obligation. Gaps stay 0
+and `trusted_assumptions` stays empty.
+
+### A gap this uncovered and did not close
+
+When a declaration does carry the leaf name, the admission is withdrawn and the call takes the
+summary path, where the receiver is not among the arguments and the mapping fails. If no argument
+independently carries a resource, that path records nothing and reports nothing -- so a
+method-shaped call on a place can still perform an unrecorded write, exactly as every builtin call
+did before this commit. It predates this change and this change does not reach it. Closing it means
+deciding what a method-shaped call means when its receiver is not a parameter of the callee, which
+is the same question the resource summary format leaves open.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

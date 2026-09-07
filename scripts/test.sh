@@ -2088,6 +2088,26 @@ if [[ "$rejected_nested_call_value_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A collection builtin writes its receiver and reads its arguments. Recording that write is what
+# gives the borrow rules their say over it.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/collection_builtin.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"read", "a_push_is_a_write_to_its_receiver", "a_copy_clears_and_extends", "a_borrow_taken_after_the_write_is_fine"}'
+collection_builtin_status=${PIPESTATUS[1]}
+set -e
+if [[ "$collection_builtin_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a collection builtin was not recorded as a write\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_collection_builtin.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"borrow-write-conflict", "region-call-opaque"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_push_while_a_borrow_is_live"] == "body-unverified"; assert reasons["a_region_argument_withdraws_the_admission"] == "body-unverified"'
+rejected_collection_builtin_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_collection_builtin_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a builtin write escaped the borrow rules\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
