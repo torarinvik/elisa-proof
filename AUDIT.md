@@ -2445,6 +2445,57 @@ gives nothing.
 The affine rekey remains the general repair; this tier, the comparison chain and this width query
 are three rules working around it.
 
+## Measured: what is left on the kernel's own source
+
+The finding counts are dominated by cascade. Of 191 functions in
+`examples/kernel_replay_standalone.elisa`, 109 are `verified`, 69 are
+`dependency-unverified` -- unverified only because something they call is -- and one exports a
+widened-state contract. The whole of the rest is 14 declarations: 9 with an unverified body and 5
+in a recursive component that cannot export a contract. They carry 88 findings between them, and
+every one of the 320 `function-summary-unverified` findings is downstream of those 14.
+
+Classifying all 88 by what each would actually take:
+
+| Count | Shape | What it needs |
+| --- | --- | --- |
+| 31 | `borrow-call-opaque` on `xs.extend(ys)` and `visiting.resize(nodes.count)` | a resource model for one builtin |
+| 26 | `children[node.children_start + index]` | a sum of two variables, and a contract on the range validator |
+| 14 | `right_names[index]` under `for index in 0..<left_names.count` | a contract relating two parallel arrays |
+| 7 | `loop-invariant-missing` | invariants on `while` loops in the subject code |
+| 4 | `call-requires-unproven` | the unsigned increment at a self-call |
+| 4 | `current.root` as an index | a field place as an index term |
+| 1 | `recursive-summary-unsupported` | the measure `elisac-stage0` refused |
+| 1 | `loop-condition-opaque` | a call in a `while` condition |
+
+Three of these are worth stating precisely, because the names understate how narrow they are.
+
+**The 31 are one method.** `push`, `resize` and `truncate` all verify; only `extend` does not, and
+the message says why: "a call argument carries a resource, but no converged callee resource
+summary". `xs.push(v)` passes a scalar and needs no summary; `xs.extend(ys)` passes a collection,
+and there is no builtin resource model to say that `extend` reads its argument and writes only its
+receiver. That is the confined-lend shape the checker already admits for user functions. 27 of the
+31 are in `proof_kernel_replay_resource_copy`, which is nothing but a sequence of `extend` calls.
+
+**The 26 are the sum the affine atom cannot hold.** `ProofAffine.base` is one identifier, so
+`node.children_start + index` is not a term. The obligation is
+`children_start + index < children.count`, and the facts that would discharge it are
+`children_start + children_count <= children.count` and `index < children_count`. The first does
+not exist: `proof_kernel_replay_child_range_valid` decides exactly that property and returns a
+bare `bool` with no `ensure`, so calling it establishes nothing. So this cluster needs both a
+contract on that helper and a rule for `X + Y < C` from `X + N <= C` and `Y < N` -- which, like
+the strict shift and the comparison chain, can match structurally instead of requiring the rekey.
+
+**The 14 are a missing contract, not a missing rule.** `proof_kernel_replay_close_equalities` walks
+`0..<left_names.count` and indexes `right_names`; the two arrays are pushed in tandem by
+`proof_kernel_replay_collect_name_equalities`, which states no relation between their lengths. The
+equality step in the comparison chain would discharge the bound from
+`left_names.count == right_names.count`, and nothing produces that fact. The contract is on a
+recursive function, so it also needs the recursive-summary path, which is available now that the
+measures are in place.
+
+Nothing in this table needs the affine rekey outright. The 26 are the only cluster where it is the
+general repair rather than one option.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
