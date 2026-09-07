@@ -2496,6 +2496,43 @@ measures are in place.
 Nothing in this table needs the affine rekey outright. The 26 are the only cluster where it is the
 general repair rather than one option.
 
+### Each of the three was then probed, and none is a one-line change
+
+**The 31 need a builtin resource summary, which does not exist as a mechanism.** The refusal is
+correct as the checker stands: an argument that carries a resource reaches a callee with no
+summary, and a callee with no summary could retain it. `push` and `resize` are silent only because
+their arguments are scalars, not because anything models them. Admitting `extend` means saying,
+somewhere the kernel can replay, that its argument is lent shared and not retained -- the same
+statement the confined-lend path makes for a user function from its declared parameter modes, but
+there is no declaration to read modes from. A name-based allow-list is not enough on its own: a
+user function named `extend` is found in the function table and would take the normal path, but an
+`extend` the table does not contain would be modelled on its name alone, which is an assumption
+rather than a check.
+
+**The 14 cannot be written in this language.** The contract wanted is on
+`proof_kernel_replay_collect_name_equalities`, which returns `void`:
+
+```
+requires left_names.count == right_names.count
+ensure left_names.count == right_names.count
+```
+
+`elisac-stage1` declines the function outright -- "backend could not produce a linkable unit;
+declined 1: proof_kernel_replay_collect_name_equalities (return statement)". Reduced, the rule is
+narrower and harsher than it first looks: a `void` function may not carry an `ensure` at all, with
+or without an early return. Two eight-line functions, one with an early `return` and one without,
+are both declined with "contract statement". `requires` and `decreases` on a `void` function are
+fine, which is why the termination measures earlier in this file went in without trouble. So this
+cluster needs the helper restructured to return a value before it can be specified at all, which
+is a change to the kernel's own shape rather than to its contracts.
+
+**The 26 need the fact and the rule, and the fact is the same problem.**
+`proof_kernel_replay_child_range_valid` also returns a bare `bool`, so its postcondition would have
+to be `ensure not result or start + count <= total` on a value-returning function -- allowed, unlike
+the `void` case -- but proving it needs `start + count <= total` from `count <= total - start`,
+which is the two-variable sum again. The contract and the rule that would use it are blocked on the
+same missing piece.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
