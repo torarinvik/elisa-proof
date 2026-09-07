@@ -1927,6 +1927,26 @@ if [[ "$rejected_settled_operand_status" -ne 0 ]]; then
     exit 1
 fi
 
+# An early return leaves its condition negated, and a negated comparison between two atoms is an
+# order between the same two atoms.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/negated_guard_order.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "goal") in proven for owner in ("a_guard_reaches_past_its_own_return", "a_guard_inside_a_disjunction_still_reaches", "a_bounded_sum_follows_from_the_pair"))'
+negated_guard_status=${PIPESTATUS[1]}
+set -e
+if [[ "$negated_guard_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a negated guard did not reach past its own return\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_negated_guard_order.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(g["name"], g["rule"]): g["proven"] for g in report["goals"]}; refused = ("a_negation_of_the_wrong_order", "an_inequality_is_not_an_order", "a_guard_on_another_pair", "the_bound_the_guards_give_is_not_strict"); assert all(goals[(owner, "goal")] is False for owner in refused); assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}'
+rejected_negated_guard_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_negated_guard_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a negated guard said more than it says\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

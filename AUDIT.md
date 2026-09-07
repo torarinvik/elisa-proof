@@ -2660,6 +2660,69 @@ negated early return does not make the subtraction range-safe for the statement 
 the same condition written as `requires start <= total` does. That asymmetry, not the disjunction,
 is now the blocker.
 
+## A guard reaches the statements after its own early return
+
+### What was wrong
+
+An unsigned subtraction is range-safe when a fact orders its operands, and the facts that can say
+so are collected by `proof_collect_unsigned_order_facts`. Only plain scalar orders enter that
+collector, deliberately: importing the arithmetic siblings of a conjunction would let the solver
+justify a range question with the very modular arithmetic it is deciding.
+
+The collector read positive comparisons and nothing else. An early return leaves its condition
+negated, so `return false if start > total` produced the fact `not (start > total)` and the
+collector discarded it. The next statement could not subtract. The same guard written as
+`requires start <= total`, or as a positive `if start <= total:`, worked. The previous entry
+recorded that asymmetry as the remaining blocker without locating it.
+
+### What changed
+
+The collector now admits a negated comparison whose operands are the same atoms a positive one
+would need. It pushes the negation unchanged: `proof_collect_bounds` and
+`proof_collect_difference_constraints` already complement a negated comparison, and both run over
+the collected orders downstream. `proof_kernel_replay_collect_unsigned_orders` is the mirror, with
+the same atom test the positive path uses.
+
+The negation of a comparison between two atoms is a comparison between the same two atoms, so this
+imports no arithmetic and the collector's invariant is unchanged. What it does not do is read
+through anything else: `not (a == b)` is an inequality and orders nothing, and a negated guard on
+one pair says nothing about another pair or the other direction.
+
+### The contract that was waiting on it
+
+`proof_kernel_replay_child_range_valid` is written in exactly the two-guard shape that could not
+carry a contract. It now states one:
+
+    ensure not result or start <= total and count <= total - start
+
+Both conjuncts are needed by a caller indexing `children[start + index]`. The sum rule bounds
+`start + index` by `total` from `count <= total - start` together with `start <= total`, and the
+guard on the subtraction is what makes the first meaningful for an unsigned type.
+
+### Fixtures
+
+`examples/negated_guard_order.elisa` carries the two-guard shape with its contract, the same shape
+where the guard sits inside a disjunction, and the sum consequence a caller needs. The previous
+commit's binary refuses the first six goals of the three and proves the last.
+
+`examples/rejected_negated_guard_order.elisa` is the boundary: a negation of the wrong order, an
+inequality where an order is needed, a guard naming another pair, and a strict bound the guards
+give only non-strictly. All four are refused, with no semantic errors and no replay gaps.
+
+### What it bought, and what it did not
+
+On `examples/kernel_replay_standalone.elisa`: proven 1400 to 1403 against obligations 2094 to
+2097, which is the new contract and its own proof. Verified functions stay at 111. All 1403
+certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
+
+The 26 `children[start + index]` findings did not close, and the reason has moved again. The
+contract exists now and the rule that consumes it works, but the call sites read
+`children[node.children_start + index]`. `node.children_start` is a field access, and both
+`ProofAffine.base` and the order-atom test accept one bare identifier. Every term in this cluster
+is a place expression, so the cluster is now blocked on exactly one thing: keying an affine base
+and an order atom by a place path rather than a name. That is the affine rekey the audit has been
+naming, and it is now the only step between this rule and these findings.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

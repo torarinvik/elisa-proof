@@ -244,6 +244,8 @@ run_probe sum_bound examples/sum_bound.elisa 0
 run_probe rejected_sum_bound examples/rejected_sum_bound.elisa 1
 run_probe settled_operand examples/settled_operand.elisa 0
 run_probe rejected_settled_operand examples/rejected_settled_operand.elisa 1
+run_probe negated_guard_order examples/negated_guard_order.elisa 0
+run_probe rejected_negated_guard_order examples/rejected_negated_guard_order.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1061,6 +1063,34 @@ for owner in ("or_left_false_still_owes_the_right", "and_left_true_still_owes_th
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s let a neighbour settle a live operand" % owner)
 print("dogfood settled_operand: a settled operand is free, a live one still owes its range")
+PY
+
+# An early return leaves its condition negated. That negation is an order between the same two
+# atoms, and it says nothing about another pair, another direction, or a strict bound.
+python3 - "$REPORT_DIR/negated_guard_order.json" "$REPORT_DIR/rejected_negated_guard_order.json" <<'PY'
+import json
+import sys
+
+reaching, silent = sys.argv[1:]
+with open(reaching, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: negated guard fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a negated-guard certificate was left unreplayed")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("a_guard_reaches_past_its_own_return", "a_guard_inside_a_disjunction_still_reaches", "a_bounded_sum_follows_from_the_pair"):
+    if (owner, "goal") not in proven:
+        raise SystemExit("dogfood failed: %s did not reach past its own return" % owner)
+with open(silent, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: negated guard boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for owner in ("a_negation_of_the_wrong_order", "an_inequality_is_not_an_order", "a_guard_on_another_pair", "the_bound_the_guards_give_is_not_strict"):
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s read more out of a negated guard than it says" % owner)
+print("dogfood negated_guard_order: a negated guard is an order, and only over the pair it names")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
