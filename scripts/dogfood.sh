@@ -254,6 +254,8 @@ run_probe literal_extent examples/literal_extent.elisa 0
 run_probe rejected_literal_extent examples/rejected_literal_extent.elisa 1
 run_probe owned_extent examples/owned_extent.elisa 0
 run_probe rejected_owned_extent examples/rejected_owned_extent.elisa 1
+run_probe captured_scalar examples/captured_scalar.elisa 0
+run_probe rejected_captured_scalar examples/rejected_captured_scalar.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1212,6 +1214,34 @@ for owner in ("a_lent_local_loses_its_extent", "a_reference_local_owns_nothing",
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s kept an extent a callee can reach" % owner)
 print("dogfood owned_extent: an owned extent survives, a reachable one does not")
+PY
+
+# A capture list bounds nothing and evidences nothing: a capture the body only reads keeps its
+# facts, and a binding the body assigns or hands to a writer does not.
+python3 - "$REPORT_DIR/captured_scalar.json" "$REPORT_DIR/rejected_captured_scalar.json" <<'PY'
+import json
+import sys
+
+read_only, written = sys.argv[1:]
+with open(read_only, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: captured scalar fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a captured-scalar certificate was left unreplayed")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_read_only_capture_keeps_its_precondition", "a_read_only_capture_survives_a_mutating_body"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost a fact its captured body never touched" % owner)
+with open(written, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: captured scalar boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_capture_the_body_assigns_is_forgotten", "a_capture_handed_to_a_writer_is_forgotten", "an_uncaptured_binding_the_body_assigns_is_forgotten"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s kept a fact its captured body falsified" % owner)
+print("dogfood captured_scalar: a read-only capture keeps its facts, a written binding does not")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

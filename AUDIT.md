@@ -2959,6 +2959,55 @@ derivation the way `type-bound` is. It should be taken deliberately and recorded
 not folded into a rule about reachability. After it, the subject code still has to state the
 invariants that relate the arrays, which is where the `loop-invariant-missing` findings sit.
 
+## A capture list is not evidence of a write
+
+### What was wrong
+
+`elisac-stage1` compiles a captured block whose body assigns an outer binding the capture list
+omits, and the program observes the assignment. That measured fact is why the write-back set takes
+everything the body assigns or references, and it is recorded in an earlier entry. The set also
+contained the capture list itself, and that is a different claim: it treats a name appearing in the
+list as a name the block may write.
+
+It is not one. A block writes an outer binding by assigning it or by handing it to something that
+can, and both of those are already in the body's own sets. A capture the body only reads was being
+forgotten, so a precondition the loop never touched was gone after it -- `requires depth <= 127`
+beside a captured loop that reads `depth` and writes nothing.
+
+### What changed
+
+The write-back set is still the body's assignment roots together with its aliased set, in full. A
+capture is added to it unless the body neither assigns nor references it *and* it is a witnessed
+scalar. The scalar condition keeps the conservative treatment for an owning value, which a capture
+could move out of; a scalar is copied and cannot be.
+
+This is a producer-side retention rule and needs no kernel mirror.
+
+### Fixtures
+
+`examples/captured_scalar.elisa` keeps a precondition across a captured loop that only reads the
+binding, including one whose body calls something that mutates an unrelated collection. The
+previous commit's binary refuses both.
+
+`examples/rejected_captured_scalar.elisa` is the boundary: a capture the body assigns, a capture
+handed to a callee that writes through it, and an outer binding the body assigns without capturing
+it at all -- the case the measured compiler fact is about.
+
+### What it bought, and the residue
+
+On `examples/kernel_replay_standalone.elisa`: proven 1435 to 1439 against obligations 2138 to 2141,
+and `call-requires-unproven` 17 to 16. Verified functions stay at 115. Gaps stay 0 and
+`trusted_assumptions` stays empty.
+
+Thirteen of the remaining sixteen are one goal, `depth + 1 <= 127`, inside
+`proof_kernel_replay_goal_depth`, and the fact list at those goals still lacks both the function's
+own `requires depth <= 127` and the negation its `return false if depth >= 127` leaves. Four probes
+reproduce the surrounding shape -- a captured loop, an uncaptured one, a body that passes a
+collection mutably, and a self-recursive call inside the loop -- and every one of them verifies.
+Whatever drops the precondition there is not any of those, and this entry does not claim to have
+found it. What is established is that the capture list was one cause, that it was measurably a
+cause, and that it is no longer one.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
