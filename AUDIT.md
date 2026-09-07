@@ -2794,6 +2794,66 @@ expression is itself a call, and a local bound to a place carries `limit == chil
 equality the structural rules do not rewrite through. The lower bound needs neither: it needs an
 unsigned width marker for a field place, and markers are keyed by bare name.
 
+## An unsigned field is nonnegative, and the type of a field was unsayable
+
+### What was wrong
+
+The lower bound on an index is `0 <= e`, and for an unsigned `e` it is true whatever the value
+holds. The checker could not say it for `node.children_start + index`, because unsigned width
+markers are keyed by a bare name and a field has none. The obvious repair -- report a width for a
+field from the general width function -- is the one already measured and rejected: doing that for
+`.count` cost 39 proofs, because every arithmetic term containing a field then fell under the
+unsigned wrap guard.
+
+Two things were missing, and neither is a width in the arithmetic sense.
+
+### What changed
+
+**A width marker over a place.** `proof_unsigned_place_marker` records the same
+`__elisa_unsigned_type_bound` marker with a place as its first argument.
+`proof_unsigned_marker_info` reads only the bare-name form, so a place width is invisible to
+`proof_unsigned_width_in_expression` by construction and no arithmetic term inherits a wrap
+obligation from it. `proof_term_is_unsigned` is the only reader: it answers whether a term has an
+unsigned type at all, and one unsigned atom settles a whole arithmetic term, because arithmetic
+mixing an unsigned operand with another type does not typecheck. That answer alone discharges
+`0 <= e` -- no bound, no interval, no range argument, since the claim is about the machine value.
+The rule is deliberately not strict: nonnegative is not positive.
+
+**A qualified struct spelling resolves to its leaf.** `proof_type_head_name` had no `Scope` arm,
+so a binding declared `Module::Type` got no field witnesses at all -- no scalar marker, no place
+marker, nothing. The leaf is not assumed unique: every reader searches the declarations by it and
+refuses a count other than one, so an ambiguous leaf loses the witness rather than picking a
+struct. This is the same convention the proof tables already use for a qualified call.
+
+Both have kernel mirrors for reading the marker.
+
+### Fixtures
+
+`examples/unsigned_place.elisa` carries the guarded range over a field indexed as
+`children[node.children_start + index]`, which now verifies end to end, a bare field
+nonnegativity, a field of a qualified struct type, and the case worth stating plainly: an
+unguarded unsigned difference is still nonnegative, because that is a claim about the machine
+value. The fact it yields is usable only where the subtraction is separately guarded, since the
+range guard rejects an unguarded one before any rule may read it.
+
+`examples/rejected_unsigned_place.elisa` is the boundary: a signed field, a strict goal, a call
+result whose argument's marker does not travel through it, an upper bound the type argument does
+not give, and an ambiguous qualified leaf.
+
+### What it bought, and what the remaining index cluster actually needs
+
+On `examples/kernel_replay_standalone.elisa`: proven 1423 to 1435 against obligations 2124 to
+2138. All 1435 certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
+
+The 17 `children[node.children_start + index]` findings are now understood completely, and they
+are not a checker gap. The probe that reproduces the call site exactly -- guard, loop, index, a
+call inside the loop body, and a mutable collection -- verifies. The corpus sites differ in one
+respect: a call stands between the guard and the loop, and it receives the collection mutably. The
+fact `node.children_start <= children.count` therefore cannot survive it, because a callee may
+resize the collection, and the checker is right to drop it. Closing these needs the callee to
+promise it does not shrink the collection, which in turn needs recursive function summaries --
+`recursive-summary-unsupported` is the finding that names it.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

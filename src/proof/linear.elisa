@@ -127,6 +127,47 @@ extend ElisaProof:
             arguments: darray[Ast::Expr] = [Ast::Expr.Ident(name, position), Ast::Expr.IntLit(width)]
             return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
 
+        # The same marker over a place rather than a bare name. It is deliberately invisible to
+        # `proof_unsigned_marker_info`, which reads only the bare-name form, so a place width never
+        # reaches `proof_unsigned_width_in_expression` and never subjects an arithmetic term
+        # containing a field to the unsigned wrap guard. Reporting `.count` from the general width
+        # function once cost 39 proofs by exactly that contagion. Only the nonnegativity rule
+        # consults this form, and only to answer whether a term has an unsigned type at all.
+        def proof_unsigned_place_marker(term: Ast::Expr, width: i64, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term, Ast::Expr.IntLit(width)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
+
+        def proof_unsigned_place_marker_width(facts: darray[Ast::Expr]&, term: Ast::Expr) -> i64 can[Memory.Allocate, Abort.Panic]:
+            width: mutable i64 = 0
+            for fact in facts |fact, term, width|:
+                match fact:
+                    Ast::Expr.Call(callee, arguments, argument_names, _):
+                        continue if argument_names.count != 0 and argument_names.count != arguments.count
+                        continue if proof_ident_name(callee) != "__elisa_unsigned_type_bound" or arguments.count != 2
+                        continue if not proof_expr_equal(arguments[0], term)
+                        marked: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                        continue if not marked.known or marked.value < 8 or marked.value > 64
+                        width <- marked.value if width == 0 or marked.value < width
+                    _:
+                        pass
+            return width
+
+        # Whether a term has an unsigned type. Arithmetic between an unsigned operand and anything
+        # else does not typecheck, so one unsigned atom settles the whole term. This answers a
+        # narrower question than the width function: it is used only where the answer alone is the
+        # argument, never to decide whether a term stays in range.
+        def proof_term_is_unsigned(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 32
+            return true if proof_unsigned_width_in_expression(expression, facts) != 0
+            stripped: Ast::Expr = proof_strip_parens(expression)
+            match stripped:
+                Ast::Expr.Binary(left, operator, right, _):
+                    arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.LShift or operator == TokenKind.RShift
+                    return false if not arithmetic
+                    return proof_term_is_unsigned(left, facts, depth + 1) or proof_term_is_unsigned(right, facts, depth + 1)
+                _:
+                    return proof_unsigned_place_marker_width(facts, stripped) != 0
+
         # Elisa dispatches `==`, `+`, `-`, `*`, `/` and the ordering operators to a user
         # `__eq__`/`__add__`/`__cmp__` implementation whenever an operand's type is a struct, and
         # a user `__eq__` need not be Leibniz equality. Ground congruence is therefore admitted
@@ -1675,9 +1716,9 @@ extend ElisaProof:
                 term <- left
             else:
                 return false
-            # A strict goal claims the value is not zero, which no width argument establishes.
+            # A strict goal claims the value is not zero, which no type argument establishes.
             return false if operator == TokenKind.Lt or operator == TokenKind.Gt
-            return false if proof_unsigned_width_in_expression(term, facts) == 0
+            return false if not proof_term_is_unsigned(term, facts, 0)
             return proof_unsigned_expression_safe(term, facts)
 
         def proof_sum_bound_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:

@@ -248,6 +248,8 @@ run_probe negated_guard_order examples/negated_guard_order.elisa 0
 run_probe rejected_negated_guard_order examples/rejected_negated_guard_order.elisa 1
 run_probe place_order examples/place_order.elisa 0
 run_probe rejected_place_order examples/rejected_place_order.elisa 1
+run_probe unsigned_place examples/unsigned_place.elisa 0
+run_probe rejected_unsigned_place examples/rejected_unsigned_place.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1122,6 +1124,34 @@ for owner in ("a_place_order_in_the_wrong_direction", "a_place_order_on_another_
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s read a fact list for more than it states" % owner)
 print("dogfood place_order: a place order guards its own subtraction, and says nothing further")
+PY
+
+# An unsigned machine value is nonnegative whatever it holds. The marker is over the place, it
+# answers only that one question, and an ambiguous qualified leaf names no struct at all.
+python3 - "$REPORT_DIR/unsigned_place.json" "$REPORT_DIR/rejected_unsigned_place.json" <<'PY'
+import json
+import sys
+
+typed, untyped = sys.argv[1:]
+with open(typed, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: unsigned place fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: an unsigned-place certificate was left unreplayed")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_guarded_range_over_a_field", "a_field_is_nonnegative", "an_unguarded_difference_is_still_nonnegative", "a_qualified_struct_field_is_nonnegative"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s did not know its field was unsigned" % owner)
+with open(untyped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: unsigned place boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_signed_field_is_not_nonnegative", "a_field_is_not_positive", "a_call_result_carries_no_marker", "an_unsigned_field_has_no_upper_bound", "an_ambiguous_leaf_names_no_struct"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s read a place marker for more than it says" % owner)
+print("dogfood unsigned_place: an unsigned field is nonnegative, and the marker says nothing more")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
