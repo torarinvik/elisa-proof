@@ -2376,11 +2376,63 @@ On `examples/kernel_replay_standalone.elisa`: proven rises from 1378 to 1385 aga
 rising 2042 to 2052, which is this change's own code being checked. Verified functions go from 104
 to 106. All 1385 certificates replay, gaps stay 0 and `trusted_assumptions` stays empty.
 
-Not covered: the peer must be a bare name, so `index < values.count` does not admit `index + 1` --
-a field place is not an identifier, and that is the same representation limit the comparison chain
-was written around. The kernel's own loops count against `collection.count`, so they are on the
-wrong side of it, and the last recursive component stays open for that reason rather than for the
-one recorded before.
+The peer is a bare name or a field of one. Neither can spell the base's own increment, which is
+what the restriction is for, and admitting the field form is what lets `index < values.count` bound
+`index + 1` at all. Reaching the *goal* `index + 1 <= values.count` needs the shift rule in the
+next entry.
+
+## A strict fact would not shift by one where its bound lived in a field
+
+### What was wrong
+
+`a < R` gives `a + 1 <= R` over the integers, for any term `R`. The difference engine draws that
+conclusion whenever it can name both sides, and `ProofAffine.base` is one bare identifier, so it
+cannot name `box.limit` at all. The increment every bounded walk performs was therefore refused
+wherever the bound lives in a field -- which, for a collection, is every loop in this codebase.
+
+The obvious repair is to widen the affine atom from a name to a place. That rekeys `ProofBound`,
+`ProofDifference` and `ProofAffine` and every comparison over them, in the producer and in the
+kernel: about two hundred sites that must agree exactly or the certificates stop replaying. The
+comparison chain was added earlier to work around the same limit without paying that, and the same
+approach works here.
+
+### What changed
+
+`proof_strict_shift_goal` matches the shifted side structurally against the strict fact's own
+right-hand side. It needs no atom: `a + 1 <= R` is discharged by a fact `a < R` where `R` is the
+same term, whatever shape `R` has. The goal must be non-strict -- `a < R` does not give
+`a + 1 < R` -- and the shift is by one. It sits behind the overflow guard, because the conclusion
+is only sound where `a + 1` does not wrap, and for an unsigned term that is exactly what the peer
+rule in the previous entry decides *from the same fact*. `proof_kernel_replay_strict_shift` is the
+mirror.
+
+### Fixtures
+
+`examples/strict_shift.elisa` requires the shift to a field place, to a bare name, and from a fact
+written the other way round. `examples/rejected_strict_shift.elisa` pins the four ways it does not
+apply: a non-strict premise, a strict conclusion, a step of two, and a fact bounding a different
+term.
+
+`examples/rejected_bound_propagation.elisa` lost two cases to this, and that is the right outcome
+rather than a regression. `lower_bound_does_not_bound_above` and `bound_on_an_unrelated_name` were
+in the rejected half because the only route to them was an interval and no interval was derivable.
+Both claims are true, and the shift proves them from `index < count` without bounding `index` at
+all, so they moved to the accepted half under names that say what they now show. What stays refused
+there is what is actually false: a step of two, a non-strict peer, and a peer bounding another
+name.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: proven 1385 to 1388 against obligations 2052 to 2061,
+which is this change's own code. Verified functions 106 to 108. All 1388 certificates replay, gaps
+stay 0 and `trusted_assumptions` stays empty.
+
+Not covered: `index + 1 <= values.count` over `usize` is still refused, and now for one reason
+rather than two. The shift reaches the goal, but the overflow guard in front of it needs
+`values.count` to carry an unsigned width, and the width markers are keyed by bare name -- a field
+place has none. Recording a width for a collection's extent would close it, and would rest on the
+same typing fact the extent rule already uses. The affine rekey remains the general repair; this
+tier and the comparison chain are two rules working around it.
 
 ## Coverage still required
 

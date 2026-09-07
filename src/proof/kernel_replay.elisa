@@ -360,6 +360,16 @@ module ElisaProofKernelReplay:
             return (true, right) if left_constant.known and left_constant.value == 1
             return (false, 0)
 
+        # Mirror: a bare name, or a field of one. Neither can spell the base's own increment.
+        def proof_kernel_replay_peer_is_nameable(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return node.name != "" if node.kind == "ident"
+            return false if node.kind != "field" or node.name == ""
+            base: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return base.known and base.node.kind == "ident" and base.node.name != ""
+
         def proof_kernel_replay_unsigned_increment_has_strict_peer(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, base: usize, width: i64, facts: darray[usize]) -> bool:
             return false if width == 0
             for fact in facts |fact, nodes, children, base, width, facts|:
@@ -369,9 +379,9 @@ module ElisaProofKernelReplay:
                 continue if node.kind != "binary"
                 # The peer must be a bare name: one that mentioned the base could justify itself,
                 # since `a < a + 1` is the very claim whose range this decides.
-                if node.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, node.left, base, 0) and proof_kernel_replay_ident_name(nodes, node.right) != "":
+                if node.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, node.left, base, 0) and proof_kernel_replay_peer_is_nameable(nodes, node.right):
                     return true if proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.right, facts, 0) == width
-                if node.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, node.right, base, 0) and proof_kernel_replay_ident_name(nodes, node.left) != "":
+                if node.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, node.right, base, 0) and proof_kernel_replay_peer_is_nameable(nodes, node.left):
                     return true if proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, 0) == width
             return false
 
@@ -2768,6 +2778,33 @@ module ElisaProofKernelReplay:
             return (true, low, normalized) if proof_kernel_replay_expr_equal(nodes, children, high, anchor, 0)
             return unknown
 
+        # Mirror of the producer's strict shift: `a < R` gives `a + 1 <= R` for any term `R`, matched
+        # structurally rather than through an atom, which is what lets it reach a field place the
+        # difference engine cannot name. The shift is sound only if `a + 1` does not wrap, which is
+        # the same guard the producer consults, and a `<` goal is not this rule.
+        def proof_kernel_replay_shifted_unit_base(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, base: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (false, 0) if node.kind != "binary" or node.operator != "+"
+            return proof_kernel_replay_unsigned_unit_increment_base(nodes, node.left, node.right)
+
+        def proof_kernel_replay_strict_shift(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
+            return false if operator != "<="
+            shifted: (known: bool, base: usize) = proof_kernel_replay_shifted_unit_base(nodes, left)
+            return false if not shifted.known
+            return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, left)
+            for fact in facts |fact, nodes, children, shifted, right|:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+                continue if not located.known
+                node: ElisaProofKernelCore::ProofKernelNode = located.node
+                continue if node.kind != "binary"
+                if node.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, node.left, shifted.base, 0) and proof_kernel_replay_expr_equal(nodes, children, node.right, right, 0):
+                    return true
+                if node.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, node.right, shifted.base, 0) and proof_kernel_replay_expr_equal(nodes, children, node.left, right, 0):
+                    return true
+            return false
+
         def proof_kernel_replay_comparison_chain(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
             goal_operator: mutable sview = operator
             lower: mutable usize = left
@@ -3010,6 +3047,7 @@ module ElisaProofKernelReplay:
                 return true if proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right) and proof_kernel_replay_difference_comparison(nodes, children, node.left, node.operator, node.right, facts)
                 return true if proof_kernel_replay_product_sign(nodes, children, facts, node.left, node.operator, node.right)
                 return true if proof_kernel_replay_comparison_chain(nodes, children, facts, node.left, node.operator, node.right)
+                return true if proof_kernel_replay_strict_shift(nodes, children, facts, node.left, node.operator, node.right)
                 # Ground congruence closure is the last equality tier. It runs only after the
                 # fixed-width safety guards above have rejected every wrapping premise and goal,
                 # so equal operands of different widths can never be propagated through a former.

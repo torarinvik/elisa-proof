@@ -764,6 +764,21 @@ extend ElisaProof:
             return (true, right) if left_constant.known and left_constant.value == 1
             return (false, Ast::Expr.Invalid)
 
+        # A peer that may bound an increment: a bare name, or a field of one. Neither can mention the
+        # base's own increment, which is what the restriction is for -- `a < a + 1` is precisely the
+        # claim whose range this decides, and neither shape can spell it. A field place is admitted
+        # because `index < values.count` is how a bound is written wherever a collection is walked.
+        def proof_peer_is_nameable(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_peer_is_nameable(inner)
+                Ast::Expr.Ident(name, _):
+                    return name != ""
+                Ast::Expr.Field(object, field_name, _):
+                    return field_name != "" and proof_ident_name(proof_strip_parens(object)) != ""
+                _:
+                    return false
+
         def proof_unsigned_increment_has_strict_peer(base: Ast::Expr, width: i64, facts: darray[Ast::Expr]&) -> bool:
             return false if width == 0
             for fact in facts |fact, base, width, facts|:
@@ -772,9 +787,9 @@ extend ElisaProof:
                         # The peer is required to be a bare name. A peer that mentioned the base
                         # could justify itself -- `a < a + 1` is exactly the claim whose range this
                         # rule is deciding -- and a name cannot.
-                        if fact_operator == TokenKind.Lt and proof_expr_equal(fact_left, base) and proof_ident_name(fact_right) != "":
+                        if fact_operator == TokenKind.Lt and proof_expr_equal(fact_left, base) and proof_peer_is_nameable(fact_right):
                             return true if proof_unsigned_width_in_expression(fact_right, facts) == width
-                        if fact_operator == TokenKind.Gt and proof_expr_equal(fact_right, base) and proof_ident_name(fact_left) != "":
+                        if fact_operator == TokenKind.Gt and proof_expr_equal(fact_right, base) and proof_peer_is_nameable(fact_left):
                             return true if proof_unsigned_width_in_expression(fact_left, facts) == width
                     _:
                         pass
@@ -1401,6 +1416,43 @@ extend ElisaProof:
             strict: bool = proof_chain_strict(first) or proof_chain_strict(second)
             return true if strict
             return goal == TokenKind.LtEq
+
+        # `a < R` gives `a + 1 <= R` over the integers, for *any* term `R`. The difference engine
+        # already draws this conclusion whenever it can name both sides, but its atom is one bare
+        # identifier, so `index < values.count` reaches nothing -- a field place is not an atom,
+        # which is the same representation limit the comparison chain was written around. This tier
+        # needs no atom at all: it matches the shifted side structurally against the strict fact's
+        # own right-hand side.
+        #
+        # The shift is only sound if `a + 1` does not wrap, which is exactly what the unsigned peer
+        # rule decides from this same fact, and for a signed term the ordinary overflow guard does.
+        # A goal that is `<` rather than `<=` is not this rule: `a < R` does not give `a + 1 < R`.
+        def proof_strict_shift_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if operator != TokenKind.LtEq
+            shifted: (known: bool, base: Ast::Expr) = proof_shifted_unit_base(left)
+            return false if not shifted.known
+            return false if not proof_unsigned_expression_safe(left, facts)
+            for fact in facts |fact, shifted, right|:
+                match fact:
+                    Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
+                        if fact_operator == TokenKind.Lt and proof_expr_equal(fact_left, shifted.base) and proof_expr_equal(fact_right, right):
+                            return true
+                        if fact_operator == TokenKind.Gt and proof_expr_equal(fact_right, shifted.base) and proof_expr_equal(fact_left, right):
+                            return true
+                    _:
+                        pass
+            return false
+
+        # `x + 1` and `1 + x`, and nothing else.
+        def proof_shifted_unit_base(expression: Ast::Expr) -> (known: bool, base: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_shifted_unit_base(inner)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (false, Ast::Expr.Invalid) if operator != TokenKind.Plus
+                    return proof_unsigned_unit_increment_base(left, right)
+                _:
+                    return (false, Ast::Expr.Invalid)
 
         def proof_comparison_chain_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             goal_operator: mutable TokenKind = operator
@@ -2041,6 +2093,7 @@ extend ElisaProof:
                         return true if proof_linear_goal(left, operator, right, facts)
                         return true if proof_product_sign_goal(left, operator, right, facts)
                         return true if proof_comparison_chain_goal(left, operator, right, facts)
+                        return true if proof_strict_shift_goal(left, operator, right, facts)
                         # Congruence is the last equality tier and runs only after the
                         # fixed-width safety guards above rejected every wrapping premise/goal.
                         return proof_congruence_goal(facts, goal, annotations, exhausted) if operator == TokenKind.EqEq

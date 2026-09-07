@@ -238,6 +238,8 @@ run_probe short_circuit_guard examples/short_circuit_guard.elisa 0
 run_probe rejected_short_circuit_guard examples/rejected_short_circuit_guard.elisa 1
 run_probe bound_propagation examples/bound_propagation.elisa 0
 run_probe rejected_bound_propagation examples/rejected_bound_propagation.elisa 1
+run_probe strict_shift examples/strict_shift.elisa 0
+run_probe rejected_strict_shift examples/rejected_strict_shift.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -963,7 +965,7 @@ if report["replay"]["certificates"] != report["replay"]["replayed"]:
 if report["trust"]["trusted_assumptions"]:
     raise SystemExit("dogfood failed: bound propagation rested on a trusted assumption")
 proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
-for owner in ("increment_under_a_bounded_limit", "increment_through_a_chain", "lower_bound_travels", "unsigned_increment_under_a_strict_peer", "unsigned_increment_under_a_reversed_peer"):
+for owner in ("increment_under_a_bounded_limit", "increment_through_a_chain", "lower_bound_travels", "unsigned_increment_under_a_strict_peer", "unsigned_increment_under_a_reversed_peer", "strict_fact_needs_no_upper_bound", "strict_fact_needs_no_related_bound"):
     if (owner, "goal") not in proven:
         raise SystemExit("dogfood failed: %s did not reach the overflow guard with its interval" % owner)
 with open(invented, encoding="utf-8") as handle:
@@ -971,10 +973,36 @@ with open(invented, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: bound propagation boundary fixture did not fail cleanly")
 goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
-for owner in ("unsigned_step_of_two", "unsigned_increment_under_a_non_strict_peer", "unsigned_peer_of_another_name", "lower_bound_does_not_bound_above", "non_strict_premise_is_not_shiftable", "bound_on_an_unrelated_name"):
+for owner in ("unsigned_step_of_two", "unsigned_increment_under_a_non_strict_peer", "unsigned_peer_of_another_name", "non_strict_premise_is_not_shiftable"):
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s was given an interval nothing established" % owner)
 print("dogfood bound_propagation: a constraint carries an interval it already implies, and no other")
+PY
+
+python3 - "$REPORT_DIR/strict_shift.json" "$REPORT_DIR/rejected_strict_shift.json" <<'PY'
+import json
+import sys
+
+shifted, refused = sys.argv[1:]
+with open(shifted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: strict shift fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a strict-shift certificate was left unreplayed")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("shift_to_a_field", "shift_to_a_name", "shift_from_a_reversed_fact"):
+    if (owner, "goal") not in proven:
+        raise SystemExit("dogfood failed: %s did not shift its strict fact" % owner)
+with open(refused, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: strict shift boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for owner in ("needs_a_strict_fact", "gives_no_strict_conclusion", "moves_by_one_only", "bounds_another_term"):
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s took a shift that does not follow" % owner)
+print("dogfood strict_shift: a strict fact shifts by one, non-strictly, to its own bound")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
