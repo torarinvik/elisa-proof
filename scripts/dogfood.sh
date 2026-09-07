@@ -264,6 +264,8 @@ run_probe collection_builtin examples/collection_builtin.elisa 0
 run_probe rejected_collection_builtin examples/rejected_collection_builtin.elisa 1
 run_probe bound_loop_condition examples/bound_loop_condition.elisa 1
 run_probe rejected_bound_loop_condition examples/rejected_bound_loop_condition.elisa 1
+run_probe block_statement_region examples/block_statement_region.elisa 0
+run_probe rejected_block_statement_region examples/rejected_block_statement_region.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1361,6 +1363,35 @@ reasons = {d["name"]: d["verification_reason"] for d in report["declaration_deta
 if reasons.get("a_call_in_the_condition_is_opaque") != "body-unverified":
     raise SystemExit("dogfood failed: an opaque loop condition was admitted")
 print("dogfood bound_loop_condition: a bound limit keeps the condition, a call in one does not")
+PY
+
+# A block statement discards its own value and nothing else; a collection's length is a scalar copy.
+python3 - "$REPORT_DIR/block_statement_region.json" "$REPORT_DIR/rejected_block_statement_region.json" <<'PY'
+import json
+import sys
+
+allowed, refused = sys.argv[1:]
+with open(allowed, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: block statement fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a block-statement certificate was left unreplayed")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_captured_loop_over_a_region_binding", "an_extent_argument_is_a_scalar"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s was read as discarding a region value" % owner)
+with open(refused, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: discarded region fixture did not fail cleanly")
+if {f["kind"] for f in report["findings"]} != {"region-expression-unsupported"}:
+    raise SystemExit("dogfood failed: a discarded region value was not reported")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_discarded_region_value_is_refused", "parentheses_do_not_hide_it"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s admitted a discarded region value" % owner)
+print("dogfood block_statement_region: a block discards its own value, and a length is a scalar")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

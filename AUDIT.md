@@ -3350,6 +3350,61 @@ same way the proof pass models a `break` or `continue` transfer against the near
 invariant. Until then these 35 obligations stay refused for the wrong reason, and the count is a
 placeholder for one scope-balancing defect rather than thirty-five region problems.
 
+## Both halves of the region cluster, and the gap between them
+
+### The finding, and why it took instrumentation
+
+The previous entry named the 35 `region-expression-unsupported` findings as captured loops and held
+the fix because it took replay gaps from 0 to 1. Both halves are here now, and the second half is
+the more interesting one.
+
+`for x in xs |captures|:` parses as a block, so in statement position it is an expression statement
+whose expression is a block. The boundary that refuses a discarded region-owned value asked whether
+that block *contains* one, and the block arm of that predicate answers by scanning the block's
+statements. The question asked of every captured loop was therefore whether any statement in its
+body mentions a region-owned binding. A block statement discards its own value and nothing else,
+and for a loop that value is absent; the body is ordinary statements, walked as such before this
+boundary is reached.
+
+Three rounds of instrumentation were needed to learn that, because the reported positions land on
+`continue`, `return` and declaration lines and no static reading of the source explained them.
+Sixteen expression kinds were eliminated one build at a time before `Block` was named.
+
+### The gap it uncovered
+
+Four functions gain a resource certificate under that fix and three replay. The fourth was reduced
+to a nine-line reproduction by bisection, and the difference is one argument:
+
+    Core::fits(node.children_start, node.children_count, children.count)
+
+where `children` is a `mutable darray& @r` parameter. Binding `children.count` to a local first
+removes the gap; so does dropping the region annotation. `proof_resource_expr_carries_resource`
+answers for a place by walking to its root binding and asking whether that binding is a reference,
+so `children.count` was read as carrying the collection. The call then recorded a transition naming
+the collection as an actual, and the kernel refused it, because the callee's formal is a by-value
+scalar and no region maps.
+
+The element count of a collection is a scalar copy. Passing one hands the callee no capability over
+the collection. `proof_resource_expr_contains_region_value` already reads `x.count` that way -- its
+first line is exactly this test -- and `proof_resource_expr_carries_resource` now does too.
+
+The refusal had been hiding this since before it was measured: the trace was wrong either way, and
+only removing the block misreading made it reachable.
+
+### Fixtures
+
+`examples/block_statement_region.elisa` carries a captured loop over a region-owned binding and an
+extent passed to a callee from a region-annotated function. The previous commit's binary refuses
+the first. `examples/rejected_block_statement_region.elisa` keeps the boundary honest: a region
+binding as a bare expression statement is still a value thrown away, and parenthesising it changes
+nothing.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: `region-expression-unsupported` 37 to 2, failed
+obligations 629 to 594, proven 1480 to 1484, against obligations 2109 to 2078. All 1484
+certificates replay, gaps are 0, and `trusted_assumptions` stays empty.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

@@ -2128,6 +2128,26 @@ if [[ "$rejected_bound_loop_condition_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A block statement discards its own value and nothing else, and a collection's length is a scalar
+# copy that hands a callee no capability over the collection.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/block_statement_region.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"fits", "a_captured_loop_over_a_region_binding", "an_extent_argument_is_a_scalar"}'
+block_statement_region_status=${PIPESTATUS[1]}
+set -e
+if [[ "$block_statement_region_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a captured loop was read as a discarded region value\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_block_statement_region.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"region-expression-unsupported"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_discarded_region_value_is_refused"] == "body-unverified"; assert reasons["parentheses_do_not_hide_it"] == "body-unverified"'
+rejected_block_statement_region_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_block_statement_region_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a discarded region value was admitted\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
