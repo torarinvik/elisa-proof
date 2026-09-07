@@ -2905,6 +2905,60 @@ scalars and could encode for a local collection's extent. Both are needed togeth
 useful alone. After them the subject code still has to state the invariants, which is where the
 `loop-invariant-missing` findings sit.
 
+## A collection a local owns is a binding no callee can name
+
+### What was wrong
+
+A by-value scalar already survives a call: `proof_expr_call_stable` keeps it because a callee
+reaches caller state through arguments, a method receiver and globals, and
+`proof_collect_aliased_names` records every binding that is referenced, received, or handed to a
+callee whose signature is not imported. A collection did not get the same treatment. Its extent
+survived only as `.count` of a *shared-borrowed parameter*, so a local collection lost its length
+across any call at all -- including a call that could not name it.
+
+That is what a loop with a length invariant and a call in its body needs, and it is the half of the
+parallel-array cluster that is not about a builtin's effect.
+
+### What changed
+
+**A local that owns its collection keeps its extent.** `report.local_extent_names` holds the
+locals declared with a container type that is not a reference; the entry is rewritten on every
+declaration of the spelling, so a redeclaration to a reference type withdraws it rather than
+inheriting the earlier claim. `proof_expr_call_stable` admits `place.count` when the root is one of
+those, is still a live binding, and is absent from `aliased_names` -- the same three conditions the
+by-value scalar case checks, applied to the extent instead of the value. A reference-typed local is
+excluded because the object behind one may be reachable by another path.
+
+**A literal collection is call-stable as a value.** `[]` is a value, not storage: nothing a callee
+can reach makes it hold something else. Without this the binding's recorded value was discarded at
+the first call and the length was gone even where the fact survived.
+
+The receiver of a method call is recorded as referenced by its own use, so the collection a `push`
+is called on is excluded by exactly the rule that keeps the others. This is a producer-side
+retention rule; the kernel replays the recorded facts and needs no mirror.
+
+### Fixtures
+
+`examples/owned_extent.elisa` keeps an owned extent across a call that cannot reach it and across
+another collection being grown. `examples/rejected_owned_extent.elisa` is the boundary: a lent
+local, a local bound to a reference, the receiver of a builtin whose effect is not modelled, and
+the completeness boundary where a shared argument still loses the extent because the record of
+reachable bindings does not separate a shared argument from a mutable one.
+
+### What it bought, and what the cluster still needs
+
+On `examples/kernel_replay_standalone.elisa`: unchanged at obligations 2138 and proven 1435, gaps
+0, `trusted_assumptions` empty. The capability is a prerequisite rather than a closer, and the
+corpus does not exercise it yet because the other half is missing.
+
+That other half is the effect of the builtin itself: `a.push(x)` must yield
+`a.count == before + 1`, and `a.clear()` must yield `a.count == 0`. Unlike everything above, that
+is not a consequence of what a callee can reach -- it is a statement about what the language's
+builtin does, and it would be a new boundary fact kind, admitted by `replay.elisa` without
+derivation the way `type-bound` is. It should be taken deliberately and recorded here when it is,
+not folded into a rule about reachability. After it, the subject code still has to state the
+invariants that relate the arrays, which is where the `loop-invariant-missing` findings sit.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

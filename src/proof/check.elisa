@@ -923,6 +923,14 @@ extend ElisaProof:
         # redeclaration purges them explicitly before establishing the new declaration's type.
         # Without this, a cleared unsigned marker would let later arithmetic on the binding be
         # folded as unbounded signed arithmetic.
+        def proof_drop_local_extent(report: mutable ProofReport&, name: sview) -> void:
+            return if name == ""
+            kept: mutable darray[sview] = []
+            for existing in report.local_extent_names |kept, name|:
+                kept.push(existing) if existing != name
+            report.local_extent_names.clear()
+            report.local_extent_names.extend(kept)
+
         def proof_push_aliased(aliased: mutable darray[sview]&, name: sview) -> void:
             return if name == ""
             return if any existing in aliased where existing == name
@@ -1100,7 +1108,7 @@ extend ElisaProof:
         # its caller's state only through references and globals, so such a fact holds after
         # the call exactly as before it. Anything else — a field, an element, a container, a
         # call, a name the body may reference — is not stable.
-        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, depth: usize) -> bool:
+        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, local_extents: darray[sview]&, depth: usize) -> bool:
             return false if depth >= 64
             match expression:
                 Ast::Expr.IntLit(_):
@@ -1133,17 +1141,31 @@ extend ElisaProof:
                     return false if field_name != "count"
                     root: sview = proof_place_root_name(expression, 0)
                     return false if root == ""
-                    return false if not (any shared in shared_extents where shared == root)
+                    # A local that owns its collection and is named by no reference, receiver or
+                    # opaque argument is a binding no callee can reach at all -- the same argument
+                    # the by-value scalar case above makes, applied to the extent instead of the
+                    # value. `proof_collect_aliased_names` records a method receiver, so the
+                    # collection a `push` is called on is excluded by its own use.
+                    local: bool = (any owned in local_extents where owned == root) and not (any existing in aliased where existing == root) and (any candidate in names where candidate == root)
+                    return false if not local and not (any shared in shared_extents where shared == root)
                     return proof_scalar_term_witnessed(expression, facts, 0)
+                Ast::Expr.Array(elements, _):
+                    # A literal collection is a value, not storage. Nothing a callee can reach
+                    # makes `[]` hold something else, so a binding recorded as one keeps that
+                    # record -- subject to the same reachability test on the binding itself that
+                    # every other retained value passes.
+                    for element in elements |facts, names, parameters, aliased, shared_extents, local_extents, depth|:
+                        return false if not proof_expr_call_stable(element, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                    return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, depth + 1)
+                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
-                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, depth + 1)
+                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, depth + 1)
+                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, depth + 1)
+                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
                 _:
                     return false
 
@@ -1154,7 +1176,7 @@ extend ElisaProof:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
             return if not analyzed
             for fact in source |source, facts, names, parameters, report|:
-                continue if not proof_expr_call_stable(fact, source, names, parameters, report.aliased_names, report.shared_extent_names, 0)
+                continue if not proof_expr_call_stable(fact, source, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -1175,7 +1197,7 @@ extend ElisaProof:
             for index in 0..<values.count |index, names, values, facts, parameters, blocked, position|:
                 values[index] <- Ast::Expr.Invalid if index >= names.count
                 continue if index >= names.count
-                retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, report.shared_extent_names, 0)
+                retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, report.shared_extent_names, report.local_extent_names, 0)
                 values[index] <- Ast::Expr.Ident(names[index], position) if not retained
 
         # Give a fresh opaque symbol, at a call boundary, only to the bindings the callee can
@@ -1195,7 +1217,7 @@ extend ElisaProof:
                 continue if index == keep
                 values[index] <- Ast::Expr.Invalid if index >= names.count
                 continue if index >= names.count
-                retained: bool = analyzed and not (any existing in report.aliased_names where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, report.aliased_names, report.shared_extent_names, 0)
+                retained: bool = analyzed and not (any existing in report.aliased_names where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
                 values[index] <- Ast::Expr.Ident(names[index], position) if not retained
 
         # The roots a body assigns, in every nested statement form. Captured blocks nested in the
@@ -1459,7 +1481,7 @@ extend ElisaProof:
             blocked.extend(report.aliased_names)
             blocked.extend(captures)
             for fact in source |source, facts, names, parameters, blocked|:
-                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, 0)
+                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, report.local_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -1481,7 +1503,7 @@ extend ElisaProof:
             for index in 0..<capped |index, values, names, then_values, else_values, then_reaches, else_reaches, facts, parameters, report|:
                 candidate: Ast::Expr = then_values[index] if then_reaches else else_values[index]
                 continue if then_reaches and else_reaches and not proof_expr_equal(then_values[index], else_values[index])
-                continue if not proof_expr_call_stable(candidate, facts, names, parameters, report.aliased_names, report.shared_extent_names, 0)
+                continue if not proof_expr_call_stable(candidate, facts, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
                 values[index] <- candidate
 
         # Re-establish, at a branch join both arms reach, every fact that both arms still hold.
@@ -1494,7 +1516,7 @@ extend ElisaProof:
             return if not analyzed
             for fact in primary |primary, secondary, facts, names, parameters, report|:
                 continue if not (any other in secondary where proof_expr_equal(other, fact))
-                continue if not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, report.shared_extent_names, 0)
+                continue if not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -1509,7 +1531,7 @@ extend ElisaProof:
                 bound_name: sview = proof_type_bound_name(fact)
                 retained: mutable bool = false
                 retained <- true if bound_name != "" and ((any candidate in names where candidate == bound_name) or (any parameter in parameters where parameter == bound_name)) and proof_fact_is_type_bound(report, fact, owner)
-                retained <- true if not retained and analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, report.shared_extent_names, 0)
+                retained <- true if not retained and analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
                 keep.push(retained)
             write_index: mutable usize = 0
             for read_index in 0..<original.count |facts, original, keep, write_index|:
@@ -6238,6 +6260,14 @@ extend ElisaProof:
                         proof_bind_scalar_symbol(names, values, prior_value_count, position) if local_scalar_kind == 1 and unsigned_width <= 0
                         local_witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
                         proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(local_name, position), type_expression, position.line, name, position, &local_witness_budget, 0) if local_scalar_kind != 1
+                        # A local that owns its collection is a binding no callee can name, so its
+                        # extent survives a call the way a by-value scalar does. The entry is
+                        # rewritten on every declaration of the spelling, so a redeclaration to a
+                        # reference type withdraws it rather than inheriting the earlier claim.
+                        proof_drop_local_extent(report, local_name)
+                        local_container: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, report.source_declarations, 0)
+                        if local_container.known and not proof_resource_is_reference_type(type_expression):
+                            report.local_extent_names.push(local_name)
                     Ast::Stmt.Assign(target, operator, initializer, position):
                         target_name: sview = proof_ident_name(target)
                         if target_name != "":
@@ -7100,6 +7130,7 @@ extend ElisaProof:
             # program as soon as one mutable global is declared, rather than trying to decide per
             # call which globals a callee can reach.
             report.shared_extent_names.clear()
+            report.local_extent_names.clear()
             program_has_mutable_global: mutable bool = false
             for annotation in file.enum_annotations |program_has_mutable_global|:
                 program_has_mutable_global <- true if annotation.name == "__global_mutable"

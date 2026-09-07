@@ -252,6 +252,8 @@ run_probe unsigned_place examples/unsigned_place.elisa 0
 run_probe rejected_unsigned_place examples/rejected_unsigned_place.elisa 1
 run_probe literal_extent examples/literal_extent.elisa 0
 run_probe rejected_literal_extent examples/rejected_literal_extent.elisa 1
+run_probe owned_extent examples/owned_extent.elisa 0
+run_probe rejected_owned_extent examples/rejected_owned_extent.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1182,6 +1184,34 @@ for owner in ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_n
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s read a length where no literal states one" % owner)
 print("dogfood literal_extent: an empty literal is empty, and says nothing past that")
+PY
+
+# A collection a local owns outright is a binding no callee can name, so its extent survives a
+# call; a lent one, a reference, and the receiver of a builtin do not.
+python3 - "$REPORT_DIR/owned_extent.json" "$REPORT_DIR/rejected_owned_extent.json" <<'PY'
+import json
+import sys
+
+owned, reachable = sys.argv[1:]
+with open(owned, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: owned extent fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: an owned-extent certificate was left unreplayed")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("an_owned_extent_survives_a_call_that_cannot_reach_it", "an_owned_extent_survives_another_collection_being_grown"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost an extent no callee can reach" % owner)
+with open(reachable, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: owned extent boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_lent_local_loses_its_extent", "a_reference_local_owns_nothing", "a_push_gives_no_new_length", "a_shared_argument_still_loses_the_extent"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s kept an extent a callee can reach" % owner)
+print("dogfood owned_extent: an owned extent survives, a reachable one does not")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

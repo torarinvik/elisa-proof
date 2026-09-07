@@ -2008,6 +2008,26 @@ if [[ "$rejected_literal_extent_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A collection a local owns outright is a binding no callee can name, so its extent survives a call
+# the way a by-value scalar does. Everything a callee can reach loses it.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/owned_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"grow", "an_owned_extent_survives_a_call_that_cannot_reach_it", "an_owned_extent_survives_another_collection_being_grown"}'
+owned_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$owned_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an owned extent did not survive an unreachable call\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_owned_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; refused = ("a_lent_local_loses_its_extent", "a_reference_local_owns_nothing", "a_push_gives_no_new_length", "a_shared_argument_still_loses_the_extent"); assert all(reasons[owner] == "body-unverified" for owner in refused)'
+rejected_owned_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_owned_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an extent was kept for a collection a callee can reach\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
