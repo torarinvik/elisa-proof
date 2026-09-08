@@ -2222,7 +2222,7 @@ if [[ "$shared_extent_loop_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_shared_extent_loop.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-lower-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_mutable_borrow_loses_its_extent"] == "body-unverified"; assert reasons["a_lent_mutable_borrow_loses_it_too"] == "body-unverified"; assert reasons["a_rewritten_argument_loses_the_guard"] == "body-unverified"'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_shared_extent_loop.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_mutable_borrow_loses_its_extent"] == "body-unverified"; assert reasons["a_lent_mutable_borrow_loses_it_too"] == "body-unverified"; assert reasons["a_rewritten_argument_loses_the_guard"] == "body-unverified"'
 rejected_shared_extent_loop_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_shared_extent_loop_status" -ne 0 ]]; then
@@ -2248,6 +2248,27 @@ rejected_replay_literal_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_replay_literal_facts_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a guard over one collection literal was credited to another\n' >&2
+    exit 1
+fi
+
+# `0 <= x` holds under both readings of a fixed-width term, so it needs no wrap proof for a
+# subtraction-free unsigned term and must be decided before the guards that refuse such a term.
+# A width witness over a place has to survive a call, like the scalar witness beside it.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/unsigned_nonnegative_sum.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"grow", "a_sum_is_never_negative", "a_product_is_never_negative", "a_guarded_sum_is_nonnegative", "a_field_and_a_binder", "a_place_width_survives_a_call"}'
+unsigned_nonnegative_sum_status=${PIPESTATUS[1]}
+set -e
+if [[ "$unsigned_nonnegative_sum_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a nonnegativity claim was refused for want of a wrap proof\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_unsigned_nonnegative_sum.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert set(reasons) == {"a_signed_sum_may_be_negative", "an_unguarded_difference_keeps_the_guard", "a_nested_difference_keeps_it_too", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"}; assert all(reason == "body-unverified" for reason in reasons.values())'
+rejected_unsigned_nonnegative_sum_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_unsigned_nonnegative_sum_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: the nonnegativity rule admitted more than nonnegativity\n' >&2
     exit 1
 fi
 

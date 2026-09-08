@@ -137,6 +137,24 @@ extend ElisaProof:
             arguments: darray[Ast::Expr] = [term, Ast::Expr.IntLit(width)]
             return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
 
+        # The place form read as a marker rather than as a width. This is deliberately separate
+        # from `proof_unsigned_marker_info`, which stays bare-name-only so a term containing a
+        # field never falls under the wrap guard. Retention is the other question, and it has to
+        # recognize the place form: a witness whose subject is a place lives and dies with that
+        # place's root binding, exactly as the scalar-type witness beside it does. Without this
+        # the width witness was dropped at the first call while the scalar witness survived, and
+        # `0 <= node.children_start + index` became unprovable for the rest of the body.
+        def proof_unsigned_place_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, width: i64) can[Memory.Allocate, Abort.Panic]:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, Ast::Expr.Invalid, 0) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, Ast::Expr.Invalid, 0) if proof_ident_name(callee) != "__elisa_unsigned_type_bound" or arguments.count != 2
+                    marked: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    return (false, Ast::Expr.Invalid, 0) if not marked.known or marked.value < 8 or marked.value > 64
+                    return (proof_place_root_name(arguments[0], 0) != "", arguments[0], marked.value)
+                _:
+                    return (false, Ast::Expr.Invalid, 0)
+
         def proof_unsigned_place_marker_width(facts: darray[Ast::Expr]&, term: Ast::Expr) -> i64 can[Memory.Allocate, Abort.Panic]:
             width: mutable i64 = 0
             for fact in facts |fact, term, width|:
@@ -242,6 +260,8 @@ extend ElisaProof:
             return proof_place_root_name(scalar.term, 0) if scalar.known
             element: (known: bool, term: Ast::Expr, depth: i64) = proof_element_marker_info(expression)
             return proof_place_root_name(element.term, 0) if element.known
+            place: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_place_marker_info(expression)
+            return proof_place_root_name(place.term, 0) if place.known
             return ""
 
         def proof_place_root_name(expression: Ast::Expr, depth: usize) -> sview:
@@ -1706,6 +1726,45 @@ extend ElisaProof:
         # it only reads the answer the guard already computed. Without it a lower-bound obligation
         # on `start + index` is refused even where the matching upper bound is proved, because no
         # affine tier can name a sum of two terms.
+        # Whether a term is built without subtraction. Every leaf of an arithmetic term one
+        # unsigned atom settles is itself unsigned, because arithmetic between an unsigned operand
+        # and anything else does not typecheck, so every leaf is nonnegative; addition,
+        # multiplication, division, remainder and the shifts all carry nonnegativity forward.
+        # Subtraction is the one operator whose mathematical value can be negative while its
+        # unsigned machine value is not, which is exactly what the wrap guard exists to catch.
+        # Any form this does not name is treated as containing a subtraction.
+        def proof_expr_subtraction_free(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.IntLit(value):
+                    return value >= 0
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Field(_, _, _):
+                    return true
+                Ast::Expr.Tuple(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_subtraction_free(inner, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus
+                    return proof_expr_subtraction_free(operand, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    allowed: bool = operator == TokenKind.Plus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.LShift or operator == TokenKind.RShift
+                    return false if not allowed
+                    return proof_expr_subtraction_free(left, depth + 1) and proof_expr_subtraction_free(right, depth + 1)
+                _:
+                    return false
+
+        # The nonnegativity rule addressed by the whole goal rather than by its operands, so it
+        # can be tried before the wrap guards that would otherwise refuse the goal outright.
+        def proof_unsigned_nonnegative_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_unsigned_nonnegative_goal(left, operator, right, facts)
+                _:
+                    return false
+
         def proof_unsigned_nonnegative_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             zero_left: (known: bool, value: i64) = proof_constant_int(left)
             zero_right: (known: bool, value: i64) = proof_constant_int(right)
@@ -1719,6 +1778,12 @@ extend ElisaProof:
             # A strict goal claims the value is not zero, which no type argument establishes.
             return false if operator == TokenKind.Lt or operator == TokenKind.Gt
             return false if not proof_term_is_unsigned(term, facts, 0)
+            # A subtraction-free unsigned term is nonnegative whether or not it wraps: its machine
+            # value is an unsigned value, and its mathematical value is a subtraction-free
+            # combination of nonnegative leaves. The wrap guard is what a subtraction needs, and
+            # requiring it here refused `0 <= start + index` for two unbounded unsigned terms --
+            # a claim no arithmetic can make false.
+            return true if proof_expr_subtraction_free(term, 0)
             return proof_unsigned_expression_safe(term, facts)
 
         def proof_sum_bound_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
@@ -2332,6 +2397,13 @@ extend ElisaProof:
                 left_facts.push(disjunction_left)
                 right_facts.push(disjunction_right)
                 return proof_goal_depth(left_facts, goal, annotations, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(right_facts, goal, annotations, depth, budget, split_depth + 1, exhausted)
+            # Nonnegativity is decided before the wrap guards below. It is the one claim that
+            # holds under both readings of a fixed-width term -- an unsigned machine value is
+            # nonnegative, and so is a subtraction-free combination of nonnegative leaves -- and
+            # it consumes no premise: only the type markers, which state declared types rather
+            # than values. Behind the guards it was unreachable, because a guard written over the
+            # same sum leaves a premise the guard itself refuses.
+            return true if proof_unsigned_nonnegative_shape(facts, goal)
             # Signed decision procedures consume premises as well as the goal.
             # A true wrapping premise may be false over integers; treating it as
             # such can discard every actual execution and prove an arbitrary goal.

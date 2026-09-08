@@ -3811,6 +3811,84 @@ literal under a guard, so its numbers are identical either way, gaps included. T
 matters here is the fixture pair -- seven gaps closed, none opened -- and the reason to record it
 is that a user writing three lines of ordinary code hit a gap the corpus never would.
 
+## Nonnegativity does not need a wrap proof
+
+### What was wrong
+
+`0 <= x` was the most-refused obligation in the corpus after the index upper bounds: 38 of the 47
+open `index-lower` findings were of that exact shape over a subtraction-free unsigned term. Two
+separate mechanisms refused them.
+
+The first is the rule itself. `proof_unsigned_nonnegative_goal` required
+`proof_unsigned_expression_safe`, a proof that the term cannot wrap, before it would conclude the
+term is nonnegative. That premise belongs to a subtraction and to nothing else. Every leaf of an
+arithmetic term that one unsigned atom settles is itself unsigned -- arithmetic between an unsigned
+operand and anything else does not typecheck -- so every leaf is nonnegative, and addition,
+multiplication, division, remainder and the shifts all carry nonnegativity forward. `start + index`
+is nonnegative whether or not it wrapped: its machine value is an unsigned value, and its
+mathematical value is a sum of nonnegative numbers. Only subtraction has a mathematical value that
+can be negative while its unsigned machine value is not, which is exactly the case the guard exists
+for.
+
+The second is placement. `proof_goal_depth` refuses a goal, and refuses every *premise*, that is
+not wrap-safe, before any rule runs. That guard is right for the tiers below it, which read terms
+as mathematical values. But a body that guards an index writes the guard over the same sum the
+index uses, so the premise the goal needs is the premise the guard rejects, and the nonnegativity
+rule was unreachable in exactly the bodies that needed it. A four-line probe shows it: with the
+guard written as `return 0 if start + index >= values.count`, the lower bound on `start + index`
+was refused, and with the same guard written in the difference form the engine does support it was
+refused just the same, because a *premise* now named the subtraction.
+
+Third, and smaller: a width witness whose subject is a place -- `node.children_start` rather than a
+bare name -- was invisible to the retention rule, because the marker reader it goes through is
+deliberately bare-name-only so that a term containing a field never falls under the wrap guard.
+Retention is a different question from width, and the place form has to be recognized there: the
+witness depends on its subject's root binding, exactly as the scalar-type witness beside it does.
+So the width witness was discarded at the first call while the scalar witness survived, and a place
+stopped being unsigned for the rest of the body.
+
+### What changed
+
+`proof_expr_subtraction_free` names the forms that carry nonnegativity: a nonnegative literal, a
+name, a place, a loop binder, and the six arithmetic operators other than subtraction. Anything it
+does not name counts as containing a subtraction.
+
+`proof_unsigned_nonnegative_goal` concludes without the wrap premise for such a term, and
+`proof_unsigned_nonnegative_shape` addresses the same rule by the whole goal so it can be tried
+before the wrap guards rather than behind them. `proof_unsigned_place_marker_info` reads the place
+form of the width marker, and `proof_type_marker_root_name` uses it, so retention follows the
+place's root. Each has a kernel mirror: `proof_kernel_replay_subtraction_free` and
+`proof_kernel_replay_unsigned_nonnegative_shape`, placed at the matching point before the kernel's
+own premise and goal guards.
+
+### Fixtures
+
+`examples/unsigned_nonnegative_sum.elisa`: the bare claim over two unbounded unsigned terms, the
+same over a product and a shift, the claim under a guard, a struct field as the leaf, and a place
+whose width witness has to survive a call. The baseline refuses three of the six.
+`examples/rejected_unsigned_nonnegative_sum.elisa`: a signed sum, an unguarded unsigned difference,
+a difference nested under an addition, a strict `0 < x`, a bound `x < 10` over a sum that may wrap,
+and that same sum used as an index. All six stay refused, which is the point: the relaxation admits
+one claim about one shape and nothing else about the same term.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`:
+
+| | before | after |
+| --- | --- | --- |
+| obligations | 2039 | 2047 |
+| proven | 1501 | 1522 |
+| findings | 548 | 535 |
+| `index-lower-unproven` | 47 | 28 |
+| replay gaps | 0 | 0 |
+| verified functions | 121 | 121 |
+
+Obligations rise by eight because a body that gets past its index obligations reaches statements
+whose obligations were never posed before; `function-summary-unverified` and
+`recursive-summary-unsupported` account for the whole of that. `index-upper-unproven` is unchanged
+at 147, `trusted_assumptions` stays empty, and no function that verified before stopped verifying.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
