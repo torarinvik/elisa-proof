@@ -4143,6 +4143,70 @@ written over places. Binding such a local to its own symbol, the way `proof_bind
 already does for an unsigned scalar, is what would make those facts places again, and the kernel is
 built out of exactly that shape.
 
+## An aggregate local kept its initializer, so the places under it were not places
+
+### What was wrong
+
+A local's recorded value is its initializer, substituted. For a scalar that is what makes equality
+reasoning work. For a container, a tuple or a struct whose initializer is a *call*, it is a defect:
+the value is `<call>`, so every later `values.count` is recorded over `<call>.count` and every
+`located.node` over `<call>.node`. Those have no place root, and the extent, alias and stability
+rules are all written over places. An index into such a local was not merely unproven -- it was
+reported `index-bounds-opaque` and given no obligation at all.
+
+The previous entry found this by instrumenting the restore decision, which reported `no place root`
+for exactly these terms. It is the shape the kernel is built out of: `located: (known, node) =
+node_at(...)` and `values: mutable darray = []` followed by a fill appear in nearly every function.
+
+### What changed
+
+A local whose declared type is not a primitive scalar and whose initializer contains a call is
+bound to its own symbol, the way `proof_bind_unsigned_symbol` already binds an unsigned scalar. The
+equality with the call was never usable for an aggregate: nothing folds it, and an opaque callee's
+result is not a value this state models. What the symbol buys is that the places under it are
+places.
+
+### Fixtures
+
+`examples/aggregate_local_symbol.elisa`: a container local from a call, a struct local from a call,
+and a loop over a container local from a call. All three verify; all three are `index-bounds-opaque`
+before the change, with no obligation issued.
+`examples/rejected_aggregate_local_symbol.elisa`: an unguarded index on such a local, a guard over a
+different collection, an `ensure` that would need the callee's result value, and a local rebound
+after its guard. All four stay refused -- the symbol makes places readable and says nothing about
+the value.
+
+Two existing fixtures changed shape rather than verdict. `branch_conjunct_placeholder` and its
+rejected twin produced their placeholder by declaring a local from a call, which is now a place, so
+the condition they were built around became admissible. They produce it by a rebinding instead --
+an assignment still leaves the call as the value -- and the accepted one gains a companion function
+recording that the declaration form is now readable.
+
+### What it bought, and why two numbers go down
+
+On `examples/kernel_replay_standalone.elisa`:
+
+| | before | after |
+| --- | --- | --- |
+| obligations | 2053 | 2027 |
+| proven | 1524 | 1512 |
+| findings | 539 | 525 |
+| `index-upper-unproven` | 147 | 133 |
+| replay gaps | 0 | 0 |
+| verified functions | 122 | 122 |
+
+Obligations and proven both fall, which needs saying plainly rather than reporting the finding count
+alone. Twenty-six index obligations disappear, in matched lower/upper pairs, at five functions. They
+are duplicates: every one of them is at a `(function, line, rule)` that still carries at least one
+goal afterwards, checked exhaustively rather than by sampling -- `difference_comparison` line 965
+goes from eight pairs to two, `tactic_step_impl` line 2294 from four to one, and no site drops to
+zero. The same index was being posed once per substituted form of its collection; with the
+collection a stable symbol, the forms coincide.
+
+Coverage moves the other way, which two probes show directly: an index into a container local from
+a call goes from `index-bounds-opaque` with no goal to a real lower/upper pair, and an unguarded one
+is still reported. Fourteen fewer failing findings for the same code, none of them silenced.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

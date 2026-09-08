@@ -284,6 +284,8 @@ run_probe confined_lend_extent examples/confined_lend_extent.elisa 0
 run_probe rejected_confined_lend_extent examples/rejected_confined_lend_extent.elisa 1
 run_probe confined_lend_across_calls examples/confined_lend_across_calls.elisa 0
 run_probe rejected_confined_lend_across_calls examples/rejected_confined_lend_across_calls.elisa 1
+run_probe aggregate_local_symbol examples/aggregate_local_symbol.elisa 0
+run_probe rejected_aggregate_local_symbol examples/rejected_aggregate_local_symbol.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1635,6 +1637,31 @@ for owner in ("an_escaping_lend_loses_the_range", "the_body_lends_the_collection
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s kept a fact across a call that reaches it" % owner)
 print("dogfood confined_lend_across_calls: a call restores what it could not reach, and no more")
+PY
+
+# An aggregate local from a call keeps its own symbol, so the places under it stay places.
+python3 - "$REPORT_DIR/aggregate_local_symbol.json" "$REPORT_DIR/rejected_aggregate_local_symbol.json" <<'PY'
+import json
+import sys
+
+places, owed = sys.argv[1:]
+with open(places, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: aggregate local fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_container_local_from_a_call", "a_struct_local_from_a_call", "a_loop_over_a_call_local"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost the places under an aggregate local" % owner)
+with open(owed, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: aggregate local boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("an_unguarded_index_is_still_owed", "a_guard_over_another_collection", "a_field_is_not_a_claim", "a_rebound_local_loses_its_guard"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s read a claim out of an aggregate local's symbol" % owner)
+print("dogfood aggregate_local_symbol: an aggregate local's places are places, and its symbol claims nothing")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

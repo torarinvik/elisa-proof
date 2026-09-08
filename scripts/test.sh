@@ -2335,6 +2335,28 @@ if [[ "$rejected_confined_lend_across_calls_status" -ne 0 ]]; then
     exit 1
 fi
 
+# An aggregate local kept its initializer as its value, so a call initializer made every place under
+# it -- `values.count`, `located.node` -- a term with no place root, and an index into it was
+# reported opaque rather than given an obligation. The symbol makes them places; it states nothing
+# about the value, and every obligation the old spelling owed is still owed.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/aggregate_local_symbol.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"affine_of", "make", "a_container_local_from_a_call", "a_struct_local_from_a_call", "a_loop_over_a_call_local"}'
+aggregate_local_symbol_status=${PIPESTATUS[1]}
+set -e
+if [[ "$aggregate_local_symbol_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a place under an aggregate local was not a place\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_aggregate_local_symbol.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-bounds-opaque", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["an_unguarded_index_is_still_owed"] == "body-unverified"; assert reasons["a_guard_over_another_collection"] == "body-unverified"; assert reasons["a_field_is_not_a_claim"] == "body-unverified"; assert reasons["a_rebound_local_loses_its_guard"] == "body-unverified"'
+rejected_aggregate_local_symbol_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_aggregate_local_symbol_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an aggregate local symbol claimed something about its value\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
