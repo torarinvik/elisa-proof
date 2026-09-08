@@ -2293,6 +2293,27 @@ if [[ "$rejected_negated_guard_range_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A lend that cannot outlive its call leaves nothing a later call could reach, so a loop entered
+# afterwards keeps the binding. It is still a write during its own call, and a callee that can keep
+# it -- through a parameter or a return whose type can hold a reference -- keeps the old answer.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/confined_lend_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"fill", "read_only", "a_confined_lend_before_a_loop", "a_shared_lend_before_a_loop", "two_confined_lends"}'
+confined_lend_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$confined_lend_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a lend that ends with its call still forgot a loop binding\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_confined_lend_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_leaked_lend_loses_the_extent"] == "body-unverified"; assert reasons["a_returned_lend_loses_it_too"] == "body-unverified"; assert reasons["a_confined_lend_still_writes"] == "body-unverified"; assert reasons["a_lend_inside_the_loop"] == "body-unverified"'
+rejected_confined_lend_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_confined_lend_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a lend that can outlive its call was treated as confined\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

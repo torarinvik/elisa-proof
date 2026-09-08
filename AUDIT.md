@@ -3421,6 +3421,17 @@ compiles. So a loop invariant cannot appear in any compiled source of this proje
 `loop-invariant-missing` finding in the kernel names a fact that cannot be stated where it is
 needed.
 
+One detail explains how the wrong guess survived a compile, and is worth recording so the next
+reading does not repeat it. The backend declines the *body*; it reports that only when something
+still references it:
+
+    error: backend could not produce a linkable unit; declined 1: scan@4 (contract statement)
+    note: emitted functions still reference declined bodies; the object was not written
+
+A function nothing calls is dropped without a word and the command exits 0. So a probe that adds an
+invariant to an unused function measures nothing. Only the loop clause is refused: a header
+`requires` and `ensure` compile, and so does an `assert` statement in the body.
+
 ### What changed
 
 Both loops are downward scans whose index bound is exactly what an invariant would have supplied.
@@ -3952,6 +3963,74 @@ measurement was the test of the hypothesis, and zero meant the hypothesis was wr
 hypothesis about the corpus. It is a capability the fixture demonstrates directly -- the commonest
 guard form in the language, unreadable before and readable after -- and the corpus reads zero only
 because the kernel happens to write its own range checks the other way.
+
+## A lend that ends with its call is not an alias afterwards
+
+### What was wrong
+
+`proof_collect_aliased_names` records a binding as aliased the moment anything in the frame lends
+it, and never withdraws that. Loop entry then merges the whole frame's aliased set into the names it
+resymbolizes, on the argument that a reference held in another binding may still reach it. So a
+collection lent once, anywhere in the body, lost its extent at every loop afterwards -- and with it
+the loop's own range fact, which is the premise every index into that collection needs.
+
+The argument is right only when the lend can outlive the call it was passed to.
+
+### Where the boundary actually is
+
+Three probes compiled against `elisac-stage1`, not an argument about the language:
+
+| callee | lend escapes |
+| --- | --- |
+| second parameter `mutable darray[darray[usize]&]&`, `sink.push(values)` | **yes**, accepted |
+| by-value return `darray[darray[usize]&]` holding it | **yes**, accepted |
+| plain struct field assignment | no, refused by the region checker |
+
+So "returns no reference" is not enough, and neither is "has exactly one reference parameter". What
+decides it is whether any place the callee can store into, that its caller still sees, has a type
+able to hold a reference: its other parameters' storage, and its return.
+
+### What changed
+
+`proof_type_is_reference_free` answers that over declared types -- primitives, `sview`, a const
+enum, a tuple, a `darray`/`view`/`set`/`array` element, and a struct all of whose fields answer the
+same -- and is conservative everywhere else: an unresolvable name, an ambiguous alias, a form it does
+not recognize, and a type too deep all count as able to hold a reference. The function table records
+it per parameter, over the type with an outer reference stripped, because what matters is the
+storage the parameter names rather than the reference to it.
+
+`proof_call_lend_is_confined` reads that, and refuses outright a callee that declares a lifetime
+parameter, returns a reference, or returns a region -- the three ways a callee names something
+longer-lived than its own call. The rule is withdrawn from a program that declares a mutable global,
+since that is a place a callee reaches without being handed anything.
+
+The result goes into a *second* set, `report.escaping_names`, and only loop entry reads it.
+`aliased_names` is unchanged and every call-site rule still reads that one, because a confined lend
+is still a write during its own call. Getting this wrong is not theoretical: an earlier attempt
+narrowed the call-site rules too, and the fixture immediately showed a binding keeping the value it
+had before the call that appended to it.
+
+### Fixtures
+
+`examples/confined_lend_extent.elisa`: a lend before a loop, a shared lend, and two bindings lent to
+the same callee. The baseline loses four index bounds across them; all three functions verify now.
+`examples/rejected_confined_lend_extent.elisa`: the two escapes above, a lend inside the loop body,
+and a fact taken before a confined lend that must not survive the call it was taken before. All four
+stay refused.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: nothing at all. Obligations 2053, proven 1524,
+findings 539, gaps 0, verified 122 -- every number identical before and after, and no bucket moved.
+
+The reason is worth recording, because it names the next piece of work rather than excusing this
+one. Loop entry is only half of where the aliased set is read. The other half is call stability: a
+fact over the binding still dies at the next call *inside* the loop body, because
+`proof_clear_facts_after_call` reads `aliased_names`, and it must, since the lending call itself is
+one of the calls it has to account for. Narrowing that safely means telling each clearing site which
+expression's call it follows, so the lends of *that* statement can be blocked while the rest are not.
+Until that is done the kernel's loops, whose bodies all call something, keep losing the fact at the
+call rather than at the loop head -- which is exactly what the corpus is reporting by not moving.
 
 ## Coverage still required
 
