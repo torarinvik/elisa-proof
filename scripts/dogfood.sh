@@ -272,6 +272,8 @@ run_probe nested_extent examples/nested_extent.elisa 0
 run_probe rejected_nested_extent examples/rejected_nested_extent.elisa 1
 run_probe value_root_field examples/value_root_field.elisa 0
 run_probe rejected_value_root_field examples/rejected_value_root_field.elisa 1
+run_probe shared_extent_loop examples/shared_extent_loop.elisa 0
+run_probe rejected_shared_extent_loop examples/rejected_shared_extent_loop.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1474,6 +1476,33 @@ for owner in ("a_field_of_a_mutable_reference_does_not_survive", "a_field_of_a_s
         raise SystemExit("dogfood failed: %s kept a field of a reference across a call" % owner)
 print("dogfood value_root_field: a field of an owned binding survives a call, a reference's does not")
 PY
+
+# A shared borrow cannot be resized for the borrow's lifetime, so a loop keeps the guard taken
+# over its count. A mutable borrow and a rewritten scalar argument must still lose it.
+python3 - "$REPORT_DIR/shared_extent_loop.json" "$REPORT_DIR/rejected_shared_extent_loop.json" <<'PY'
+import json
+import sys
+
+kept, moved = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: shared extent fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_shared_borrow_keeps_its_extent", "a_later_lend_does_not_reach_backwards", "a_lend_inside_the_loop"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost a shared borrow's extent at loop entry" % owner)
+with open(moved, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: shared extent boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_mutable_borrow_loses_its_extent", "a_lent_mutable_borrow_loses_it_too", "a_rewritten_argument_loses_the_guard"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s kept a guard over a quantity the loop can move" % owner)
+print("dogfood shared_extent_loop: a shared borrow keeps its extent through a loop, a mutable one does not")
+PY
+
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
 # scalar nothing references keeps its value, a referenced one and a value over it do not.

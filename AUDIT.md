@@ -3683,6 +3683,82 @@ audit whose explanations drift is worth less than one that records only what it 
 files that produce the table above run in seconds; the next attempt should start by widening the
 matrix rather than by reasoning from three rows.
 
+## The summary-provenance question, answered: a shared borrow keeps its extent through a loop
+
+### What the last three entries were chasing
+
+Three entries asked why a callee's summary -- `not f(...) or p`, the fact that carries a range
+guard -- does not survive to the loop that needs it. Each looked at the call boundary, added a
+witness there, measured zero, and reverted. The corpus numbers were sound and the explanations
+were not, which the last entry said plainly.
+
+The cause is not at the call boundary. Six probes over one shape, each running in seconds:
+
+| intervening statement | guard survives |
+| --- | --- |
+| none | yes |
+| a call to a contract-less callee | yes |
+| a call to a callee with an `ensure` | yes |
+| a call taking an unrelated collection | yes |
+| a call taking a *scalar* read off the guarded collection | yes |
+| a call taking the guarded collection itself | **no** |
+
+Only the last row fails, and what distinguishes it is not the call: it is that lending the
+collection anywhere in the frame puts its name in `report.aliased_names`, and
+`proof_forget_loop_entry` merges that whole set into the names it resymbolizes at loop entry. The
+guard was purged by the *loop*, not by the call. Every earlier probe had a loop in it, which is why
+the call boundary looked like the site.
+
+### What changed
+
+Two things, both narrow.
+
+`proof_forget_loop_entry` now adds the frame's shared-borrow parameters to its extent-safe set. A
+shared borrow cannot be written through for its lifetime, and the compiler's borrow rule means no
+mutable path to the same object coexists with it, so no statement of the loop body -- element
+write, whole assignment or call -- can change `name.count` for a parameter bound by one. This is
+the claim `proof_expr_call_stable` already makes for the same parameters, applied to an iteration
+instead of to a call. The set is already emptied for a program that declares a mutable global,
+which is the one way a callee could reach the object by another path, and the spelling must still
+denote that parameter, so a local that shadows it is excluded.
+
+`proof_expr_extent_stable` gained a call arm, and the entry facts are threaded in as its witness
+set. A call term denotes one value when a pure-call witness says the callee is verified, total and
+pure over witnessed arguments; if every argument is extent-stable across an iteration, so is the
+call. Without this the guard itself -- a call -- could never be restored even once its arguments
+were known to be stable.
+
+The call-stability rule gained the matching call arm at the same time, so a guard also survives an
+intervening call once its extent is known: a scalar-term marker is worth what its subject term is
+worth, and an ordinary call term is stable when it is witnessed and its arguments are stable.
+
+### Fixtures
+
+`examples/shared_extent_loop.elisa`: the collection is lent to a callee before the loop, after the
+loop, and inside the loop body on every iteration. All three keep the guard.
+`examples/rejected_shared_extent_loop.elisa`: a mutable borrow a callee empties on each iteration,
+a mutable borrow lent before the loop, and a scalar argument of the guard that the loop rewrites.
+All three lose it, which is the correct answer in each case.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`, measured against the same corpus before and after:
+
+| | before | after |
+| --- | --- | --- |
+| obligations | 2039 | 2039 |
+| proven | 1495 | 1501 |
+| findings | 554 | 548 |
+| `index-upper-unproven` | 153 | 147 |
+| replay gaps | 0 | 0 |
+| verified functions | 121 | 121 |
+
+Every other finding bucket is unchanged, `trusted_assumptions` stays empty, and no function that
+verified before stopped verifying. Six index obligations is a small number for a question three
+entries went after; what the change is worth is that the question is now answered rather than
+narrowed, and the answer is a rule with a stated justification rather than a witness moved around
+until something moved.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

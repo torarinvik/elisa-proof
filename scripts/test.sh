@@ -2208,6 +2208,29 @@ if [[ "$rejected_value_root_field_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A shared borrow's extent is fixed for the borrow's lifetime, so a loop cannot change it and the
+# guard taken over `name.count` still holds on every iteration. Lending the collection anywhere in
+# the frame used to purge that guard at loop entry. Every other way the guarded quantity can move
+# -- a mutable borrow, a rewritten scalar argument -- must still lose it.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/shared_extent_loop.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"range_valid", "reads", "a_shared_borrow_keeps_its_extent", "a_later_lend_does_not_reach_backwards", "a_lend_inside_the_loop"}'
+shared_extent_loop_status=${PIPESTATUS[1]}
+set -e
+if [[ "$shared_extent_loop_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a shared borrow lost its extent at loop entry\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_shared_extent_loop.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-lower-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_mutable_borrow_loses_its_extent"] == "body-unverified"; assert reasons["a_lent_mutable_borrow_loses_it_too"] == "body-unverified"; assert reasons["a_rewritten_argument_loses_the_guard"] == "body-unverified"'
+rejected_shared_extent_loop_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_shared_extent_loop_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a moving extent or argument kept its guard at loop entry\n' >&2
+    exit 1
+fi
+
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

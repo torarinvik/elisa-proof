@@ -1160,6 +1160,21 @@ extend ElisaProof:
                     for element in elements |facts, names, parameters, aliased, shared_extents, local_extents, depth|:
                         return false if not proof_expr_call_stable(element, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
                     return true
+                Ast::Expr.Call(_, arguments, _, _):
+                    # A scalar-term marker is a statement about a term's *type*, so it is worth
+                    # exactly what the term's identity is worth: if the term still denotes the same
+                    # value after the call, the type statement about it still holds.
+                    marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+                    return proof_expr_call_stable(marker.term, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) if marker.known
+                    # An ordinary call term keeps its value across another call when a pure-call
+                    # witness says it denotes one value, and its arguments are themselves stable
+                    # so the same text still names the same arguments. This is what carries a
+                    # callee's summary -- `not f(...) or p` -- past the next call in the body,
+                    # together with the witness recorded beside that fact when it is built.
+                    return false if not proof_scalar_term_witnessed(expression, facts, 0)
+                    for argument in arguments |facts, names, parameters, aliased, shared_extents, local_extents, depth|:
+                        return false if not proof_expr_call_stable(argument, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                    return true
                 Ast::Expr.Paren(inner, _):
                     return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
@@ -1335,7 +1350,7 @@ extend ElisaProof:
         # extent-preserved name read exactly as `name.count` -- `xs[i]` and `xs` itself are not
         # stable under an element write, and only a bare identifier's count is: `h.items.count`
         # would need `h.items` itself to be the preserved root, which this does not claim.
-        def proof_expr_extent_stable(expression: Ast::Expr, written: darray[sview]&, extent_safe: darray[sview]&, depth: usize) -> bool:
+        def proof_expr_extent_stable(expression: Ast::Expr, written: darray[sview]&, extent_safe: darray[sview]&, witnesses: darray[Ast::Expr]&, depth: usize) -> bool:
             return false if depth >= 64
             match expression:
                 Ast::Expr.IntLit(_):
@@ -1361,23 +1376,38 @@ extend ElisaProof:
                         # `state.b[i]` lost its own range fact.
                         base_root: sview = proof_place_root_name(object, 0)
                         return true if base_root != "" and (any candidate in extent_safe where candidate == base_root)
-                    return proof_expr_extent_stable(object, written, extent_safe, depth + 1)
+                    return proof_expr_extent_stable(object, written, extent_safe, witnesses, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    return proof_expr_extent_stable(inner, written, extent_safe, depth + 1)
+                    return proof_expr_extent_stable(inner, written, extent_safe, witnesses, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
-                    return proof_expr_extent_stable(operand, written, extent_safe, depth + 1)
+                    return proof_expr_extent_stable(operand, written, extent_safe, witnesses, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_extent_stable(left, written, extent_safe, depth + 1) and proof_expr_extent_stable(right, written, extent_safe, depth + 1)
+                    return proof_expr_extent_stable(left, written, extent_safe, witnesses, depth + 1) and proof_expr_extent_stable(right, written, extent_safe, witnesses, depth + 1)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_expr_extent_stable(condition, written, extent_safe, depth + 1) and proof_expr_extent_stable(then_expression, written, extent_safe, depth + 1) and proof_expr_extent_stable(else_expression, written, extent_safe, depth + 1)
+                    return proof_expr_extent_stable(condition, written, extent_safe, witnesses, depth + 1) and proof_expr_extent_stable(then_expression, written, extent_safe, witnesses, depth + 1) and proof_expr_extent_stable(else_expression, written, extent_safe, witnesses, depth + 1)
+                Ast::Expr.Call(_, arguments, _, _):
+                    # A scalar-term marker states a term's type, so it is worth what the term's
+                    # identity is worth: the same term over the same values has the same type.
+                    marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+                    return proof_expr_extent_stable(marker.term, written, extent_safe, witnesses, depth + 1) if marker.known
+                    # An ordinary call term denotes one value when a pure-call witness recorded at
+                    # loop entry says so: the callee is verified total and pure, so its result is
+                    # a function of its arguments alone. If every argument still denotes the same
+                    # value after an iteration, so does the call. This is what carries a guard --
+                    # `range_valid(node.start, node.count, xs.count)` and the summary implied by
+                    # it -- into a loop that only reads `xs`.
+                    return false if not proof_scalar_term_witnessed(expression, witnesses, 0)
+                    for argument in arguments |written, extent_safe, witnesses, depth|:
+                        return false if not proof_expr_extent_stable(argument, written, extent_safe, witnesses, depth + 1)
+                    return true
                 _:
                     return false
 
         def proof_restore_extent_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, written: darray[sview]&, extent_safe: darray[sview]&) -> void:
             return if extent_safe.count == 0
             for fact in source |fact, facts, written, extent_safe|:
-                continue if not proof_expr_extent_stable(fact, written, extent_safe, 0)
+                continue if not proof_expr_extent_stable(fact, written, extent_safe, source, 0)
                 duplicate: mutable bool = false
                 for existing in facts |existing, fact, duplicate|:
                     duplicate <- true if proof_expr_equal(existing, fact)
@@ -1428,6 +1458,19 @@ extend ElisaProof:
                 continue if any existing in body_aliased where existing == candidate
                 continue if reaches_beyond_itself and (any existing in report.aliased_names where existing == candidate)
                 proof_push_aliased(&extent_safe, candidate)
+            # A shared borrow's extent is fixed for the borrow's lifetime: nothing may write
+            # through it, and the compiler's borrow rule means no mutable path to the same object
+            # coexists with it. So no statement of the loop body -- element write, whole
+            # assignment or call -- can change `name.count` for a parameter bound by one. This is
+            # the claim the call-stability rule already makes for the same parameters, applied to
+            # an iteration instead of a call, and `shared_extent_names` is already empty for a
+            # program that declares a mutable global, which is the one way a callee could reach
+            # the object by another path. The spelling must still denote that parameter: a local
+            # that shadows it is a different binding with its own extent.
+            if report.aliased_owner == owner and owner != "":
+                for shared in report.shared_extent_names |extent_safe, names, parameters|:
+                    continue if not proof_current_parameter(names, parameters, shared)
+                    proof_push_aliased(&extent_safe, shared)
             entry_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
             for target in written |names, values, facts, report, owner, position|:
                 continue if not (any candidate in names where candidate == target)
@@ -4281,6 +4324,7 @@ extend ElisaProof:
                             _:
                                 ensured <- proof_substitute(ensured, result_names, result_values)
                         proof_add_function_summary_fact(facts, report, ensured, position.line, name, function_name, parameter_names, argument_values, result_value, require_goal_ids, ensure_index)
+                        proof_add_pure_call_witnesses(result_value, facts, functions, report, position.line, name, 0)
                     return true
                 _:
                     return false
