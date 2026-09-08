@@ -278,6 +278,8 @@ run_probe replay_literal_facts examples/replay_literal_facts.elisa 1
 run_probe rejected_replay_literal_facts examples/rejected_replay_literal_facts.elisa 1
 run_probe unsigned_nonnegative_sum examples/unsigned_nonnegative_sum.elisa 0
 run_probe rejected_unsigned_nonnegative_sum examples/rejected_unsigned_nonnegative_sum.elisa 1
+run_probe negated_guard_range examples/negated_guard_range.elisa 0
+run_probe rejected_negated_guard_range examples/rejected_negated_guard_range.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1554,6 +1556,31 @@ for owner in ("a_signed_sum_may_be_negative", "an_unguarded_difference_keeps_the
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s was admitted by the nonnegativity rule" % owner)
 print("dogfood unsigned_nonnegative_sum: an unsigned sum is nonnegative without a wrap proof, and bounds nothing")
+PY
+
+# A negated guard is an order, and its complement is all it is.
+python3 - "$REPORT_DIR/negated_guard_range.json" "$REPORT_DIR/rejected_negated_guard_range.json" <<'PY'
+import json
+import sys
+
+read, refused = sys.argv[1:]
+with open(read, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: negated guard fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_negated_range_check", "the_same_check_as_a_condition", "two_places"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s could not read its own guard" % owner)
+with open(refused, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: negated guard boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_negated_struct_order_does_not_chain", "a_negated_struct_order_gives_no_strict_chain", "a_negated_modular_guard_bounds_nothing", "a_negated_equality_is_not_an_order"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s read more than a complement off a negation" % owner)
+print("dogfood negated_guard_range: an early-return guard is an order, and its complement is all of it")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

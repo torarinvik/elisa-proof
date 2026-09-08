@@ -3889,6 +3889,70 @@ whose obligations were never posed before; `function-summary-unverified` and
 `recursive-summary-unsupported` account for the whole of that. `index-upper-unproven` is unchanged
 at 147, `trusted_assumptions` stays empty, and no function that verified before stopped verifying.
 
+## A guard reaches the code after it negated, and nothing could read it
+
+### What was wrong
+
+`return 0 if start > values.count` is how a guard is written in this language, and the statements
+after it see `not (start > values.count)`. Every rule built on the order query read only the
+positive spelling. The affine tiers do normalize a negation, but they name one bare identifier, so
+an order stated between a place and a name -- `start <= values.count`, the premise every range
+check turns on -- was stated and unreadable.
+
+The measurement is a three-function probe. The same range check, written three ways:
+
+| spelling | verified |
+| --- | --- |
+| `return values[start + index] if start <= values.count and index < values.count - start` | yes |
+| `return 0 if not (start <= values.count)` … | yes |
+| `return 0 if start > values.count` … | **no** |
+
+The second row passes because a double negation is folded away before the facts are recorded. The
+third is the ordinary form, and it was the one that failed.
+
+### What changed
+
+`proof_readable_order` returns the order a fact states, seeing through one negation, and
+`proof_has_order_fact` and `proof_sum_witness_for` read their facts through it. Reading
+`not (x > n)` as `x <= n` is the totality of the primitive order, so both operands must carry a
+primitive scalar witness; a positive fact needs none, since it is used as itself with no inference
+over its operator. The subtraction-safety tier already carried the bare-name type markers alongside
+its collected orders so that gate could be answered there; it now carries the place-form markers
+too, or the witness could not be established for `values.count`.
+
+`proof_kernel_replay_readable_order` mirrors it, and the kernel's own subtraction-safety tier
+carries the markers the same way. Both halves were needed: with only the producer half the fixture
+proved and gapped, which is the kernel doing its job.
+
+Complementarity is available even for a struct, and the fixture says so rather than assuming
+otherwise: the compiler derives all four ordering operators from a single
+`__cmp__(self, other) -> i64` compared against zero, so `not (p > q)` and `p <= q` are the same
+predicate over the same call. The witness requirement is therefore stricter than the language
+demands, which is the safe direction and costs nothing measured. What a negation does not give is
+transitivity, and two negated struct steps still compose to nothing.
+
+### Fixtures
+
+`examples/negated_guard_range.elisa`: the difference-form range check written with early returns,
+the same check written as an `if` condition so the two spellings must agree, and a guard over a
+struct field on both sides. The baseline proves one of the three.
+`examples/rejected_negated_guard_range.elisa`: two negated struct orders chained, the modular form
+`start + index >= values.count` whose negation bounds nothing about a sum that may have wrapped,
+and a negated equality, which is not an order at all. All four stay refused.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: proven 1522 to 1524, obligations 2047 to 2053,
+verified functions 121 to 122, gaps 0, `trusted_assumptions` empty, nothing lost. The one function
+that newly verifies is the helper this change adds, and `index-upper-unproven` is unchanged at 147.
+
+That is a corpus effect of approximately zero, and it is worth saying why this was kept when two
+earlier zero-measuring changes were reverted. Those were hypotheses about a corpus cluster: the
+measurement was the test of the hypothesis, and zero meant the hypothesis was wrong. This is not a
+hypothesis about the corpus. It is a capability the fixture demonstrates directly -- the commonest
+guard form in the language, unreadable before and readable after -- and the corpus reads zero only
+because the kernel happens to write its own range checks the other way.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

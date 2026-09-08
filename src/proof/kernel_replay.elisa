@@ -491,6 +491,11 @@ module ElisaProofKernelReplay:
                     readable: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
                     for fact in readable |nodes, orders|:
                         proof_kernel_replay_collect_unsigned_orders(nodes, fact, &orders, 0)
+                    # Mirror: the order tier is gated on its operands' primitive type witness,
+                    # which is a type statement rather than an order fact. Carry the markers
+                    # across with the orders; they are inert for every bound collector.
+                    for fact in facts |nodes, orders|:
+                        orders.push(fact) if proof_kernel_replay_type_marker_callee(nodes, fact)
                     # Mirror: the order may be stated between two places, which the affine
                     # tiers cannot name. A collected order contains no arithmetic.
                     return true if proof_kernel_replay_has_order_fact(nodes, children, node.right, node.left, false, orders)
@@ -2926,43 +2931,60 @@ module ElisaProofKernelReplay:
                 proof_kernel_replay_push_conjuncts(nodes, fact, &conjuncts, 0)
             return conjuncts
 
+        def proof_kernel_replay_is_order_operator(operator: sview) -> bool:
+            return operator == "<" or operator == "<=" or operator == ">" or operator == ">="
+
+        # Mirror: the order a fact states, seeing through the negation an early-return guard leaves
+        # behind. Reading `not (x > n)` as `x <= n` is the totality of the primitive order, which a
+        # user comparison method need not have, so both operands must carry a primitive scalar
+        # witness. A positive fact is used as itself and needs none.
+        def proof_kernel_replay_readable_order(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact: usize) -> (known: bool, left: usize, operator: sview, right: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+            return (false, 0, "", 0) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (proof_kernel_replay_is_order_operator(node.operator), node.left, node.operator, node.right) if node.kind == "binary"
+            return (false, 0, "", 0) if node.kind != "unary" or node.operator != "not"
+            inner: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return (false, 0, "", 0) if not inner.known or inner.node.kind != "binary"
+            negated: sview = proof_kernel_replay_negation(inner.node.operator)
+            return (false, 0, "", 0) if not proof_kernel_replay_is_order_operator(negated)
+            return (false, 0, "", 0) if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, inner.node.left, 0)
+            return (false, 0, "", 0) if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, inner.node.right, 0)
+            return (true, inner.node.left, negated, inner.node.right)
+
         def proof_kernel_replay_has_order_fact(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, term: usize, bound: usize, strict_only: bool, facts: darray[usize]) -> bool:
             conjuncts: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
-            for fact in conjuncts |fact, nodes, children, term, bound, strict_only|:
-                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
-                continue if not located.known
-                node: ElisaProofKernelCore::ProofKernelNode = located.node
-                continue if node.kind != "binary"
-                if node.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, node.left, term, 0) and proof_kernel_replay_expr_equal(nodes, children, node.right, bound, 0):
+            for fact in conjuncts |fact, nodes, children, term, bound, strict_only, facts|:
+                readable: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order(nodes, children, facts, fact)
+                continue if not readable.known
+                if readable.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, readable.left, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.right, bound, 0):
                     return true
-                if node.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, node.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, node.left, bound, 0):
+                if readable.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, readable.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.left, bound, 0):
                     return true
                 continue if strict_only
-                if node.operator == "<=" and proof_kernel_replay_expr_equal(nodes, children, node.left, term, 0) and proof_kernel_replay_expr_equal(nodes, children, node.right, bound, 0):
+                if readable.operator == "<=" and proof_kernel_replay_expr_equal(nodes, children, readable.left, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.right, bound, 0):
                     return true
-                if node.operator == ">=" and proof_kernel_replay_expr_equal(nodes, children, node.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, node.left, bound, 0):
+                if readable.operator == ">=" and proof_kernel_replay_expr_equal(nodes, children, readable.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.left, bound, 0):
                     return true
             return false
 
         def proof_kernel_replay_sum_witness_for(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, first: usize, second: usize, facts: darray[usize]) -> (known: bool, bound: usize, strict: bool):
             conjuncts: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
             for fact in conjuncts |fact, nodes, children, first, second, facts|:
-                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
-                continue if not located.known
-                node: ElisaProofKernelCore::ProofKernelNode = located.node
-                continue if node.kind != "binary"
-                continue if node.operator != "<" and node.operator != "<="
-                difference: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, node.right, "-")
+                readable: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order(nodes, children, facts, fact)
+                continue if not readable.known
+                continue if readable.operator != "<" and readable.operator != "<="
+                difference: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, readable.right, "-")
                 continue if not difference.known
                 continue if not proof_kernel_replay_expr_equal(nodes, children, difference.right, first, 0)
                 continue if not proof_kernel_replay_has_order_fact(nodes, children, first, difference.left, false, facts)
-                if proof_kernel_replay_expr_equal(nodes, children, node.left, second, 0):
-                    return (true, difference.left, node.operator == "<")
-                if proof_kernel_replay_has_order_fact(nodes, children, second, node.left, true, facts):
+                if proof_kernel_replay_expr_equal(nodes, children, readable.left, second, 0):
+                    return (true, difference.left, readable.operator == "<")
+                if proof_kernel_replay_has_order_fact(nodes, children, second, readable.left, true, facts):
                     return (true, difference.left, true)
-                if node.operator == "<" and proof_kernel_replay_has_order_fact(nodes, children, second, node.left, false, facts):
+                if readable.operator == "<" and proof_kernel_replay_has_order_fact(nodes, children, second, readable.left, false, facts):
                     return (true, difference.left, true)
-                if proof_kernel_replay_has_order_fact(nodes, children, second, node.left, false, facts):
+                if proof_kernel_replay_has_order_fact(nodes, children, second, readable.left, false, facts):
                     return (true, difference.left, false)
             return (false, 0, false)
 

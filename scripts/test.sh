@@ -2272,6 +2272,27 @@ if [[ "$rejected_unsigned_nonnegative_sum_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A guard reaches the statements after it negated, and the order query read only the positive
+# spelling, so the ordinary early-return range check was stated and unreadable. Complementarity is
+# what the negation gives; transitivity and a modular comparison are not.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/negated_guard_range.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"a_negated_range_check", "the_same_check_as_a_condition", "two_places"}'
+negated_guard_range_status=${PIPESTATUS[1]}
+set -e
+if [[ "$negated_guard_range_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a negated range check was unreadable\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_negated_guard_range.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert set(reasons) == {"a_negated_struct_order_does_not_chain", "a_negated_struct_order_gives_no_strict_chain", "a_negated_modular_guard_bounds_nothing", "a_negated_equality_is_not_an_order"}; assert all(reason == "body-unverified" for reason in reasons.values())'
+rejected_negated_guard_range_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_negated_guard_range_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a negated comparison gave more than its complement\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in

@@ -465,7 +465,7 @@ extend ElisaProof:
                         # is a type statement rather than an order fact. Carry the markers across
                         # with the orders; they are inert for every bound and alias collector.
                         for fact in facts |orders|:
-                            orders.push(fact) if proof_scalar_marker_name(fact) != "" or proof_unsigned_marker_name(fact) != ""
+                            orders.push(fact) if proof_type_marker_root_name(fact) != "" or proof_unsigned_marker_name(fact) != ""
                         # The order the subtraction needs may be stated between two places, and
                         # the affine tiers below name one bare identifier, so they cannot read it.
                         # A collected order is a comparison between two atoms and contains no
@@ -1659,60 +1659,87 @@ extend ElisaProof:
                 proof_push_conjuncts(fact, &conjuncts, 0)
             return conjuncts
 
+        # The order a fact states, seeing through the negation an early-return guard leaves behind.
+        # `return ... if x > n` reaches the statements after it as `not (x > n)`, which is the
+        # commonest guard form in the language, and every rule built on the order query used to be
+        # blind to it: only the affine tiers normalized a negation, and they name one bare
+        # identifier, so a guard over a place or a sum was stated and unreadable.
+        #
+        # Reading `not (x > n)` as `x <= n` is the totality of the primitive order. `>` dispatches
+        # to a user `__cmp__` whenever an operand is a struct, and that method need not be total,
+        # so both operands have to carry a primitive scalar witness. A positive fact needs no such
+        # witness: it is used as itself, with no inference over the operator at all.
+        def proof_readable_order(fact: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            match fact:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (proof_is_order_operator(operator), left, operator, right)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated: TokenKind = proof_comparison_negation(operator)
+                            return (false, Ast::Expr.Invalid, TokenKind.Eof, Ast::Expr.Invalid) if not proof_is_order_operator(negated)
+                            return (false, Ast::Expr.Invalid, TokenKind.Eof, Ast::Expr.Invalid) if not proof_scalar_term_witnessed(left, facts, 0)
+                            return (false, Ast::Expr.Invalid, TokenKind.Eof, Ast::Expr.Invalid) if not proof_scalar_term_witnessed(right, facts, 0)
+                            return (true, left, negated, right)
+                        _:
+                            return (false, Ast::Expr.Invalid, TokenKind.Eof, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid, TokenKind.Eof, Ast::Expr.Invalid)
+
+        def proof_is_order_operator(operator: TokenKind) -> bool:
+            return operator == TokenKind.Lt or operator == TokenKind.LtEq or operator == TokenKind.Gt or operator == TokenKind.GtEq
+
         # `term <= bound` or `term < bound` recorded as a fact, in either spelling.
         def proof_has_order_fact(term: Ast::Expr, bound: Ast::Expr, strict_only: bool, facts: darray[Ast::Expr]&) -> bool:
             conjuncts: darray[Ast::Expr] = proof_conjunct_facts(facts)
-            for fact in conjuncts |fact, term, bound, strict_only|:
-                match fact:
-                    Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
-                        if fact_operator == TokenKind.Lt and proof_expr_equal(fact_left, term) and proof_expr_equal(fact_right, bound):
-                            return true
-                        if fact_operator == TokenKind.Gt and proof_expr_equal(fact_right, term) and proof_expr_equal(fact_left, bound):
-                            return true
-                        continue if strict_only
-                        if fact_operator == TokenKind.LtEq and proof_expr_equal(fact_left, term) and proof_expr_equal(fact_right, bound):
-                            return true
-                        if fact_operator == TokenKind.GtEq and proof_expr_equal(fact_right, term) and proof_expr_equal(fact_left, bound):
-                            return true
-                    _:
-                        pass
+            for fact in conjuncts |fact, term, bound, strict_only, facts|:
+                readable: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_readable_order(fact, facts)
+                continue if not readable.known
+                if readable.operator == TokenKind.Lt and proof_expr_equal(readable.left, term) and proof_expr_equal(readable.right, bound):
+                    return true
+                if readable.operator == TokenKind.Gt and proof_expr_equal(readable.right, term) and proof_expr_equal(readable.left, bound):
+                    return true
+                continue if strict_only
+                if readable.operator == TokenKind.LtEq and proof_expr_equal(readable.left, term) and proof_expr_equal(readable.right, bound):
+                    return true
+                if readable.operator == TokenKind.GtEq and proof_expr_equal(readable.right, term) and proof_expr_equal(readable.left, bound):
+                    return true
             return false
 
         def proof_sum_witness_for(first: Ast::Expr, second: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, bound: Ast::Expr, strict: bool) can[Memory.Allocate, Abort.Panic]:
             conjuncts: darray[Ast::Expr] = proof_conjunct_facts(facts)
             for fact in conjuncts |fact, first, second, facts|:
-                match fact:
-                    Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
-                        continue if fact_operator != TokenKind.Lt and fact_operator != TokenKind.LtEq
-                        # Shape B: some term is bounded by `bound - first`, with `first <= bound`
-                        # recorded beside it -- the guard that makes the subtraction meaningful for
-                        # an unsigned type, and the one such code already writes. The bounded term
-                        # is `second` itself, or a term `second` is under in turn: a range check
-                        # states `count <= total - start` once and every index into it is `< count`.
-                        #
-                        # The premise is deliberately this shape rather than `first + second <=
-                        # bound`. For an unsigned type the latter is a *modular* claim about a sum
-                        # that may already have wrapped, so it cannot be read as a bound on the
-                        # mathematical sum, and using it to justify its own range is the mistake
-                        # `examples/rejected_unsigned_fact_explosion.elisa` pins.
-                        difference: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_difference_operands(fact_right)
-                        if difference.known and proof_expr_equal(difference.right, first) and proof_has_order_fact(first, difference.left, false, facts):
-                            if proof_expr_equal(fact_left, second):
-                                return (true, difference.left, fact_operator == TokenKind.Lt)
-                            if proof_has_order_fact(second, fact_left, true, facts):
-                                return (true, difference.left, true)
-                            if fact_operator == TokenKind.Lt and proof_has_order_fact(second, fact_left, false, facts):
-                                return (true, difference.left, true)
-                            if proof_has_order_fact(second, fact_left, false, facts):
-                                return (true, difference.left, false)
-                        # There is deliberately no rule reading `first + middle <= bound` as a
-                        # premise. For a fixed-width type that is a claim about a sum that may
-                        # already have wrapped: at `start = MAX, count = 1, total = 0` the premise
-                        # `start + count <= total` holds modulo 2^64 while the mathematical sum does
-                        # not, and reading it as an integer bound proves `start + 0 < 0`. The
-                        # subtraction form above says the same thing without a sum in it.
-                    _:
-                        pass
+                readable: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_readable_order(fact, facts)
+                continue if not readable.known
+                fact_left: Ast::Expr = readable.left
+                fact_operator: TokenKind = readable.operator
+                fact_right: Ast::Expr = readable.right
+                continue if fact_operator != TokenKind.Lt and fact_operator != TokenKind.LtEq
+                # Shape B: some term is bounded by `bound - first`, with `first <= bound`
+                # recorded beside it -- the guard that makes the subtraction meaningful for
+                # an unsigned type, and the one such code already writes. The bounded term
+                # is `second` itself, or a term `second` is under in turn: a range check
+                # states `count <= total - start` once and every index into it is `< count`.
+                #
+                # The premise is deliberately this shape rather than `first + second <=
+                # bound`. For an unsigned type the latter is a *modular* claim about a sum
+                # that may already have wrapped, so it cannot be read as a bound on the
+                # mathematical sum, and using it to justify its own range is the mistake
+                # `examples/rejected_unsigned_fact_explosion.elisa` pins.
+                difference: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_difference_operands(fact_right)
+                continue if not difference.known
+                continue if not proof_expr_equal(difference.right, first)
+                continue if not proof_has_order_fact(first, difference.left, false, facts)
+                return (true, difference.left, fact_operator == TokenKind.Lt) if proof_expr_equal(fact_left, second)
+                return (true, difference.left, true) if proof_has_order_fact(second, fact_left, true, facts)
+                return (true, difference.left, true) if fact_operator == TokenKind.Lt and proof_has_order_fact(second, fact_left, false, facts)
+                return (true, difference.left, false) if proof_has_order_fact(second, fact_left, false, facts)
+                # There is deliberately no rule reading `first + middle <= bound` as a
+                # premise. For a fixed-width type that is a claim about a sum that may
+                # already have wrapped: at `start = MAX, count = 1, total = 0` the premise
+                # `start + count <= total` holds modulo 2^64 while the mathematical sum does
+                # not, and reading it as an integer bound proves `start + 0 < 0`. The
+                # subtraction form above says the same thing without a sum in it.
             return (false, Ast::Expr.Invalid, false)
 
         def proof_sum_upper_witness(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, bound: Ast::Expr, strict: bool) can[Memory.Allocate, Abort.Panic]:
