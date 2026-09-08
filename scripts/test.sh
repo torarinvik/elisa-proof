@@ -2852,4 +2852,26 @@ if [[ "$large_source_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A method call's receiver is not among its arguments, so the frame records it by name. A collection
+# builtin writes its receiver during its own call and leaves nothing a later call could reach, so it
+# is not part of what escapes -- otherwise a list this frame only pushed to stayed aliased forever
+# and every loop over its `count` lost its range. The write itself, and every other route out, stay.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/collection_builtin_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"push_then_loop", "shrink_then_loop", "two_collections"}'
+collection_builtin_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$collection_builtin_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a collection only pushed to still lost its loop range\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_collection_builtin_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lend_still_escapes"] == "body-unverified"; assert reasons["a_push_in_the_body_still_writes"] == "body-unverified"; assert reasons["a_push_still_changes_the_count"] == "body-unverified"; assert reasons["a_pushed_lend_still_escapes"] == "body-unverified"'
+rejected_collection_builtin_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_collection_builtin_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a collection builtin laundered a reach it does not have\n' >&2
+    exit 1
+fi
+
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

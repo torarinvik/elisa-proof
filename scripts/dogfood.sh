@@ -286,6 +286,8 @@ run_probe confined_lend_across_calls examples/confined_lend_across_calls.elisa 0
 run_probe rejected_confined_lend_across_calls examples/rejected_confined_lend_across_calls.elisa 1
 run_probe aggregate_local_symbol examples/aggregate_local_symbol.elisa 0
 run_probe rejected_aggregate_local_symbol examples/rejected_aggregate_local_symbol.elisa 1
+run_probe collection_builtin_extent examples/collection_builtin_extent.elisa 0
+run_probe rejected_collection_builtin_extent examples/rejected_collection_builtin_extent.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1662,6 +1664,32 @@ for owner in ("an_unguarded_index_is_still_owed", "a_guard_over_another_collecti
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s read a claim out of an aggregate local's symbol" % owner)
 print("dogfood aggregate_local_symbol: an aggregate local's places are places, and its symbol claims nothing")
+PY
+
+# A collection builtin writes its receiver during its own call and leaves nothing behind, so the
+# receiver is not part of what escapes the call; every other route to the collection still is.
+python3 - "$REPORT_DIR/collection_builtin_extent.json" "$REPORT_DIR/rejected_collection_builtin_extent.json" <<'PY'
+import json
+import sys
+
+kept, owed = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: collection builtin fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("push_then_loop", "shrink_then_loop", "two_collections"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost the range of a collection it only pushed to" % owner)
+with open(owed, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: collection builtin boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_lend_still_escapes", "a_push_in_the_body_still_writes", "a_push_still_changes_the_count", "a_pushed_lend_still_escapes"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s read a reach a collection builtin does not remove" % owner)
+print("dogfood collection_builtin_extent: a push is a write, not a reach that outlives its call")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

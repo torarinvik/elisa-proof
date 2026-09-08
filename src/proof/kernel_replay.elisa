@@ -3391,6 +3391,15 @@ module ElisaProofKernelReplay:
             kind: sview
             place: ProofKernelReplayResourcePlace
 
+        # One lent argument of a lend call. The three facts about it -- the place, whether that
+        # place was resolved, and whether the formal is exclusive -- were three arrays pushed in
+        # lockstep, so every read of one owed an index obligation against a length nothing related
+        # to the others'. One array of records owes one.
+        struct ProofKernelReplayLentArgument:
+            place: ProofKernelReplayResourcePlace
+            known: bool
+            exclusive: bool
+
         def proof_kernel_replay_resource_empty_place() -> ProofKernelReplayResourcePlace:
             return ProofKernelReplayResourcePlace{root: "", path_root: 0, depth: 0, whole: false}
 
@@ -4407,10 +4416,8 @@ module ElisaProofKernelReplay:
                 return false if not proof_kernel_replay_resource_region_active(state, region_located.node.secondary_name)
                 lend_regions.push(region_located.node.name)
                 lend_regions.push(region_located.node.secondary_name)
-            lent_places: mutable darray[ProofKernelReplayResourcePlace] = []
-            lent_known: mutable darray[bool] = []
-            lent_exclusive: mutable darray[bool] = []
-            for index in 0..<node.auxiliary |index, node, children, nodes, state, lent_places, lent_known, lent_exclusive|:
+            lent: mutable darray[ProofKernelReplayLentArgument] = []
+            for index in 0..<node.auxiliary |index, node, children, nodes, state, lent|:
                 actual_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                 formal_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + node.auxiliary + index)
                 return false if not actual_child.known or not formal_child.known
@@ -4440,9 +4447,7 @@ module ElisaProofKernelReplay:
                     # binding slot too, and its region is just as much the caller's claim.
                     return false if actual.slot >= state.binding_names.count
                     return false if proof_kernel_replay_resource_binding_region(state, actual.slot) != mapped_region
-                lent_places.push(proof_kernel_replay_resource_empty_place())
-                lent_known.push(false)
-                lent_exclusive.push(exclusive)
+                lent.push(ProofKernelReplayLentArgument{place: proof_kernel_replay_resource_empty_place(), known: false, exclusive: exclusive})
                 # A by-value formal receives no capability, so the actual must not be one either:
                 # otherwise the call would be a move and the caller state would change.
                 if formal.operator != "external-shared" and not exclusive:
@@ -4450,8 +4455,7 @@ module ElisaProofKernelReplay:
                     continue
                 continue if argument.operator == "value" and not exclusive
                 return false if actual.place.root == ""
-                lent_places[lent_places.count - 1] <- actual.place
-                lent_known[lent_known.count - 1] <- true
+                lent[lent.count - 1] <- ProofKernelReplayLentArgument{place: actual.place, known: true, exclusive: exclusive}
                 if exclusive:
                     # The callee may write through this one, so the caller must hold the
                     # permission to write the whole place, and no other borrow may be live on it.
@@ -4471,17 +4475,21 @@ module ElisaProofKernelReplay:
                     return false if proof_kernel_replay_resource_has_mutable_borrow_overlap(nodes, state, actual.place, state.binding_names.count)
             # Every lent capability is live at once while the callee runs, so two of them may
             # overlap only when neither is exclusive.
-            for left_index in 0..<lent_places.count |left_index, lent_places, lent_known, lent_exclusive, state, nodes|:
-                continue if not lent_known[left_index]
-                for right_index in 0..<lent_places.count |right_index, left_index, lent_places, lent_known, lent_exclusive, state, nodes|:
-                    continue if right_index <= left_index or not lent_known[right_index]
-                    continue if not lent_exclusive[left_index] and not lent_exclusive[right_index]
-                    return false if proof_kernel_replay_resource_places_overlap(state, nodes, lent_places[left_index], lent_places[right_index])
-            for index in 0..<lent_places.count |index, lent_places, lent_known, lent_exclusive, state, nodes, effects|:
-                continue if not lent_known[index] or not lent_exclusive[index]
-                owner_slot: usize = proof_kernel_replay_resource_lookup(state, lent_places[index].root)
+            for left_index in 0..<lent.count |left_index, lent, state, nodes|:
+                left_argument: ProofKernelReplayLentArgument = lent[left_index]
+                continue if not left_argument.known
+                for right_index in 0..<lent.count |right_index, left_index, left_argument, lent, state, nodes|:
+                    continue if right_index <= left_index
+                    right_argument: ProofKernelReplayLentArgument = lent[right_index]
+                    continue if not right_argument.known
+                    continue if not left_argument.exclusive and not right_argument.exclusive
+                    return false if proof_kernel_replay_resource_places_overlap(state, nodes, left_argument.place, right_argument.place)
+            for index in 0..<lent.count |index, lent, state, nodes, effects|:
+                argument_lent: ProofKernelReplayLentArgument = lent[index]
+                continue if not argument_lent.known or not argument_lent.exclusive
+                owner_slot: usize = proof_kernel_replay_resource_lookup(state, argument_lent.place.root)
                 return false if owner_slot >= state.binding_names.count
-                owner_origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_resolve_origin(nodes, state, lent_places[index], lent_places[index].root)
+                owner_origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_resolve_origin(nodes, state, argument_lent.place, argument_lent.place.root)
                 effects.push(ProofKernelReplayResourceEffect{kind: "write", place: owner_origin.place}) if owner_origin.known
             return true
 

@@ -4207,6 +4207,74 @@ Coverage moves the other way, which two probes show directly: an index into a co
 a call goes from `index-bounds-opaque` with no goal to a real lower/upper pair, and an unguarded one
 is still reported. Fourteen fewer failing findings for the same code, none of them silenced.
 
+## A collection this frame only pushed to counted as escaping it
+
+### What was wrong
+
+`index-upper-unproven` was the largest remaining cluster, and grouping it by collection put the
+blame on parallel arrays: eleven of its failures were loops over `lent.count` in the kernel's
+lend-call handler, which carries `lent_places`, `lent_known` and `lent_exclusive` side by side. The
+obvious reading is that the engine cannot relate three collections' counts.
+
+That reading was wrong, and merging the three arrays into one `ProofKernelReplayLentArgument`
+record measured it: findings 525 -> 522, three of the eleven. What the remaining eight were losing
+was not a relation between collections but the loop's *own* range fact, `index < lent.count`.
+
+The cause is where a method call's receiver is recorded. A receiver is not among a call's arguments,
+so no argument mapping can describe it; the frame records it by name as a place a call can reach.
+`lent.push(...)`, appearing anywhere in a frame, therefore put `lent` in the escaping set for the
+rest of that frame -- and loop entry forgets everything in that set. So a collection that is built
+by pushes and then walked, the commonest shape there is, could not be indexed. Nothing had reached
+it; nothing could.
+
+### What changed
+
+The escaping set drops the receiver of a *known collection builtin* -- `push`, `extend`, `clear`,
+`resize`, `pop`, `truncate`, the six `proof_resource_collection_builtin` already names. This is the
+confinement rule the previous entry established, reaching the same conclusion by a second route:
+`xs.push(v)` writes `xs` during its own call and leaves nothing behind that a later call could
+reach, exactly as a lend that cannot outlive its call does.
+
+Three things are deliberately untouched.
+
+* `aliased_names` is unchanged, so the push is still a write: a `count` fact taken before it does
+  not survive it, and a push in a loop body still reaches the collection on every iteration.
+* The exemption is gated on the same `confinable` flag as the lend rule, so it applies only at the
+  frame-wide site that fills the escaping set -- never at a call site.
+* A builtin is not a known function, so every *argument* of one is still recorded. That is what
+  keeps `sink.push(values)` from laundering a lend: the lend escapes through the argument even
+  though the receiver does not.
+
+### Fixtures
+
+`examples/collection_builtin_extent.elisa`: a list built by pushes in a loop and then walked, a list
+shrunk by `pop` and then walked, and two lists each confined on its own account. All three verify;
+all three are `index-upper-unproven` under a build of the previous commit.
+`examples/rejected_collection_builtin_extent.elisa`: an explicit lend into a parameter whose element
+type can hold a reference, a push inside the loop body, an `ensure` that would need a `count` fact
+to survive a push, and a lend pushed *into* another collection. All four stay refused, with
+identical findings before and after the change.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`, in the two steps:
+
+| | before | record | receiver |
+| --- | --- | --- | --- |
+| obligations | 2027 | 2023 | 2027 |
+| proven | 1512 | 1511 | 1527 |
+| findings | 525 | 522 | 510 |
+| `index-upper-unproven` | 133 | 131 | 119 |
+| replay gaps | 0 | 0 | 0 |
+| trusted assumptions | 0 | 0 | 0 |
+| verified functions | 122 | 122 | 122 |
+
+The record refactor is a change to the checked *source*, not to the checker, and it is reported here
+because it is the measurement that redirected the work: it bought three findings where the
+explanation it was built on predicted eleven. The receiver rule bought the other twelve and nine
+more. No function crosses into `verified` -- each still owes other obligations -- which is why the
+goal counts, not the function count, are the reading.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
