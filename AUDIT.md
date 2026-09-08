@@ -3635,6 +3635,54 @@ question, which has gone from "why is the summary lost" to "which step of the pu
 excludes a callee that carries an `ensure`", and a probe file shape that answers it in seconds
 rather than in a twenty-five minute corpus run.
 
+## Correcting two claims about the summary-provenance question
+
+The previous entry drew two conclusions from a four-row probe. A wider probe contradicts both, and
+the record should say so plainly rather than leave them standing.
+
+### `ensure` is not the discriminator
+
+The claim was that a callee carrying an `ensure` is never classified as a pure call, and that this
+excludes exactly the callees whose summaries matter. Measured over six callee shapes:
+
+| callee | pure-call witness recorded |
+| --- | --- |
+| no contract | yes |
+| `ensure true` | yes |
+| `ensure not result or a <= b`, two-guard body | yes |
+| `ensure not result or a <= b and ...`, three-guard body | yes |
+| `requires a <= b` with `ensure result` | no |
+| a callee that is itself `body-unverified` | no |
+
+The third and fourth rows are the exact shape of `proof_kernel_replay_child_range_valid`, and they
+are witnessed. The discriminator in the fifth row is the `requires`, which is what
+`proof_function_is_directly_pure` refuses in its first line, alongside `changes` and `preserves`.
+The earlier entry quoted that line and then reasoned past it. The sixth row is the ordinary
+`verified` requirement.
+
+So the mechanisms do *not* exclude each other by construction, and the callee this cluster needs is
+eligible for a witness.
+
+### The site is not settled either
+
+The previous entry located the fact's construction at
+`proof_check_frame_calls_in_expression`'s call arm, on the strength of that arm extending the real
+facts from a probe list. If that were the site, adding the witness there would have recorded one for
+a callee the table above says is eligible. It recorded nothing, in either of the two positions
+tried. That is evidence against the identification, not for it.
+
+What stands is narrower than either entry claimed: the fact reaches the caller's state, it is lost
+at the next call, the callee is eligible for a pure-call witness, and the place that builds the fact
+is still unidentified among `proof_apply_function`'s ten call sites.
+
+### Why this is worth a commit of its own
+
+Two entries asserted a cause on evidence that did not support it. The corpus numbers in them are
+sound -- both changes measured zero and both were reverted -- but the explanations were not, and an
+audit whose explanations drift is worth less than one that records only what it measured. The probe
+files that produce the table above run in seconds; the next attempt should start by widening the
+matrix rather than by reasoning from three rows.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
