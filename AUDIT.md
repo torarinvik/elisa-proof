@@ -4032,6 +4032,59 @@ expression's call it follows, so the lends of *that* statement can be blocked wh
 Until that is done the kernel's loops, whose bodies all call something, keep losing the fact at the
 call rather than at the loop head -- which is exactly what the corpus is reporting by not moving.
 
+## The other half of the aliasing question, built and measured at zero
+
+The previous entry named the missing half and said what it would take: tell each fact-clearing site
+which expression's call it follows, so the lends of *that* statement can be blocked while the rest
+are not. That was built and reverted. This records the measurement and, more usefully, where the
+probes say the remaining obstacle actually is, because it is not where the previous entry guessed.
+
+### What was built
+
+`proof_statement_lend_roots` returns the roots one expression lends.
+`proof_clear_facts_after_call` and `proof_forget_values_after_call` take that set and block
+`escaping_names` together with it, instead of the whole frame's aliased set. All twenty-seven call
+sites pass the expression whose call they follow; the five that cannot name one -- a catch's error
+path, an unsupported expression, a compound assignment, and the two branch joins -- pass the full
+aliased set, which makes the union the old behaviour exactly.
+
+### What it measured
+
+Nothing, anywhere. On `examples/kernel_replay_standalone.elisa`: obligations 2053, proven 1524,
+findings 539, gaps 0, verified 122, every bucket identical. On six hand-written probes covering a
+loop over a local collection, over a by-value parameter, and over a shared borrow, with and without
+a lend in the body: every function that verified with the change verified without it.
+
+That last measurement is the one that matters, and it corrects an attribution made while the work
+was in progress. A probe that improved was compared against a build predating the previous commit,
+so the improvement belonged to that commit and not to this one. Rebuilding at the committed state
+and re-running the same probes is what settled it.
+
+### Where the obstacle is instead
+
+Probes narrow it to one shape, and it is not the aliasing set at all:
+
+| collection | lend in the loop body | verified |
+| --- | --- | --- |
+| shared-borrow parameter | yes | yes |
+| by-value parameter | yes | yes |
+| local, filled by `fill(&names)` | yes | **no** |
+| local, from a call returning it | yes | **no** |
+| local | no | yes |
+
+The loop-range fact survives an in-body call for a parameter and not for a local, and relaxing the
+call-stability rule for a `.count` place makes only the lent-local row pass. So a local collection's
+extent is not call-stable for a reason that is *not* the frame's aliased set, and the two local rows
+fail for different reasons. Chasing it further by construction rather than by instrumenting the
+clearing decision is what ran this attempt into the ground; the next attempt should print the
+retained/dropped split for one statement rather than infer it from six programs.
+
+### Why nothing is committed
+
+The change is sound and complete in itself, and it does not move a single obligation. Two earlier
+entries record changes reverted for exactly that, and the reasoning holds here: what is worth
+keeping is the measurement and the table above, not machinery that is inert.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
