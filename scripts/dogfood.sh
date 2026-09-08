@@ -274,6 +274,8 @@ run_probe value_root_field examples/value_root_field.elisa 0
 run_probe rejected_value_root_field examples/rejected_value_root_field.elisa 1
 run_probe shared_extent_loop examples/shared_extent_loop.elisa 0
 run_probe rejected_shared_extent_loop examples/rejected_shared_extent_loop.elisa 1
+run_probe replay_literal_facts examples/replay_literal_facts.elisa 1
+run_probe rejected_replay_literal_facts examples/rejected_replay_literal_facts.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1503,6 +1505,29 @@ for owner in ("a_mutable_borrow_loses_its_extent", "a_lent_mutable_borrow_loses_
 print("dogfood shared_extent_loop: a shared borrow keeps its extent through a loop, a mutable one does not")
 PY
 
+# A fact over a collection literal has to find its own trace, or the certificate carrying it gaps.
+python3 - "$REPORT_DIR/replay_literal_facts.json" "$REPORT_DIR/rejected_replay_literal_facts.json" <<'PY'
+import json
+import sys
+
+carried, refused = sys.argv[1:]
+with open(carried, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["replay"]["gaps"] or report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a fact over a collection literal did not replay")
+lower = [g for g in report["goals"] if g["rule"] == "index-lower"]
+if len(lower) != 5 or not all(g["proven"] and g["replay_status"] == "replayed" for g in lower):
+    raise SystemExit("dogfood failed: a lower bound over a literal-bound local was lost")
+with open(refused, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: literal boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("a_rebound_literal_loses_its_guard", "a_guard_for_one_literal_is_not_a_guard_for_another", "an_empty_literal_has_no_element"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s borrowed a guard recorded for another literal" % owner)
+print("dogfood replay_literal_facts: a fact over a collection literal replays, and only against its own literal")
+PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value
 # scalar nothing references keeps its value, a referenced one and a value over it do not.

@@ -2230,6 +2230,26 @@ if [[ "$rejected_shared_extent_loop_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A local bound to a collection literal records its facts over that literal. The replay driver's
+# expression equality had no arm for one, so such a fact never matched its own trace and every
+# certificate carrying it gapped. Exact, elementwise: a different literal is a different fact.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; lower = [g for g in report["goals"] if g["rule"] == "index-lower"]; assert len(lower) == 5; assert all(g["proven"] and g["replay_status"] == "replayed" for g in lower); assert {f["kind"] for f in report["findings"]} == {"index-upper-unproven"}'
+replay_literal_facts_status=${PIPESTATUS[1]}
+set -e
+if [[ "$replay_literal_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a fact over a collection literal did not replay\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-bounds-opaque", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_rebound_literal_loses_its_guard"] == "body-unverified"; assert reasons["a_guard_for_one_literal_is_not_a_guard_for_another"] == "body-unverified"; assert reasons["an_empty_literal_has_no_element"] == "body-unverified"'
+rejected_replay_literal_facts_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_replay_literal_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a guard over one collection literal was credited to another\n' >&2
+    exit 1
+fi
 
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a

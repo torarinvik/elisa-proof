@@ -3759,6 +3759,58 @@ entries went after; what the change is worth is that the question is now answere
 narrowed, and the answer is a rule with a stated justification rather than a witness moved around
 until something moved.
 
+## A proven goal the kernel refused for want of an equality
+
+### What was wrong
+
+A local bound to a collection literal has that literal as its recorded value, so every fact the
+body takes over `name.count` is recorded over `[...].count` instead. The replay driver finds each
+certificate fact's origin by comparing it against the recorded trace with
+`proof_replay_expr_equal`, and that comparison had no arm for a collection literal: it fell to the
+wildcard and returned false. A fact could not match *its own trace*. Its origin came back unknown,
+and the certificate carrying it could not be replayed.
+
+The producer had proved the goal. The kernel refused it because two identical expressions did not
+compare equal, not because anything was unjustified. So this was a completeness hole rather than an
+unsound one -- the refusal is the safe direction -- but it is a gap, and gaps are what the whole
+replay path exists to keep at zero.
+
+The shape that hits it is ordinary:
+
+```
+def f(start: usize) -> usize:
+    children: mutable darray[usize] = [1, 2, 3]
+    return 0 if not range_valid(start, 1, children.count)
+    return children[start]
+```
+
+Five certificates in a four-function file gapped. A local bound from a *call* instead of a literal
+replayed cleanly, which is what isolated the cause: the call arm existed and the array arm did not.
+
+### What changed
+
+`proof_replay_expr_equal` gained arms for `Array`, `CharLit` and `StringLit`. The array arm is
+elementwise and exact -- same length, same elements, compared with the same recursion the tuple arm
+above it uses -- so it distinguishes `[1, 2, 3]` from `[4, 5, 6]` and from `[4, 5]`. Adding an arm
+to this comparison can only make it more precise: every form it does not name still returns false.
+
+### Fixtures
+
+`examples/replay_literal_facts.elisa`: a guard over a literal-bound local, two literals of
+different lengths in one frame, and two of the same length with different elements. Twelve
+certificates, all replayed; the same file gaps five before the change.
+`examples/rejected_replay_literal_facts.elisa`: the binding rebound to a different literal after
+the guard, a guard for one literal with a different literal indexed, and an empty literal indexed
+at all. All three stay unverified, and all nine certificates replay; the same file gaps two before
+the change.
+
+### What it did not buy
+
+Nothing on the corpus: `examples/kernel_replay_standalone.elisa` has no local bound to a collection
+literal under a guard, so its numbers are identical either way, gaps included. The measurement that
+matters here is the fixture pair -- seven gaps closed, none opened -- and the reason to record it
+is that a user writing three lines of ordinary code hit a gap the corpus never would.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
