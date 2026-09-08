@@ -1346,11 +1346,27 @@ extend ElisaProof:
         # Re-establish, after a nested opaque call, every pre-call fact that is call-stable for
         # the current function. Witnesses are read from the pre-call state, which still holds
         # every type bound the call could not remove.
-        def proof_restore_call_stable_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+        # The roots one expression lends. A lend that ends with its call is a write during that
+        # call and nothing afterwards, so the call performing it is the one place its binding has
+        # to be treated as reachable. Collected without the confinement refinement, which is the
+        # point: this is the lend itself.
+        def proof_statement_lend_roots(expression: Ast::Expr, functions: ProofFunctionTable&) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
+            roots: mutable darray[sview] = []
+            proof_collect_aliased_in_expression(expression, functions, &roots, false)
+            return roots
+
+        def proof_restore_call_stable_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview, lends: darray[sview]&) -> void:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
             return if not analyzed
-            for fact in source |source, facts, names, parameters, report|:
-                continue if not proof_expr_call_stable(fact, source, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
+            # What this call can reach: the lends that outlive their own call, together with the
+            # ones this call itself performs. A caller that cannot name the expression passes the
+            # whole aliased set, which leaves the union unchanged.
+            blocked: mutable darray[sview] = []
+            blocked.extend(report.escaping_names)
+            for lent in lends |blocked|:
+                proof_push_aliased(&blocked, lent)
+            for fact in source |source, facts, names, parameters, report, blocked|:
+                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, report.local_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -4463,7 +4479,7 @@ extend ElisaProof:
                     # opaque one, and the same argument bounds that havoc: a callee reaches the
                     # caller only through references and globals, so a fact over a by-value
                     # scalar the caller's body never references survives this call too.
-                    proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name)
+                    proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_statement_lend_roots(expression, functions))
                     ensures_start: usize = functions.ensure_starts[function_index]
                     ensures_count: usize = functions.ensure_counts[function_index]
                     result_names: mutable darray[sview] = ["result"]
@@ -4801,7 +4817,7 @@ extend ElisaProof:
                     proof_restore_type_bound_facts(pre_call_facts, facts, names, report, name) if not proof_expr_has_move(expression)
                     # An opaque nested call reaches an unreferenced by-value scalar local no
                     # more than a call statement does: the facts over such locals come back.
-                    proof_restore_call_stable_facts(pre_call_facts, facts, names, parameter_names, report, name) if not applied and not proof_expr_has_move(expression)
+                    proof_restore_call_stable_facts(pre_call_facts, facts, names, parameter_names, report, name, proof_statement_lend_roots(expression, functions)) if not applied and not proof_expr_has_move(expression)
                     # A nested call has no destination binding to preserve. Forget all symbolic
                     # values after it so a later sibling or the enclosing call sees only the
                     # current-state identifiers, never a pre-call alias expression.
@@ -6741,7 +6757,7 @@ extend ElisaProof:
                                 # forbids importing that state wholesale, but a call-stable fact
                                 # is over by-value scalars of this frame that nothing references:
                                 # true at the end of the branch means true at this point.
-                                proof_restore_call_stable_facts(else_facts, facts, names, frame_parameters, report, name) if else_names.count == names.count
+                                proof_restore_call_stable_facts(else_facts, facts, names, frame_parameters, report, name, report.aliased_names) if else_names.count == names.count
                         elif then_falls_through and not else_falls_through:
                             if condition_facts_stable and then_names.count == names.count and then_values.count >= branch_value_count:
                                 for index in 0..<branch_value_count |index, values, then_values|:
@@ -6751,7 +6767,7 @@ extend ElisaProof:
                             else:
                                 proof_forget_values(names, values, position)
                                 proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
-                                proof_restore_call_stable_facts(then_facts, facts, names, frame_parameters, report, name) if then_names.count == names.count
+                                proof_restore_call_stable_facts(then_facts, facts, names, frame_parameters, report, name, report.aliased_names) if then_names.count == names.count
                         elif not then_falls_through and not else_falls_through:
                             proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                             flow.normal <- false
@@ -6766,9 +6782,9 @@ extend ElisaProof:
                             if then_falls_through and else_falls_through:
                                 proof_restore_branch_stable_facts(then_facts, else_facts, facts, names, frame_parameters, report, name)
                             elif then_falls_through:
-                                proof_restore_call_stable_facts(then_facts, facts, names, frame_parameters, report, name)
+                                proof_restore_call_stable_facts(then_facts, facts, names, frame_parameters, report, name, report.aliased_names)
                             elif else_falls_through:
-                                proof_restore_call_stable_facts(else_facts, facts, names, frame_parameters, report, name)
+                                proof_restore_call_stable_facts(else_facts, facts, names, frame_parameters, report, name, report.aliased_names)
                     Ast::Stmt.While(condition, while_body, position):
                         # A loop without an invariant is not treated as verified. With one,
                         # establish and check preservation on the one symbolic iteration.

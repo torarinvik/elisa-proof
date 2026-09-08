@@ -282,6 +282,8 @@ run_probe negated_guard_range examples/negated_guard_range.elisa 0
 run_probe rejected_negated_guard_range examples/rejected_negated_guard_range.elisa 1
 run_probe confined_lend_extent examples/confined_lend_extent.elisa 0
 run_probe rejected_confined_lend_extent examples/rejected_confined_lend_extent.elisa 1
+run_probe confined_lend_across_calls examples/confined_lend_across_calls.elisa 0
+run_probe rejected_confined_lend_across_calls examples/rejected_confined_lend_across_calls.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1608,6 +1610,31 @@ for owner in ("a_leaked_lend_loses_the_extent", "a_returned_lend_loses_it_too", 
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s treated an escaping lend as confined" % owner)
 print("dogfood confined_lend_extent: a lend that ends with its call is not an alias afterwards")
+PY
+
+# The same, at the call inside the loop rather than at the loop head.
+python3 - "$REPORT_DIR/confined_lend_across_calls.json" "$REPORT_DIR/rejected_confined_lend_across_calls.json" <<'PY'
+import json
+import sys
+
+kept, reached = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: across-calls fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("a_call_in_the_body_keeps_the_range", "a_lent_local_in_the_body", "an_element_argument"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost a range fact to a call that could not reach it" % owner)
+with open(reached, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: across-calls boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("an_escaping_lend_loses_the_range", "the_body_lends_the_collection", "a_fact_before_the_lend"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s kept a fact across a call that reaches it" % owner)
+print("dogfood confined_lend_across_calls: a call restores what it could not reach, and no more")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

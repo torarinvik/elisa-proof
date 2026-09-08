@@ -4085,6 +4085,64 @@ The change is sound and complete in itself, and it does not move a single obliga
 entries record changes reverted for exactly that, and the reasoning holds here: what is worth
 keeping is the measurement and the table above, not machinery that is inert.
 
+## The other half, found by instrumenting instead of guessing
+
+### What the previous entry got wrong
+
+It said the missing half was the fact *clearing* after a call, built that, and measured zero. The
+entry before it had recorded the same suspicion. Both were wrong about the site, and no amount of
+further probing would have found it, because the function they narrowed is not the one that decides.
+
+Instrumenting the decision took one build. Emitting a finding for every dropped comparison fact, at
+each of `proof_clear_facts_after_call`, `proof_clear_facts_keep_type_bounds` and
+`proof_resymbolize_binding`, produced *nothing* on a program whose range fact plainly disappears.
+The fact was never dropped. It was cleared wholesale and not restored:
+
+    facts.clear()
+    facts.extend(probe_facts) if applied
+    proof_restore_type_bound_facts(pre_call_facts, facts, ...)
+    proof_restore_call_stable_facts(pre_call_facts, facts, ...) if not applied
+
+An opaque call clears the state and restores what the callee could not have reached.
+`proof_restore_call_stable_facts` is the decision, and it asked the frame's whole aliased set.
+
+A second round of instrumentation, reporting which operand and which clause failed, split the
+remaining failures into two unrelated causes: `root aliased`, meaning the collection was lent once
+somewhere in the frame, and `no place root`, meaning the collection's recorded value is an opaque
+call so `name.count` is not a place at all. Only the first is this entry's.
+
+### What changed
+
+`proof_restore_call_stable_facts` takes the lends of the call it follows and blocks
+`escaping_names` together with them, exactly as loop entry blocks `escaping_names`. Its two callers
+that know the call -- the summary-applied path and the opaque-call path in
+`proof_check_frame_calls_in_expression` -- pass `proof_statement_lend_roots(expression, functions)`.
+The four branch-join callers cannot name one call and pass the whole aliased set, which leaves the
+union unchanged there.
+
+### Fixtures
+
+`examples/confined_lend_across_calls.elisa`: a loop whose body calls something on every iteration,
+with the call lending a parameter, lending a local, and taking an element by value. All three keep
+the range fact; all three fail before the change.
+`examples/rejected_confined_lend_across_calls.elisa`: a lend that escapes through a
+reference-holding parameter, a body that lends the very collection it is iterating, and a fact taken
+before a lending call. All three stay refused -- the middle one is the point that confinement is
+about outliving a call, never about the call itself.
+
+### What it bought
+
+On `examples/kernel_replay_standalone.elisa`: nothing. Obligations 2053, proven 1524, findings 539,
+gaps 0, verified 122, unchanged in every bucket.
+
+The second cause the instrumentation found is why, and it is now a specific defect rather than a
+suspicion. A local bound to a call result -- `node: X = located.node`, `values: mutable darray = []`
+followed by a fill -- has that call as its recorded value, so every fact the body takes over
+`values.count` is recorded over `<call>.count`, whose place root is empty. The extent rules are all
+written over places. Binding such a local to its own symbol, the way `proof_bind_unsigned_symbol`
+already does for an unsigned scalar, is what would make those facts places again, and the kernel is
+built out of exactly that shape.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

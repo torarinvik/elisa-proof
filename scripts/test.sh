@@ -2314,6 +2314,27 @@ if [[ "$rejected_confined_lend_extent_status" -ne 0 ]]; then
     exit 1
 fi
 
+# The same question at the call inside the loop: an opaque call clears the state and restores what
+# it could not have reached, and that restore asked the whole frame's aliased set. A lend that ends
+# with its call is not part of this call's reach; a lend this call performs is.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/confined_lend_across_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"fill", "note", "a_call_in_the_body_keeps_the_range", "a_lent_local_in_the_body", "an_element_argument"}'
+confined_lend_across_calls_status=${PIPESTATUS[1]}
+set -e
+if [[ "$confined_lend_across_calls_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call in a loop body lost a range fact it could not reach\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_confined_lend_across_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["an_escaping_lend_loses_the_range"] == "body-unverified"; assert reasons["the_body_lends_the_collection"] == "body-unverified"; assert reasons["a_fact_before_the_lend"] == "body-unverified"'
+rejected_confined_lend_across_calls_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_confined_lend_across_calls_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call kept a fact over a binding it could reach\n' >&2
+    exit 1
+fi
+
 # A call reaches the caller's state only through references and globals, so a by-value scalar
 # nothing in the body references keeps its recorded value across the call; at a branch join, a
 # value every reaching arm still agrees on keeps it too. A referenced binding, a value recorded in
