@@ -17,28 +17,87 @@ extend ElisaProof:
                 index <- index + 1
             return directory
 
-        def proof_resolve_include(base_directory: darray[u8]&, relative: darray[u8]&) -> darray[u8]:
+        def proof_resolve_include(base_directory: darray[u8]&, relative: darray[u8]&) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
             resolved: mutable darray[u8] = []
-            if relative.count > 0 and relative[0] == 47:
-                resolved.extend(relative)
-                return proof_normalize_path(resolved)
             resolved.extend(base_directory)
             resolved.extend(relative)
             return proof_normalize_path(resolved)
 
-        # Match the compiler's include rule for `./` segments. This keeps the NUL-separated
-        # seen set stable when the same module is reached through `x.elisa` and `./x.elisa`.
-        def proof_normalize_path(path: darray[u8]&) -> darray[u8]:
-            normalized: mutable darray[u8] = []
+        def proof_path_is_absolute(path: darray[u8]&) -> bool:
+            return path.count > 0 and path[0] == 47
+
+        # Match the compiler's filepath.Clean behavior. The old importer removed only `./`,
+        # which let `x`, `./x`, and `sub/../x` become three seen-set entries even though they
+        # name one source file. That made cycle detection impossible to make sound over aliases.
+        def proof_normalize_path(path: darray[u8]&) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+            rooted: bool = proof_path_is_absolute(path)
+            starts: mutable darray[usize] = []
+            lengths: mutable darray[usize] = []
+            depth: mutable usize = 0
+            segment_start: mutable usize = 0
             index: mutable usize = 0
-            while index < path.count |index, normalized, path|:
-                at_segment_start: bool = normalized.count == 0 or normalized[normalized.count - 1] == 47
-                if at_segment_start and path[index] == 46 and index + 1 < path.count and path[index + 1] == 47:
-                    index <- index + 2
-                    continue
-                normalized.push(path[index])
+            while index <= path.count |index, segment_start, depth, starts, lengths, path|:
+                at_end: bool = index == path.count
+                byte: u8 = 47 if at_end else path[index]
+                if byte == 47:
+                    length: usize = index - segment_start
+                    is_dot: bool = length == 1 and path[segment_start] == 46
+                    is_parent: bool = length == 2 and path[segment_start] == 46 and path[segment_start + 1] == 46
+                    if length == 0 or is_dot:
+                        segment_start <- index + 1
+                        index <- index + 1
+                        continue
+                    keep: mutable bool = true
+                    if is_parent:
+                        keep <- false
+                        if depth > 0:
+                            top_is_parent: bool = lengths[depth - 1] == 2 and path[starts[depth - 1]] == 46 and path[starts[depth - 1] + 1] == 46
+                            if not top_is_parent:
+                                depth <- depth - 1
+                            else:
+                                keep <- true
+                        else:
+                            keep <- not rooted
+                    if keep:
+                        if depth < starts.count:
+                            starts[depth] <- segment_start
+                            lengths[depth] <- length
+                        else:
+                            starts <- starts.push(segment_start)
+                            lengths <- lengths.push(length)
+                        depth <- depth + 1
+                    segment_start <- index + 1
                 index <- index + 1
-            return normalized
+            out: mutable darray[u8] = []
+            out.push(47) if rooted
+            for segment in 0..<depth |out, starts, lengths, path, rooted|:
+                out.push(47) if segment > 0 or (out.count > 0 and not rooted)
+                for byte_index in 0..<lengths[segment] |out, starts, lengths, path, segment|:
+                    out.push(path[starts[segment] + byte_index])
+            if out.count == 0:
+                out.push(46)
+            return out
+
+        # The compiler turns relative source arguments into cwd-relative paths before walking
+        # includes. Use the process cwd here as well, so path identities are stable for a user
+        # invoking `elisa-proof file.elisa` instead of an absolute path.
+        def proof_absolute_path(path: darray[u8]&) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            normalized: darray[u8] = proof_normalize_path(path)
+            return normalized if proof_path_is_absolute(normalized)
+            cwd_buffer: mutable darray[u8] = []
+            cwd_buffer.resize(4096)
+            target: void& = (&cwd_buffer[0]).cast[void&] can Unsafe.PointerCast
+            _ = getcwd(target, 4096)
+            cwd: mutable darray[u8] = []
+            for index in 0..<cwd_buffer.count |cwd, cwd_buffer|:
+                break if cwd_buffer[index] == 0
+                cwd.push(cwd_buffer[index])
+            return normalized if cwd.count == 0
+            joined: mutable darray[u8] = []
+            joined.extend(cwd)
+            joined.push(47) if joined.count > 0 and normalized.count > 0
+            joined.extend(normalized)
+            return proof_normalize_path(joined)
 
         # The compiler's source reader keeps a flat NUL-separated path set. Reuse that shape
         # here so imports remain region-simple and deduplicate diamond include graphs.
@@ -99,12 +158,16 @@ extend ElisaProof:
                 cursor <- cursor + 1
             return captured
 
-        def proof_expand_file(path: darray[u8]&, output: mutable darray[u8]&, seen: mutable darray[u8]&, depth: i64, failed: mutable bool&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        def proof_expand_file(path: darray[u8]&, output: mutable darray[u8]&, seen: mutable darray[u8]&, active: mutable darray[u8]&, depth: i64, failed: mutable bool&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             if depth > 64:
+                failed <- true
+                return
+            if proof_path_seen(active, path):
                 failed <- true
                 return
             return if proof_path_seen(seen, path)
             proof_record_path(seen, path)
+            proof_record_path(active, path)
             path_storage: mutable darray[u8] = []
             path_storage.extend(path)
             path_storage.push(0)
@@ -112,6 +175,7 @@ extend ElisaProof:
             read_result: (ok: bool, contents: darray[u8]) = proof_read_file_checked(path_cstr)
             if not read_result.ok:
                 failed <- true
+                active.count <- active.count - path.count - 1
                 return
             contents: darray[u8] = read_result.contents
             directory: darray[u8] = proof_path_directory(path)
@@ -124,7 +188,8 @@ extend ElisaProof:
             # megabyte -- which is smaller than `src/proof/check.elisa`. The measurement and the
             # standalone reproduction are in AUDIT.md.
             byte: mutable u8 = 0
-            while index <= contents.count |index, byte, contents, line, output, seen, directory, path, depth, failed|:
+            trailing_partial: bool = contents.count > 0 and contents[contents.count - 1] != 10
+            while index < contents.count + (1 if trailing_partial else 0) |index, byte, contents, line, output, seen, active, directory, path, depth, failed, trailing_partial|:
                 at_end: bool = index == contents.count
                 byte <- 10
                 byte <- contents[index] if not at_end
@@ -132,7 +197,7 @@ extend ElisaProof:
                     included: darray[u8] = proof_include_path(line)
                     if included.count > 0:
                         resolved: darray[u8] = proof_resolve_include(directory, included)
-                        proof_expand_file(resolved, output, seen, depth + 1, failed)
+                        proof_expand_file(resolved, output, seen, active, depth + 1, failed)
                     else:
                         output.extend(line)
                         output.push(10)
@@ -140,11 +205,13 @@ extend ElisaProof:
                 else:
                     line.push(byte)
                 index <- index + 1
+            active.count <- active.count - path.count - 1
 
         public:
             def proof_import_source(path: darray[u8]&, failed: mutable bool&) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
                 output: mutable darray[u8] = []
                 seen: mutable darray[u8] = []
-                normalized: mutable darray[u8] = proof_normalize_path(path)
-                proof_expand_file(normalized, &output, &seen, 0, failed)
+                active: mutable darray[u8] = []
+                normalized: darray[u8] = proof_absolute_path(path)
+                proof_expand_file(normalized, &output, &seen, &active, 0, failed)
                 return output

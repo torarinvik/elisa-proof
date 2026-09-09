@@ -4414,6 +4414,19 @@ the compiler returned a parse error; after the repair the proof binary returns `
 certificate emitted. It is part of `scripts/dogfood.sh`, which also checks deterministic output and
 independent certificate replay.
 
+The same audit found two more import mismatches. The importer used to silently stop at a repeated
+path, so a cycle could be erased and the remaining declarations proved even though the compiler
+rejects cyclic includes. It also canonicalized only `./`, so `./included.elisa` and
+`./sub/../included.elisa` were treated as different files. The importer now keeps an active
+recursion stack separate from the include-once set, rejects active-path re-entry, and uses the
+compiler's lexical path cleaning for `.`, `..`, and repeated separators. Relative roots are made
+cwd-relative before the walk. `examples/rejected_include_cycle_a.elisa` guards the rejection, while
+`examples/include_alias_diamond.elisa` guards one-time expansion through an alias.
+
+Finally, expansion now flushes only an unterminated final physical line. The old `<=` sentinel
+always appended a synthetic blank line to newline-terminated files, changing imported byte counts,
+fingerprints, and downstream source locations.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
