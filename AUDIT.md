@@ -4381,6 +4381,25 @@ fixture reports 2,066 obligations, 1,542 replayed certificates, and 0 replay gap
 matrix passes, and the executable dogfood probes cover the mutated lemma/function summary,
 floating-point, unsigned, alias, region, tactic, effect, arena, bootstrap, and loop-counter cases.
 
+## Repaired: tactic `simp` replay accepted a stronger goal
+
+The independent tactic-transition kernel originally checked `simp` by asking whether the old goal
+could be found inside the new goal's proof-depth relation. That was too weak for a transition
+certificate: a forged snapshot could change `p` into `p and true`, which contains the old goal as a
+conjunct but is not a rewrite performed by the Elisa tactic. A later action would then continue
+from a strengthened proposition that the source tactic never produced.
+
+The replay kernel now mirrors the exact bottom-up simplifier: it recursively normalizes only unary
+and binary terms, folds checked integer arithmetic and integer comparisons, folds Boolean equality
+and connectives, and removes double negation. Non-binary formers remain opaque, and overflow or
+invalid arithmetic remains unknown. The transition is accepted only when the independently
+normalized old goal is structurally equal to the supplied new goal; if the new goal is marked
+solved, ordinary proposition replay still has to close it from the post-state facts.
+
+`examples/kernel_arena_runtime.elisa` directly submits the forged `p -> p and true` transition and
+requires rejection. The full stage1 matrix, stage1 dogfood, and stage0 bootstrap harness all pass,
+including the existing positive simplification and overflow cases, with zero replay gaps.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
