@@ -1747,7 +1747,7 @@ the tree produces the finding any more, so the remaining path is exercised only 
 absence. The loop handler's own imprecision is untouched -- a `for` without an invariant still
 forgets its whole frame afterwards.
 
-## The checker died of a stack overflow on half a megabyte of source
+## Repaired: the checker died of a stack overflow on half a megabyte of source
 
 ### What was wrong
 
@@ -1791,6 +1791,21 @@ this checker.
 
 ### What changed
 
+The crash was first avoided in the importer by hoisting the byte binding, but that only hid a
+compiler defect and left every other Elisa program with the same hazard. The root cause was
+subsequently reduced to the compiler's local-scope metadata: scoped declarations were removed
+from `names`, `slots` and `types`, but not from the parallel mutability and arena metadata arrays.
+When a later `mutable ...&` binding was looked up, the stale array entries shifted its mutability
+bit. A plain `<-` was then lowered as a write through the zero reference instead of a rebind,
+producing a null store in `arena_take_free_block` and a native `SIGSEGV` during lexer darray
+growth.
+
+The compiler now restores every index-parallel local array together, and the zero-initialized
+declaration path records mutable reference bindings just like ordinary initializers. The fix is
+committed in compiler revision `3b48e949`, with a stage0/stage1 regression in
+`test/parity/mutable_ref_scope_smoke.sh`. The importer deliberately uses the original conditional
+initializer again, so the proof build now exercises the repaired backend directly.
+
 `proof_expand_file` reads the file it is expanding one byte per iteration through exactly that
 shape:
 
@@ -1798,9 +1813,9 @@ shape:
 byte: u8 = 10 if at_end else contents[index]
 ```
 
-so a source file of *n* bytes leaked *n* times. The binding is now hoisted out of the loop as
-`mutable` and assigned with two guarded assignments, which the reduction above shows does not
-leak. The comment there names the defect so the line is not "simplified" back.
+so a source file of *n* bytes used to leak *n* times. The repaired compiler now lowers this
+conditional without per-iteration frame growth. The source-level conditional remains in place as
+a regression against reintroducing the backend defect.
 
 ### Coverage
 
