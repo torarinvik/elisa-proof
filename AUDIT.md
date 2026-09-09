@@ -4427,6 +4427,25 @@ Finally, expansion now flushes only an unterminated final physical line. The old
 always appended a synthetic blank line to newline-terminated files, changing imported byte counts,
 fingerprints, and downstream source locations.
 
+## Repaired: batch arena admission could accept a disconnected cycle
+
+The report-wide kernel admission pass checked node shapes and direct ranges, but did not enforce
+the producer's append-only arena order. A cyclic component that was not reachable from the first
+certificate root could therefore pass `proof_kernel_replay_arena_all_report`, even though the
+strict single-root validator rejected the same cycle. A batch validator also has to stay bounded
+on the large self-hosting report; a graph worklist that retained one allocation per disconnected
+component exhausted memory while auditing `kernel_replay_standalone`. The local pass also omitted
+the direct payload edge of `resource-use`, `resource-write`, and `resource-move`, leaving one
+class of malformed resource node under-validated.
+
+The arena format is now explicitly admitted in canonical postorder: every direct or child-list
+edge must point to an earlier node. This rejects self-cycles, forward edges, and every directed
+cycle in the existing local shape/range pass without a graph-sized traversal or per-component
+allocation. Exact depth remains checked by strict per-root replay for every certificate before
+its logical rule executes. `examples/kernel_arena_runtime.elisa` directly checks that the public
+batch report rejects a self-cycle and an out-of-range resource edge, while the full stage1 matrix,
+stage1 dogfood, and stage0 bootstrap harnesses pass with zero replay gaps.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
