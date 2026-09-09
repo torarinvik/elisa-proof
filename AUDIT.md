@@ -4453,6 +4453,19 @@ resource replay tried to dereference it. The result node is now traversed and ch
 iterative validator as well as the batch postorder pass; the arena harness supplies an out-of-range
 result edge regression.
 
+## Repaired: a moved resource could remain a return witness
+
+Resource replay records each valid `resource-use` as a possible witness for a returned region
+capability. The witness list was append-only, so a forged trace could use an earlier witness after
+the same reference binding had been moved. The return marker checked the binding name, region,
+reference mode, and mutability, but not its current moved state; this allowed a capability to be
+derived from a value that no longer existed at that program point.
+
+Return-witness validation now requires the witnessed binding to be live and unmoved. The executable
+arena harness includes a trace that uses, moves, and then returns the same reference through the old
+witness; the independent resource kernel rejects it, while the full stage1 dogfood and stage0
+bootstrap coverage remain gap-free.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
