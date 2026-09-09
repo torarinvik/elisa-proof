@@ -288,6 +288,8 @@ run_probe aggregate_local_symbol examples/aggregate_local_symbol.elisa 0
 run_probe rejected_aggregate_local_symbol examples/rejected_aggregate_local_symbol.elisa 1
 run_probe collection_builtin_extent examples/collection_builtin_extent.elisa 0
 run_probe rejected_collection_builtin_extent examples/rejected_collection_builtin_extent.elisa 1
+run_probe loop_counter_invariant examples/loop_counter_invariant.elisa 0
+run_probe rejected_loop_counter_invariant examples/rejected_loop_counter_invariant.elisa 1
 run_probe call_boundary_binding examples/call_boundary_binding.elisa 0
 run_probe rejected_call_boundary_binding examples/rejected_call_boundary_binding.elisa 1
 run_probe short_circuit_call examples/short_circuit_call.elisa 0
@@ -1690,6 +1692,32 @@ for owner in ("a_lend_still_escapes", "a_push_in_the_body_still_writes", "a_push
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s read a reach a collection builtin does not remove" % owner)
 print("dogfood collection_builtin_extent: a push is a write, not a reach that outlives its call")
+PY
+
+# A counter keeps its own value across its update, and the fresh symbol that records it claims
+# nothing beyond the update itself.
+python3 - "$REPORT_DIR/loop_counter_invariant.json" "$REPORT_DIR/rejected_loop_counter_invariant.json" <<'PY'
+import json
+import sys
+
+kept, owed = sys.argv[1:]
+with open(kept, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: counter fixture did not prove cleanly")
+verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
+for owner in ("bounded_counter", "walk_to_limit", "increment_keeps_its_value", "two_counters"):
+    if owner not in verified:
+        raise SystemExit("dogfood failed: %s lost a counter's value across its own update" % owner)
+with open(owed, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: counter boundary fixture did not fail cleanly")
+reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
+for owner in ("an_increment_without_a_peer", "a_non_unit_step", "a_false_invariant", "a_counter_is_not_a_total", "a_pre_update_fact_is_not_current"):
+    if reasons.get(owner) != "body-unverified":
+        raise SystemExit("dogfood failed: %s read more out of a rebind than the update" % owner)
+print("dogfood loop_counter_invariant: a counter's update is recorded, and records only itself")
 PY
 
 # A call boundary and a branch join forget only what a callee or an arm can rewrite: a by-value

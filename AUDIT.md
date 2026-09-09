@@ -4275,6 +4275,112 @@ explanation it was built on predicted eleven. The receiver rule bought the other
 more. No function crosses into `verified` -- each still owes other obligations -- which is why the
 goal counts, not the function count, are the reading.
 
+## A counter could not keep its own value across its own update
+
+### What was wrong
+
+`elisac-stage1` declined any body carrying a loop `invariant`, so the annotation the checker asks
+for could not appear in a program this project compiles, and the nine `loop-invariant-missing`
+findings could not be answered. The compiler now erases the annotation instead (`Elisa-compiler`
+`src/backend/codegen_stmt_expr.elisa`, with a differential case beside it), which made the invariant
+path testable for the first time -- and it failed on the simplest counter there is:
+
+    rounds: mutable usize = 0
+    while rounds < limit:
+        invariant rounds <= limit
+        rounds <- rounds + 1
+
+`invariant-not-preserved`. The preservation goal's fact list carried only type bounds -- neither the
+loop condition nor the invariant. Narrowing it outside any loop isolated the cause exactly:
+`rounds <- 1` and `rounds <- seed + 1` both prove, `rounds <- rounds + 1` and even `rounds <- rounds`
+do not.
+
+`proof_bind_unsigned_symbol` resymbolizes a rebound local under *its own name* and then refuses the
+binding fact when the value mentions that symbol -- which a self-referential value always does. So
+the new value was dropped, and the resymbolization cleared every fact about the old one. A counter
+could not keep its own value across its own update, in a loop or out of one.
+
+### What changed
+
+Two steps, and both are needed for either to show.
+
+* A rebind whose value is written over the binding's own symbol takes a **fresh symbol**. The
+  source name is bound to the fresh one, so every substitution reaches the new value; the old
+  symbol then denotes the old value and nothing else, so every fact already recorded stays true of
+  the value it was taken over and none of them is cleared. The update is recorded as the ordinary
+  `local-binding` equality the non-self-referential case already emits, so replay needs no new rule.
+  The names come from a fixed pool of 64 rather than being built -- nothing here can construct an
+  identifier -- and the pool is per function; exhausting it falls back to the old behaviour, which
+  forgets rather than assumes.
+* The equality is only useful if the difference engine imports it, and it would not. An affine term
+  `x + 1` enters the constraint graph only when the bounds prove it cannot wrap, and a counter
+  bounded by a symbolic limit has no numeric upper bound. The goal side already had the argument
+  this needs -- `x < peer` with a peer of the same unsigned width puts `x + 1` in range, since the
+  peer is at most that width's maximum -- but it asked the finished constraint graph, which a fact
+  being imported *into* that graph does not have. The fact side now asks the same question of the
+  facts directly. Mirrored in `proof_kernel_replay_affine_peer_safe_from_facts`; without the mirror
+  every one of these proofs gapped at the kernel, which is how the mirror was found to be required.
+
+### Fixtures
+
+`examples/loop_counter_invariant.elisa`: a `while` loop whose invariant establishes and is
+preserved, the same over a collection walk where the index obligation is discharged through the
+counter's bound, a straight-line increment that keeps its value, and two counters in one frame. All
+four verify; all four fail under a build of the previous commit.
+`examples/rejected_loop_counter_invariant.elisa`: an increment with no strict peer (the wrap guard's
+own case), a non-unit step, an invariant that is false on the iteration reaching the bound, a total
+accumulated beside a counter, and a pre-update fact that would prove the claim if it were read as
+current. All five stay refused, with replay gaps 0.
+
+### What it bought, and what it cost
+
+On `examples/kernel_replay_standalone.elisa`:
+
+| | before | after |
+| --- | --- | --- |
+| obligations | 2027 | 2033 |
+| proven | 1527 | 1527 |
+| findings | 510 | 516 |
+| replay gaps | 0 | 0 |
+| trusted assumptions | 0 | 0 |
+
+The corpus moves *backwards* by six findings, and saying so plainly matters more than the direction.
+The six are named exactly: `proof_kernel_replay_affine_peer_safe_from_facts` is a new declaration in
+the checked source and is itself unverified (1), and the two functions that now call it or carry its
+new parameters pick up its shadow (`proof_kernel_replay_collect_differences` 4,
+`proof_kernel_replay_difference_comparison` 1). Every one is `function-summary-unverified`, the
+cluster already recorded as a shadow of unverified roots. No goal that was proven stopped being
+proven.
+
+Nothing else moves because the kernel's own nine loops still carry no invariant: writing one
+requires the fixed compiler to be the *installed* `elisac-stage1`, and the snapshot at
+`~/.elisac/stage1` is pinned at a revision that predates the fix. The capability is what this entry
+records -- the four fixture functions go from unprovable to verified, and the counter shape that
+blocked all nine loops is no longer the obstacle. Moving the snapshot, and then annotating those
+loops, is the next step and is deliberately not taken here: the snapshot is shared with every other
+project on this machine.
+
+## Replay admission and provenance audit
+
+The next pass found three independent correctness/performance hazards in the self-hosting path.
+Type-bound cleanup searched the complete historical trace table for every copied fact; batch kernel
+replay also reallocated a whole-arena validator for each certificate; and certificate JSON origin
+lookups repeated the same trace search. These were replaced with per-function type-bound membership,
+one report-wide shape/range admission pass, and a flat certificate-fact-to-trace index. These are
+only caches: no cache entry is a proof fact or a trusted assumption.
+
+The audit also caught two boundary mistakes. `effect-containment` had been classified as a unary
+node by the generic arena walker, so its child call entries were not admitted by the ordinary
+validator; it now validates the declared row and every call entry explicitly. More importantly,
+fact-trace revalidation trusted the report-wide admission bit after a caller mutated a serialized
+kernel node. Public fact-trace entry now always invokes strict per-root arena admission, so a hidden
+payload or a replaced normalized argument fails closed even after an earlier successful replay.
+
+The self-hosting corpus remains deterministic and gap-free after the changes: the large replay
+fixture reports 2,066 obligations, 1,542 replayed certificates, and 0 replay gaps. The full proof
+matrix passes, and the executable dogfood probes cover the mutated lemma/function summary,
+floating-point, unsigned, alias, region, tactic, effect, arena, bootstrap, and loop-counter cases.
+
 ## Coverage still required
 
 | Code | Required audit coverage |

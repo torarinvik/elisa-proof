@@ -2874,4 +2874,26 @@ if [[ "$rejected_collection_builtin_extent_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A rebind written over the binding's own symbol takes a fresh symbol, so the new value is recorded
+# and the old one keeps its facts. The equality that records it is admitted into the difference
+# graph under the same increment argument the goal side already used: a strict peer of the same
+# unsigned width puts `x + 1` in range. Neither the symbol nor the import may say more than that.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/loop_counter_invariant.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"bounded_counter", "walk_to_limit", "increment_keeps_its_value", "two_counters"}'
+loop_counter_invariant_status=${PIPESTATUS[1]}
+set -e
+if [[ "$loop_counter_invariant_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a counter lost its own value across its update\n' >&2
+    exit 1
+fi
+
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_loop_counter_invariant.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "invariant-not-preserved", "invariant-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["an_increment_without_a_peer"] == "body-unverified"; assert reasons["a_non_unit_step"] == "body-unverified"; assert reasons["a_false_invariant"] == "body-unverified"; assert reasons["a_counter_is_not_a_total"] == "body-unverified"; assert reasons["a_pre_update_fact_is_not_current"] == "body-unverified"'
+rejected_loop_counter_invariant_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_loop_counter_invariant_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a fresh rebind symbol claimed more than the update\n' >&2
+    exit 1
+fi
+
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

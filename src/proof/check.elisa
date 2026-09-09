@@ -455,7 +455,18 @@ extend ElisaProof:
             return 0
 
         const PROOF_SCALAR_WITNESS_BUDGET: usize = 12
+        const PROOF_SCALAR_WITNESS_FUNCTION_BUDGET: usize = 32
         const PROOF_SCALAR_WITNESS_DEPTH: usize = 3
+
+        # Expression witnesses are optional completeness data for the congruence fragment. Keep
+        # their number bounded per checked function: every witness is copied through branch and
+        # call state, so an unbounded set would turn a finite proof into quadratic or worse fact
+        # churn. Spending this budget only removes a witness and can therefore only make a goal
+        # decline; it never changes an accepted theorem into an unsound one.
+        def proof_add_scalar_type_witness(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
+            return if report.scalar_witness_facts >= PROOF_SCALAR_WITNESS_FUNCTION_BUDGET
+            report.scalar_witness_facts <- report.scalar_witness_facts + 1
+            proof_add_type_bound_fact(facts, report, expression, line, owner)
 
         # Expression-level type witnesses for a binding. The bare name of a scalar binding is
         # witnessed by the caller; this records what the declared type says about the places
@@ -464,15 +475,15 @@ extend ElisaProof:
         # container itself when its elements are scalars. Every witness is a type statement about
         # a place and is retained and invalidated with the binding's root symbol.
         def proof_add_scalar_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos, budget: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_SCALAR_WITNESS_DEPTH or budget == 0
+            return if depth >= PROOF_SCALAR_WITNESS_DEPTH or budget == 0 or report.scalar_witness_facts >= PROOF_SCALAR_WITNESS_FUNCTION_BUDGET
             element_depth: i64 = proof_scalar_element_depth(type_expression, report.source_declarations, 0)
             container: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, report.source_declarations, 0)
             if container.known:
                 budget <- budget - 1
-                proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(Ast::Expr.Field(root, "count", position), position), line, owner)
+                proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(Ast::Expr.Field(root, "count", position), position), line, owner)
                 if element_depth > 0 and budget > 0:
                     budget <- budget - 1
-                    proof_add_type_bound_fact(facts, report, proof_scalar_element_marker(root, element_depth, position), line, owner)
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_element_marker(root, element_depth, position), line, owner)
                 return
             struct_name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
             return if struct_name == ""
@@ -485,12 +496,12 @@ extend ElisaProof:
                 place: Ast::Expr = Ast::Expr.Field(root, field_name, position)
                 if proof_scalar_type_kind(field.type_expression, report.source_declarations, 0) == 1:
                     budget <- budget - 1
-                    proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(place, position), line, owner)
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(place, position), line, owner)
                     # A field of an unsigned type is nonnegative whatever its value, which is the
                     # lower bound on every index written as `node.start + i`. The marker is over
                     # the place, so it stays out of the general width function.
                     field_width: i64 = proof_unsigned_type_width(field.type_expression, report.source_declarations, 0)
-                    proof_add_type_bound_fact(facts, report, proof_unsigned_place_marker(place, field_width, position), line, owner) if field_width > 0
+                    proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(place, field_width, position), line, owner) if field_width > 0
                 else:
                     proof_add_scalar_witnesses(facts, report, place, field.type_expression, line, owner, position, budget, depth + 1)
 
@@ -521,7 +532,7 @@ extend ElisaProof:
                     return if called >= functions.return_scalar.count or not functions.return_scalar[called]
                     for argument in arguments |facts|:
                         return if not proof_scalar_term_witnessed(argument, facts, 0)
-                    proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(expression, position), line, owner)
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
                 _:
                     pass
 
@@ -563,6 +574,7 @@ extend ElisaProof:
             if proof_fact_is_type_bound(report, expression, owner):
                 facts.push(expression)
                 return
+            report.type_bound_seen.push(expression)
             proof_add_traced_fact(facts, report, expression, "type-bound", line, owner)
 
         def proof_add_unsigned_binding_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, width: i64, line: u32, owner: sview, position: Ast::Pos) -> void:
@@ -977,8 +989,9 @@ extend ElisaProof:
 
         def proof_fact_is_type_bound(report: ProofReport&, expression: Ast::Expr, owner: sview) -> bool:
             return false if proof_type_bound_name(expression) == ""
-            for trace in report.fact_traces:
-                return true if trace.kind == "type-bound" and trace.name == owner and proof_expr_equal(trace.expression, expression)
+            return false if report.type_bound_owner != owner
+            for existing in report.type_bound_seen:
+                return true if proof_expr_equal(existing, expression)
             return false
 
         # Type bounds come from the compiler's variable type, not from mutable program state.
@@ -1831,12 +1844,90 @@ extend ElisaProof:
         # literal arithmetic. The value is recorded as an equality only when it is itself
         # range-safe under the current facts; a possibly wrapping initializer leaves the symbol
         # opaque within its declared type range.
+        # A rebind whose value is written over the binding's own symbol cannot record that value
+        # under that symbol: `rounds == rounds + 1` is cyclic, and refusing it is what dropped the
+        # new value and, with it, every fact about the old one. The new value gets a fresh symbol
+        # instead. The old symbol then denotes the old value and nothing else -- the source name is
+        # bound to the fresh symbol, so every substitution reaches the new value and every fact
+        # already recorded stays true of the value it was taken over.
+        #
+        # The names are drawn from a fixed pool rather than built, and the pool is per function:
+        # nothing here can construct an identifier, and a shared counter would run a long program
+        # out of names for a short one. Exhausting the pool falls back to the old behaviour, which
+        # forgets rather than assumes. The prefix is reserved exactly as the type markers' is.
+        def proof_rebind_symbol(report: mutable ProofReport&) -> sview:
+            index: usize = report.rebind_symbols
+            return "" if index >= 64
+            report.rebind_symbols <- index + 1
+            return "__elisa_rebind_0" if index == 0
+            return "__elisa_rebind_1" if index == 1
+            return "__elisa_rebind_2" if index == 2
+            return "__elisa_rebind_3" if index == 3
+            return "__elisa_rebind_4" if index == 4
+            return "__elisa_rebind_5" if index == 5
+            return "__elisa_rebind_6" if index == 6
+            return "__elisa_rebind_7" if index == 7
+            return "__elisa_rebind_8" if index == 8
+            return "__elisa_rebind_9" if index == 9
+            return "__elisa_rebind_10" if index == 10
+            return "__elisa_rebind_11" if index == 11
+            return "__elisa_rebind_12" if index == 12
+            return "__elisa_rebind_13" if index == 13
+            return "__elisa_rebind_14" if index == 14
+            return "__elisa_rebind_15" if index == 15
+            return "__elisa_rebind_16" if index == 16
+            return "__elisa_rebind_17" if index == 17
+            return "__elisa_rebind_18" if index == 18
+            return "__elisa_rebind_19" if index == 19
+            return "__elisa_rebind_20" if index == 20
+            return "__elisa_rebind_21" if index == 21
+            return "__elisa_rebind_22" if index == 22
+            return "__elisa_rebind_23" if index == 23
+            return "__elisa_rebind_24" if index == 24
+            return "__elisa_rebind_25" if index == 25
+            return "__elisa_rebind_26" if index == 26
+            return "__elisa_rebind_27" if index == 27
+            return "__elisa_rebind_28" if index == 28
+            return "__elisa_rebind_29" if index == 29
+            return "__elisa_rebind_30" if index == 30
+            return "__elisa_rebind_31" if index == 31
+            return "__elisa_rebind_32" if index == 32
+            return "__elisa_rebind_33" if index == 33
+            return "__elisa_rebind_34" if index == 34
+            return "__elisa_rebind_35" if index == 35
+            return "__elisa_rebind_36" if index == 36
+            return "__elisa_rebind_37" if index == 37
+            return "__elisa_rebind_38" if index == 38
+            return "__elisa_rebind_39" if index == 39
+            return "__elisa_rebind_40" if index == 40
+            return "__elisa_rebind_41" if index == 41
+            return "__elisa_rebind_42" if index == 42
+            return "__elisa_rebind_43" if index == 43
+            return "__elisa_rebind_44" if index == 44
+            return "__elisa_rebind_45" if index == 45
+            return "__elisa_rebind_46" if index == 46
+            return "__elisa_rebind_47" if index == 47
+            return "__elisa_rebind_48" if index == 48
+            return "__elisa_rebind_49" if index == 49
+            return "__elisa_rebind_50" if index == 50
+            return "__elisa_rebind_51" if index == 51
+            return "__elisa_rebind_52" if index == 52
+            return "__elisa_rebind_53" if index == 53
+            return "__elisa_rebind_54" if index == 54
+            return "__elisa_rebind_55" if index == 55
+            return "__elisa_rebind_56" if index == 56
+            return "__elisa_rebind_57" if index == 57
+            return "__elisa_rebind_58" if index == 58
+            return "__elisa_rebind_59" if index == 59
+            return "__elisa_rebind_60" if index == 60
+            return "__elisa_rebind_61" if index == 61
+            return "__elisa_rebind_62" if index == 62
+            return "__elisa_rebind_63" if index == 63
+            return ""
+
         def proof_bind_unsigned_symbol(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, slot: usize, width: i64, value: Ast::Expr, position: Ast::Pos) -> void:
             return if slot >= names.count or slot >= values.count or width <= 0
-            symbol: sview = names[slot]
-            proof_resymbolize_binding(names, values, facts, report, owner, symbol, position)
-            values[slot] <- Ast::Expr.Ident(symbol, position)
-            proof_add_unsigned_binding_facts(facts, report, symbol, width, position.line, owner, position)
+            declared: sview = names[slot]
             value_known: mutable bool = true
             match value:
                 Ast::Expr.Invalid:
@@ -1845,6 +1936,14 @@ extend ElisaProof:
                     value_known <- false
                 _:
                     pass
+            # Only a self-referential value needs a fresh symbol, and only then is the old symbol
+            # left standing. Every other rebind keeps the source name as its symbol, so the facts
+            # over the old value -- which that name would otherwise still denote -- are dropped.
+            fresh: sview = proof_rebind_symbol(report) if value_known and proof_expr_mentions_name(value, declared) else ""
+            symbol: sview = declared if fresh == "" else fresh
+            proof_resymbolize_binding(names, values, facts, report, owner, declared, position) if fresh == ""
+            values[slot] <- Ast::Expr.Ident(symbol, position)
+            proof_add_unsigned_binding_facts(facts, report, symbol, width, position.line, owner, position)
             return if not value_known or proof_expr_mentions_name(value, symbol)
             return if not proof_unsigned_expression_safe(value, facts)
             binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.EqEq, value, position)
@@ -5768,7 +5867,7 @@ extend ElisaProof:
             if fixed_extent >= 0:
                 fixed_upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, Ast::Expr.IntLit(fixed_extent), position)
                 fixed_upper_proven <- proof_goal(checked_facts, fixed_upper, annotations)
-                proof_add_traced_fact(checked_facts, report, upper, "type-bound", position.line, name) if fixed_upper_proven
+                proof_add_type_bound_fact(checked_facts, report, upper, position.line, name) if fixed_upper_proven
             upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "index-upper")
             report.proof_obligation(upper_proven)
             proof_add_latest_goal_finding(report, "index-upper-unproven", position.line, name, "indexed access may exceed the collection bound") if not upper_proven
@@ -5878,7 +5977,7 @@ extend ElisaProof:
                     if fixed_extent >= 0:
                         fixed_upper: Ast::Expr = Ast::Expr.Binary(checked_high, TokenKind.LtEq, Ast::Expr.IntLit(fixed_extent), position)
                         if proof_goal(checked_facts, fixed_upper, annotations):
-                            proof_add_traced_fact(checked_facts, report, upper, "type-bound", position.line, name)
+                            proof_add_type_bound_fact(checked_facts, report, upper, position.line, name)
                     upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "slice-upper")
                     report.proof_obligation(upper_proven)
                     proof_add_latest_goal_finding(report, "slice-upper-unproven", position.line, name, "slice may end beyond the collection") if not upper_proven
@@ -6515,7 +6614,7 @@ extend ElisaProof:
                         # equality reasoning over it is not held back by the binding form. An
                         # unsigned width marker already witnesses the same thing.
                         local_scalar_kind: i64 = proof_scalar_type_kind(type_expression, report.source_declarations, 0)
-                        proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(local_name, position), position.line, name) if local_scalar_kind == 1 and unsigned_width <= 0
+                        proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(local_name, position), position.line, name) if local_scalar_kind == 1 and unsigned_width <= 0
                         proof_bind_scalar_symbol(names, values, prior_value_count, position) if local_scalar_kind == 1 and unsigned_width <= 0
                         local_witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
                         proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(local_name, position), type_expression, position.line, name, position, &local_witness_budget, 0) if local_scalar_kind != 1
@@ -7382,6 +7481,10 @@ extend ElisaProof:
             facts: mutable darray[Ast::Expr] = []
             report.aliased_names.clear()
             report.aliased_owner <- function_name
+            report.type_bound_seen.clear()
+            report.type_bound_owner <- function_name
+            report.rebind_symbols <- 0
+            report.scalar_witness_facts <- 0
             # A mutable global is a place any callee can reach without being handed anything, so a
             # lend could be stored there and outlive its call. The confinement rule is withdrawn
             # from the whole program as soon as one is declared, the same way the shared-extent
@@ -7425,7 +7528,7 @@ extend ElisaProof:
                 # remaining scalar parameters need the narrower marker. Congruence consumes it to
                 # establish that this name's operators cannot be a user protocol implementation.
                 scalar_kind: i64 = proof_scalar_type_kind(parameter.type_expression, report.source_declarations, 0)
-                proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(parameter.name, position), position.line, function_name) if scalar_kind == 1 and unsigned_width <= 0
+                proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(parameter.name, position), position.line, function_name) if scalar_kind == 1 and unsigned_width <= 0
                 witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
                 proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position.line, function_name, position, &witness_budget, 0) if scalar_kind != 1
             for requirement in preconditions |facts, names, values, report, function_name, position|:

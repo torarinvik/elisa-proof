@@ -1561,7 +1561,7 @@ extend ElisaProof:
         # step check is performed entirely by kernel_replay.elisa. Runtime and summary facts are
         # explicit semantic boundaries; they are still required to have a well-formed lowered
         # term and summary dependencies are recursively checked by the existing SCC-aware path.
-        def proof_replay_kernel_fact_trace_is_valid_with_stack[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&) -> bool:
+        def proof_replay_kernel_fact_trace_is_valid_with_stack[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&, revalidate_arena: bool) -> bool:
             return false if trace.name != owner or not proof_replay_kernel_trace_range_valid(report, trace)
             return false if not proof_replay_ast_matches_kernel(report, trace.expression, trace.kernel_expression, 0)
             return false if trace.premises_count != trace.kernel_premises_count
@@ -1574,7 +1574,11 @@ extend ElisaProof:
             # Boundary facts do not require a logical derivation, but their serialized terms are
             # still untrusted input. Admit the complete reachable graph before any early return so
             # hidden fields, malformed child slices, cycles, and unsupported nodes fail closed.
-            return false if not ElisaProofKernelReplay::proof_kernel_replay_arena_report(&report.kernel_nodes, &report.kernel_children, kernel_premises, trace.kernel_expression)
+            # A fact-trace entry is a public revalidation boundary. The batch certificate pass
+            # may admit its arena once for the duration of that pass, but callers can retain a
+            # mutable report and alter its serialized nodes afterwards. Never let that cached
+            # bit turn a post-mutation fact trace into trusted evidence.
+            return false if (revalidate_arena or not report.kernel_arena_validated) and not ElisaProofKernelReplay::proof_kernel_replay_arena_report(&report.kernel_nodes, &report.kernel_children, kernel_premises, trace.kernel_expression)
             return true if trace.kind == "precondition" or trace.kind == "type-bound" or trace.kind == "runtime-assert" or trace.kind == "runtime-guard" or trace.kind == "branch-condition" or trace.kind == "loop-condition" or trace.kind == "loop-invariant" or trace.kind == "loop-range" or trace.kind == "local-binding"
             if trace.kind == "lemma-summary":
                 return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
@@ -1582,19 +1586,21 @@ extend ElisaProof:
                 return proof_replay_function_summary_is_valid(report, trace, dependency_stack, depth) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
             return false if trace.kind != "proof-step" and trace.kind != "lemma-step" and trace.kind != "loop-invariant-step" and trace.kind != "branch-conjunct" and trace.kind != "branch-conjunct"
             return false if depth >= 64
-            for premise in kernel_premises |premise, report, owner, depth, dependency_stack|:
+            for premise in kernel_premises |premise, report, owner, depth, dependency_stack, revalidate_arena|:
                 found: mutable bool = false
                 for candidate in report.fact_traces |candidate, premise, report, owner, depth, dependency_stack, found|:
-                    if candidate.kernel_expression < report.kernel_nodes.count and ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(report.kernel_nodes, report.kernel_children, candidate.kernel_expression, premise, 0) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, candidate, owner, depth + 1, dependency_stack):
+                    continue if candidate.name != owner
+                    if candidate.kernel_expression < report.kernel_nodes.count and ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(report.kernel_nodes, report.kernel_children, candidate.kernel_expression, premise, 0) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, candidate, owner, depth + 1, dependency_stack, revalidate_arena):
                         found <- true
                         break
                 return false if not found
             return ElisaProofKernelReplay::proof_kernel_replay_goal_report(&report.kernel_nodes, &report.kernel_children, kernel_premises, trace.kernel_expression)
 
-        def proof_replay_kernel_fact_root_is_traced_with_stack[@r](report: mutable ProofReport& @r, fact: usize, owner: sview, dependency_stack: darray[sview]&) -> bool:
+        def proof_replay_kernel_fact_root_is_traced_with_stack[@r](report: mutable ProofReport& @r, fact: usize, owner: sview, dependency_stack: darray[sview]&, revalidate_arena: bool) -> bool:
             return false if fact >= report.kernel_nodes.count
-            for trace in report.fact_traces |trace, report, fact, owner, dependency_stack|:
-                return true if trace.kernel_expression < report.kernel_nodes.count and ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(report.kernel_nodes, report.kernel_children, trace.kernel_expression, fact, 0) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack)
+            for trace in report.fact_traces |trace, report, fact, owner, dependency_stack, revalidate_arena|:
+                continue if trace.name != owner
+                return true if trace.kernel_expression < report.kernel_nodes.count and ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(report.kernel_nodes, report.kernel_children, trace.kernel_expression, fact, 0) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack, revalidate_arena)
             return false
 
         # Resource-disjoint transitions carry their own logical premises inside the resource
@@ -1611,7 +1617,7 @@ extend ElisaProof:
                 return false if node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
                 for index in 0..<node.children_count |index, node, report, active_owner, dependency_stack|:
                     fact: usize = report.kernel_children[node.children_start + index]
-                    return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, active_owner, dependency_stack)
+                    return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, active_owner, dependency_stack, false)
                 return true
             if node.kind == "resource-safety" or node.kind == "resource-scope":
                 return false if node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
@@ -1643,6 +1649,7 @@ extend ElisaProof:
             for premise in premises |premise, report, owner, depth, dependency_stack|:
                 found: mutable bool = false
                 for candidate in report.fact_traces |candidate, premise, owner, depth, dependency_stack, found|:
+                    continue if candidate.name != owner
                     if proof_replay_expr_equal(candidate.expression, premise) and proof_replay_fact_trace_is_valid_with_stack(report, candidate, owner, depth + 1, dependency_stack):
                         found <- true
                         break
@@ -1655,6 +1662,7 @@ extend ElisaProof:
 
         def proof_replay_fact_is_traced_with_stack(report: mutable ProofReport&, fact: Ast::Expr, owner: sview, dependency_stack: darray[sview]&) -> bool:
             for trace in report.fact_traces:
+                continue if trace.name != owner
                 return true if proof_replay_expr_equal(trace.expression, fact) and proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack)
             return false
 
@@ -1681,6 +1689,7 @@ extend ElisaProof:
             return false
 
         def proof_replay_certificate_with_stack[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
+            return false if not report.kernel_arena_validated
             return false if not proof_replay_certificate_root_is_proven(report, certificate)
             return false if certificate.kernel_facts_start > report.kernel_certificate_facts.count or certificate.kernel_facts_count > report.kernel_certificate_facts.count - certificate.kernel_facts_start
             return false if certificate.kernel_goal >= report.kernel_nodes.count
@@ -1697,17 +1706,17 @@ extend ElisaProof:
                 return false if fact >= report.kernel_nodes.count
                 facts.push(fact)
             for fact in facts |fact, report, certificate, dependency_stack|:
-                return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, certificate.name, dependency_stack)
+                return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, certificate.name, dependency_stack, false)
             return false if certificate.rule == "resource-safety" and not proof_replay_resource_event_facts_with_owner(report, certificate.kernel_goal, certificate.name, dependency_stack, 0)
-            return ElisaProofKernelReplay::proof_kernel_replay_resource_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "resource-safety"
-            return ElisaProofKernelReplay::proof_kernel_replay_structural_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "structural-safety"
-            return ElisaProofKernelReplay::proof_kernel_replay_effect_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "effect-containment"
-            return ElisaProofKernelReplay::proof_kernel_replay_checked_index_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-index"
-            return ElisaProofKernelReplay::proof_kernel_replay_checked_get_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-get"
-            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, "forall", facts, certificate.kernel_goal) if certificate.rule == "quantifier-forall"
-            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, "exists", facts, certificate.kernel_goal) if certificate.rule == "quantifier-exists"
-            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, report.kernel_nodes[certificate.kernel_goal].operator, facts, certificate.kernel_goal) if report.kernel_nodes[certificate.kernel_goal].kind == "quantifier"
-            return ElisaProofKernelReplay::proof_kernel_replay_goal_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal)
+            return ElisaProofKernelReplay::proof_kernel_replay_resource_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "resource-safety"
+            return ElisaProofKernelReplay::proof_kernel_replay_structural_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "structural-safety"
+            return ElisaProofKernelReplay::proof_kernel_replay_effect_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "effect-containment"
+            return ElisaProofKernelReplay::proof_kernel_replay_checked_index_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-index"
+            return ElisaProofKernelReplay::proof_kernel_replay_checked_get_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-get"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_after_arena(&report.kernel_nodes, &report.kernel_children, "forall", facts, certificate.kernel_goal) if certificate.rule == "quantifier-forall"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_after_arena(&report.kernel_nodes, &report.kernel_children, "exists", facts, certificate.kernel_goal) if certificate.rule == "quantifier-exists"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_after_arena(&report.kernel_nodes, &report.kernel_children, report.kernel_nodes[certificate.kernel_goal].operator, facts, certificate.kernel_goal) if report.kernel_nodes[certificate.kernel_goal].kind == "quantifier"
+            return ElisaProofKernelReplay::proof_kernel_replay_goal_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal)
 
         def proof_replay_certificate[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate) -> bool:
             dependency_stack: mutable darray[sview] = [certificate.name]
@@ -1721,15 +1730,43 @@ extend ElisaProof:
             return false if trace_index >= report.fact_traces.count
             trace: ProofFactTrace = report.fact_traces[trace_index]
             dependency_stack: mutable darray[sview] = [trace.name]
-            return proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack)
+            return proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, true)
+
+        def proof_replay_fact_trace_index(report: ProofReport&, fact: Ast::Expr, owner: sview) -> usize:
+            for index in 0..<report.fact_traces.count |index, report, fact, owner|:
+                trace: ProofFactTrace = report.fact_traces[index]
+                if trace.name == owner and proof_replay_expr_equal(trace.expression, fact):
+                    return index
+            return report.fact_traces.count
 
         def proof_replay_fact_origin(report: ProofReport&, fact: Ast::Expr, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
-            for trace in report.fact_traces:
-                if trace.name == owner and proof_replay_expr_equal(trace.expression, fact):
-                    return (true, trace.kind, trace.line, trace.name, trace.dependency, trace.premises_count)
+            index: usize = proof_replay_fact_trace_index(report, fact, owner)
+            return (true, report.fact_traces[index].kind, report.fact_traces[index].line, report.fact_traces[index].name, report.fact_traces[index].dependency, report.fact_traces[index].premises_count) if index < report.fact_traces.count
+            return (false, "", 0, "", "", 0)
+
+        def proof_replay_cache_fact_origins(report: mutable ProofReport&) -> void:
+            sentinel: usize = report.fact_traces.count
+            report.fact_origin_trace_indices.clear()
+            report.fact_origin_trace_indices.resize(report.certificate_facts.count)
+            for index in 0..<report.fact_origin_trace_indices.count |index, report, sentinel|:
+                report.fact_origin_trace_indices[index] <- sentinel
+            for certificate in report.certificates |certificate, report|:
+                return if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
+                for offset in 0..<certificate.facts_count |offset, certificate, report|:
+                    fact_index: usize = certificate.facts_start + offset
+                    report.fact_origin_trace_indices[fact_index] <- proof_replay_fact_trace_index(report, report.certificate_facts[fact_index], certificate.name)
+
+        def proof_replay_fact_origin_at(report: ProofReport&, fact_index: usize, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
+            if fact_index < report.fact_origin_trace_indices.count:
+                trace_index: usize = report.fact_origin_trace_indices[fact_index]
+                if trace_index < report.fact_traces.count and report.fact_traces[trace_index].name == owner:
+                    cached: ProofFactTrace = report.fact_traces[trace_index]
+                    return (true, cached.kind, cached.line, cached.name, cached.dependency, cached.premises_count)
+            return proof_replay_fact_origin(report, report.certificate_facts[fact_index], owner) if fact_index < report.certificate_facts.count
             return (false, "", 0, "", "", 0)
 
         def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> void:
+            report.kernel_arena_validated <- ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel_nodes, &report.kernel_children)
             for index in 0..<report.certificates.count |index, report|:
                 replayed: bool = proof_replay_certificate(report, report.certificates[index])
                 report.certificates[index].replayed <- replayed
@@ -1737,3 +1774,4 @@ extend ElisaProof:
                     report.replayed <- report.replayed + 1
                 else:
                     report.replay_gaps <- report.replay_gaps + 1
+            proof_replay_cache_fact_origins(report)

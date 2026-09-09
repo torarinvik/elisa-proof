@@ -2,6 +2,8 @@
 # follow from explicit bounds and overflow-safe identities; unknown shapes remain unproven.
 extend ElisaProof:
     public:
+        const PROOF_CONGRUENCE_SCAN_DEPTH: usize = 127
+
         struct ProofBound:
             name: sview
             lower: mutable i64
@@ -1021,29 +1023,43 @@ extend ElisaProof:
             constraints.push(ProofDifference{left: second.base, right: first.base, bound: bound}) if first.negative
             constraints.push(ProofDifference{left: first.base, right: second.base, bound: bound}) if not first.negative
 
+        # The same increment argument as `proof_affine_unsigned_peer_safe`, asked of the facts alone
+        # rather than of an already-collected constraint graph. The goal side could ask the graph
+        # because the graph was finished by then; a fact is being imported *into* that graph, so
+        # its own admissibility has to be decided before there is one. `x + 1` cannot wrap when a
+        # fact says `x < peer` and the peer has the same unsigned width, because the peer is then
+        # at most that width's maximum. Without this, an equality naming an increment -- which is
+        # what every counter rebind records -- was dropped from the graph entirely.
+        def proof_affine_peer_safe_from_facts(affine: ProofAffine, facts: darray[Ast::Expr]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if not affine.known or affine.negative or affine.offset != 1 or affine.base == ""
+            width: i64 = proof_unsigned_marker_width_for_name(facts, affine.base)
+            return false if width == 0
+            return proof_unsigned_increment_has_strict_peer(Ast::Expr.Ident(affine.base, Ast::Pos{line: 0, column: 0}), width, facts)
+
         # Normalize only comparison facts whose affine subexpressions are safe to evaluate for
         # the current fixed-width intervals. A relation involving `x + 1` is not imported unless
         # the known bounds prove that expression cannot wrap.
-        def proof_collect_difference_constraints(expression: Ast::Expr, bounds: darray[ProofBound]&, constraints: mutable darray[ProofDifference]&) -> void:
+        def proof_collect_difference_constraints(expression: Ast::Expr, bounds: darray[ProofBound]&, facts: darray[Ast::Expr]&, constraints: mutable darray[ProofDifference]&) -> void:
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    proof_collect_difference_constraints(inner, bounds, constraints)
+                    proof_collect_difference_constraints(inner, bounds, facts, constraints)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
                     match operand:
                         Ast::Expr.Binary(left, operator, right, _):
                             negated_operator: TokenKind = proof_comparison_negation(operator)
-                            proof_collect_difference_constraints(Ast::Expr.Binary(left, negated_operator, right, Ast::expr_pos(expression)), bounds, constraints) if negated_operator != TokenKind.Eof
+                            proof_collect_difference_constraints(Ast::Expr.Binary(left, negated_operator, right, Ast::expr_pos(expression)), bounds, facts, constraints) if negated_operator != TokenKind.Eof
                         _:
                             pass
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And:
-                        proof_collect_difference_constraints(left, bounds, constraints)
-                        proof_collect_difference_constraints(right, bounds, constraints)
+                        proof_collect_difference_constraints(left, bounds, facts, constraints)
+                        proof_collect_difference_constraints(right, bounds, facts, constraints)
                         return
                     return if not proof_is_comparison(operator)
                     left_affine: ProofAffine = proof_affine_expression(left)
                     right_affine: ProofAffine = proof_affine_expression(right)
-                    return if not proof_affine_safe(left_affine, bounds) or not proof_affine_safe(right_affine, bounds)
+                    return if not (proof_affine_safe(left_affine, bounds) or proof_affine_peer_safe_from_facts(left_affine, facts))
+                    return if not (proof_affine_safe(right_affine, bounds) or proof_affine_peer_safe_from_facts(right_affine, facts))
                     if operator == TokenKind.LtEq:
                         proof_difference_push(left_affine, right_affine, false, false, constraints)
                     if operator == TokenKind.Lt:
@@ -1101,7 +1117,7 @@ extend ElisaProof:
             left_affine: ProofAffine = proof_affine_expression(left)
             right_affine: ProofAffine = proof_affine_expression(right)
             for fact in facts |bounds, constraints|:
-                proof_collect_difference_constraints(fact, bounds, &constraints)
+                proof_collect_difference_constraints(fact, bounds, facts, &constraints)
             return false if constraints.count > 4096
             # The constraints are collected before the overflow guard runs, because they are what
             # gives a name an interval when no fact states one about it directly.
@@ -2374,8 +2390,38 @@ extend ElisaProof:
                 _:
                     return false
 
+        # Congruence can only seed a class from a positive equality premise. Check that cheap
+        # shape before lowering a large fact frame into a scratch arena; the ordinary arithmetic,
+        # identity, and model tiers already handled every goal that needs no equality premise.
+        # Conjunction is the only proposition whose equality children are exported here, and
+        # `not (a != b)` is the equivalent positive form used by the kernel seed rule.
+        def proof_congruence_has_seed(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_congruence_has_seed(inner, depth + 1)
+                Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
+                    return true
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_congruence_has_seed(left, depth + 1) or proof_congruence_has_seed(right, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    match inner:
+                        Ast::Expr.Binary(_, TokenKind.BangEq, _, _):
+                            return true
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_congruence_has_seed_in_facts(facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts |fact|:
+                return true if proof_congruence_has_seed(fact, 0)
+            return false
+
         def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool:
             return false if not proof_kernel_expression_supported(goal)
+            return false if not proof_congruence_has_seed_in_facts(facts)
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             roots: mutable darray[usize] = []
