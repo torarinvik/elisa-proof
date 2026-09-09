@@ -4453,6 +4453,11 @@ resource replay tried to dereference it. The result node is now traversed and ch
 iterative validator as well as the batch postorder pass; the arena harness supplies an out-of-range
 result edge regression.
 
+The batch edge inventory also omitted `resource-disjoint`'s premise child slice. Its three direct
+expression roots were checked, but a malformed `children_start`/`children_count` pair could still
+make `proof_kernel_replay_arena_all_report` return true. The batch pass now checks that slice and
+the arena harness supplies a shape-valid disjoint node with an out-of-range premise range.
+
 ## Repaired: a moved resource could remain a return witness
 
 Resource replay records each valid `resource-use` as a possible witness for a returned region
