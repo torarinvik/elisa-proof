@@ -4446,6 +4446,13 @@ its logical rule executes. `examples/kernel_arena_runtime.elisa` directly checks
 batch report rejects a self-cycle and an out-of-range resource edge, while the full stage1 matrix,
 stage1 dogfood, and stage0 bootstrap harnesses pass with zero replay gaps.
 
+The same edge inventory had one remaining omission in the strict validator: `resource-call-result`
+stores the completed `resource-call` event in its `left` field, but the arena walker treated the
+node as a leaf. A malformed result could therefore pass standalone arena admission until the
+resource replay tried to dereference it. The result node is now traversed and checked in the
+iterative validator as well as the batch postorder pass; the arena harness supplies an out-of-range
+result edge regression.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
