@@ -106,6 +106,7 @@ for path, proven in zip(sys.argv[1:], (7, 20)):
     assert report["findings"] == []
 PY
 run_probe quantifier_hypothesis examples/quantifier_hypothesis.elisa 0
+run_probe rejected_include_trailing examples/rejected_include_trailing.elisa 1
 run_probe rejected_float_reflexivity examples/rejected_float_reflexivity.elisa 1
 run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
 run_probe rejected_float_field examples/rejected_float_field.elisa 1

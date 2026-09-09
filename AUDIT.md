@@ -4400,6 +4400,20 @@ solved, ordinary proposition replay still has to close it from the post-state fa
 requires rejection. The full stage1 matrix, stage1 dogfood, and stage0 bootstrap harness all pass,
 including the existing positive simplification and overflow cases, with zero replay gaps.
 
+## Repaired: proof import accepted malformed include directives
+
+The proof importer recognized the prefix of an include directive and returned the quoted path as
+soon as it saw the closing quote. It therefore erased a line such as
+`include "./included.elisa" trailing` and proved the remaining program. The compiler's include
+reader matches the complete physical line and accepts only spaces, tabs, or CR after the quote;
+both compiler stages reject the malformed line as source instead.
+
+The importer now applies the same trailing-byte check. `examples/rejected_include_trailing.elisa`
+is a permanent regression: before the repair the proof binary incorrectly returned `proved`, while
+the compiler returned a parse error; after the repair the proof binary returns `failed` with no
+certificate emitted. It is part of `scripts/dogfood.sh`, which also checks deterministic output and
+independent certificate replay.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
