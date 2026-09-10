@@ -4302,6 +4302,7 @@ extend ElisaProof:
                         # return from manufacturing facts through a proof-only call.
                         continue if proof_lemma_index(lemmas, name) < lemmas.names.count
                         functions.names <- functions.names.push(name)
+                        functions.declarations <- functions.declarations.push(declaration)
                         functions.name_hashes <- functions.name_hashes.push(proof_name_hash(name))
                         functions.param_starts <- functions.param_starts.push(functions.all_params.count)
                         functions.param_counts <- functions.param_counts.push(parameters.count)
@@ -4317,6 +4318,7 @@ extend ElisaProof:
                             functions.all_params <- functions.all_params.push(parameter.name)
                             functions.all_parameter_references <- functions.all_parameter_references.push(proof_resource_is_reference_type(parameter.type_expression))
                             functions.all_parameter_mutable_references <- functions.all_parameter_mutable_references.push(proof_resource_is_mutable_reference_type(parameter.type_expression))
+                            functions.all_parameter_may_contain_float <- functions.all_parameter_may_contain_float.push(proof_type_may_contain_float(parameter.type_expression, file.top_decls, file.top_decls, 0))
                             functions.all_parameter_target_reference_free <- functions.all_parameter_target_reference_free.push(proof_type_is_reference_free(proof_type_strip_reference(parameter.type_expression, 0), declarations, 0))
                             functions.all_parameter_mutable <- functions.all_parameter_mutable.push(parameter.is_mutable)
                             functions.all_has_defaults <- functions.all_has_defaults.push(parameter.has_default)
@@ -7410,15 +7412,24 @@ extend ElisaProof:
             # not IEEE NaN or rounding. Erasing a floating parameter to an untyped identifier
             # would make even x == x an unsound theorem. Stop before publishing obligations
             # that a source-bound tactic could otherwise repair under the wrong semantics.
-            for parameter in parameters |report, function_name, position|:
+            function_index: usize = proof_function_index(functions, function_name)
+            parameter_start: usize = functions.param_starts[function_index] if function_index < functions.param_starts.count else functions.all_parameter_may_contain_float.count
+            parameter_slot: mutable usize = 0
+            for parameter in parameters |report, function_index, functions, parameter_start, parameter_slot, function_name, position|:
                 if proof_unsigned_type_width(parameter.type_expression, file.top_decls, 0) < 0:
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "parameter numeric type alias cannot be resolved uniquely")
                     return
-                if proof_type_may_contain_float(parameter.type_expression, file.top_decls, file.top_decls, 0):
+                contains_float: mutable bool = false
+                if function_index < functions.param_starts.count and parameter_start + parameter_slot < functions.all_parameter_may_contain_float.count:
+                    contains_float <- functions.all_parameter_may_contain_float[parameter_start + parameter_slot]
+                else:
+                    contains_float <- proof_type_may_contain_float(parameter.type_expression, file.top_decls, file.top_decls, 0)
+                if contains_float:
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "floating-point parameter verification requires IEEE floating-point semantics")
                     return
+                parameter_slot <- parameter_slot + 1
             preconditions: mutable darray[Ast::Expr] = proof_contracts(body, "requires")
             signature_requires: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "requires")
             preconditions.extend(signature_requires)
@@ -7812,19 +7823,13 @@ extend ElisaProof:
             return true
 
         def proof_check_scheduled_function(file: Ast::File&, declarations: darray[Ast::Decl]&, target: usize, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> bool:
-            for declaration in declarations |file, declarations, target, lemmas, functions, report|:
-                match declaration:
-                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
-                        if proof_function_index(functions, name) == target:
-                            proof_check_function(file, name, parameters, body, position, lemmas, functions, report)
-                            return true
-                    Ast::Decl.Module(_, module_body, _):
-                        return true if proof_check_scheduled_function(file, module_body, target, lemmas, functions, report)
-                    Ast::Decl.Scoped(scoped_body, _):
-                        return true if proof_check_scheduled_function(file, scoped_body, target, lemmas, functions, report)
-                    _:
-                        pass
-            return false
+            return false if target >= functions.declarations.count
+            match functions.declarations[target]:
+                Ast::Decl.Func(name, parameters, _, body, _, _, position):
+                    proof_check_function(file, name, parameters, body, position, lemmas, functions, report)
+                    return true
+                _:
+                    return false
 
         def proof_lemma_component_ready(lemmas: ProofLemmaTable&, scheduled: darray[bool]&, source: usize) -> bool:
             return false if source >= lemmas.names.count or source >= lemmas.call_starts.count or source >= lemmas.call_counts.count
