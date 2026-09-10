@@ -4545,6 +4545,17 @@ arena harness includes a trace that uses, moves, and then returns the same refer
 witness; the independent resource kernel rejects it, while the full stage1 dogfood and stage0
 bootstrap coverage remain gap-free.
 
+## Repaired: quantifier replay reset its termination ranking
+
+The finite quantifier rule called ordinary goal replay with `depth = 0` for every instantiated
+body. Nested quantifiers could therefore reset the kernel's explicit term-depth bound, and stage1
+accepted a mutually recursive replay cycle that stage0 could not establish as terminating.
+
+The quantifier, collection, and dictionary helpers now carry the caller's ranking and increase it
+before replaying each instantiated body. A direct runtime regression proves a small nested
+quantifier and refuses a deliberately over-deep nest. The same harness compiles and runs under both
+stage1 and stage0, so the termination guarantee is checked by both compiler generations.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
