@@ -4487,6 +4487,25 @@ trusted. `examples/kernel_arena_runtime.elisa` includes a direct regression for 
 case. The complete stage1 dogfood suite, executable arena harness, and all stage0 bootstrap
 harnesses pass with zero replay gaps after the repair.
 
+## Repaired: source-bound tactic state relied only on erased kernel metadata
+
+Source-bound tactic replay compared the reparsed goal and facts with their recorded attempt only
+after lowering them into the source-neutral kernel arena. That arena intentionally erases some
+source metadata, including a quantifier binder's declared type. The source-side facts range was
+also not checked in the shared matcher before indexing the report's captured facts.
+
+The shared kernel matcher now checks the captured-fact range before indexing and is the deliberate
+relation used by the CLI after the source state has been serialized and reparsed in a fresh AST
+store. A separate same-store matcher adds exact `proof_expr_equal` checks for callers that can
+legally dereference the original AST; its regression rejects a quantifier whose binder type was
+changed from `i64` to `bool`. The source-neutral kernel remains intentionally metadata-light, and
+the cross-store CLI boundary remains serialization-plus-kernel based because imported AST handles
+are not valid to dereference from the tactic store.
+
+The tactic runtime covers both a forged fact-range offset and the same-store typed-quantifier
+identity check. The complete stage1 dogfood suite, including nested source-bound branches and
+stage0 bootstrap harnesses, passes with zero replay gaps after the repair.
+
 ## Repaired: a moved resource could remain a return witness
 
 Resource replay records each valid `resource-use` as a possible witness for a returned region
