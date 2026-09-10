@@ -128,6 +128,21 @@ if [[ "$quantifier_tactic_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: portable quantifier tactic was not independently replayed\n' >&2
     exit 1
 fi
+for rejected_tactic_fixture in tactic_script_rejected_large_line tactic_script_rejected_large_expr_line; do
+    rejected_tactic_report="$standalone_probe_dir/$rejected_tactic_fixture.json"
+    "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/$rejected_tactic_fixture.json" "$ROOT_DIR/examples/verified.elisa" >"$rejected_tactic_report"
+    rejected_tactic_status=$?
+    if [[ "$rejected_tactic_status" -ne 1 ]]; then
+        printf 'proof test matrix failed: overflowing JSON line was accepted for %s\n' "$rejected_tactic_fixture" >&2
+        exit 1
+    fi
+    python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert report["tactic"]["valid"] is False; assert report["tactic"]["action_count"] == 0' "$rejected_tactic_report"
+    rejected_tactic_probe_status=$?
+    if [[ "$rejected_tactic_probe_status" -ne 0 ]]; then
+        printf 'proof test matrix failed: overflowing JSON line report was incomplete for %s\n' "$rejected_tactic_fixture" >&2
+        exit 1
+    fi
+done
 for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument; do
     "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?

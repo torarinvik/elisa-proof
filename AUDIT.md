@@ -4519,6 +4519,19 @@ producer decision and the complete source-neutral certificate to succeed, preven
 producer/kernel disagreement from being hidden behind a successful tactic action. Stage1 tests,
 the full dogfood suite, and stage0 bootstrap harnesses pass after the repair.
 
+## Repaired: tactic JSON silently wrapped overflowing source lines
+
+The tactic interchange parsed a JSON `line` as a signed integer and converted every nonnegative
+value directly to `u32`. A value above the representable source-location range therefore wrapped
+to a different line while the rest of the script continued to execute. That can corrupt diagnostic
+identity and annotation binding even when the proof proposition is unchanged.
+
+Line parsing now returns an explicit `(known, value)` result and rejects values above the shared
+`u32` maximum for both expression positions and contract-quantifier annotations. The existing
+safe-integer gate still protects JSON numbers from binary64 rounding, and the two malformed
+fixtures cover both line-bearing paths. The stage1 test matrix, full dogfood suite, and stage0
+bootstrap harnesses pass with the overflow rejected before any tactic action runs.
+
 ## Repaired: a moved resource could remain a return witness
 
 Resource replay records each valid `resource-use` as a possible witness for a returned region

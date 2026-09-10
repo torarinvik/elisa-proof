@@ -2342,6 +2342,28 @@ assert tactic["kernel_replayed"] is True
 assert tactic["certificate_replayed"] is True
 print("dogfood tactic_script_quantifier: producer and kernel agreed on finite quantifier replay")
 PY
+for rejected_line_fixture in tactic_script_rejected_large_line tactic_script_rejected_large_expr_line; do
+    rejected_line_output="$REPORT_DIR/$rejected_line_fixture.json"
+    set +e
+    "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/$rejected_line_fixture.json" "$ROOT_DIR/examples/verified.elisa" >"$rejected_line_output"
+    rejected_line_status=$?
+    set -e
+    if [[ "$rejected_line_status" -ne 1 ]]; then
+        printf 'dogfood failed: overflowing JSON line was accepted for %s\n' "$rejected_line_fixture" >&2
+        exit 1
+    fi
+    python3 - "$rejected_line_output" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "failed"
+assert report["tactic"]["valid"] is False
+assert report["tactic"]["action_count"] == 0
+PY
+done
+printf 'dogfood tactic_json_lines: overflowing source and expression lines were rejected\n'
 branch_output="$REPORT_DIR/tactic-script-branch.json"
 set +e
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_branch.json" "$ROOT_DIR/examples/verified.elisa" >"$branch_output"
