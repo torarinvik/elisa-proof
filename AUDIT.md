@@ -4506,6 +4506,19 @@ The tactic runtime covers both a forged fact-range offset and the same-store typ
 identity check. The complete stage1 dogfood suite, including nested source-bound branches and
 stage0 bootstrap harnesses, passes with zero replay gaps after the repair.
 
+## Repaired: portable quantifier tactics were accepted without kernel closure
+
+The source-level tactic decision procedure could prove a finite contract quantifier, but the
+independent tactic certificate path sent the encoded quantifier block through the ordinary goal
+replay tiers. Those tiers intentionally do not interpret quantifier ranges, so the producer could
+report `decide` as accepted while `kernel_replayed` and `certificate_replayed` were false.
+
+Kernel goal replay now dispatches a validated quantifier root to the finite quantifier rule before
+the arithmetic and bounded-model tiers. The portable quantifier regression requires both the
+producer decision and the complete source-neutral certificate to succeed, preventing this class of
+producer/kernel disagreement from being hidden behind a successful tactic action. Stage1 tests,
+the full dogfood suite, and stage0 bootstrap harnesses pass after the repair.
+
 ## Repaired: a moved resource could remain a return witness
 
 Resource replay records each valid `resource-use` as a possible witness for a returned region

@@ -2318,6 +2318,30 @@ assert tactic["action_count"] == 2
 assert len(report["state"]["trace"]) == 2
 print("dogfood tactic_script: portable JSON trace and certificate passed")
 PY
+quantifier_output="$REPORT_DIR/tactic-script-quantifier.json"
+set +e
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_quantifier.json" "$ROOT_DIR/examples/verified.elisa" >"$quantifier_output"
+quantifier_status=$?
+set -e
+if [[ "$quantifier_status" -ne 0 ]]; then
+    printf 'dogfood failed: portable quantifier tactic was not admitted (exit %s)\n' "$quantifier_status" >&2
+    exit 1
+fi
+python3 - "$quantifier_output" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+tactic = report["tactic"]
+assert report["status"] == "proved"
+assert tactic["valid"] is True
+assert tactic["solved"] is True
+assert tactic["kernel_trace_replayed"] is True
+assert tactic["kernel_replayed"] is True
+assert tactic["certificate_replayed"] is True
+print("dogfood tactic_script_quantifier: producer and kernel agreed on finite quantifier replay")
+PY
 branch_output="$REPORT_DIR/tactic-script-branch.json"
 set +e
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_branch.json" "$ROOT_DIR/examples/verified.elisa" >"$branch_output"
