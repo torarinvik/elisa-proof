@@ -2223,9 +2223,18 @@ printf 'dogfood effect_runtime: contained rows admitted and uncontained or malfo
 bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
 if [[ -n "$bootstrap_compiler" ]]; then
     "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
+    # The raw runtime support object intentionally leaves the optional profiler
+    # ABI unresolved.  Keep the stage0 bootstrap link honest by supplying the
+    # same small hook implementation used by the compiler parity harness.
+    profile_hooks_source="$COMPILER_SRC/test/parity/profile_hooks.c"
+    if [[ ! -f "$profile_hooks_source" ]]; then
+        printf 'dogfood failed: profiler hooks source is missing for stage0 bootstrap harness\n' >&2
+        exit 1
+    fi
+    clang -c -O2 -o "$runtime_dir/bootstrap-profile-hooks.o" "$profile_hooks_source"
     for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
         "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
-        clang -Wl,-dead_strip -o "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o"
+        clang -Wl,-dead_strip -o "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o" "$runtime_dir/bootstrap-profile-hooks.o"
         set +e
         "$runtime_dir/bootstrap-$bootstrap_example"
         bootstrap_status=$?
