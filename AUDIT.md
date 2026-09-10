@@ -4473,6 +4473,20 @@ expression roots were checked, but a malformed `children_start`/`children_count`
 make `proof_kernel_replay_arena_all_report` return true. The batch pass now checks that slice and
 the arena harness supplies a shape-valid disjoint node with an out-of-range premise range.
 
+## Repaired: cached arena admission skipped semantic child validation
+
+The report replay pass caches `proof_kernel_replay_arena_all_report` before replaying many
+certificates. Its postorder walk checked node payloads, child ranges, and backward-edge order, but
+did not carry forward the per-node semantic validity bits used by strict admission. A malformed
+`call` whose child slice contained an ordinary expression instead of a `call_arg` could therefore
+be marked admitted by the batch path and reach an `*_after_arena` replay entry point.
+
+Batch admission now computes and stores the same child-validity relation while walking the
+postorder arena. The fast path therefore rejects malformed child kinds before the cache becomes
+trusted. `examples/kernel_arena_runtime.elisa` includes a direct regression for the cached call
+case. The complete stage1 dogfood suite, executable arena harness, and all stage0 bootstrap
+harnesses pass with zero replay gaps after the repair.
+
 ## Repaired: a moved resource could remain a return witness
 
 Resource replay records each valid `resource-use` as a possible witness for a returned region
