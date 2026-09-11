@@ -2,23 +2,109 @@ extend ElisaProof:
     private:
         const PROOF_TYPE_AUDIT_DEPTH_LIMIT: usize = 64
 
+        # Type expressions are small trees, but the imported compiler can contain thousands of
+        # aliases and structs.  Collect the names in one bounded walk instead of rescanning the
+        # whole expression once for every declaration in the file.  `unknown` is deliberately
+        # sticky: a future AST form or a depth-exhausted term remains conservative and is treated
+        # as potentially floating by the caller.
+        def proof_type_name_add(names: mutable darray[sview]&, name: sview) -> void:
+            return if name == ""
+            return if any existing in names where existing == name
+            names.push(name)
+
+        def proof_collect_type_names(expression: Ast::Expr, names: mutable darray[sview]&, unknown: mutable bool&, depth: usize) -> void:
+            if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:
+                unknown <- true
+                return
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    pass
+                Ast::Expr.BoolLit(_, _):
+                    pass
+                Ast::Expr.FloatLit(_, _):
+                    unknown <- true
+                Ast::Expr.StringLit(_, _):
+                    pass
+                Ast::Expr.CharLit(_, _):
+                    pass
+                Ast::Expr.Ident(name, _):
+                    proof_type_name_add(names, name)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_type_names(inner, names, unknown, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_type_names(operand, names, unknown, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_type_names(left, names, unknown, depth + 1)
+                    proof_collect_type_names(right, names, unknown, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_collect_type_names(callee, names, unknown, depth + 1)
+                    for argument in arguments |names, unknown, depth|:
+                        proof_collect_type_names(argument, names, unknown, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    proof_collect_type_names(object, names, unknown, depth + 1)
+                Ast::Expr.Scope(base, scoped_name, _):
+                    proof_type_name_add(names, scoped_name)
+                    proof_collect_type_names(base, names, unknown, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    proof_collect_type_names(object, names, unknown, depth + 1)
+                    proof_collect_type_names(index, names, unknown, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_collect_type_names(object, names, unknown, depth + 1)
+                    proof_collect_type_names(low, names, unknown, depth + 1)
+                    proof_collect_type_names(high, names, unknown, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_collect_type_names(object, names, unknown, depth + 1)
+                    for argument in arguments |names, unknown, depth|:
+                        proof_collect_type_names(argument, names, unknown, depth + 1)
+                Ast::Expr.Move(operand, _):
+                    proof_collect_type_names(operand, names, unknown, depth + 1)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_collect_type_names(operand, names, unknown, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |names, unknown, depth|:
+                        proof_collect_type_names(element, names, unknown, depth + 1)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |names, unknown, depth|:
+                        proof_collect_type_names(element, names, unknown, depth + 1)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |names, unknown, depth|:
+                        proof_collect_type_names(element, names, unknown, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |names, unknown, depth|:
+                        proof_collect_type_names(entry.key, names, unknown, depth + 1)
+                        proof_collect_type_names(entry.value, names, unknown, depth + 1)
+                Ast::Expr.Construct(type_name, fields, _):
+                    proof_collect_type_names(type_name, names, unknown, depth + 1)
+                    for field in fields |names, unknown, depth|:
+                        proof_collect_type_names(field.value, names, unknown, depth + 1)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_collect_type_names(base, names, unknown, depth + 1)
+                    for field in fields |names, unknown, depth|:
+                        proof_collect_type_names(field.value, names, unknown, depth + 1)
+                _:
+                    unknown <- true
+
         # Alias spelling must not hide a floating parameter from the proof-language gate.
         # Search nested declaration scopes too; ambiguous names are handled conservatively.
         # Cyclic or excessively deep aliases remain unsupported rather than being guessed safe.
         def proof_type_may_contain_float_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, depth: usize, visited: darray[sview]&) -> bool:
             return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            return true if proof_expr_mentions_name(expression, "f32") or proof_expr_mentions_name(expression, "f64")
-            for declaration in declarations |expression, all_declarations, depth, visited|:
+            type_names: mutable darray[sview] = []
+            unknown: mutable bool = false
+            proof_collect_type_names(expression, &type_names, &unknown, 0)
+            return true if unknown
+            return true if any referenced in type_names where referenced == "f32" or referenced == "f64"
+            for declaration in declarations |type_names, all_declarations, depth, visited|:
                 match declaration:
                     Ast::Decl.Alias(name, target, _):
-                        if proof_expr_mentions_name(expression, name) or proof_callable_name(expression) == name:
+                        if any referenced in type_names where referenced == name:
                             continue if any seen in visited where seen == name
                             nested_visited: mutable darray[sview] = []
                             nested_visited.extend(visited)
                             nested_visited.push(name)
                             return true if proof_type_may_contain_float_depth(target, all_declarations, all_declarations, depth + 1, nested_visited)
                     Ast::Decl.Struct(name, fields, _, _, _, _, _):
-                        if proof_expr_mentions_name(expression, name) or proof_callable_name(expression) == name:
+                        if any referenced in type_names where referenced == name:
                             continue if any seen in visited where seen == name
                             nested_visited: mutable darray[sview] = []
                             nested_visited.extend(visited)
