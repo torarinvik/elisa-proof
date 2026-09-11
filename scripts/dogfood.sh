@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER="${ELISA_COMPILER_BIN:-}"
+# shellcheck source=scripts/compiler_provenance.sh
+source "$ROOT_DIR/scripts/compiler_provenance.sh"
 if [[ -z "$COMPILER" ]]; then
     # `elisac` was a symlink to the Go compiler and is gone; the stage names are
     # explicit now. Prefer the self-hosted compiler. Its objects need the runtime
@@ -15,6 +17,9 @@ fi
 if [[ -z "$COMPILER" ]]; then
     printf 'dogfood failed: set ELISA_COMPILER_BIN to an Elisa compiler\n' >&2
     exit 1
+fi
+if elisa_compiler_is_stage0 "$COMPILER"; then
+    elisa_verify_stage0_provenance "$COMPILER" "$ROOT_DIR" || exit $?
 fi
 
 # A stage1 wrapper emits objects that use the self-hosted runtime. Keep this in
@@ -37,7 +42,7 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
     RUNTIME_OBJ="${HOME}/.elisac/elisacore_runtime.o"
 fi
 
-"$ROOT_DIR/scripts/build.sh"
+ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" "$ROOT_DIR/scripts/build.sh"
 # build.sh has just refreshed the snapshot; the executable harnesses below that
 # include compiler sources must compile from the same pinned export.
 # shellcheck source=scripts/compiler_snapshot.sh
@@ -2235,6 +2240,7 @@ printf 'dogfood effect_runtime: contained rows admitted and uncontained or malfo
 # harness then confirms the whole replay layer under the bootstrap compiler.
 bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
 if [[ -n "$bootstrap_compiler" ]]; then
+    elisa_verify_stage0_provenance "$bootstrap_compiler" "$ROOT_DIR" || exit $?
     "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
     # The raw runtime support object intentionally leaves the optional profiler
     # ABI unresolved.  Keep the stage0 bootstrap link honest by supplying the

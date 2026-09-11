@@ -15,6 +15,13 @@ if [[ -z "$SELF_HOST_COMPILER" ]]; then
         [[ -n "$SELF_HOST_COMPILER" ]] && break
     done
 fi
+# The standalone probes below invoke the selected compiler directly, so repeat the
+# same stage0 identity check that protects the main proof build.
+# shellcheck source=scripts/compiler_provenance.sh
+source "$ROOT_DIR/scripts/compiler_provenance.sh"
+if elisa_compiler_is_stage0 "$SELF_HOST_COMPILER"; then
+    elisa_verify_stage0_provenance "$SELF_HOST_COMPILER" "$ROOT_DIR" || exit $?
+fi
 # Proof fixtures intentionally include unproven and refuted contracts. Import them
 # in permissive compiler mode so the proof assistant, rather than the compiler's
 # strict contract gate, reports the verification result.
@@ -671,7 +678,7 @@ if [[ "$bitwise_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: fixed-width bitwise kernel coverage\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/proof_step_derivation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert any(origin["kind"] == "proof-step" and origin["premises"] > 0 for certificate in report["certificates"] for origin in certificate["fact_origins"]); assert report["replay"]["gaps"] == 0'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/proof_step_derivation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert any(trace["kind"] == "proof-step" and trace["premises_count"] > 0 for trace in report["kernel"]["fact_traces"]); assert report["replay"]["gaps"] == 0'
 proof_trace_probe_status=${PIPESTATUS[1]}
 if [[ "$proof_trace_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: derived proof-step provenance\n' >&2

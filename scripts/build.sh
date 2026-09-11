@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER="${ELISA_COMPILER_BIN:-}"
+# shellcheck source=scripts/compiler_provenance.sh
+source "$ROOT_DIR/scripts/compiler_provenance.sh"
 
 if [[ -z "$COMPILER" ]]; then
     # The compilers are installed under explicit stage names; `elisac` no longer
@@ -19,35 +21,14 @@ if [[ -z "$COMPILER" || ! -x "$COMPILER" ]]; then
 fi
 
 COMPILER_IS_STAGE0=0
-if [[ "$(basename "$COMPILER")" == "elisac-stage0" ]]; then
+if elisa_compiler_is_stage0 "$COMPILER"; then
     COMPILER_IS_STAGE0=1
-elif go version -m "$COMPILER" 2>/dev/null | awk '$1 == "path" && $2 == "elisacore/src" { found = 1 } END { exit !found }'; then
     # The stage0 product may be copied aside for a pinned toolchain. Identify that copy by its
     # embedded Go module path instead of allowing a renamed bootstrap binary to bypass the guard.
-    COMPILER_IS_STAGE0=1
 fi
 
 if [[ "$COMPILER_IS_STAGE0" -eq 1 ]]; then
-    stage0_build_info="$(go version -m "$COMPILER" 2>/dev/null || true)"
-    stage0_revision="$(printf '%s\n' "$stage0_build_info" | awk '$1 == "build" && $2 ~ /^vcs.revision=/ { sub(/^vcs.revision=/, "", $2); print $2; exit }')"
-    stage0_modified="$(printf '%s\n' "$stage0_build_info" | awk '$1 == "build" && $2 ~ /^vcs.modified=/ { sub(/^vcs.modified=/, "", $2); print $2; exit }')"
-    if [[ ! -f "$ROOT_DIR/ELISA_STAGE0_REV" ]]; then
-        printf 'stage0 provenance unavailable: ELISA_STAGE0_REV is missing\n' >&2
-        exit 2
-    fi
-    stage0_pinned_revision="$(tr -d '[:space:]' < "$ROOT_DIR/ELISA_STAGE0_REV")"
-    if [[ -z "$stage0_revision" || -z "$stage0_pinned_revision" ]]; then
-        printf 'stage0 provenance unavailable: compiler has no embedded VCS revision\n' >&2
-        exit 2
-    fi
-    if [[ "$stage0_revision" != "$stage0_pinned_revision"* ]]; then
-        printf 'stage0 provenance mismatch: binary=%s expected=%s\n' "$stage0_revision" "$stage0_pinned_revision" >&2
-        exit 2
-    fi
-    if [[ "$stage0_modified" != "false" ]]; then
-        printf 'stage0 provenance mismatch: compiler was built from modified sources\n' >&2
-        exit 2
-    fi
+    elisa_verify_stage0_provenance "$COMPILER" "$ROOT_DIR" || exit $?
 fi
 
 if ! command -v clang >/dev/null 2>&1; then
