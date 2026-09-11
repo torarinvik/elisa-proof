@@ -9,7 +9,14 @@ extend ElisaProof:
             trace: ProofFactTrace = report.fact_traces[trace_index]
             dependency_stack: mutable darray[sview] = [trace.name]
             active_certificates: mutable darray[usize] = []
-            return proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, active_certificates) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, true, active_certificates)
+            node_count: usize = report.kernel_nodes.count
+            child_count: usize = report.kernel_children.count
+            source_valid: bool = proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, active_certificates)
+            kernel_valid: mutable bool = proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, true, active_certificates)
+            if node_count != report.kernel_nodes.count or child_count != report.kernel_children.count:
+                report.kernel_arena_validated <- ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel_nodes, &report.kernel_children)
+                kernel_valid <- false if not report.kernel_arena_validated
+            return source_valid and kernel_valid
 
         def proof_replay_fact_trace_index(report: ProofReport&, fact: Ast::Expr, owner: sview) -> usize:
             indexed_head: usize = proof_replay_fact_trace_head(report, owner)
@@ -68,7 +75,17 @@ extend ElisaProof:
             proof_replay_build_fact_trace_index(report)
             return if not proof_kernel_report_append_allowed(report, 0, report.certificates.count, "replay-certificates")
             for index in 0..<report.certificates.count |index, report|:
-                replayed: bool = proof_replay_certificate(report, report.certificates[index], index)
+                node_count: usize = report.kernel_nodes.count
+                child_count: usize = report.kernel_children.count
+                replayed: mutable bool = proof_replay_certificate(report, report.certificates[index], index)
+                # Quantifier instantiation and equality rewriting are intentionally append-only:
+                # they construct derived roots in the same arena while replaying a certificate.
+                # The batch admission above covers the serialized prefix, not those newly appended
+                # nodes. Re-admit after growth before exposing the certificate as replayed, and
+                # keep the cache bit honest for the next certificate as well.
+                if node_count != report.kernel_nodes.count or child_count != report.kernel_children.count:
+                    report.kernel_arena_validated <- ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel_nodes, &report.kernel_children)
+                    replayed <- false if not report.kernel_arena_validated
                 report.certificates[index].replayed <- replayed
                 if replayed:
                     report.replayed <- report.replayed + 1
