@@ -406,6 +406,15 @@ module ElisaProof:
                 report.kernel_budget_reported <- true
                 proof_add_finding(report, "kernel-arena-budget", 0, name, "kernel certificate arena exceeded its bounded storage budget")
 
+        # Replay-side provenance tables are report-owned storage too. Keep their flat appends
+        # under the same canonical bound before `resize`/`extend` can allocate. The first check
+        # avoids unsigned subtraction underflow when a malformed report already exceeds the
+        # budget.
+        def proof_kernel_report_append_allowed(report: mutable ProofReport&, current: usize, addition: usize, name: sview) -> bool:
+            return true if current <= ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET and addition <= ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET - current
+            proof_kernel_budget_note(report, name)
+            return false
+
         def proof_kernel_encode_annotated_checked(expression: Ast::Expr, report: mutable ProofReport&, name: sview) -> (known: bool, root: usize):
             return (false, 0) if report.kernel_budget_exhausted
             if report.kernel_nodes.count >= ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET or report.kernel_children.count >= ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET:
@@ -496,6 +505,8 @@ module ElisaProof:
             return proof_certificate_fact_trace_index(report, fact, owner) < report.fact_traces.count
 
         def proof_add_goal_attempt(report: mutable ProofReport&, facts: darray[Ast::Expr]&, goal: Ast::Expr, line: u32, name: sview, rule: sview, proven: bool) -> void:
+            if facts.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET:
+                proof_kernel_budget_note(report, name)
             if report.kernel_budget_exhausted:
                 report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.certificate_facts.count, facts_count: 0, kernel_goal: report.kernel_nodes.count, kernel_facts_start: report.kernel_certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, proven: false, has_certificate: false, certificate_index: report.certificates.count})
                 return
@@ -512,12 +523,18 @@ module ElisaProof:
             if not encoded_goal.known:
                 report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.certificate_facts.count, facts_count: 0, kernel_goal: report.kernel_nodes.count, kernel_facts_start: report.kernel_certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, proven: false, has_certificate: false, certificate_index: report.certificates.count})
                 return
+            if not proof_kernel_report_append_allowed(report, report.certificate_facts.count, captured_facts.count, name):
+                report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.kernel_certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, proven: false, has_certificate: false, certificate_index: report.certificates.count})
+                return
+            if not proof_kernel_report_append_allowed(report, report.kernel_certificate_facts.count, captured_kernel_roots.count, name):
+                report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: true, facts_start: report.certificate_facts.count, facts_count: 0, kernel_goal: encoded_goal.root, kernel_facts_start: report.kernel_certificate_facts.count, kernel_facts_count: 0, line: line, name: name, rule: rule, proven: false, has_certificate: false, certificate_index: report.certificates.count})
+                return
             facts_start: usize = report.certificate_facts.count
             report.certificate_facts.extend(captured_facts)
             kernel_facts_start: usize = report.kernel_certificate_facts.count
             report.kernel_certificate_facts.extend(captured_kernel_roots)
             kernel_goal: usize = encoded_goal.root
-            certificate_proven: bool = proven and not report.kernel_budget_exhausted
+            certificate_proven: mutable bool = proven and not report.kernel_budget_exhausted
             if rule == "quantifier-forall" or rule == "quantifier-exists":
                 quantifier_kind: sview = "forall" if rule == "quantifier-forall" else "exists"
                 # A quantifier certificate must carry the source-side kind in the arena. If the
@@ -526,5 +543,7 @@ module ElisaProof:
                 proof_kernel_bind_quantifier_kind(&report.kernel_nodes, kernel_goal, quantifier_kind)
             kernel_facts_count: usize = captured_facts.count
             certificate_index: usize = report.certificates.count
-            report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, proven: certificate_proven, has_certificate: certificate_proven, certificate_index: certificate_index})
+            if certificate_proven and not proof_kernel_report_append_allowed(report, report.certificates.count, 1, name):
+                certificate_proven <- false
+            report.goal_attempts <- report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: report.kernel_budget_exhausted, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, proven: certificate_proven, has_certificate: certificate_proven, certificate_index: certificate_index})
             report.certificates <- report.certificates.push(ProofGoalCertificate{goal: goal, facts_start: facts_start, facts_count: captured_facts.count, kernel_goal: kernel_goal, kernel_facts_start: kernel_facts_start, kernel_facts_count: kernel_facts_count, line: line, name: name, rule: rule, replayed: false}) if certificate_proven
