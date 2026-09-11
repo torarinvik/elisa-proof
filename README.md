@@ -21,6 +21,11 @@ PATH=/path/to/elisac-bin:$PATH scripts/build.sh
 build/elisa-proof examples/verified.elisa
 ```
 
+When the fallback is used, `ELISA_STAGE0_REV` pins the expected Go VCS revision. The build reads
+the embedded revision and `vcs.modified` flag from `elisac-stage0` and refuses a missing, dirty, or
+mismatched binary, so a bootstrap result is never silently accepted from stale compiler sources.
+After rebuilding stage0 from a clean compiler checkout, update that file to the new short revision.
+
 For AI tooling, `build/elisa-proof --json examples/verified.elisa` emits a deterministic machine
 report with the compatibility verdict, an explicit `verification_state` (`proved`, `disproved`,
 `unsupported`, or `unknown`), the expanded-source byte count and observational FNV-1a fingerprint,

@@ -18,6 +18,28 @@ if [[ -z "$COMPILER" || ! -x "$COMPILER" ]]; then
     exit 2
 fi
 
+if [[ "$(basename "$COMPILER")" == "elisac-stage0" ]]; then
+    stage0_revision="$(go version -m "$COMPILER" 2>/dev/null | awk '$1 == "build" && $2 ~ /^vcs.revision=/ { sub(/^vcs.revision=/, "", $2); print $2; exit }')"
+    stage0_modified="$(go version -m "$COMPILER" 2>/dev/null | awk '$1 == "build" && $2 ~ /^vcs.modified=/ { sub(/^vcs.modified=/, "", $2); print $2; exit }')"
+    if [[ ! -f "$ROOT_DIR/ELISA_STAGE0_REV" ]]; then
+        printf 'stage0 provenance unavailable: ELISA_STAGE0_REV is missing\n' >&2
+        exit 2
+    fi
+    stage0_pinned_revision="$(tr -d '[:space:]' < "$ROOT_DIR/ELISA_STAGE0_REV")"
+    if [[ -z "$stage0_revision" || -z "$stage0_pinned_revision" ]]; then
+        printf 'stage0 provenance unavailable: compiler has no embedded VCS revision\n' >&2
+        exit 2
+    fi
+    if [[ "$stage0_revision" != "$stage0_pinned_revision"* ]]; then
+        printf 'stage0 provenance mismatch: binary=%s expected=%s\n' "$stage0_revision" "$stage0_pinned_revision" >&2
+        exit 2
+    fi
+    if [[ "$stage0_modified" != "false" ]]; then
+        printf 'stage0 provenance mismatch: compiler was built from modified sources\n' >&2
+        exit 2
+    fi
+fi
+
 if ! command -v clang >/dev/null 2>&1; then
     printf 'clang is required to link the generated Elisa object.\n' >&2
     exit 2
