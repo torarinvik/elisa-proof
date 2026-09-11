@@ -2161,6 +2161,18 @@ if [[ "$rejected_collection_builtin_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A declared function with the same leaf as a collection method must withdraw the builtin
+# shortcut. Method-shaped AST nodes have no callable leaf, so this protects the receiver from an
+# incomplete effect model for a user-defined UFCS call.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_shadowed_collection_builtin.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert any(f["kind"] == "borrow-call-opaque" and f["name"] == "shadowed_push_must_not_be_verified" for f in report["findings"]); reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["shadowed_push_must_not_be_verified"] == "body-unverified"'
+rejected_shadowed_collection_builtin_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_shadowed_collection_builtin_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a declared collection-method name was admitted as a builtin\n' >&2
+    exit 1
+fi
+
 # A call in a loop condition has no statement boundary either, and an opaque condition leaves the
 # loop with no post-state claim at all. Binding the call before the loop keeps the condition.
 set +e

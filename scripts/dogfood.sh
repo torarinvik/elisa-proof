@@ -300,6 +300,7 @@ run_probe nested_call_value examples/nested_call_value.elisa 0
 run_probe rejected_nested_call_value examples/rejected_nested_call_value.elisa 1
 run_probe collection_builtin examples/collection_builtin.elisa 0
 run_probe rejected_collection_builtin examples/rejected_collection_builtin.elisa 1
+run_probe rejected_shadowed_collection_builtin examples/rejected_shadowed_collection_builtin.elisa 1
 run_probe bound_loop_condition examples/bound_loop_condition.elisa 1
 run_probe rejected_bound_loop_condition examples/rejected_bound_loop_condition.elisa 1
 run_probe block_statement_region examples/block_statement_region.elisa 0
@@ -1397,6 +1398,29 @@ for owner in ("a_push_while_a_borrow_is_live", "a_region_argument_withdraws_the_
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s admitted a builtin call it does not model" % owner)
 print("dogfood collection_builtin: a builtin writes its receiver, and the borrow rules see it")
+PY
+
+python3 - "$REPORT_DIR/rejected_shadowed_collection_builtin.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "failed"
+assert report["summary"]["semantic_errors"] == 0
+assert report["replay"]["gaps"] == 0
+assert any(
+    finding["kind"] == "borrow-call-opaque"
+    and finding["name"] == "shadowed_push_must_not_be_verified"
+    for finding in report["findings"]
+)
+reasons = {
+    declaration["name"]: declaration["verification_reason"]
+    for declaration in report["declaration_details"]
+    if declaration["kind"] == "function"
+}
+assert reasons["shadowed_push_must_not_be_verified"] == "body-unverified"
+print("dogfood rejected_shadowed_collection_builtin: declared method names cannot use builtin effects")
 PY
 
 # A call in a loop condition is opaque, and an opaque condition leaves the loop with no post-state
