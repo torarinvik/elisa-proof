@@ -1,75 +1,80 @@
 extend ElisaProofKernelReplay:
     private:
-        def proof_kernel_replay_arena_push_children(node: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, depth: usize, work: mutable darray[ProofKernelReplayArenaWork]&) -> bool:
+        # A shared DAG can be revisited at progressively deeper paths. Bound total work as well
+        # as serialized arena size so adversarial sharing cannot turn the depth-aware validation
+        # into an unbounded CPU or worklist allocation problem.
+        const PROOF_KERNEL_REPLAY_WORK_BUDGET: usize = ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET + ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET * 4
+
+        def proof_kernel_replay_arena_push_work(work: mutable darray[ProofKernelReplayArenaWork]&, work_used: mutable usize&, root: usize, depth: usize, exiting: bool) -> bool:
+            return false if work_used >= PROOF_KERNEL_REPLAY_WORK_BUDGET
+            work.push(ProofKernelReplayArenaWork{root: root, depth: depth, exiting: exiting})
+            work_used <- work_used + 1
+            return true
+
+        def proof_kernel_replay_arena_push_children(node: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, depth: usize, work: mutable darray[ProofKernelReplayArenaWork]&, work_used: mutable usize&) -> bool:
             next_depth: usize = depth + 1
             if node.kind == "unary" or node.kind == "move" or node.kind == "field" or node.kind == "scope" or node.kind == "call_arg" or node.kind == "field-init" or node.kind == "effect-call" or node.kind == "checked-get" or node.kind == "resource-call-arg" or node.kind == "resource-region-alloc" or node.kind == "resource-region-alloc-discard" or node.kind == "resource-region-return-alloc" or node.kind == "resource-region-call-alloc" or node.kind == "resource-region-rebind-alloc" or node.kind == "resource-region-bind" or node.kind == "resource-region-assign" or node.kind == "resource-region-return" or node.kind == "resource-call-result":
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                return true
+                return proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
             if node.kind == "binary" or node.kind == "index" or node.kind == "dict_entry" or node.kind == "checked-index":
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
-                return true
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
+                return proof_kernel_replay_arena_push_work(work, work_used, node.right, next_depth, false)
             if node.kind == "slice":
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
-                work.push(ProofKernelReplayArenaWork{root: node.auxiliary, depth: next_depth, exiting: false})
-                return true
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.right, next_depth, false)
+                return proof_kernel_replay_arena_push_work(work, work_used, node.auxiliary, next_depth, false)
             if node.kind == "if" or node.kind == "quantifier":
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.right, next_depth, false)
                 if node.kind == "if":
-                    work.push(ProofKernelReplayArenaWork{root: node.auxiliary, depth: next_depth, exiting: false})
+                    return proof_kernel_replay_arena_push_work(work, work_used, node.auxiliary, next_depth, false)
                 return true
             if node.kind == "effect-containment":
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
-                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                for index in 0..<node.children_count |index, node, children, work, work_used, next_depth|:
                     child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                     return false if not child.known
-                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                    return false if not proof_kernel_replay_arena_push_work(work, work_used, child.value, next_depth, false)
                 return true
             if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "effect-row" or node.kind == "effect-containment" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "resource-call" or node.kind == "resource-call-lend":
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "resource-call":
-                    work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                    return false if not proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
+                for index in 0..<node.children_count |index, node, children, work, work_used, next_depth|:
                     child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                     return false if not child.known
-                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                    return false if not proof_kernel_replay_arena_push_work(work, work_used, child.value, next_depth, false)
                 return true
             if node.kind == "resource-scope" or node.kind == "resource-safety" or node.kind == "structural-safety" or node.kind == "structural-edge":
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
-                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                for index in 0..<node.children_count |index, node, children, work, work_used, next_depth|:
                     child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                     return false if not child.known
-                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                    return false if not proof_kernel_replay_arena_push_work(work, work_used, child.value, next_depth, false)
                 return true
             if node.kind == "resource-disjoint":
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
-                work.push(ProofKernelReplayArenaWork{root: node.auxiliary, depth: next_depth, exiting: false})
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.right, next_depth, false)
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, node.auxiliary, next_depth, false)
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
-                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                for index in 0..<node.children_count |index, node, children, work, work_used, next_depth|:
                     child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                     return false if not child.known
-                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                    return false if not proof_kernel_replay_arena_push_work(work, work_used, child.value, next_depth, false)
                 return true
             if node.kind == "resource-bind":
                 return true if node.operator == "value" or node.operator == "external-shared" or node.operator == "external-mutable"
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                return true
+                return proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
             if node.kind == "resource-write" or node.kind == "resource-move":
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                return true
+                return proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
             if node.kind == "resource-use":
-                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
-                return true
+                return proof_kernel_replay_arena_push_work(work, work_used, node.left, next_depth, false)
             return true
 
         # Iterative fail-closed arena admission. `visiting` is the active DFS color, `visited`
         # memoizes completed nodes, and `validity` prevents a malformed shared child from being
-        # accepted on a later path. The work stack is bounded by the input graph's own size, while
-        # the explicit depth field retains the certificate-level term bound.
+        # accepted on a later path. Work insertion is bounded independently of the serialized
+        # graph, while the explicit depth field retains the certificate-level term bound.
         def proof_kernel_replay_arena_valid_iterative(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
             return false if nodes.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
             return false if children.count > ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET
@@ -85,9 +90,12 @@ extend ElisaProofKernelReplay:
             visited.resize(nodes.count)
             validity.resize(nodes.count)
             visited_depth.resize(nodes.count)
-            work: mutable darray[ProofKernelReplayArenaWork] = [ProofKernelReplayArenaWork{root: goal_root, depth: 0, exiting: false}]
-            work.extend([ProofKernelReplayArenaWork{root: fact, depth: 0, exiting: false} for fact in facts])
-            while work.count > 0 |work, nodes, children, visiting, visited, validity, visited_depth|:
+            work: mutable darray[ProofKernelReplayArenaWork] = []
+            work_used: mutable usize = 0
+            return false if not proof_kernel_replay_arena_push_work(work, work_used, goal_root, 0, false)
+            for fact in facts |fact, work, work_used|:
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, fact, 0, false)
+            while work.count > 0 |work, nodes, children, visiting, visited, validity, visited_depth, work_used|:
                 current: ProofKernelReplayArenaWork = work.pop()
                 return false if current.root >= nodes.count
                 return false if current.depth >= 127 or not ElisaProofKernelCore::depth_valid(current.depth)
@@ -115,8 +123,8 @@ extend ElisaProofKernelReplay:
                 located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, current.root)
                 return false if not located.known or not proof_kernel_replay_arena_shape_valid(located.node)
                 return false if not proof_kernel_replay_bool_set(visiting, current.root, true)
-                work.push(ProofKernelReplayArenaWork{root: current.root, depth: current.depth, exiting: true})
-                return false if not proof_kernel_replay_arena_push_children(located.node, children, current.depth, &work)
+                return false if not proof_kernel_replay_arena_push_work(work, work_used, current.root, current.depth, true)
+                return false if not proof_kernel_replay_arena_push_children(located.node, children, current.depth, &work, &work_used)
             return true
 
         def proof_kernel_replay_arena_valid[@r](nodes: darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
