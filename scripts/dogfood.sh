@@ -2679,9 +2679,36 @@ print("dogfood tactic_script_stale: source binding rejected stale certificate")
 PY
 
 if [[ "${ELISA_DOGFOOD_FULL:-0}" == "1" ]]; then
-    # The complete implementation is currently an audit target, not a self-trust exception:
-    # unsupported compiler/proof-language boundaries are expected to keep this report failed.
-    run_probe full_implementation src/main.elisa 1
+    # The complete implementation is currently an audit target, not a self-trust exception.
+    # Keep this path bounded: a resource stop is an explicit incomplete audit (exit 3), not a
+    # proof failure and not a reason to let an exploratory dogfood run consume the host.
+    full_audit_output="$REPORT_DIR/full-implementation-audit.json"
+    set +e
+    "$ROOT_DIR/scripts/audit_full_source.sh" >"$full_audit_output"
+    full_audit_status=$?
+    set -e
+    if [[ "$full_audit_status" -eq 3 ]]; then
+        printf 'dogfood full_implementation: bounded audit incomplete (see %s)\n' "$full_audit_output" >&2
+        exit 3
+    fi
+    if [[ "$full_audit_status" -ne 0 ]]; then
+        printf 'dogfood full_implementation: audit harness failed (exit %s)\n' "$full_audit_status" >&2
+        exit 1
+    fi
+    python3 - "$full_audit_output" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    audit = json.load(handle)
+if not audit["complete"] or audit["replay_gaps"] != 0:
+    raise SystemExit("dogfood failed: completed full-source audit did not have zero replay gaps")
+print(
+    "dogfood full_implementation: completed with "
+    f"report_status={audit['report_status']} verification_state={audit['report_verification_state']} "
+    f"obligations={audit.get('obligations')} proven={audit.get('proven')}"
+)
+PY
 fi
 
 printf 'dogfood audit passed: formalized layers are replay-complete\n'

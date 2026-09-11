@@ -200,9 +200,14 @@ PATH=/Users/torarinvikbjarko/.elisac:$PATH scripts/test.sh
 
 Run the source-neutral dogfood gate with `scripts/dogfood.sh`. It requires the formalized kernel
 layers and standalone replay boundary to be fully independently replayable. Set
-`ELISA_DOGFOOD_FULL=1` to additionally audit the complete imported implementation source; that
-report is expected to remain `failed` until the checker covers the compiler and proof-language
-surface, but it must still finish with zero certificate replay gaps.
+`ELISA_DOGFOOD_FULL=1` to additionally run the complete imported implementation through the same
+bounded audit. For direct use, first build the proof binary and run
+`scripts/audit_full_source.sh`; it writes the proof JSON and stderr under a retained temporary
+directory and prints a machine-readable summary. Exit `0` means the process completed and emitted
+valid JSON (inspect `report_status` and `report_verification_state`); exit `3` means the watchdog
+stopped it for its time or RSS limit, which is an incomplete audit rather than a proof verdict;
+exit `2` means the harness or report format failed. Configure the bounds with
+`ELISA_FULL_AUDIT_TIME_LIMIT` and `ELISA_FULL_AUDIT_RSS_LIMIT_KB`.
 Each dogfood probe is executed twice and must produce byte-identical JSON, making nondeterministic
 proof IDs, certificate ordering, or report serialization a gate failure.
 
@@ -224,9 +229,9 @@ no circular self-trust exemption. The replay module is also compiled independent
 that imports only `kernel_core.elisa` and `kernel_replay.elisa`; this dependency-isolation gate is
 separate from proof acceptance and does not pretend that the complete AST-backed checker has
 verified itself yet.
-The full-source audit now reaches the complete imported implementation and has zero replay gaps;
-its remaining failures are explicit semantic/unsupported obligations rather than unverified
-certificates.
+The complete imported implementation remains a scalability audit target: a bounded run may stop
+before report generation when the process reaches its documented resource ceiling. Such a stop is
+reported explicitly and is not counted as either a proof failure or a successful verification.
 
 ## Current proof surface
 
