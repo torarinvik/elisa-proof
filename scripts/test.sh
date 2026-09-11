@@ -514,6 +514,12 @@ if [[ "$structural_shadowed_subterm_status" -ne 0 ]]; then
     printf 'proof test matrix failed: shadowed structural subterm identity\n' >&2
     exit 1
 fi
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_match_shadow_fact.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not any(goal["proven"] for goal in report["goals"] if goal["rule"] != "resource-safety"); assert any(finding["kind"] == "proof-step-unproven" for finding in report["findings"])'
+rejected_match_shadow_fact_probe_status=${PIPESTATUS[1]}
+if [[ "$rejected_match_shadow_fact_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: shadowed loop binder reused an outer proof fact\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/bounded_recursive_depth.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0'
 bounded_recursive_depth_status=${PIPESTATUS[1]}
 if [[ "$bounded_recursive_depth_status" -ne 0 ]]; then
@@ -1077,6 +1083,8 @@ rejected_checked_index_nested_status=$?
 rejected_for_shadow_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_match_shadow.elisa" >/dev/null
 rejected_match_shadow_status=$?
+"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_match_shadow_fact.elisa" >/dev/null
+rejected_match_shadow_fact_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_value_match.elisa" >/dev/null
 rejected_value_match_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_value_match_payload_shadow.elisa" >/dev/null
@@ -1223,8 +1231,8 @@ if [[ "$collection_quantifier_status" -ne 0 || "$collection_quantifier_rejected_
     exit 1
 fi
 
-if [[ "$rejected_nested_call_symbolic_value_status" -ne 1 || "$rejected_for_shadow_status" -ne 1 || "$rejected_match_shadow_status" -ne 1 || "$rejected_value_match_status" -ne 1 || "$rejected_loop_invariant_scope_status" -ne 1 || "$rejected_contract_call_status" -ne 1 || "$rejected_mutable_pure_contract_status" -ne 1 || "$rejected_pure_default_contract_status" -ne 1 || "$rejected_resource_expression_status" -ne 1 || "$rejected_unknown_call_result_status" -ne 1 || "$rejected_unknown_assert_reuse_status" -ne 1 || "$rejected_assert_nested_call_status" -ne 1 || "$rejected_mutual_recursive_pure_impure_member_status" -ne 1 || "$rejected_mutable_global_pure_contract_status" -ne 1 ]]; then
-    printf 'proof test matrix failed: rejected_nested_call_symbolic_value=%s rejected_for_shadow=%s rejected_match_shadow=%s rejected_value_match=%s rejected_loop_invariant_scope=%s rejected_contract_call=%s rejected_mutable_pure_contract=%s rejected_pure_default_contract=%s rejected_resource_expression=%s rejected_parallel_proof_state=%s rejected_unknown_call_result=%s rejected_unknown_assert_reuse=%s rejected_assert_nested_call=%s rejected_mutual_recursive_pure_impure_member=%s rejected_mutable_global_pure_contract=%s\n' "$rejected_nested_call_symbolic_value_status" "$rejected_for_shadow_status" "$rejected_match_shadow_status" "$rejected_value_match_status" "$rejected_loop_invariant_scope_status" "$rejected_contract_call_status" "$rejected_mutable_pure_contract_status" "$rejected_pure_default_contract_status" "$rejected_resource_expression_status" "$rejected_parallel_proof_state_status" "$rejected_unknown_call_result_status" "$rejected_unknown_assert_reuse_status" "$rejected_assert_nested_call_status" "$rejected_mutual_recursive_pure_impure_member_status" "$rejected_mutable_global_pure_contract_status" >&2
+if [[ "$rejected_nested_call_symbolic_value_status" -ne 1 || "$rejected_for_shadow_status" -ne 1 || "$rejected_match_shadow_status" -ne 1 || "$rejected_match_shadow_fact_status" -ne 1 || "$rejected_value_match_status" -ne 1 || "$rejected_loop_invariant_scope_status" -ne 1 || "$rejected_contract_call_status" -ne 1 || "$rejected_mutable_pure_contract_status" -ne 1 || "$rejected_pure_default_contract_status" -ne 1 || "$rejected_resource_expression_status" -ne 1 || "$rejected_unknown_call_result_status" -ne 1 || "$rejected_unknown_assert_reuse_status" -ne 1 || "$rejected_assert_nested_call_status" -ne 1 || "$rejected_mutual_recursive_pure_impure_member_status" -ne 1 || "$rejected_mutable_global_pure_contract_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: rejected_nested_call_symbolic_value=%s rejected_for_shadow=%s rejected_match_shadow=%s rejected_match_shadow_fact=%s rejected_value_match=%s rejected_loop_invariant_scope=%s rejected_contract_call=%s rejected_mutable_pure_contract=%s rejected_pure_default_contract=%s rejected_resource_expression=%s rejected_parallel_proof_state=%s rejected_unknown_call_result=%s rejected_unknown_assert_reuse=%s rejected_assert_nested_call=%s rejected_mutual_recursive_pure_impure_member=%s rejected_mutable_global_pure_contract=%s\n' "$rejected_nested_call_symbolic_value_status" "$rejected_for_shadow_status" "$rejected_match_shadow_status" "$rejected_match_shadow_fact_status" "$rejected_value_match_status" "$rejected_loop_invariant_scope_status" "$rejected_contract_call_status" "$rejected_mutable_pure_contract_status" "$rejected_pure_default_contract_status" "$rejected_resource_expression_status" "$rejected_parallel_proof_state_status" "$rejected_unknown_call_result_status" "$rejected_unknown_assert_reuse_status" "$rejected_assert_nested_call_status" "$rejected_mutual_recursive_pure_impure_member_status" "$rejected_mutable_global_pure_contract_status" >&2
     exit 1
 fi
 
