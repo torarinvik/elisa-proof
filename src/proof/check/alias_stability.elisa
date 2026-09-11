@@ -1,0 +1,432 @@
+extend ElisaProof:
+    private:
+        def proof_add_lemma_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
+            facts.push(expression)
+            bindings_start: usize = report.fact_trace_summary_names.count
+            report.fact_trace_summary_names.extend(parameter_names)
+            report.fact_trace_summary_values.extend(argument_values)
+            requires_start: usize = report.fact_trace_summary_require_goal_ids.count
+            report.fact_trace_summary_require_goal_ids.extend(require_goal_ids)
+            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
+            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: "lemma-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index})
+
+        def proof_type_bound_name(expression: Ast::Expr) -> sview:
+            marker_name: sview = proof_unsigned_marker_name(expression)
+            return marker_name if marker_name != ""
+            builtin_marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_builtin_operator_marker_info(expression)
+            return proof_place_root_name(builtin_marker.term, 0) if builtin_marker.known
+            untrusted_marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_untrusted_operator_marker_info(expression)
+            return proof_place_root_name(untrusted_marker.term, 0) if untrusted_marker.known
+            index_marker: (known: bool, term: Ast::Expr) = proof_builtin_index_marker_info(expression)
+            return proof_place_root_name(index_marker.term, 0) if index_marker.known
+            # A type witness may be keyed by a place rather than a name. Retention follows the
+            # root symbol of that place, so `h.part`'s witness lives and dies with `h`.
+            root_name: sview = proof_type_marker_root_name(expression)
+            return root_name if root_name != ""
+            match expression:
+                Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
+                    match left:
+                        Ast::Expr.IntLit(value, _):
+                            match right:
+                                Ast::Expr.Ident(name, _):
+                                    return name if value == 0
+                                _:
+                                    pass
+                        _:
+                            pass
+                    match right:
+                        Ast::Expr.IntLit(_, _):
+                            match left:
+                                Ast::Expr.Ident(name, _):
+                                    return name
+                                _:
+                                    pass
+                        _:
+                            pass
+                _:
+                    pass
+            return ""
+
+        def proof_fact_is_type_bound(report: ProofReport&, expression: Ast::Expr, owner: sview) -> bool:
+            return false if proof_type_bound_name(expression) == ""
+            return false if report.type_bound_owner != owner
+            for existing in report.type_bound_seen:
+                return true if proof_expr_equal(existing, expression)
+            return false
+
+        # Type bounds come from the compiler's variable type, not from mutable program state.
+        # Preserve only those explicitly traced facts across an opaque/recursive call, and only
+        # while their lexical binding is still live. Move-containing calls are excluded because
+        # ownership invalidation can remove the binding itself at the statement boundary.
+        def proof_restore_type_bound_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            for fact in source |fact, facts, names, report, owner|:
+                bound_name: sview = proof_type_bound_name(fact)
+                continue if bound_name == "" or not (any candidate in names where candidate == bound_name)
+                continue if not proof_fact_is_type_bound(report, fact, owner)
+                duplicate: mutable bool = false
+                for existing in facts |existing, fact, duplicate|:
+                    duplicate <- true if proof_expr_equal(existing, fact)
+                facts.push(fact) if not duplicate
+
+        # A loop or pattern binder can shadow a name while the proof state still uses source
+        # spellings. Remove inherited type facts for those spellings before entering the child
+        # state; otherwise an outer `0 <= i` could be applied to an unrelated signed binder.
+        def proof_remove_type_bound_facts_for_names(facts: mutable darray[Ast::Expr]&, names: darray[sview]&) -> void:
+            # Compact in place. A temporary AST value in a fresh darray would acquire the
+            # inferred auto region of this helper; stage1 correctly rejects storing that value
+            # into the longer-lived fact set. The source and destination are the same arena-owned
+            # array, so compaction preserves both the AST views and the proof-state lifetime.
+            original_count: usize = facts.count
+            write_index: mutable usize = 0
+            for read_index in 0..<original_count |facts, names, original_count, write_index|:
+                bound_name: sview = proof_type_bound_name(facts[read_index])
+                continue if bound_name != "" and (any candidate in names where candidate == bound_name)
+                facts[write_index] <- facts[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
+
+        # Replaces `facts.clear()` at every state-invalidation point of symbolic execution.
+        # Type-bound facts describe the compiler type of a binding, not mutable program state,
+        # so they remain true across an invalidation while that binding is lexically live. A
+        # redeclaration purges them explicitly before establishing the new declaration's type.
+        # Without this, a cleared unsigned marker would let later arithmetic on the binding be
+        # folded as unbounded signed arithmetic.
+        def proof_drop_local_extent(report: mutable ProofReport&, name: sview) -> void:
+            return if name == ""
+            kept: mutable darray[sview] = []
+            for existing in report.local_extent_names |kept, name|:
+                kept.push(existing) if existing != name
+            report.local_extent_names.clear()
+            report.local_extent_names.extend(kept)
+
+        def proof_push_aliased(aliased: mutable darray[sview]&, name: sview) -> void:
+            return if name == ""
+            return if any existing in aliased where existing == name
+            aliased.push(name)
+
+        # The locals of a function body that may be referenced: a place under `&`, `mutable` or
+        # `move`, the receiver of a method call, and a bare name passed to a parameter that is a
+        # reference (Elisa references such an argument implicitly) or to a callee whose signature
+        # is not imported. A lambda body is not analyzed; it disables the analysis for the whole
+        # function through the `*` sentinel. Everything else is a by-value scalar a callee cannot
+        # reach.
+        def proof_collect_aliased_names(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, aliased: mutable darray[sview]&, confinable: bool) -> void:
+            for statement in body |functions, aliased, confinable|:
+                match statement:
+                    Ast::Stmt.Expr(expression, _):
+                        proof_collect_aliased_in_expression(expression, functions, aliased, confinable)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        proof_collect_aliased_names(block_body, functions, aliased, confinable)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        proof_collect_aliased_in_expression(initializer, functions, aliased, confinable)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        proof_collect_aliased_in_expression(target, functions, aliased, confinable)
+                        proof_collect_aliased_in_expression(value, functions, aliased, confinable)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_collect_aliased_in_expression(condition, functions, aliased, confinable)
+                        proof_collect_aliased_names(then_body, functions, aliased, confinable)
+                        proof_collect_aliased_names(else_body, functions, aliased, confinable)
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_collect_aliased_in_expression(condition, functions, aliased, confinable)
+                        proof_collect_aliased_names(while_body, functions, aliased, confinable)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        proof_collect_aliased_in_expression(iterable, functions, aliased, confinable)
+                        proof_collect_aliased_names(for_body, functions, aliased, confinable)
+                    Ast::Stmt.Return(value, _):
+                        proof_collect_aliased_in_expression(returned, functions, aliased, confinable) if value is returned
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_collect_aliased_in_expression(scrutinee, functions, aliased, confinable)
+                        for arm in arms |functions, aliased, confinable|:
+                            proof_collect_aliased_in_expression(arm.guard, functions, aliased, confinable)
+                            proof_collect_aliased_names(arm.body, functions, aliased, confinable)
+                    Ast::Stmt.Contract(_, expression, _):
+                        proof_collect_aliased_in_expression(expression, functions, aliased, confinable)
+                    _:
+                        pass
+
+        def proof_strip_parens(expression: Ast::Expr) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_strip_parens(inner)
+                _:
+                    return expression
+
+        # Whether a reference handed to this callee's parameter `lent_slot` can outlive the call.
+        # It cannot when nothing the callee can store into, that its caller still sees, has a type
+        # able to hold a reference: its other parameters' storage, and its return. A lifetime
+        # parameter is the one way a callee names a region longer-lived than the call, so a callee
+        # that declares one is refused outright, as is one that returns a reference or a region.
+        #
+        # The boundary is fixed by compiled probes rather than by argument. A callee with a second
+        # parameter of type `mutable darray[darray[usize]&]&` does store the lend into it, and one
+        # that returns a by-value `darray[darray[usize]&]` holding it does too; the compiler
+        # accepts both. Storing into an ordinary field is what its region checker refuses. So the
+        # test has to be over types, and it is deliberately conservative: an unresolvable name, an
+        # ambiguous alias and a form it does not recognize all count as able to hold a reference.
+        def proof_call_lend_is_confined(functions: ProofFunctionTable&, callee_index: usize, lent_slot: usize) -> bool:
+            return false if callee_index >= functions.param_starts.count or callee_index >= functions.param_counts.count
+            return false if callee_index >= functions.region_param_counts.count or functions.region_param_counts[callee_index] != 0
+            return false if callee_index >= functions.return_references.count or functions.return_references[callee_index]
+            return false if callee_index >= functions.return_regions.count or functions.return_regions[callee_index] != ""
+            return false if callee_index >= functions.return_reference_free.count or not functions.return_reference_free[callee_index]
+            parameter_start: usize = functions.param_starts[callee_index]
+            parameter_count: usize = functions.param_counts[callee_index]
+            for offset in 0..<parameter_count |offset, functions, parameter_start, lent_slot|:
+                continue if offset == lent_slot
+                slot: usize = parameter_start + offset
+                return false if slot >= functions.all_parameter_target_reference_free.count
+                return false if not functions.all_parameter_target_reference_free[slot]
+            return true
+
+        def proof_collect_aliased_call_arguments(callee: Ast::Expr, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, functions: ProofFunctionTable&, aliased: mutable darray[sview]&, confinable: bool) -> void:
+            called: sview = proof_callable_name(callee)
+            index: usize = proof_function_index(functions, called)
+            known: bool = called != "" and index < functions.names.count
+            # A method call's receiver is not among its arguments, so it is recorded here by name.
+            # A collection builtin is the exception the confinement rule already covers by another
+            # route: `xs.push(v)` writes `xs` during the call and leaves nothing behind that a
+            # later call could reach, exactly as a confined lend does. Recording it as escaping
+            # made a collection this frame only ever pushed to unreachable-by-nothing yet aliased
+            # forever, and every loop over `xs.count` afterwards lost its own range fact.
+            builtin: (known: bool, receiver: Ast::Expr) = proof_resource_collection_builtin(callee)
+            match callee:
+                Ast::Expr.Field(receiver, _, _):
+                    proof_push_aliased(aliased, proof_ident_name(proof_strip_parens(receiver))) if not (confinable and builtin.known)
+                _:
+                    pass
+            for position in 0..<arguments.count |position, arguments, argument_names, functions, aliased, known, index, confinable|:
+                argument_name: sview = proof_ident_name(proof_strip_parens(arguments[position]))
+                continue if argument_name == ""
+                if not known:
+                    proof_push_aliased(aliased, argument_name)
+                    continue
+                parameter_start: usize = functions.param_starts[index]
+                parameter_count: usize = functions.param_counts[index]
+                slot: usize = proof_call_argument_slot(functions, index, argument_names, position, arguments.count)
+                if slot >= parameter_count or parameter_start + slot >= functions.all_parameter_references.count:
+                    proof_push_aliased(aliased, argument_name)
+                    continue
+                continue if not functions.all_parameter_references[parameter_start + slot]
+                continue if confinable and proof_call_lend_is_confined(functions, index, slot)
+                proof_push_aliased(aliased, argument_name)
+
+        # Which formal an actual lands on: its position, or the formal a named argument names.
+        # `parameter_count` means the actual could not be placed.
+        def proof_call_argument_slot(functions: ProofFunctionTable&, callee_index: usize, argument_names: darray[sview]&, position: usize, argument_count: usize) -> usize:
+            return 0 if callee_index >= functions.param_starts.count or callee_index >= functions.param_counts.count
+            parameter_start: usize = functions.param_starts[callee_index]
+            parameter_count: usize = functions.param_counts[callee_index]
+            slot: mutable usize = parameter_count
+            if argument_names.count == argument_count and position < argument_names.count and argument_names[position] != "":
+                for offset in 0..<parameter_count |offset, functions, parameter_start, argument_names, position, slot|:
+                    slot <- offset if parameter_start + offset < functions.all_params.count and functions.all_params[parameter_start + offset] == argument_names[position]
+            else:
+                slot <- position if position < parameter_count
+            return slot
+
+        # `&x`, `mutable x` or `lmut x` written out at a call site, and the place it lends.
+        def proof_explicit_lend_operand(expression: Ast::Expr) -> (known: bool, operand: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            match proof_strip_parens(expression):
+                Ast::Expr.Unary(operator, operand, _):
+                    return (true, operand) if operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut
+                    return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_collect_aliased_in_expression(expression: Ast::Expr, functions: ProofFunctionTable&, aliased: mutable darray[sview]&, confinable: bool) -> void:
+            match expression:
+                Ast::Expr.Unary(operator, operand, _):
+                    proof_push_aliased(aliased, proof_place_root_name(operand, 0)) if operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut
+                    proof_collect_aliased_in_expression(operand, functions, aliased, confinable)
+                Ast::Expr.Move(operand, _):
+                    proof_push_aliased(aliased, proof_place_root_name(operand, 0))
+                    proof_collect_aliased_in_expression(operand, functions, aliased, confinable)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_push_aliased(aliased, proof_place_root_name(operand, 0))
+                    proof_collect_aliased_in_expression(operand, functions, aliased, confinable)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    proof_collect_aliased_call_arguments(callee, arguments, argument_names, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(callee, functions, aliased, confinable)
+                    # An explicit `&x` at a call site is the same lend the implicit form above
+                    # decides on, so it gets the same decision. When the lend is confined the
+                    # walk descends into the lent place instead of the lend, which records
+                    # anything nested inside it without recording the lend itself.
+                    called_name: sview = proof_callable_name(callee)
+                    called_index: usize = proof_function_index(functions, called_name)
+                    callee_known: bool = called_name != "" and called_index < functions.names.count
+                    for position in 0..<arguments.count |position, arguments, argument_names, functions, aliased, confinable, callee_known, called_index|:
+                        argument: Ast::Expr = arguments[position]
+                        lend: (known: bool, operand: Ast::Expr) = proof_explicit_lend_operand(argument)
+                        confined: mutable bool = false
+                        if confinable and callee_known and lend.known:
+                            slot: usize = proof_call_argument_slot(functions, called_index, argument_names, position, arguments.count)
+                            confined <- slot < functions.param_counts[called_index] and proof_call_lend_is_confined(functions, called_index, slot)
+                        proof_collect_aliased_in_expression(lend.operand, functions, aliased, confinable) if confined
+                        proof_collect_aliased_in_expression(argument, functions, aliased, confinable) if not confined
+                Ast::Expr.StaticEffectCall(_, _, _, arguments, _, _):
+                    for argument in arguments |functions, aliased, confinable|:
+                        proof_push_aliased(aliased, proof_ident_name(proof_strip_parens(argument)))
+                        proof_collect_aliased_in_expression(argument, functions, aliased, confinable)
+                Ast::Expr.Field(object, _, _):
+                    proof_collect_aliased_in_expression(object, functions, aliased, confinable)
+                Ast::Expr.Scope(base, _, _):
+                    proof_collect_aliased_in_expression(base, functions, aliased, confinable)
+                Ast::Expr.Index(object, index, _):
+                    proof_collect_aliased_in_expression(object, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(index, functions, aliased, confinable)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_collect_aliased_in_expression(object, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(low, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(high, functions, aliased, confinable)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_collect_aliased_in_expression(object, functions, aliased, confinable)
+                    for argument in arguments |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(argument, functions, aliased, confinable)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_aliased_in_expression(left, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(right, functions, aliased, confinable)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_aliased_in_expression(inner, functions, aliased, confinable)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(element, functions, aliased, confinable)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(element, functions, aliased, confinable)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(element, functions, aliased, confinable)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(entry.key, functions, aliased, confinable)
+                        proof_collect_aliased_in_expression(entry.value, functions, aliased, confinable)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(field.value, functions, aliased, confinable)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_collect_aliased_in_expression(base, functions, aliased, confinable)
+                    for field in fields |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(field.value, functions, aliased, confinable)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    proof_collect_aliased_in_expression(condition, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(then_expression, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(else_expression, functions, aliased, confinable)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    proof_collect_aliased_in_expression(scrutinee, functions, aliased, confinable)
+                    for arm in arms |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(arm.guard, functions, aliased, confinable)
+                        proof_collect_aliased_names(arm.body, functions, aliased, confinable)
+                Ast::Expr.Catch(guarded, arms, _):
+                    proof_collect_aliased_in_expression(guarded, functions, aliased, confinable)
+                    for arm in arms |functions, aliased, confinable|:
+                        proof_collect_aliased_in_expression(arm.guard, functions, aliased, confinable)
+                        proof_collect_aliased_names(arm.body, functions, aliased, confinable)
+                Ast::Expr.Comprehension(_, iterable, condition, comprehension_body, _):
+                    proof_collect_aliased_in_expression(iterable, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(condition, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(comprehension_body, functions, aliased, confinable)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_collect_aliased_in_expression(base, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(predicate, functions, aliased, confinable)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_collect_aliased_in_expression(guarded, functions, aliased, confinable)
+                    proof_collect_aliased_names(recovery, functions, aliased, confinable)
+                Ast::Expr.Lambda(_, _, _):
+                    proof_push_aliased(aliased, "*")
+                Ast::Expr.Block(statements, value, _, _):
+                    proof_collect_aliased_names(statements, functions, aliased, confinable)
+                    proof_collect_aliased_in_expression(value, functions, aliased, confinable)
+                _:
+                    pass
+
+        # A fact a call cannot falsify: a proposition over literals and by-value scalar locals
+        # and parameters of the current function that are never referenced. A callee reaches
+        # its caller's state only through references and globals, so such a fact holds after
+        # the call exactly as before it. Anything else — a field, an element, a container, a
+        # call, a name the body may reference — is not stable.
+        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, local_extents: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.ShorthandMember(parts, _):
+                    return parts.count == 1 and parts[0] != ""
+                Ast::Expr.Ident(name, _):
+                    return false if any existing in aliased where existing == name
+                    return false if not (any candidate in names where candidate == name) and not (any parameter in parameters where parameter == name)
+                    return proof_scalar_witnessed(facts, name)
+                Ast::Expr.Tuple(_, _):
+                    # A loop binder's atom `(name, offset)`: the binder is a local of this body.
+                    binder: sview = proof_place_root_name(expression, 0)
+                    return false if binder == ""
+                    return false if any existing in aliased where existing == binder
+                    return false if not (any candidate in names where candidate == binder)
+                    return proof_scalar_term_witnessed(expression, facts, 0)
+                Ast::Expr.Field(_, field_name, _):
+                    return false if field_name == ""
+                    root: sview = proof_place_root_name(expression, 0)
+                    return false if root == ""
+                    # A binding that holds its value rather than a reference to one, and that is
+                    # named by no reference, receiver or opaque argument, is a binding no callee
+                    # can reach at all -- the same argument the by-value scalar case above makes,
+                    # applied to a field of it. `proof_collect_aliased_names` records a method
+                    # receiver, so a collection a `push` is called on is excluded by its own use.
+                    # This is what carries `node.children_start` across a call: `node` is a struct
+                    # a callee has no path to, so its fields are as stable as a scalar local.
+                    value_root: bool = (any owned in local_extents where owned == root) and not (any existing in aliased where existing == root) and (any candidate in names where candidate == root)
+                    # The other place a call cannot change: the element count of a parameter bound
+                    # by a shared borrow. Nothing may write through a shared borrow for its
+                    # lifetime, and the borrow rule the compiler enforces means no mutable path to
+                    # the same object coexists with it, so no callee -- whether or not it receives
+                    # the borrow -- can push, pop or resize it.
+                    shared_extent: bool = field_name == "count" and (any shared in shared_extents where shared == root)
+                    return false if not value_root and not shared_extent
+                    # The witness is still required, so a place that was never established as a
+                    # scalar term is refused here exactly as an unwitnessed name is.
+                    return proof_scalar_term_witnessed(expression, facts, 0)
+                Ast::Expr.Array(elements, _):
+                    # A literal collection is a value, not storage. Nothing a callee can reach
+                    # makes `[]` hold something else, so a binding recorded as one keeps that
+                    # record -- subject to the same reachability test on the binding itself that
+                    # every other retained value passes.
+                    for element in elements |facts, names, parameters, aliased, shared_extents, local_extents, depth|:
+                        return false if not proof_expr_call_stable(element, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                    return true
+                Ast::Expr.Call(_, arguments, _, _):
+                    # A scalar-term marker is a statement about a term's *type*, so it is worth
+                    # exactly what the term's identity is worth: if the term still denotes the same
+                    # value after the call, the type statement about it still holds.
+                    marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+                    return proof_expr_call_stable(marker.term, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) if marker.known
+                    # An ordinary call term keeps its value across another call when a pure-call
+                    # witness says it denotes one value, and its arguments are themselves stable
+                    # so the same text still names the same arguments. This is what carries a
+                    # callee's summary -- `not f(...) or p` -- past the next call in the body,
+                    # together with the witness recorded beside that fact when it is built.
+                    return false if not proof_scalar_term_witnessed(expression, facts, 0)
+                    for argument in arguments |facts, names, parameters, aliased, shared_extents, local_extents, depth|:
+                        return false if not proof_expr_call_stable(argument, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
+                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                _:
+                    return false
+
+        # Re-establish, after a nested opaque call, every pre-call fact that is call-stable for
+        # the current function. Witnesses are read from the pre-call state, which still holds
+        # every type bound the call could not remove.
+        # The roots one expression lends. A lend that ends with its call is a write during that
+        # call and nothing afterwards, so the call performing it is the one place its binding has
+        # to be treated as reachable. Collected without the confinement refinement, which is the
+        # point: this is the lend itself.

@@ -1,0 +1,208 @@
+def proof_push_proof_check(buffer: mutable darray[u8]&, report: ProofReport&, contents: darray[u8]&, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
+    claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
+    if not claimed.known:
+        proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"unreadable\",\"goal_id\":null,\"differences\":[]}\n")
+        return 2
+    if claimed.goal_id >= report.goal_attempts.count:
+        proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"not_found\",\"goal_id\":")
+        proof_push_number(buffer, claimed.goal_id.u32())
+        proof_push(buffer, ",\"differences\":[]}\n")
+        return 2
+    canonical: mutable darray[u8] = []
+    proof_push_elisa_proof(&canonical, report, claimed.goal_id, source_fingerprint, source_complete, source_admissible)
+    differences: mutable darray[u8] = []
+    difference_count: mutable usize = 0
+    file_cursor: mutable usize = 0
+    canonical_cursor: mutable usize = 0
+    line_number: mutable usize = 0
+    while file_cursor < contents.count or canonical_cursor < canonical.count |file_cursor, canonical_cursor, line_number, contents, canonical, differences, difference_count|:
+        line_number <- line_number + 1
+        file_line: (end: usize, next: usize) = proof_rendered_line(contents, file_cursor)
+        canonical_line: (end: usize, next: usize) = proof_rendered_line(canonical, canonical_cursor)
+        file_present: bool = file_cursor < contents.count
+        canonical_present: bool = canonical_cursor < canonical.count
+        equal: bool = file_present and canonical_present and proof_rendered_lines_equal(contents, file_cursor, file_line.end, canonical, canonical_cursor, canonical_line.end)
+        if not equal and difference_count < 32:
+            proof_push(&differences, ",") if difference_count > 0
+            proof_push(&differences, "{\"line\":")
+            proof_push_number(&differences, line_number.u32())
+            proof_push(&differences, ",\"expected\":")
+            if canonical_present:
+                proof_push_json_byte_range(&differences, canonical, canonical_cursor, canonical_line.end)
+            else:
+                proof_push(&differences, "null")
+            proof_push(&differences, ",\"found\":")
+            if file_present:
+                proof_push_json_byte_range(&differences, contents, file_cursor, file_line.end)
+            else:
+                proof_push(&differences, "null")
+            proof_push(&differences, "}")
+        difference_count <- difference_count + 1 if not equal
+        file_cursor <- file_line.next if file_present else file_cursor + 1
+        canonical_cursor <- canonical_line.next if canonical_present else canonical_cursor + 1
+    proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":")
+    proof_push(buffer, "\"matches\"" if difference_count == 0 else "\"diverges\"")
+    proof_push(buffer, ",\"goal_id\":")
+    proof_push_number(buffer, claimed.goal_id.u32())
+    proof_push(buffer, ",\"difference_count\":")
+    proof_push_number(buffer, difference_count.u32())
+    proof_push(buffer, ",\"differences\":[")
+    for index in 0..<differences.count |index, buffer, differences|:
+        buffer.push(differences[index])
+    proof_push(buffer, "]}\n")
+    return 0 if difference_count == 0 else 1
+
+def proof_push_elisa_proof(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "# elisa-proof-proof-v1\n")
+    if goal_id >= report.goal_attempts.count:
+        proof_push(buffer, "# goal ")
+        proof_push_number(buffer, goal_id.u32())
+        proof_push(buffer, " does not exist in this source\n")
+        return
+    attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+    certificate_replayed: bool = attempt.has_certificate and attempt.certificate_index < report.certificates.count and report.certificates[attempt.certificate_index].replayed
+    proof_push(buffer, "# source: fingerprint fnv1a32=")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, ", complete=")
+    proof_push(buffer, "true" if source_complete else "false")
+    proof_push(buffer, ", admissible=")
+    proof_push(buffer, "true" if source_admissible else "false")
+    proof_push(buffer, "\n# goal ")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, " of ")
+    proof_push_number(buffer, report.goal_attempts.count.u32())
+    proof_push(buffer, ", rule ")
+    proof_push(buffer, attempt.rule)
+    proof_push(buffer, ", in ")
+    proof_push(buffer, attempt.name)
+    proof_push(buffer, " at line ")
+    proof_push_number(buffer, attempt.line)
+    proof_push(buffer, "\n")
+    keyword: mutable sview = "open"
+    keyword <- "unchecked" if attempt.proven
+    keyword <- "proof" if attempt.proven and certificate_replayed
+    if attempt.proven and not certificate_replayed:
+        proof_push(buffer, "# no certificate replayed for this goal: the block below is not kernel-backed\n")
+    proof_push(buffer, keyword)
+    proof_push(buffer, " ")
+    proof_push(buffer, attempt.name)
+    proof_push(buffer, "_")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ":\n")
+    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
+        fact: Ast::Expr = report.certificate_facts[attempt.facts_start + fact_index]
+        proof_push(buffer, "    given ")
+        proof_push_elisa_expr(buffer, fact, false, 0)
+        origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at(report, attempt.facts_start + fact_index, attempt.name)
+        if origin.known:
+            proof_push(buffer, "    # ")
+            proof_push(buffer, origin.kind)
+            proof_push(buffer, ", line ")
+            proof_push_number(buffer, origin.line)
+            if origin.dependency != "":
+                proof_push(buffer, ", via ")
+                proof_push(buffer, origin.dependency)
+        proof_push(buffer, "\n")
+    proof_push(buffer, "    show ")
+    proof_push_elisa_expr(buffer, attempt.goal, false, 0)
+    proof_push(buffer, "\n")
+    if attempt.proven and certificate_replayed:
+        proof_push(buffer, "    by kernel certificate ")
+        proof_push_number(buffer, attempt.certificate_index.u32())
+        proof_push(buffer, ", arena root ")
+        proof_push_number(buffer, attempt.kernel_goal.u32())
+        proof_push(buffer, "\nqed\n")
+        return
+    if attempt.proven:
+        proof_push(buffer, "    by producer only\n")
+        return
+    selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+    proof_push(buffer, "    unproved: ")
+    if selected.known:
+        proof_push(buffer, report.findings[selected.index].kind)
+        proof_push(buffer, " (")
+        proof_push(buffer, report.findings[selected.index].status)
+        proof_push(buffer, ") - ")
+        proof_push(buffer, report.findings[selected.index].message)
+    else:
+        proof_push(buffer, "unknown")
+    proof_push(buffer, "\n")
+
+def proof_push_json_focused_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_bytes: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    found: bool = goal_id < report.goal_attempts.count
+    proof_push(buffer, "{\"format\":\"elisa-proof-goal-v1\",\"status\":")
+    if not found:
+        proof_push_json_string(buffer, "not_found")
+    else:
+        attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+        certificate_replayed: bool = attempt.has_certificate and attempt.certificate_index < report.certificates.count and report.certificates[attempt.certificate_index].replayed
+        attempt_status: mutable sview = "proved" if attempt.proven and certificate_replayed else "unknown"
+        if not attempt.proven:
+            selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+            attempt_status <- report.findings[selected.index].status if selected.known else "unknown"
+        proof_push_json_string(buffer, attempt_status)
+    proof_push(buffer, ",\"source\":{\"bytes\":")
+    proof_push_number(buffer, source_bytes.u32())
+    proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, "},\"complete\":")
+    proof_push(buffer, "true" if source_complete else "false")
+    proof_push(buffer, ",\"admissible\":")
+    proof_push(buffer, "true" if source_admissible else "false")
+    proof_push(buffer, "},\"goal_id\":")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ",\"goal_fingerprint\":")
+    if found:
+        fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint(report, report.goal_attempts[goal_id])
+        if fingerprint.valid:
+            proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-goal-v1\",\"value\":")
+            proof_push_number(buffer, fingerprint.value)
+            proof_push(buffer, "}")
+        else:
+            proof_push(buffer, "null")
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, ",\"goal\":")
+    if not found:
+        proof_push(buffer, "null,\"failure\":null}\n")
+        return
+    attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+    replay_status: mutable sview = "not_certified"
+    if attempt.has_certificate and attempt.certificate_index < report.certificates.count:
+        replay_status <- "replayed" if report.certificates[attempt.certificate_index].replayed else "gap"
+    proof_push(buffer, "{\"line\":")
+    proof_push_number(buffer, attempt.line)
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, attempt.name)
+    proof_push(buffer, ",\"rule\":")
+    proof_push_json_string(buffer, attempt.rule)
+    proof_push(buffer, ",\"proven\":")
+    proof_push(buffer, "true" if attempt.proven else "false")
+    proof_push(buffer, ",\"replay_status\":")
+    proof_push_json_string(buffer, replay_status)
+    proof_push(buffer, ",\"certificate_id\":")
+    if attempt.has_certificate and attempt.certificate_index < report.certificates.count:
+        proof_push_number(buffer, attempt.certificate_index.u32())
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, ",\"kernel_goal\":")
+    proof_push_number(buffer, attempt.kernel_goal.u32())
+    proof_push(buffer, ",\"facts\":[")
+    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
+        proof_push(buffer, ",") if fact_index > 0
+        proof_push_json_expr(buffer, report.certificate_facts[attempt.facts_start + fact_index])
+    proof_push(buffer, "],\"fact_origins\":[")
+    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, buffer|:
+        proof_push(buffer, ",") if fact_index > 0
+        proof_push_json_fact_origin(buffer, report, attempt.facts_start + fact_index, attempt.name)
+    proof_push(buffer, "],\"dependencies\":[")
+    proof_push_json_goal_dependencies(buffer, report, attempt.facts_start, attempt.facts_count, attempt.name)
+    proof_push(buffer, "],\"proposition\":")
+    proof_push_json_expr(buffer, attempt.goal)
+    proof_push(buffer, "},\"failure\":")
+    if attempt.proven:
+        proof_push(buffer, "null")
+    else:
+        proof_push_json_repair_failure(buffer, report, attempt, goal_id)
+    proof_push(buffer, "}\n")
+

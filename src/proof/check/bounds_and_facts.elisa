@@ -1,0 +1,406 @@
+extend ElisaProof:
+    private:
+        def proof_unsigned_type_width(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            primitive: i64 = proof_unsigned_primitive_width(expression)
+            return primitive if primitive > 0
+            match expression:
+                Ast::Expr.Refinement(base, _, _):
+                    # A predicate restricts inhabitants; it does not change the base type's
+                    # machine arithmetic. Preserve the width even for a vacuous predicate.
+                    return proof_unsigned_type_width(base, declarations, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_type_width(inner, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_unsigned_type_width(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return -1 if alias.count > 1
+                    return proof_unsigned_type_width(alias.target, declarations, depth + 1) if alias.count == 1
+                Ast::Expr.Scope(_, name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    # A bare-name search cannot establish a qualified alias's owner.
+                    return -1 if alias.count > 0
+                _:
+                    pass
+            return 0
+
+        # Type facts are re-established whenever a binding is re-symbolized. This is idempotent
+        # within the current state: an existing fact is not pushed again, while a fact restored
+        # into a fresh state receives a fresh provenance trace for that state.
+        def proof_add_type_bound_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
+            for existing in facts |existing, expression|:
+                return if proof_expr_equal(existing, expression)
+            report.type_bound_seen.push(expression) if not proof_fact_is_type_bound(report, expression, owner)
+            proof_add_traced_fact(facts, report, expression, "type-bound", line, owner)
+
+        def proof_add_unsigned_binding_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, width: i64, line: u32, owner: sview, position: Ast::Pos) -> void:
+            return if name == "" or width <= 0
+            lower_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, Ast::Expr.Ident(name, position), position)
+            proof_add_type_bound_fact(facts, report, lower_bound, line, owner)
+            proof_add_type_bound_fact(facts, report, proof_unsigned_type_marker(name, width, position), line, owner)
+            if width < 64:
+                upper: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(name, position), TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(width), position), position)
+                proof_add_type_bound_fact(facts, report, upper, line, owner)
+
+        # Fixed arrays carry an exact element count in their type (`array[T, N]` or the
+        # primitive shorthand `T[N]`). Keep this importer intentionally narrower than the
+        # compiler's full type algebra: only a literal extent is admitted, and wrappers are
+        # transparent. The result is -1 for dynamic arrays, dependent extents, aliases, or
+        # malformed type syntax. This is used only to derive a memory-safety fact after the
+        # index itself has independently been proved below the exact extent.
+        def proof_fixed_array_extent(expression: Ast::Expr) -> i64:
+            match expression:
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_fixed_array_extent(operand)
+                Ast::Expr.Paren(inner, _):
+                    return proof_fixed_array_extent(inner)
+                Ast::Expr.IndexN(object, arguments, _):
+                    head: sview = proof_callable_name(object)
+                    return -1 if head != "array" or arguments.count != 2
+                    extent: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    return extent.value if extent.known and extent.value >= 0
+                    return -1
+                Ast::Expr.Index(object, extent_expression, _):
+                    head: sview = proof_callable_name(object)
+                    # The compiler's shorthand form is only a fixed array when the
+                    # element head is a primitive scalar. Generic `T[N]`-shaped syntax
+                    # must not be reinterpreted as a storage bound by the proof importer.
+                    primitive: bool = head == "i8" or head == "i16" or head == "i32" or head == "i64" or head == "int" or head == "isize" or head == "u8" or head == "u16" or head == "u32" or head == "u64" or head == "usize" or head == "uintptr" or head == "f32" or head == "f64"
+                    return -1 if not primitive
+                    extent: (known: bool, value: i64) = proof_constant_int(extent_expression)
+                    return extent.value if extent.known and extent.value >= 0
+                    return -1
+                _:
+                    return -1
+
+        # Only direct function parameters are imported into this first fixed-array model.
+        # Looking through parentheses is harmless; fields, calls, and arbitrary paths are
+        # intentionally excluded until their storage identity and aliasing are modeled.
+        def proof_fixed_array_extent_for_object(expression: Ast::Expr, names: darray[sview]&, extents: darray[i64]&) -> i64:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_fixed_array_extent_for_object(inner, names, extents)
+                Ast::Expr.Ident(object_name, _):
+                    limit: usize = names.count if names.count <= extents.count else extents.count
+                    for index in 0..<limit |index, names, extents, object_name|:
+                        return extents[index] if names[index] == object_name
+                    return -1
+                _:
+                    return -1
+
+        # Collect the statically known dimensions of a nested fixed-array parameter in
+        # receiver-to-element order. A missing nested dimension is intentionally not invented:
+        # `array[darray[T], N]` contributes only its outer `N`, so a second runtime index remains
+        # opaque. This flat shape is enough for a bounded `IndexN` access without introducing a
+        # separate heap/alias model.
+        def proof_fixed_array_shape(expression: Ast::Expr, extents: mutable darray[i64]&) -> bool:
+            match expression:
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_fixed_array_shape(operand, extents)
+                Ast::Expr.Paren(inner, _):
+                    return proof_fixed_array_shape(inner, extents)
+                Ast::Expr.IndexN(object, arguments, _):
+                    head: sview = proof_callable_name(object)
+                    return false if head != "array" or arguments.count != 2
+                    extent: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    return false if not extent.known or extent.value < 0
+                    extents.push(extent.value)
+                    nested: mutable darray[i64] = []
+                    proof_fixed_array_shape(arguments[0], &nested)
+                    extents.extend(nested)
+                    return true
+                Ast::Expr.Index(object, extent_expression, _):
+                    head: sview = proof_callable_name(object)
+                    primitive: bool = head == "i8" or head == "i16" or head == "i32" or head == "i64" or head == "int" or head == "isize" or head == "u8" or head == "u16" or head == "u32" or head == "u64" or head == "usize" or head == "uintptr" or head == "f32" or head == "f64"
+                    return false if not primitive
+                    extent: (known: bool, value: i64) = proof_constant_int(extent_expression)
+                    return false if not extent.known or extent.value < 0
+                    extents.push(extent.value)
+                    return true
+                _:
+                    return false
+
+        # The ordinary index path uses the first dimension. Multi-index expressions select the
+        # dimension by occurrence, so duplicate parameter names in the flat shape are deliberate
+        # and preserve the exact nesting order.
+        def proof_fixed_array_dimension_extent(expression: Ast::Expr, dimension: usize, names: darray[sview]&, extents: darray[i64]&) -> i64:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_fixed_array_dimension_extent(inner, dimension, names, extents)
+                Ast::Expr.Ident(object_name, _):
+                    limit: usize = names.count if names.count <= extents.count else extents.count
+                    occurrence: mutable usize = 0
+                    for index in 0..<limit |index, names, extents, object_name, dimension, occurrence|:
+                        if names[index] == object_name:
+                            return extents[index] if occurrence == dimension
+                            occurrence <- occurrence + 1
+                    return -1
+                _:
+                    return -1
+
+        def proof_quantifier_rule(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> sview:
+            kind: sview = proof_quantifier_kind(expression, annotations)
+            return "quantifier-forall" if kind == "forall"
+            return "quantifier-exists" if kind == "exists"
+            return ""
+
+        # Keep the decision procedure and certificate emission together. Only successful goals
+        # enter the certificate stream; failed goals remain ordinary report findings.
+        def proof_certify_goal_with_rule(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&, original_rule: sview) -> bool:
+            exhausted: mutable bool = false
+            proven: bool = proof_kernel_expression_supported(goal) and proof_goal_with_limits(facts, goal, annotations, &exhausted)
+            rule: mutable sview = original_rule
+            quantifier_kind: mutable sview = ""
+            quantifier_kind <- proof_quantifier_kind(goal, annotations) if original_rule == ""
+            rule <- "goal" if rule == ""
+            rule <- "quantifier-forall" if quantifier_kind == "forall"
+            rule <- "quantifier-exists" if quantifier_kind == "exists"
+            proof_add_goal_attempt(report, facts, goal, line, name, rule, proven)
+            proof_mark_latest_attempt_exhausted(report, exhausted and not proven)
+            return proven
+
+        def proof_certify_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return proof_certify_goal_with_rule(facts, goal, report, line, name, annotations, "")
+
+        # A termination clause may spell a lexicographic ranking either as one tuple
+        # (`decreases (outer, inner)`) or as several clauses. Flatten only the explicit tuple
+        # shell; each resulting component is still checked as an ordinary fixed-width integer
+        # expression. Empty/nested unsupported shapes remain represented by their expression and
+        # therefore fail closed in the arithmetic obligation instead of becoming an assumption.
+        def proof_decreases_components(expression: Ast::Expr, components: mutable darray[Ast::Expr]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_decreases_components(inner, components)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |components|:
+                        proof_decreases_components(element, components)
+                _:
+                    components.push(expression)
+
+        def proof_decreases_component_slice(expressions: darray[Ast::Expr]&, components: mutable darray[Ast::Expr]&) -> void:
+            for expression in expressions |components|:
+                proof_decreases_components(expression, components)
+
+        # Infer the ordinary structural ranking used by algebraic-data-type traversals when the
+        # author omits an explicit `decreases` clause. This is deliberately narrow: there must be
+        # at least one enum-typed parameter, and the existing structural checker must still prove
+        # every recursive edge descends in one of the enum parameters while leaving every other
+        # enum parameter unchanged or descending. This is a product-of-subterms ranking: the sum
+        # of the finite constructor heights strictly decreases. No integer or opaque/reference
+        # parameter is inferred, so this cannot turn arbitrary recursion into a termination
+        # certificate.
+        def proof_infer_structural_decrease(file: Ast::File&, parameters: darray[Ast::ParamDecl]&) -> (known: bool, parameter: sview, position: usize, type_name: sview):
+            candidate: mutable sview = ""
+            candidate_position: mutable usize = parameters.count
+            candidate_type: mutable sview = ""
+            for index in 0..<parameters.count |index, parameters, candidate, candidate_position, candidate_type, file|:
+                type_name: sview = proof_callable_name(parameters[index].type_expression)
+                if type_name != "" and proof_declaration_has_enum(file.top_decls, type_name):
+                    if candidate == "":
+                        candidate <- parameters[index].name
+                        candidate_position <- index
+                        candidate_type <- type_name
+            return (candidate != "", candidate, candidate_position, candidate_type)
+
+        def proof_enum_parameter_names(file: Ast::File&, parameters: darray[Ast::ParamDecl]&) -> darray[sview]:
+            result: mutable darray[sview] = []
+            for parameter in parameters |result, file|:
+                type_name: sview = proof_callable_name(parameter.type_expression)
+                result.push(parameter.name) if type_name != "" and proof_declaration_has_enum(file.top_decls, type_name)
+            return result
+
+        def proof_decreases_range_valid(start: usize, count: usize, total: usize) -> bool:
+            return start <= total and count <= total - start
+
+        def proof_declaration_has_enum(declarations: darray[Ast::Decl]&, wanted: sview) -> bool:
+            for declaration in declarations:
+                match declaration:
+                    Ast::Decl.Enum(name, _, _, _, _):
+                        return true if name == wanted
+                    Ast::Decl.Module(_, module_body, _):
+                        return true if proof_declaration_has_enum(module_body, wanted)
+                    Ast::Decl.Scoped(scoped_body, _):
+                        return true if proof_declaration_has_enum(scoped_body, wanted)
+                    _:
+                        pass
+            return false
+
+        def proof_enum_parameter_position(declarations: darray[Ast::Decl]&, parameters: darray[Ast::ParamDecl]&, subject: sview) -> usize:
+            index: mutable usize = 0
+            for parameter in parameters |index|:
+                type_name: sview = proof_callable_name(parameter.type_expression)
+                return index if parameter.name == subject and proof_declaration_has_enum(declarations, type_name)
+                index <- index + 1
+            return parameters.count
+
+        # Prove lexicographic descent over nonnegative components. Earlier components must be
+        # equal and the first component that differs must strictly decrease. Every component's
+        # nonnegativity is checked by the caller, so this relation is a well-founded ranking over
+        # fixed-width naturals rather than an unchecked tuple comparison.
+        def proof_lexicographic_smaller(current_components: darray[Ast::Expr]&, next_components: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos, report: mutable ProofReport&, name: sview) -> bool:
+            return false if current_components.count == 0 or current_components.count != next_components.count
+            # Build one proposition instead of emitting speculative component goals while
+            # searching for the first decrease. For (a,b), this is a'<a || (a'==a && b'<b).
+            # Consequently every exported goal attempt is a real obligation and a successful
+            # lexicographic proof cannot leave abandoned failures in the repair queue.
+            relation: mutable Ast::Expr = Ast::Expr.Invalid
+            cursor: mutable usize = current_components.count
+            while cursor > 0 |cursor, current_components, next_components, position, relation|:
+                cursor <- cursor - 1
+                smaller: Ast::Expr = Ast::Expr.Binary(next_components[cursor], TokenKind.Lt, current_components[cursor], position)
+                if proof_expr_is_invalid(relation):
+                    relation <- smaller
+                else:
+                    equal: Ast::Expr = Ast::Expr.Binary(next_components[cursor], TokenKind.EqEq, current_components[cursor], position)
+                    suffix: Ast::Expr = Ast::Expr.Binary(equal, TokenKind.And, relation, position)
+                    relation <- Ast::Expr.Binary(smaller, TokenKind.Or, suffix, position)
+            return proof_certify_goal(facts, relation, report, position.line, name, annotations)
+
+        # A branch/loop join may have changed a local on only some paths. Retaining its old
+        # symbolic value would let a later return silently use the pre-join expression. Forget
+        # such values by replacing them with opaque current identifiers; invariants or explicit
+        # facts may reintroduce relationships after the join.
+        def proof_forget_values(names: darray[sview]&, values: mutable darray[Ast::Expr]&, position: Ast::Pos) -> void:
+            for index in 0..<values.count |index, names, values, position|:
+                values[index] <- Ast::Expr.Ident(names[index], position) if index < names.count
+                values[index] <- Ast::Expr.Invalid if index >= names.count
+
+        # An else path after `if not condition` carries condition itself, not a redundant
+        # double negation. This matters for early-return guards: the surviving path can then
+        # publish the predicate that justified a later access or postcondition.
+        # A conjunctive branch condition entails each of its conjuncts. Recording the conjuncts
+        # alongside the whole costs nothing logically and makes each one survive on its own
+        # merits: `not f(x) and depth < 127` is discarded wholesale at the next call because of
+        # the call, while its second conjunct is over a by-value scalar and remains true. The
+        # walk is a bounded worklist so a deeply nested condition cannot blow up the fact set.
+        def proof_conjunct_components(expression: Ast::Expr, components: mutable darray[Ast::Expr]&) -> void:
+            pending: mutable darray[Ast::Expr] = [expression]
+            cursor: mutable usize = 0
+            while cursor < pending.count and components.count < 8 |cursor, pending, components|:
+                current: Ast::Expr = proof_strip_parens(pending[cursor])
+                cursor <- cursor + 1
+                room: bool = pending.count < 16
+                split: mutable bool = false
+                match current:
+                    Ast::Expr.Binary(left, TokenKind.And, right, _):
+                        if room:
+                            pending.push(left)
+                            pending.push(right)
+                            split <- true
+                    Ast::Expr.Unary(TokenKind.Not, operand, _):
+                        # De Morgan only where it makes progress; a negated comparison is
+                        # already atomic and must not be pushed back onto the worklist.
+                        inner: Ast::Expr = proof_strip_parens(operand)
+                        match inner:
+                            Ast::Expr.Binary(_, TokenKind.Or, _, _):
+                                # `not (X or Y)` is the conjunction `not X and not Y`. The dual
+                                # form `not (X and Y)` is a disjunction and is left whole: it is
+                                # not a conjunct and the kernel would not re-derive it.
+                                if room:
+                                    pending.push(proof_branch_negation(inner, Ast::expr_pos(current)))
+                                    split <- true
+                            Ast::Expr.Unary(TokenKind.Not, double, _):
+                                if room:
+                                    pending.push(double)
+                                    split <- true
+                            _:
+                                pass
+                    _:
+                        pass
+                components.push(current) if not split
+
+        # Record a branch condition and, separately, every conjunct it entails. The conjuncts are
+        # derived facts: replay revalidates each one from the premises standing at this point
+        # rather than accepting it as a second assumption.
+        def proof_add_branch_condition_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, condition: Ast::Expr, line: u32, name: sview) -> void:
+            proof_add_traced_fact(facts, report, condition, "branch-condition", line, name)
+            components: mutable darray[Ast::Expr] = []
+            proof_conjunct_components(condition, &components)
+            return if components.count < 2
+            # A condition the kernel cannot represent -- one carrying an opaque placeholder left
+            # by an unverified callee, say -- never enters a certificate, so nothing derived
+            # from it can be replayed. Each conjunct the kernel can represent is still true on
+            # this path for exactly the reason the condition is: control arrived here through
+            # it. Record such a conjunct as a branch fact in its own right rather than as a
+            # derivation from a premise replay can never validate.
+            premises: darray[Ast::Expr] = [condition]
+            condition_admissible: bool = proof_kernel_expression_supported(condition)
+            for component in components |facts, report, line, name, premises, condition_admissible|:
+                continue if any existing in facts where proof_expr_equal(existing, component)
+                if condition_admissible:
+                    proof_add_derived_fact_from(facts, report, component, premises, "branch-conjunct", line, name)
+                elif proof_kernel_expression_supported(component):
+                    proof_add_traced_fact(facts, report, component, "branch-condition", line, name)
+
+        def proof_branch_negation(expression: Ast::Expr, position: Ast::Pos) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return inner
+                Ast::Expr.BoolLit(value, _):
+                    return Ast::Expr.BoolLit(not value, Ast::pos_at_line(0))
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, left, position), TokenKind.Or, Ast::Expr.Unary(TokenKind.Not, right, position), position)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, left, position), TokenKind.And, Ast::Expr.Unary(TokenKind.Not, right, position), position)
+                _:
+                    return Ast::Expr.Unary(TokenKind.Not, expression, position)
+
+        def proof_add_fact(facts: mutable darray[Ast::Expr]&, expression: Ast::Expr) -> void:
+            facts.push(expression)
+
+        def proof_trace_fact(report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> void:
+            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
+            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: "", premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+
+        def proof_add_traced_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> void:
+            facts.push(expression)
+            proof_trace_fact(report, expression, kind, line, name)
+
+        # A derived fact records the current logical context before it is added. Replay can then
+        # recursively validate proof-step facts instead of treating their source assertion as an
+        # axiom. Runtime facts and imported contract summaries continue to use proof_trace_fact;
+        # they are explicit semantic assumptions at this boundary.
+        def proof_add_derived_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> void:
+            premises: darray[Ast::Expr] = proof_copy_exprs(facts)
+            facts.push(expression)
+            premises_start: usize = report.fact_trace_premises.count
+            report.fact_trace_premises.extend(premises)
+            kernel_premises_start: usize = report.kernel_fact_trace_premises.count
+            for premise in premises |premise, report|:
+                report.kernel_fact_trace_premises.push(proof_kernel_encode_annotated(premise, &report.kernel_nodes, &report.kernel_children, report.source_annotations))
+            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
+            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+
+        # The same trace, but over an explicit premise list rather than the whole current context.
+        # A step whose justification is a single named fact records exactly that fact, so replay
+        # revalidates a small, precise derivation instead of the entire ambient state.
+        def proof_add_derived_fact_from(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, premises: darray[Ast::Expr]&, kind: sview, line: u32, name: sview) -> void:
+            # A derivation is only as good as its premises. One the kernel cannot represent can
+            # never be validated by replay, so a fact derived from it would certify at the
+            # producer and gap at the kernel. Refuse the derivation instead; the fact is simply
+            # not available, which is the conservative direction.
+            for premise in premises:
+                return if not proof_kernel_expression_supported(premise)
+            facts.push(expression)
+            premises_start: usize = report.fact_trace_premises.count
+            report.fact_trace_premises.extend(premises)
+            kernel_premises_start: usize = report.kernel_fact_trace_premises.count
+            for premise in premises |premise, report|:
+                report.kernel_fact_trace_premises.push(proof_kernel_encode_annotated(premise, &report.kernel_nodes, &report.kernel_children, report.source_annotations))
+            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
+            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+
+        def proof_add_function_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, result_value: Ast::Expr, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
+            facts.push(expression)
+            bindings_start: usize = report.fact_trace_summary_names.count
+            report.fact_trace_summary_names.extend(parameter_names)
+            report.fact_trace_summary_values.extend(argument_values)
+            report.fact_trace_summary_names.push("result")
+            report.fact_trace_summary_values.push(result_value)
+            requires_start: usize = report.fact_trace_summary_require_goal_ids.count
+            report.fact_trace_summary_require_goal_ids.extend(require_goal_ids)
+            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
+            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: "function-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count + 1, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index})
+

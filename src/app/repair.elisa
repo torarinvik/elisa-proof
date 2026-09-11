@@ -1,0 +1,392 @@
+def proof_push_json_kernel_node(buffer: mutable darray[u8]&, node: ElisaProofKernelCore::ProofKernelNode) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"kind\":")
+    proof_push_json_string(buffer, node.kind)
+    proof_push(buffer, ",\"operator\":")
+    proof_push_json_string(buffer, node.operator)
+    proof_push(buffer, ",\"left\":")
+    proof_push_number(buffer, node.left.u32())
+    proof_push(buffer, ",\"right\":")
+    proof_push_number(buffer, node.right.u32())
+    proof_push(buffer, ",\"auxiliary\":")
+    proof_push_number(buffer, node.auxiliary.u32())
+    proof_push(buffer, ",\"children_start\":")
+    proof_push_number(buffer, node.children_start.u32())
+    proof_push(buffer, ",\"children_count\":")
+    proof_push_number(buffer, node.children_count.u32())
+    proof_push(buffer, ",\"value\":")
+    proof_push_json_i64(buffer, node.value)
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, node.name)
+    proof_push(buffer, ",\"secondary_name\":")
+    proof_push_json_string(buffer, node.secondary_name)
+    proof_push(buffer, "}")
+
+def proof_push_json_fact_origin(buffer: mutable darray[u8]&, report: ProofReport&, fact_index: usize, owner: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at(report, fact_index, owner)
+    if not origin.known:
+        proof_push(buffer, "null")
+        return
+    proof_push(buffer, "{\"kind\":")
+    proof_push_json_string(buffer, origin.kind)
+    proof_push(buffer, ",\"line\":")
+    proof_push_number(buffer, origin.line)
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, origin.name)
+    proof_push(buffer, ",\"dependency\":")
+    proof_push_json_string(buffer, origin.dependency)
+    proof_push(buffer, ",\"premises\":")
+    proof_push_number(buffer, origin.premises_count.u32())
+    proof_push(buffer, "}")
+
+def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: ProofReport&, facts_start: usize, facts_count: usize, owner: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    emitted: mutable usize = 0
+    for fact_index in 0..<facts_count |fact_index, facts_start, report, owner, emitted, buffer|:
+        origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at(report, facts_start + fact_index, owner)
+        continue if not origin.known or origin.dependency == ""
+        duplicate: mutable bool = false
+        for prior_index in 0..<fact_index |prior_index, facts_start, report, owner, origin, duplicate|:
+            prior: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at(report, facts_start + prior_index, owner)
+            duplicate <- true if prior.known and prior.kind == origin.kind and prior.dependency == origin.dependency
+        continue if duplicate
+        proof_push(buffer, ",") if emitted > 0
+        proof_push(buffer, "{\"kind\":")
+        proof_push_json_string(buffer, origin.kind)
+        proof_push(buffer, ",\"name\":")
+        proof_push_json_string(buffer, origin.dependency)
+        proof_push(buffer, ",\"line\":")
+        proof_push_number(buffer, origin.line)
+        proof_push(buffer, "}")
+        emitted <- emitted + 1
+
+def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"kind\":")
+    proof_push_json_string(buffer, finding.kind)
+    proof_push(buffer, ",\"status\":")
+    proof_push_json_string(buffer, finding.status)
+    proof_push(buffer, ",\"message\":")
+    proof_push_json_string(buffer, finding.message)
+    proof_push(buffer, ",\"counterexample_found\":")
+    proof_push(buffer, "true" if finding.counterexample_found else "false")
+    proof_push(buffer, ",\"goal_id\":")
+    proof_push_number(buffer, finding.goal_id.u32()) if finding.has_goal
+    proof_push(buffer, "null") if not finding.has_goal
+    proof_push(buffer, ",\"counterexample\":[")
+    for index in 0..<finding.counterexample_count |index, finding, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_json_expr(buffer, report.counterexample_facts[finding.counterexample_start + index])
+    proof_push(buffer, "]}")
+
+def proof_repair_finding_index(report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize) -> (known: bool, index: usize, ambiguous: bool):
+    # Stable goal provenance wins unconditionally. Never select a different goal's diagnostic
+    # merely because the compiler placed both obligations on the same source line.
+    index: mutable usize = 0
+    for finding in report.findings |finding, report, goal_id, index|:
+        if finding.has_goal and finding.goal_id == goal_id:
+            return (true, index, false)
+        index <- index + 1
+    # Legacy non-goal diagnostics can be used only when the line/name pair identifies exactly one
+    # candidate. Ambiguity is reported as unknown instead of fabricating a causal association.
+    candidate_count: mutable usize = 0
+    candidate_index: mutable usize = 0
+    for index in 0..<report.findings.count |index, report, attempt, candidate_count, candidate_index|:
+        finding: ProofFinding = report.findings[index]
+        if not finding.has_goal and finding.line == attempt.line and finding.name == attempt.name:
+            candidate_count <- candidate_count + 1
+            candidate_index <- index
+    return (true, candidate_index, false) if candidate_count == 1
+    return (false, 0, candidate_count > 1)
+
+def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+    if selected.known:
+        proof_push_json_repair_finding(buffer, report, report.findings[selected.index])
+        return
+    proof_push(buffer, "{\"kind\":\"unresolved-goal\",\"status\":\"unknown\",\"message\":")
+    proof_push_json_string(buffer, "multiple unbound diagnostics share this source location" if selected.ambiguous else "no matching diagnostic was recorded")
+    proof_push(buffer, ",\"counterexample_found\":false,\"goal_id\":null,\"counterexample\":[]}")
+
+# Render one goal as an Elisa-like proof a person can read and edit. Everything printed comes from
+# the recorded attempt: its hypotheses are the exact certificate facts, its conclusion is the exact
+# goal proposition, and its justification names the certificate that replayed. Nothing is inferred
+# and no step is invented, so this is a view of the evidence rather than a second proof.
+#
+# The block keyword carries the verdict, and only one of the three means the kernel checked it:
+#   `proof ... qed`  the goal is proven and its certificate replayed independently
+#   `unchecked ...`  the producer proved it but no certificate replayed: not kernel-backed
+#   `open ...`       the goal is unproven; the recorded failure is printed instead of a proof
+# Read a rendered proof block back and check it against the source it claims to be about. The
+# file is untrusted input: nothing in it is believed, and no part of it is used to decide anything.
+# The check re-renders the canonical block for the goal the file names and compares the two, so an
+# edited `qed`, an invented hypothesis, a swapped conclusion, a renumbered certificate and a stale
+# source all show up the same way — as a divergence from what the report actually supports.
+def proof_rendered_line(contents: darray[u8]&, start: usize) -> (end: usize, next: usize) can[Memory.Allocate, Abort.Panic]:
+    cursor: mutable usize = start
+    while cursor < contents.count |cursor, contents|:
+        break if contents[cursor] == '\n'.u8()
+        cursor <- cursor + 1
+    return (cursor, cursor + 1 if cursor < contents.count else cursor)
+
+def proof_rendered_lines_equal(left: darray[u8]&, left_start: usize, left_end: usize, right: darray[u8]&, right_start: usize, right_end: usize) -> bool:
+    return false if left_end - left_start != right_end - right_start
+    for offset in 0..<(left_end - left_start) |offset, left, right, left_start, right_start|:
+        return false if left[left_start + offset] != right[right_start + offset]
+    return true
+
+def proof_push_json_byte_range(buffer: mutable darray[u8]&, contents: darray[u8]&, start: usize, end: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    buffer.push('"'.u8())
+    for index in start..<end |index, buffer, contents|:
+        byte: u8 = contents[index]
+        if byte == '"'.u8() or byte == '\\'.u8():
+            buffer.push('\\'.u8())
+            buffer.push(byte)
+        elif byte < 32:
+            buffer.push('?'.u8())
+        else:
+            buffer.push(byte)
+    buffer.push('"'.u8())
+
+# The goal id the block claims, read from its own header. A block that does not name one cannot be
+# checked against anything, which is itself a refusal rather than a pass.
+def proof_rendered_goal_id(contents: darray[u8]&) -> (known: bool, goal_id: usize) can[Memory.Allocate, Abort.Panic]:
+    marker: sview = "# goal "
+    for start in 0..<contents.count |start, contents, marker|:
+        continue if start > 0 and contents[start - 1] != '\n'.u8()
+        matched: mutable bool = true
+        for offset in 0..<sview_len(marker) |offset, start, contents, marker, matched|:
+            matched <- false if start + offset >= contents.count or contents[start + offset] != sview_at(marker, offset)
+        continue if not matched
+        cursor: mutable usize = start + sview_len(marker)
+        value: mutable usize = 0
+        digits: mutable usize = 0
+        while cursor < contents.count |cursor, contents, value, digits|:
+            byte: u8 = contents[cursor]
+            break if byte < '0'.u8() or byte > '9'.u8()
+            break if digits >= 9
+            value <- value * 10 + (byte - '0'.u8()).usize()
+            digits <- digits + 1
+            cursor <- cursor + 1
+        return (true, value) if digits > 0
+    return (false, 0)
+
+# Returns the process exit code: 0 the block matches what the report supports, 1 it diverges,
+# 2 it names no goal of this source and so cannot be checked at all.
+# Translate a human-written proof script into the tactic interchange the checked engine already
+# consumes. This is untrusted elaboration and nothing more: it produces a script, it never decides
+# whether a goal holds, and the `proof`/`qed` words carry no weight here — only the tactic engine
+# and the kernel decide that. A line it does not recognize refuses the whole script rather than
+# being skipped, so a typo cannot quietly become a shorter proof than the author wrote.
+#
+# `given` and `show` lines are accepted and carry no effect: in a source-bound script the
+# hypotheses and the conclusion come from the goal itself, and the engine reports the state it
+# actually started from. Use `--check-proof` to confirm they say what the report supports.
+def proof_script_is_space(byte: u8) -> bool:
+    return byte == ' '.u8() or byte == '\t'.u8() or byte == '\r'.u8()
+
+def proof_script_starts_with(contents: darray[u8]&, start: usize, end: usize, prefix: sview) -> bool:
+    return false if end - start < sview_len(prefix)
+    for offset in 0..<sview_len(prefix) |offset, contents, start, prefix|:
+        return false if contents[start + offset] != sview_at(prefix, offset)
+    return true
+
+def proof_script_line_to_json(buffer: mutable darray[u8]&, contents: darray[u8]&, start: usize, end: usize, emitted: usize) -> (ok: bool, emitted: usize) can[Memory.Allocate, Abort.Panic]:
+    cursor: mutable usize = start
+    while cursor < end |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        cursor <- cursor + 1
+    stop: mutable usize = end
+    while stop > cursor |stop, contents|:
+        break if not proof_script_is_space(contents[stop - 1])
+        stop <- stop - 1
+    return (true, emitted) if cursor >= stop
+    return (true, emitted) if contents[cursor] == '#'.u8()
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "proof ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "open ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "unchecked ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "given ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "show ")
+    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "unproved:")
+    return (true, emitted) if stop - cursor == 3 and proof_script_starts_with(contents, cursor, stop, "qed")
+    return (false, emitted) if not proof_script_starts_with(contents, cursor, stop, "by ")
+    cursor <- cursor + 3
+    while cursor < stop |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        cursor <- cursor + 1
+    name_start: usize = cursor
+    while cursor < stop |cursor, contents|:
+        byte: u8 = contents[cursor]
+        break if byte < 'a'.u8() or byte > 'z'.u8()
+        cursor <- cursor + 1
+    return (false, emitted) if cursor == name_start
+    name_end: usize = cursor
+    while cursor < stop |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        cursor <- cursor + 1
+    argument_value: mutable usize = 0
+    argument_digits: mutable usize = 0
+    while cursor < stop |cursor, contents, argument_value, argument_digits|:
+        byte: u8 = contents[cursor]
+        break if byte < '0'.u8() or byte > '9'.u8()
+        break if argument_digits >= 9
+        argument_value <- argument_value * 10 + (byte - '0'.u8()).usize()
+        argument_digits <- argument_digits + 1
+        cursor <- cursor + 1
+    # Anything after the action name and one optional index is not part of this grammar.
+    return (false, emitted) if cursor != stop
+    proof_push(buffer, ",") if emitted > 0
+    proof_push(buffer, "{\"action\":")
+    proof_push_json_byte_range(buffer, contents, name_start, name_end)
+    if argument_digits > 0:
+        proof_push(buffer, ",\"argument_index\":")
+        proof_push_number(buffer, argument_value.u32())
+    proof_push(buffer, "}")
+    return (true, emitted + 1)
+
+# The bounded, deterministic repair vocabulary. Every candidate is a fixed sequence of the
+# argument-free actions the checked engine already implements, tried in this exact order, so a
+# repair is reproducible and its search space is a stated constant rather than a heuristic budget.
+# Nothing here decides anything: a candidate is only ever a *proposal*, admitted solely if the
+# tactic engine accepts it and the kernel replays the certificate it produces.
+def proof_repair_candidates() -> darray[sview] can[Memory.Allocate, Abort.Panic]:
+    return ["assumption", "exact", "decide", "simp", "intro", "intro,assumption", "intro,exact", "intro,decide", "simp,assumption", "simp,exact", "simp,decide", "intro,simp", "intro,simp,assumption", "intro,simp,exact", "intro,simp,decide", "intro,intro,assumption", "intro,intro,exact", "intro,intro,decide", "decide,assumption", "simp,intro,exact"]
+
+def proof_repair_push_actions(buffer: mutable darray[u8]&, actions: sview, as_json: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    start: mutable usize = 0
+    emitted: mutable usize = 0
+    while start <= sview_len(actions) |start, emitted, actions, buffer, as_json|:
+        stop: mutable usize = start
+        while stop < sview_len(actions) |stop, actions|:
+            break if sview_at(actions, stop) == ','.u8()
+            stop <- stop + 1
+        if stop > start:
+            if as_json:
+                proof_push(buffer, ",") if emitted > 0
+                proof_push(buffer, "{\"action\":\"")
+                for offset in start..<stop |offset, buffer, actions|:
+                    buffer.push(sview_at(actions, offset))
+                proof_push(buffer, "\"}")
+            else:
+                proof_push(buffer, "    by ")
+                for offset in start..<stop |offset, buffer, actions|:
+                    buffer.push(sview_at(actions, offset))
+                proof_push(buffer, "\n")
+            emitted <- emitted + 1
+        break if stop >= sview_len(actions)
+        start <- stop + 1
+
+def proof_repair_push_script_json(buffer: mutable darray[u8]&, goal_id: usize, actions: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"format\":\"elisa-proof-tactics-v1\",\"target\":{\"goal_id\":")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, "},\"actions\":[")
+    proof_repair_push_actions(buffer, actions, true)
+    proof_push(buffer, "]}")
+
+# The proposal in the same shape `--proof` renders and `--script` runs, so a repair can be read,
+# edited and re-run without translation.
+def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, actions: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "# goal ")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, "\nproof ")
+    proof_push(buffer, report.goal_attempts[goal_id].name if goal_id < report.goal_attempts.count else "goal")
+    proof_push(buffer, "_")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ":\n")
+    proof_repair_push_actions(buffer, actions, false)
+    proof_push(buffer, "qed\n")
+
+# One goal's bounded search, shared by the single-goal and whole-file repair modes. It reports only
+# what was tried and which candidate the *checked engine* accepted; it never reaches a verdict of
+# its own.
+def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool, searched: usize, actions: sview) can[Memory.Allocate, Abort.Panic]:
+    repair_state: mutable darray[u8] = []
+    if goal_id < report.goal_attempts.count:
+        repair_attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+        if repair_attempt.facts_start <= report.certificate_facts.count and repair_attempt.facts_count <= report.certificate_facts.count - repair_attempt.facts_start:
+            proof_push(&repair_state, "{\"facts\":[")
+            for fact_index in 0..<repair_attempt.facts_count |fact_index, repair_attempt, report, repair_state|:
+                proof_push(&repair_state, ",") if fact_index > 0
+                proof_push_json_expr(&repair_state, report.certificate_facts[repair_attempt.facts_start + fact_index])
+            proof_push(&repair_state, "],\"goal\":")
+            proof_push_json_expr(&repair_state, repair_attempt.goal)
+            proof_push(&repair_state, "}")
+    candidates: darray[sview] = proof_repair_candidates()
+    repaired: mutable bool = false
+    searched: mutable usize = 0
+    winning: mutable sview = ""
+    region repair_region(1048576):
+        repair_store: Ast::Node.Store[Local] = Ast::Node.Store(repair_region)
+        in repair_store:
+            if repair_state.count > 0:
+                for candidate_index in 0..<candidates.count |candidate_index, candidates, repair_state, report, repaired, searched, winning, goal_id|:
+                    break if repaired
+                    candidate: sview = candidates[candidate_index]
+                    script_text: mutable darray[u8] = []
+                    proof_repair_push_script_json(&script_text, goal_id, candidate)
+                    candidate_arena: mutable Arena = zeroed
+                    parsed_candidate: JsonParseResult = json_parse_checked(&candidate_arena, sview(&script_text[0], 0, script_text.count.i64()))
+                    continue if parsed_candidate.code != JsonErrorCode.OK
+                    parsed_state: JsonParseResult = json_parse_checked(&candidate_arena, sview(&repair_state[0], 0, repair_state.count.i64()))
+                    continue if parsed_state.code != JsonErrorCode.OK
+                    candidate_empty: mutable darray[Ast::Expr] = []
+                    candidate_state: mutable ProofTacticState = proof_tactic_state(&candidate_empty, Ast::Expr.Invalid)
+                    candidate_scratch_empty: mutable darray[Ast::Expr] = []
+                    candidate_scratch: mutable darray[ProofTacticState] = []
+                    for scratch_index in 0..<64 |scratch_index, candidate_scratch_empty, candidate_scratch|:
+                        candidate_scratch.push(proof_tactic_state(&candidate_scratch_empty, Ast::Expr.Invalid))
+                    candidate_tree: mutable ProofTacticJsonTree = ProofTacticJsonTree{states: [], left: [], right: [], has_branch: []}
+                    candidate_annotations: mutable darray[Ast::EnumAnnotation] = []
+                    candidate_result: ProofTacticJsonResult = proof_tactic_json_run_source(parsed_candidate.value, parsed_state.value, &candidate_annotations, &candidate_state, &candidate_tree, &candidate_scratch, report, goal_id)
+                    searched <- searched + 1
+                    # Solved by the engine is not enough: the certificate it produced must also
+                    # replay against the kernel, exactly as a hand-written script must.
+                    if candidate_result.valid and candidate_result.solved and candidate_result.kernel_replayed and candidate_result.certificate_replayed:
+                        repaired <- true
+                        winning <- candidate
+    return (repaired, searched, winning)
+
+# One goal's entry in a whole-file repair report: what it is, whether a proposal survived the
+# kernel, and the runnable script when one did.
+def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, found: (repaired: bool, searched: usize, actions: sview)) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"goal_id\":")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, report.goal_attempts[goal_id].name)
+    proof_push(buffer, ",\"rule\":")
+    proof_push_json_string(buffer, report.goal_attempts[goal_id].rule)
+    proof_push(buffer, ",\"line\":")
+    proof_push_number(buffer, report.goal_attempts[goal_id].line)
+    proof_push(buffer, ",\"status\":")
+    proof_push(buffer, "\"repaired\"" if found.repaired else "\"unrepaired\"")
+    proof_push(buffer, ",\"tried\":")
+    proof_push_number(buffer, found.searched.u32())
+    proof_push(buffer, ",\"script\":")
+    if found.repaired:
+        script_body: mutable darray[u8] = []
+        proof_repair_push_script_text(&script_body, report, goal_id, found.actions)
+        proof_push_json_bytes(buffer, script_body)
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, "}")
+
+def proof_tactic_text_to_json(contents: darray[u8]&) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+    empty: mutable darray[u8] = []
+    claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
+    return empty if not claimed.known
+    actions: mutable darray[u8] = []
+    emitted: mutable usize = 0
+    cursor: mutable usize = 0
+    while cursor < contents.count |cursor, contents, actions, emitted|:
+        line: (end: usize, next: usize) = proof_rendered_line(contents, cursor)
+        translated: (ok: bool, emitted: usize) = proof_script_line_to_json(&actions, contents, cursor, line.end, emitted)
+        return empty if not translated.ok
+        emitted <- translated.emitted
+        cursor <- line.next
+    return empty if emitted == 0
+    script: mutable darray[u8] = []
+    proof_push(&script, "{\"format\":\"elisa-proof-tactics-v1\",\"target\":{\"goal_id\":")
+    proof_push_number(&script, claimed.goal_id.u32())
+    proof_push(&script, "},\"actions\":[")
+    for index in 0..<actions.count |index, script, actions|:
+        script.push(actions[index])
+    proof_push(&script, "]}")
+    return script
+

@@ -1,0 +1,438 @@
+extend ElisaProof:
+    private:
+        def proof_contract_calls_are_pure(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            match expression:
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent:
+                    return true
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.FloatLit(_, _):
+                    return true
+                Ast::Expr.StringLit(_, _):
+                    return true
+                Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Call(callee, arguments, _, _):
+                    if proof_ident_name(callee) == "old" and arguments.count == 1:
+                        return proof_contract_calls_are_pure(arguments[0], functions)
+                    called: sview = proof_callable_name(callee)
+                    called_index: usize = proof_function_index(functions, called)
+                    return false if called == "" or called_index >= functions.pure.count or not functions.pure[called_index]
+                    # Purity is a syntactic/fixed-point classification, not a proof result.
+                    # A function whose body failed verification must not be smuggled into a
+                    # logical contract merely because it has the right effect shape.
+                    return false if called_index >= functions.verified.count or not functions.verified[called_index]
+                    return false if not proof_contract_calls_are_pure(callee, functions)
+                    for argument in arguments |functions|:
+                        return false if not proof_contract_calls_are_pure(argument, functions)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_contract_calls_are_pure(inner, functions)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_contract_calls_are_pure(operand, functions)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_contract_calls_are_pure(left, functions) and proof_contract_calls_are_pure(right, functions)
+                Ast::Expr.Field(object, _, _):
+                    return proof_contract_calls_are_pure(object, functions)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_contract_calls_are_pure(base, functions)
+                Ast::Expr.Index(object, index, _):
+                    return proof_contract_calls_are_pure(object, functions) and proof_contract_calls_are_pure(index, functions)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_contract_calls_are_pure(object, functions) and proof_contract_calls_are_pure(low, functions) and proof_contract_calls_are_pure(high, functions)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_contract_calls_are_pure(object, functions)
+                    for argument in arguments |functions|:
+                        return false if not proof_contract_calls_are_pure(argument, functions)
+                    return true
+                Ast::Expr.Move(operand, _):
+                    return proof_contract_calls_are_pure(operand, functions)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_contract_calls_are_pure(operand, functions)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_contract_calls_are_pure(element, functions)
+                    return true
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_contract_calls_are_pure(element, functions)
+                    return true
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_contract_calls_are_pure(element, functions)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |functions|:
+                        return false if not proof_contract_calls_are_pure(entry.key, functions) or not proof_contract_calls_are_pure(entry.value, functions)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |functions|:
+                        return false if not proof_contract_calls_are_pure(field.value, functions)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_contract_calls_are_pure(base, functions)
+                    for field in fields |functions|:
+                        return false if not proof_contract_calls_are_pure(field.value, functions)
+                    return true
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_contract_calls_are_pure(condition, functions) and proof_contract_calls_are_pure(then_expr, functions) and proof_contract_calls_are_pure(else_expr, functions)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return false if not proof_contract_calls_are_pure(scrutinee, functions)
+                    for arm in arms |functions|:
+                        return false if not proof_contract_calls_are_pure(arm.guard, functions)
+                        return false if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return false if not proof_contract_calls_are_pure(value, functions)
+                            _:
+                                return false
+                    return true
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_contract_calls_are_pure(iterable, functions) and proof_contract_calls_are_pure(condition, functions) and proof_contract_calls_are_pure(body, functions)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_contract_calls_are_pure(base, functions) and proof_contract_calls_are_pure(predicate, functions)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return false if not proof_contract_calls_are_pure(initializer, functions)
+                            _:
+                                return false
+                    return proof_contract_calls_are_pure(value, functions)
+                _:
+                    return false
+
+        # A fact produced by a runtime assertion may outlive the expression evaluation. A
+        # substituted call term is therefore safe to publish only when it denotes a certified pure
+        # value; an unresolved/effectful call may have a different result on its next execution.
+        def proof_runtime_fact_is_stable(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            return false if proof_expr_has_old(expression)
+            return true if not proof_expr_has_call(expression)
+            return proof_contract_calls_are_pure(expression, functions)
+
+        # Rewrite only exact equalities already published by a verified call summary. This is
+        # intentionally separate from ordinary identifier substitution: call results are effect-
+        # sensitive, and treating arbitrary equalities as a rewrite system could cross a call or
+        # overflow boundary. The enclosing admission gates ensure nested runtime calls are pure;
+        # the equality lookup also handles a successful result binding from a fallible call. The
+        # eight-step fuel limit keeps nested expressions finite and fail-closed.
+        def proof_pure_call_summary_replacement(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> (known: bool, value: Ast::Expr):
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    pass
+                _:
+                    return (false, Ast::Expr.Invalid)
+            return (false, Ast::Expr.Invalid) if proof_expr_has_old(expression)
+            for fact in facts |expression|:
+                match fact:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        candidate: Ast::Expr = right if proof_expr_equal(left, expression) else (left if proof_expr_equal(right, expression) else Ast::Expr.Invalid)
+                        if not proof_expr_is_invalid(candidate) and proof_expr_supported(candidate) and not proof_expr_has_old(candidate) and not proof_expr_has_move(candidate):
+                            return (true, candidate)
+                    _:
+                        pass
+            return (false, Ast::Expr.Invalid)
+
+        def proof_rewrite_pure_call_summaries(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, depth: usize) -> Ast::Expr:
+            return expression if depth >= 8
+            direct: (known: bool, value: Ast::Expr) = proof_pure_call_summary_replacement(expression, facts, functions)
+            if direct.known and not proof_expr_equal(direct.value, expression):
+                return proof_rewrite_pure_call_summaries(direct.value, facts, functions, depth + 1)
+            match expression:
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_rewrite_pure_call_summaries(inner, facts, functions, depth + 1), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_rewrite_pure_call_summaries(operand, facts, functions, depth + 1), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_rewrite_pure_call_summaries(left, facts, functions, depth + 1), operator, proof_rewrite_pure_call_summaries(right, facts, functions, depth + 1), position)
+                Ast::Expr.Field(object, field, position):
+                    return Ast::Expr.Field(proof_rewrite_pure_call_summaries(object, facts, functions, depth + 1), field, position)
+                Ast::Expr.Scope(base, member, position):
+                    return Ast::Expr.Scope(proof_rewrite_pure_call_summaries(base, facts, functions, depth + 1), member, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_rewrite_pure_call_summaries(object, facts, functions, depth + 1), proof_rewrite_pure_call_summaries(index, facts, functions, depth + 1), position)
+                Ast::Expr.Slice(object, low, high, position):
+                    return Ast::Expr.Slice(proof_rewrite_pure_call_summaries(object, facts, functions, depth + 1), proof_rewrite_pure_call_summaries(low, facts, functions, depth + 1), proof_rewrite_pure_call_summaries(high, facts, functions, depth + 1), position)
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    rewritten_arguments: mutable darray[Ast::Expr] = []
+                    for argument in arguments |rewritten_arguments, facts, functions, depth|:
+                        rewritten_arguments.push(proof_rewrite_pure_call_summaries(argument, facts, functions, depth + 1))
+                    rewritten_call: Ast::Expr = Ast::Expr.Call(proof_rewrite_pure_call_summaries(callee, facts, functions, depth + 1), rewritten_arguments, argument_names, position)
+                    rewritten_direct: (known: bool, value: Ast::Expr) = proof_pure_call_summary_replacement(rewritten_call, facts, functions)
+                    return proof_rewrite_pure_call_summaries(rewritten_direct.value, facts, functions, depth + 1) if rewritten_direct.known and not proof_expr_equal(rewritten_direct.value, rewritten_call)
+                    return rewritten_call
+                _:
+                    return expression
+
+        def proof_check_logical_contract_calls(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview) -> void:
+            for statement in body |functions, report, name|:
+                match statement:
+                    Ast::Stmt.Contract(kind, expression, position):
+                        logical: bool = kind == "requires" or kind == "ensure" or kind == "invariant" or kind == "decreases" or kind == "decreases*"
+                        if logical:
+                            if proof_expr_has_move(expression):
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "contract-resource-unsupported", position.line, name, "logical contracts may not perform ownership transfers")
+                            elif not proof_expr_supported(expression):
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "contract-expression-unsupported", position.line, name, "logical contract uses an unsupported expression form")
+                            else:
+                                if proof_expr_has_executable_call(expression) and not proof_contract_calls_are_pure(expression, functions):
+                                    report.proof_obligation(false)
+                                    proof_add_finding(report, "contract-call-unsupported", position.line, name, "logical contracts may use old(...) or calls to verified total pure functions")
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        proof_check_logical_contract_calls(then_body, functions, report, name)
+                        proof_check_logical_contract_calls(else_body, functions, report, name)
+                    Ast::Stmt.While(_, while_body, _):
+                        proof_check_logical_contract_calls(while_body, functions, report, name)
+                    Ast::Stmt.For(_, _, _, for_body, _):
+                        proof_check_logical_contract_calls(for_body, functions, report, name)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |functions, report, name|:
+                            proof_check_logical_contract_calls(arm.body, functions, report, name)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        proof_check_logical_contract_calls(block_body, functions, report, name)
+                    _:
+                        pass
+
+        def proof_signature_contracts(file: Ast::File&, line: u32, kind: sview) -> darray[Ast::Expr]:
+            result: mutable darray[Ast::Expr] = []
+            index: mutable usize = 0
+            while index < file.signature_contract_lines.count |index, file, line, kind, result|:
+                if file.signature_contract_lines[index] == line and file.signature_contract_kinds[index] == kind:
+                    result.push(file.signature_contract_exprs[index])
+                index <- index + 1
+            return result
+
+        # The mutable name stack is append-only while checking one lexical path. Therefore the
+        # last binding for a name tells us whether it is still one of the original parameters;
+        # this prevents a local shadow from accidentally borrowing a parameter's frame grant.
+        def proof_current_parameter(names: darray[sview]&, parameter_names: darray[sview]&, name: sview) -> bool:
+            index: mutable usize = names.count
+            while index > 0 |index, names, parameter_names|:
+                index <- index - 1
+                return index < parameter_names.count if names[index] == name
+            return false
+
+        # Decode the frame syntax the compiler parser keeps in the AST. Frame clauses are
+        # places, not propositions: only a bare root or a bounded root.field... selector is
+        # accepted by this kernel. Anything richer stays opaque and cannot authorize a write or
+        # preserve a caller fact. The bound is explicit in ProofFramePlace so summaries remain
+        # flat and independently inspectable.
+        def proof_frame_place_add_field(parent: ProofFramePlace, field: sview) -> (known: bool, place: ProofFramePlace):
+            empty: ProofFramePlace = ProofFramePlace{root: "", field: "", field2: "", field3: "", depth: 0, whole: false}
+            return (false, empty) if parent.root == "" or field == "" or parent.depth >= 3
+            if parent.depth == 0:
+                return (true, ProofFramePlace{root: parent.root, field: field, field2: "", field3: "", depth: 1, whole: false})
+            if parent.depth == 1:
+                return (true, ProofFramePlace{root: parent.root, field: parent.field, field2: field, field3: "", depth: 2, whole: false})
+            return (true, ProofFramePlace{root: parent.root, field: parent.field, field2: parent.field2, field3: field, depth: 3, whole: false})
+
+        def proof_frame_place(expression: Ast::Expr) -> (known: bool, place: ProofFramePlace):
+            empty: ProofFramePlace = ProofFramePlace{root: "", field: "", field2: "", field3: "", depth: 0, whole: false}
+            match expression:
+                Ast::Expr.Ident(root, _):
+                    return (root != "", ProofFramePlace{root: root, field: "", field2: "", field3: "", depth: 0, whole: true})
+                Ast::Expr.Field(object, field, _):
+                    parent: (known: bool, place: ProofFramePlace) = proof_frame_place(object)
+                    return proof_frame_place_add_field(parent.place, field) if parent.known
+                    return (false, empty)
+                Ast::Expr.Paren(inner, _):
+                    return proof_frame_place(inner)
+                _:
+                    return (false, empty)
+
+        def proof_frame_body_places(body: darray[Ast::Stmt]&, kind: sview) -> darray[ProofFramePlace]:
+            result: mutable darray[ProofFramePlace] = []
+            for statement in body |result, kind|:
+                match statement:
+                    Ast::Stmt.Contract(contract_kind, expression, _):
+                        decoded: (known: bool, place: ProofFramePlace) = proof_frame_place(expression)
+                        result.push(decoded.place) if contract_kind == kind and decoded.known
+                    _:
+                        pass
+            return result
+
+        def proof_frame_place_same(left: ProofFramePlace, right: ProofFramePlace) -> bool:
+            return left.root != "" and right.root != "" and left.root == right.root and left.depth == right.depth and left.field == right.field and left.field2 == right.field2 and left.field3 == right.field3 and left.whole == right.whole
+
+        # A frame permission is a path prefix permission. Changing `box.inner` may update any
+        # descendant of `inner`, while changing `box.inner.value` does not authorize a sibling or
+        # the whole `box.inner` object. This is also the overlap relation used for preservation.
+        def proof_frame_place_is_prefix(prefix: ProofFramePlace, target: ProofFramePlace) -> bool:
+            return false if prefix.root == "" or target.root == "" or prefix.root != target.root
+            return true if prefix.whole
+            return false if target.whole or prefix.depth > target.depth
+            return false if prefix.depth >= 1 and prefix.field != target.field
+            return false if prefix.depth >= 2 and prefix.field2 != target.field2
+            return false if prefix.depth >= 3 and prefix.field3 != target.field3
+            return true
+
+        def proof_frame_places_overlap(preserved: ProofFramePlace, changed: ProofFramePlace) -> bool:
+            return false if preserved.root == "" or changed.root == "" or preserved.root != changed.root
+            return proof_frame_place_is_prefix(preserved, changed) or proof_frame_place_is_prefix(changed, preserved)
+
+        # A declared whole-root or subtree change authorizes every target below that path.
+        # Unknown roots from lossy compiler metadata never authorize a write, which keeps the
+        # proof kernel fail-closed.
+        def proof_frame_allows_write(changes: darray[ProofFramePlace]&, target: ProofFramePlace) -> bool:
+            for changed in changes:
+                return true if proof_frame_place_is_prefix(changed, target)
+            return false
+
+        def proof_frame_argument_place(expression: Ast::Expr) -> (known: bool, place: ProofFramePlace):
+            match expression:
+                Ast::Expr.Unary(operator, operand, _):
+                    return proof_frame_place(operand) if operator == TokenKind.Ampersand
+                    return (false, ProofFramePlace{root: "", field: "", field2: "", field3: "", depth: 0, whole: false})
+                Ast::Expr.Paren(inner, _):
+                    return proof_frame_argument_place(inner)
+                _:
+                    return proof_frame_place(expression)
+
+        # Append a callee frame path to the caller argument path. For example, a callee place
+        # `p.value` passed `&box.inner` maps to `box.inner.value`. The explicit depth cap causes
+        # an opaque mapping instead of silently dropping a selector.
+        def proof_frame_place_append(base: ProofFramePlace, suffix: ProofFramePlace) -> (known: bool, place: ProofFramePlace):
+            empty: ProofFramePlace = ProofFramePlace{root: "", field: "", field2: "", field3: "", depth: 0, whole: false}
+            return (false, empty) if base.root == "" or suffix.root == ""
+            total: usize = base.depth + suffix.depth
+            return (false, empty) if total > 3
+            first: sview = base.field if base.depth >= 1 else suffix.field
+            second: sview = base.field2 if base.depth >= 2 else (suffix.field if base.depth == 1 else suffix.field2)
+            third: sview = base.field3 if base.depth >= 3 else (suffix.field if base.depth == 2 else (suffix.field2 if base.depth == 1 else suffix.field3))
+            return (true, ProofFramePlace{root: base.root, field: first, field2: second, field3: third, depth: total, whole: total == 0})
+
+        # Recover the known container prefix of an indexed/sliced target. The selector itself is
+        # intentionally opaque, but a checked ancestor frame can still authorize the operation:
+        # `changes box.values` covers `box.values[i]`, while an exact element frame is not
+        # guessed. This lets the heap model make useful progress without pretending indices are
+        # alias-free.
+        def proof_frame_target_place_prefix(expression: Ast::Expr) -> (known: bool, place: ProofFramePlace):
+            empty: ProofFramePlace = ProofFramePlace{root: "", field: "", field2: "", field3: "", depth: 0, whole: false}
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_frame_target_place_prefix(inner)
+                Ast::Expr.Unary(operator, operand, _):
+                    return proof_frame_target_place_prefix(operand) if operator == TokenKind.Ampersand
+                    return (false, empty)
+                Ast::Expr.Field(object, field, _):
+                    parent: (known: bool, place: ProofFramePlace) = proof_frame_target_place_prefix(object)
+                    return proof_frame_place_add_field(parent.place, field) if parent.known
+                    return (false, empty)
+                Ast::Expr.Index(object, _, _):
+                    return proof_frame_target_place_prefix(object)
+                Ast::Expr.Slice(object, _, _, _):
+                    return proof_frame_target_place_prefix(object)
+                Ast::Expr.IndexN(object, _, _):
+                    return proof_frame_target_place_prefix(object)
+                _:
+                    return proof_frame_place(expression)
+
+        def proof_frame_target_has_dynamic_selector(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_frame_target_has_dynamic_selector(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_frame_target_has_dynamic_selector(operand)
+                Ast::Expr.Field(object, _, _):
+                    return proof_frame_target_has_dynamic_selector(object)
+                Ast::Expr.Index(_, _, _):
+                    return true
+                Ast::Expr.Slice(_, _, _, _):
+                    return true
+                Ast::Expr.IndexN(_, _, _):
+                    return true
+                _:
+                    return false
+
+        def proof_frame_place_from_call(place: ProofFramePlace, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&) -> ProofFramePlace:
+            empty: ProofFramePlace = ProofFramePlace{root: "", field: "", field2: "", field3: "", depth: 0, whole: false}
+            return empty if place.root == ""
+            for index in 0..<argument_values.count |index, parameter_names, argument_values|:
+                if index < parameter_names.count:
+                    if parameter_names[index] == place.root:
+                        argument_place: ProofFramePlace = proof_frame_argument_place(argument_values[index]).place
+                        return proof_frame_place_append(argument_place, place).place if argument_place.root != ""
+                        return empty
+            return empty
+
+        # Whether an expression depends on a changed place. A field mutation invalidates the
+        # overlapping selector and a bare use of its root (the latter may be an alias); unrelated
+        # sibling fields remain available for modular proofs.
+        def proof_expr_mentions_frame_place(expression: Ast::Expr, place: ProofFramePlace) -> bool:
+            decoded: (known: bool, place: ProofFramePlace) = proof_frame_place(expression)
+            if decoded.known:
+                if place.root == "":
+                    return decoded.place.field == place.field and decoded.place.field2 == place.field2 and decoded.place.field3 == place.field3 and decoded.place.depth == place.depth
+                return proof_frame_places_overlap(decoded.place, place)
+            match expression:
+                Ast::Expr.Field(object, field, _):
+                    return proof_expr_mentions_frame_place(object, place)
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_mentions_frame_place(inner, place)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_mentions_frame_place(operand, place)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_mentions_frame_place(left, place) or proof_expr_mentions_frame_place(right, place)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_expr_mentions_frame_place(callee, place)
+                    for argument in arguments:
+                        return true if proof_expr_mentions_frame_place(argument, place)
+                    return false
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_mentions_frame_place(base, place)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_mentions_frame_place(object, place) or proof_expr_mentions_frame_place(index, place)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_mentions_frame_place(object, place) or proof_expr_mentions_frame_place(low, place) or proof_expr_mentions_frame_place(high, place)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_mentions_frame_place(object, place)
+                    for argument in arguments:
+                        return true if proof_expr_mentions_frame_place(argument, place)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_mentions_frame_place(operand, place)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_mentions_frame_place(operand, place)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_frame_place(element, place)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_frame_place(element, place)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_frame_place(element, place)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_mentions_frame_place(entry.key, place) or proof_expr_mentions_frame_place(entry.value, place)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_mentions_frame_place(field.value, place)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_mentions_frame_place(base, place)
+                    for field in fields:
+                        return true if proof_expr_mentions_frame_place(field.value, place)
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_mentions_frame_place(iterable, place) or proof_expr_mentions_frame_place(condition, place) or proof_expr_mentions_frame_place(body, place)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_mentions_frame_place(condition, place) or proof_expr_mentions_frame_place(then_expr, place) or proof_expr_mentions_frame_place(else_expr, place)
+                _:
+                    return true
+
+        # Whether a root expression may denote a reference whose storage identity is not
+        # represented in the AST fragment. Calls, indexes, slices, and unsupported forms are
+        # opaque reference candidates; literal constructors and scalar expressions are not.

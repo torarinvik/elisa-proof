@@ -1,0 +1,446 @@
+extend ElisaProof:
+    public:
+        def proof_is_comparison(operator: TokenKind) -> bool:
+            return operator == TokenKind.EqEq or operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+
+        def proof_is_true_comparison(operator: TokenKind) -> bool:
+            return operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+
+        def proof_i64_max() -> i64:
+            return 9223372036854775807
+
+        def proof_i64_min() -> i64:
+            return 0 - 9223372036854775807 - 1
+
+        def proof_add_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (false, 0) if right > 0 and left > proof_i64_max() - right
+            return (false, 0) if right < 0 and left < proof_i64_min() - right
+            return (true, left + right)
+
+        def proof_sub_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (false, 0) if right > 0 and left < proof_i64_min() + right
+            return (false, 0) if right < 0 and left > proof_i64_max() + right
+            return (true, left - right)
+
+        def proof_mul_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (true, 0) if left == 0 or right == 0
+            return (true, right) if left == 1
+            return (true, left) if right == 1
+            if left == -1:
+                return (false, 0) if right == proof_i64_min()
+                return (true, 0 - right)
+            if right == -1:
+                return (false, 0) if left == proof_i64_min()
+                return (true, 0 - left)
+            if left > 0:
+                return (false, 0) if right > 0 and left > proof_i64_max() / right
+                return (false, 0) if right < 0 and right < proof_i64_min() / left
+            else:
+                return (false, 0) if right > 0 and left < proof_i64_min() / right
+                return (false, 0) if right < 0 and left < proof_i64_max() / right
+            return (true, left * right)
+
+        def proof_div_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (false, 0) if right == 0 or (left == proof_i64_min() and right == -1)
+            return (true, left / right)
+
+        def proof_mod_safe(left: i64, right: i64) -> (known: bool, value: i64):
+            return (false, 0) if right == 0 or (left == proof_i64_min() and right == -1)
+            return (true, left % right)
+
+        # Elisa's integer bitwise operators use the target's fixed-width representation. The
+        # shift count is still checked by the compiler's semantic pass; keep the same 0..63
+        # boundary here so constant folding never relies on a host-language shift convention.
+        def proof_shift_safe(value: i64, amount: i64, left: bool) -> (known: bool, value: i64):
+            return (false, 0) if amount < 0 or amount > 63
+            return (true, value << amount) if left
+            return (true, value >> amount)
+
+        def proof_constant_int(expression: Ast::Expr) -> (known: bool, value: i64):
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_constant_int(inner)
+                Ast::Expr.Field(object, field_name, _):
+                    # The element count of a literal collection is written in the literal. This is
+                    # not a claim about any storage: the term *is* the value, so nothing can alias
+                    # it, mutate it, or make the count something else. A binding initialized to
+                    # `[]` reaches a goal as `[].count` after substitution, which is how a length
+                    # invariant is established at loop entry.
+                    return (false, 0) if field_name != "count"
+                    # Only the empty literal. A non-empty one would need its `usize` length as an
+                    # `i64`, and the conversion is outside the expression fragment this checker
+                    # verifies: putting one here made `proof_kernel_replay_constant_int` itself
+                    # unverifiable and cost 16 functions and 65 proofs to the cascade. The empty
+                    # case needs no conversion and is the one a length invariant starts from.
+                    match object:
+                        Ast::Expr.Array(elements, _):
+                            return (false, 0) if elements.count != 0
+                            return (true, 0)
+                        _:
+                            return (false, 0)
+                Ast::Expr.Unary(operator, operand, _):
+                    found: (known: bool, value: i64) = proof_constant_int(operand)
+                    if found.known and operator == TokenKind.Minus:
+                        return (true, 0 - found.value) if found.value != proof_i64_min()
+                    if found.known and operator == TokenKind.Plus:
+                        return found
+                    return (false, 0)
+                Ast::Expr.Binary(left, operator, right, _):
+                    a: (known: bool, value: i64) = proof_constant_int(left)
+                    b: (known: bool, value: i64) = proof_constant_int(right)
+                    return (false, 0) if not a.known or not b.known
+                    if operator == TokenKind.Plus:
+                        return proof_add_safe(a.value, b.value)
+                    if operator == TokenKind.Minus:
+                        return proof_sub_safe(a.value, b.value)
+                    if operator == TokenKind.Star:
+                        return proof_mul_safe(a.value, b.value)
+                    if operator == TokenKind.Slash:
+                        return proof_div_safe(a.value, b.value)
+                    if operator == TokenKind.Percent:
+                        return proof_mod_safe(a.value, b.value)
+                    if operator == TokenKind.Ampersand:
+                        return (true, a.value & b.value)
+                    if operator == TokenKind.Pipe:
+                        return (true, a.value | b.value)
+                    if operator == TokenKind.Caret:
+                        return (true, a.value ^ b.value)
+                    if operator == TokenKind.LShift:
+                        return proof_shift_safe(a.value, b.value, true)
+                    if operator == TokenKind.RShift:
+                        return proof_shift_safe(a.value, b.value, false)
+                    return (false, 0)
+                _:
+                    return (false, 0)
+
+        def proof_normalized_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
+            return proof_expr_equal(left, right)
+
+        # Return true when an expression contains a named value. Unsupported expression
+        # forms are treated as containing the name: a lemma with an opaque postcondition
+        # must not be applied to a caller unless a later kernel tier understands that form.
+        def proof_expr_mentions_name(expression: Ast::Expr, target: sview) -> bool:
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return false
+                Ast::Expr.BoolLit(_, _):
+                    return false
+                Ast::Expr.FloatLit(_, _):
+                    return false
+                Ast::Expr.StringLit(_, _):
+                    return false
+                Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.Ident(name, _):
+                    return name == target
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_mentions_name(inner, target)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_mentions_name(operand, target)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_mentions_name(left, target) or proof_expr_mentions_name(right, target)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_expr_mentions_name(callee, target)
+                    for argument in arguments:
+                        return true if proof_expr_mentions_name(argument, target)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_mentions_name(object, target)
+                Ast::Expr.Scope(base, scoped_name, _):
+                    # The scope leaf is a binding too. Ignoring it would let a qualified
+                    # mutable global (for example `Config.counter`) evade dependency scans and
+                    # would make unresolved-formal checks unsound across qualified names.
+                    return true if scoped_name == target
+                    return proof_expr_mentions_name(base, target)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_mentions_name(object, target) or proof_expr_mentions_name(index, target)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_mentions_name(object, target) or proof_expr_mentions_name(low, target) or proof_expr_mentions_name(high, target)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_mentions_name(object, target)
+                    for argument in arguments:
+                        return true if proof_expr_mentions_name(argument, target)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_mentions_name(operand, target)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_mentions_name(operand, target)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_name(element, target)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_name(element, target)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_mentions_name(element, target)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_mentions_name(entry.key, target) or proof_expr_mentions_name(entry.value, target)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_mentions_name(field.value, target)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_mentions_name(base, target)
+                    for field in fields:
+                        return true if proof_expr_mentions_name(field.value, target)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_mentions_name(condition, target) or proof_expr_mentions_name(then_expr, target) or proof_expr_mentions_name(else_expr, target)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_mentions_name(scrutinee, target)
+                    for arm in arms:
+                        return true if proof_expr_mentions_name(arm.guard, target)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_mentions_name(value, target)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    return true if proof_expr_mentions_name(iterable, target)
+                    return false if variable == target
+                    return proof_expr_mentions_name(condition, target) or proof_expr_mentions_name(body, target)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_mentions_name(base, target) or proof_expr_mentions_name(predicate, target)
+                Ast::Expr.Block(statements, value, _, _):
+                    body_mentions: mutable bool = true
+                    for statement in statements |body_mentions|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                                return true if proof_expr_mentions_name(initializer, target)
+                                body_mentions <- false if local_name == target
+                            _:
+                                return true
+                    return body_mentions and proof_expr_mentions_name(value, target)
+                _:
+                    return true
+
+        # Calls inside an initializer or expression may mutate aliases outside the symbolic
+        # state. Unknown AST forms count as effectful until a kernel tier models them.
+        def proof_expr_has_call(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent:
+                    return false
+                Ast::Expr.IntLit(_, _):
+                    return false
+                Ast::Expr.BoolLit(_, _):
+                    return false
+                Ast::Expr.FloatLit(_, _):
+                    return false
+                Ast::Expr.StringLit(_, _):
+                    return false
+                Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.Ident(_, _):
+                    return false
+                Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_call(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_has_call(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_has_call(left) or proof_expr_has_call(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_call(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_call(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_has_call(object) or proof_expr_has_call(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_call(object) or proof_expr_has_call(low) or proof_expr_has_call(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_has_call(object)
+                    for argument in arguments:
+                        return true if proof_expr_has_call(argument)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_has_call(operand)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_call(operand)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_call(element)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_call(element)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_call(element)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_has_call(entry.key) or proof_expr_has_call(entry.value)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_has_call(field.value)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_call(base)
+                    for field in fields:
+                        return true if proof_expr_has_call(field.value)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_call(condition) or proof_expr_has_call(then_expr) or proof_expr_has_call(else_expr)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_has_call(scrutinee)
+                    for arm in arms:
+                        return true if proof_expr_has_call(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_call(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_expr_has_call(guarded)
+                    for arm in arms:
+                        return true if proof_expr_has_call(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_call(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_call(iterable) or proof_expr_has_call(condition) or proof_expr_has_call(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_call(base) or proof_expr_has_call(predicate)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return true if proof_expr_has_call(initializer)
+                            _:
+                                return true
+                    return proof_expr_has_call(value)
+                _:
+                    return true
+
+        # A move is an executable ownership transition even when its operand is otherwise a
+        # simple symbolic expression. Keep this separate from call detection: a move can be
+        # effectful without invoking a function, and facts must not cross that boundary.
+        def proof_expr_has_move(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Move(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_move(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_has_move(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_has_move(left) or proof_expr_has_move(right)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_expr_has_move(callee)
+                    for argument in arguments:
+                        return true if proof_expr_has_move(argument)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_move(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_move(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_has_move(object) or proof_expr_has_move(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_move(object) or proof_expr_has_move(low) or proof_expr_has_move(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_has_move(object)
+                    for argument in arguments:
+                        return true if proof_expr_has_move(argument)
+                    return false
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_move(operand)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_move(element)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_move(element)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_has_move(element)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_has_move(entry.key) or proof_expr_has_move(entry.value)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_has_move(field.value)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_move(base)
+                    for field in fields:
+                        return true if proof_expr_has_move(field.value)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_move(condition) or proof_expr_has_move(then_expr) or proof_expr_has_move(else_expr)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_has_move(scrutinee)
+                    for arm in arms:
+                        return true if proof_expr_has_move(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_move(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_expr_has_move(guarded)
+                    for arm in arms:
+                        return true if proof_expr_has_move(arm.guard)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_move(value)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_move(iterable) or proof_expr_has_move(condition) or proof_expr_has_move(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_move(base) or proof_expr_has_move(predicate)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return true if proof_expr_has_move(initializer)
+                            Ast::Stmt.Assign(_, _, initializer, _):
+                                return true if proof_expr_has_move(initializer)
+                            Ast::Stmt.Expr(statement_expression, _):
+                                return true if proof_expr_has_move(statement_expression)
+                            Ast::Stmt.Return(statement_value, _):
+                                if statement_value is returned:
+                                    return true if proof_expr_has_move(returned)
+                            _:
+                                return true
+                    return proof_expr_has_move(value)
+                _:
+                    return false
+
+        # A call-rooted expression has a stable symbolic result: the whole call node can be
+        # retained while its callee/arguments are checked in evaluation order. Nested calls are
+        # admitted separately only when the purity fixed point proves every call total and
+        # non-mutating; nested effectful calls still require a general expression evaluator and
+        # are rejected at the statement boundary.

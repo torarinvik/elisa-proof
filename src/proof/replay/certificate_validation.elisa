@@ -1,0 +1,421 @@
+extend ElisaProof:
+    private:
+        def proof_replay_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            return proof_replay_goal_depth(facts, goal, 0)
+
+        def proof_replay_trace_range_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return trace.premises_start <= report.fact_trace_premises.count and trace.premises_count <= report.fact_trace_premises.count - trace.premises_start
+
+        def proof_replay_dependency_in_stack(names: darray[sview]&, dependency: sview) -> bool:
+            return any existing in names where existing == dependency
+
+        # The producer's `proof_finding_only_widens_state`, restated here rather than called.
+        # Replay is a second opinion on the same report and shares no code with the checker that
+        # produced it; a predicate imported from `check.elisa` would make the two agree by
+        # construction. Both list the same two kinds, and they must be kept in step by hand -- the
+        # same arrangement the scalar-term witness already has on both sides of this boundary.
+        def proof_replay_finding_only_widens_state(kind: sview) -> bool:
+            return true if kind == "captured-block-unsupported"
+            return kind == "loop-invariant-missing"
+
+        # Replay every certificate owned by a modular dependency before allowing its summary to
+        # support a caller. A dependency already on the stack is an SCC induction edge: the main
+        # checker must have supplied the corresponding termination proof, while replay stops at
+        # that fixed-point boundary instead of recursing forever. Acyclic summary chains therefore
+        # receive full replay, and cyclic summaries remain visibly tied to the main termination
+        # checker rather than being mistaken for ordinary facts.
+        def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
+            return false if dependency == ""
+            found_goal: mutable bool = false
+            all_goals_proven: mutable bool = true
+            for attempt in report.goal_attempts |found_goal, all_goals_proven, dependency|:
+                if attempt.name == dependency:
+                    found_goal <- true
+                    all_goals_proven <- false if not attempt.proven
+            # Same filter the scheduler applies: a finding that only records a construct whose
+            # effect was over-approximated did not enter this dependency's contract derivation,
+            # and the two conditions that carry the weight here are untouched -- every goal the
+            # dependency recorded must be proven, and every certificate it owns must replay.
+            for finding in report.findings:
+                continue if finding.name != dependency
+                return false if not proof_replay_finding_only_widens_state(finding.kind)
+            return false if not found_goal or not all_goals_proven
+            return true if proof_replay_dependency_in_stack(dependency_stack, dependency)
+            return false if dependency_depth >= 64
+            next_stack: mutable darray[sview] = []
+            next_stack.extend(dependency_stack)
+            next_stack.push(dependency)
+            found_certificate: mutable bool = false
+            for certificate in report.certificates |certificate, report, next_stack, dependency_depth, found_certificate|:
+                if certificate.name == dependency:
+                    found_certificate <- true
+                    return false if not proof_replay_certificate_with_stack(report, certificate, next_stack, dependency_depth + 1)
+            return found_certificate
+
+        # A reusable lemma fact is valid only when it is the recorded postcondition instance for
+        # the exact normalized arguments and every instantiated precondition is tied to a caller
+        # certificate. Merely finding some replayable certificate with the same lemma name is not
+        # enough: that would allow a buggy elaborator to manufacture an unrelated summary fact.
+        def proof_replay_lemma_summary_is_valid[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
+            return false if trace.kind != "lemma-summary" or trace.dependency == ""
+            return false if trace.summary_bindings_start > report.fact_trace_summary_names.count or trace.summary_bindings_count > report.fact_trace_summary_names.count - trace.summary_bindings_start
+            return false if trace.summary_bindings_start > report.fact_trace_summary_values.count or trace.summary_bindings_count > report.fact_trace_summary_values.count - trace.summary_bindings_start
+            return false if trace.summary_requires_start > report.fact_trace_summary_require_goal_ids.count or trace.summary_requires_count > report.fact_trace_summary_require_goal_ids.count - trace.summary_requires_start
+            theorem_found: mutable bool = false
+            theorem: mutable ProofTheoremSummary = ProofTheoremSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, decreases_start: 0, decreases_count: 0, proof_goals_start: 0, proof_goals_count: 0, recursive: false, verified: false, verification_reason: ""}
+            for candidate in report.theorem_summaries |candidate, trace, theorem_found, theorem|:
+                if candidate.name == trace.dependency:
+                    return false if theorem_found
+                    theorem_found <- true
+                    theorem <- candidate
+            return false if not theorem_found or not theorem.verified
+            return false if theorem.parameters_start > report.theorem_parameters.count or theorem.parameters_count > report.theorem_parameters.count - theorem.parameters_start
+            return false if theorem.requires_start > report.theorem_requires.count or theorem.requires_count > report.theorem_requires.count - theorem.requires_start
+            return false if theorem.ensures_start > report.theorem_ensures.count or theorem.ensures_count > report.theorem_ensures.count - theorem.ensures_start
+            return false if trace.summary_bindings_count != theorem.parameters_count or trace.summary_requires_count != theorem.requires_count or trace.summary_ensure_index >= theorem.ensures_count
+            instance: mutable Ast::Expr = report.theorem_ensures[theorem.ensures_start + trace.summary_ensure_index]
+            substitution_names: mutable darray[sview] = []
+            substitution_values: mutable darray[Ast::Expr] = []
+            for index in 0..<theorem.parameters_count |index, theorem, report, trace, substitution_names, substitution_values|:
+                expected_name: sview = report.theorem_parameters[theorem.parameters_start + index]
+                actual_name: sview = report.fact_trace_summary_names[trace.summary_bindings_start + index]
+                return false if expected_name != actual_name
+                substitution_names.push(expected_name)
+                substitution_values.push(report.fact_trace_summary_values[trace.summary_bindings_start + index])
+            instance <- proof_replay_substitute_many(instance, substitution_names, substitution_values)
+            return false if not proof_replay_expr_equal(instance, trace.expression)
+            for require_index in 0..<theorem.requires_count |require_index, theorem, report, trace, dependency_stack, dependency_depth|:
+                required: mutable Ast::Expr = report.theorem_requires[theorem.requires_start + require_index]
+                for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, trace, required|:
+                    required <- proof_replay_substitute(required, report.theorem_parameters[theorem.parameters_start + parameter_index], report.fact_trace_summary_values[trace.summary_bindings_start + parameter_index])
+                goal_id: usize = report.fact_trace_summary_require_goal_ids[trace.summary_requires_start + require_index]
+                return false if goal_id >= report.goal_attempts.count
+                attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+                return false if attempt.name != trace.name or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
+                return false if not proof_replay_expr_equal(attempt.goal, required)
+                return false if not proof_replay_certificate_with_stack(report, report.certificates[attempt.certificate_index], dependency_stack, dependency_depth + 1)
+            return true
+
+        # Reconstruct an executable postcondition from the verified source contract and the exact
+        # call bindings. This keeps ordinary calls at the source-semantics boundary while removing
+        # the producer's ability to attach an arbitrary fact to a merely verified function name.
+        def proof_replay_function_summary_is_valid[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
+            return false if dependency_depth >= 64
+            return false if trace.summary_bindings_start > report.fact_trace_summary_names.count or trace.summary_bindings_count > report.fact_trace_summary_names.count - trace.summary_bindings_start
+            return false if trace.summary_bindings_start > report.fact_trace_summary_values.count or trace.summary_bindings_count > report.fact_trace_summary_values.count - trace.summary_bindings_start
+            return false if trace.summary_requires_start > report.fact_trace_summary_require_goal_ids.count or trace.summary_requires_count > report.fact_trace_summary_require_goal_ids.count - trace.summary_requires_start
+            summary_found: mutable bool = false
+            summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, verified: false, verification_reason: ""}
+            for candidate in report.executable_summaries |candidate, trace, summary_found, summary|:
+                if candidate.name == trace.dependency:
+                    return false if summary_found
+                    summary_found <- true
+                    summary <- candidate
+            return false if not summary_found or not summary.verified
+            return false if summary.parameters_start > report.executable_parameters.count or summary.parameters_count > report.executable_parameters.count - summary.parameters_start
+            return false if summary.requires_start > report.executable_requires.count or summary.requires_count > report.executable_requires.count - summary.requires_start
+            return false if summary.ensures_start > report.executable_ensures.count or summary.ensures_count > report.executable_ensures.count - summary.ensures_start
+            return false if trace.summary_bindings_count != summary.parameters_count + 1 or trace.summary_requires_count != summary.requires_count or trace.summary_ensure_index >= summary.ensures_count
+            for index in 0..<summary.parameters_count |index, summary, report, trace|:
+                return false if report.fact_trace_summary_names[trace.summary_bindings_start + index] != report.executable_parameters[summary.parameters_start + index]
+            return false if report.fact_trace_summary_names[trace.summary_bindings_start + summary.parameters_count] != "result"
+            instance: mutable Ast::Expr = report.executable_ensures[summary.ensures_start + trace.summary_ensure_index]
+            parameter_names: mutable darray[sview] = []
+            parameter_values: mutable darray[Ast::Expr] = []
+            for index in 0..<summary.parameters_count |index, summary, report, trace, parameter_names, parameter_values|:
+                parameter_names.push(report.fact_trace_summary_names[trace.summary_bindings_start + index])
+                parameter_values.push(report.fact_trace_summary_values[trace.summary_bindings_start + index])
+            instance <- proof_replay_substitute_many(instance, parameter_names, parameter_values)
+            instance <- proof_replay_substitute(instance, "result", report.fact_trace_summary_values[trace.summary_bindings_start + summary.parameters_count])
+            return false if not proof_replay_expr_equal(instance, trace.expression)
+            for require_index in 0..<summary.requires_count |require_index, summary, report, trace, dependency_stack, dependency_depth|:
+                required: mutable Ast::Expr = report.executable_requires[summary.requires_start + require_index]
+                required <- proof_replay_substitute_many(required, parameter_names, parameter_values)
+                goal_id: usize = report.fact_trace_summary_require_goal_ids[trace.summary_requires_start + require_index]
+                return false if goal_id >= report.goal_attempts.count
+                attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+                return false if attempt.name != trace.name or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
+                return false if not proof_replay_expr_equal(attempt.goal, required)
+                return false if not proof_replay_certificate_with_stack(report, report.certificates[attempt.certificate_index], dependency_stack, dependency_depth + 1)
+            return true
+
+        def proof_replay_kernel_trace_range_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return trace.kernel_expression < report.kernel_nodes.count and trace.kernel_premises_start <= report.kernel_fact_trace_premises.count and trace.kernel_premises_count <= report.kernel_fact_trace_premises.count - trace.kernel_premises_start
+
+        # Independently check the untrusted AST mirror against the source-neutral kernel term.
+        # Do not call the producer's encoder here: replay must detect, rather than reproduce, a
+        # lowering bug. Parentheses and type annotations are intentionally semantic erasures.
+        def proof_replay_operator_name(operator: TokenKind) -> sview:
+            return "+" if operator == TokenKind.Plus
+            return "-" if operator == TokenKind.Minus
+            return "*" if operator == TokenKind.Star
+            return "/" if operator == TokenKind.Slash
+            return "%" if operator == TokenKind.Percent
+            return "==" if operator == TokenKind.EqEq
+            return "!=" if operator == TokenKind.BangEq
+            return "<" if operator == TokenKind.Lt
+            return ">" if operator == TokenKind.Gt
+            return "<=" if operator == TokenKind.LtEq
+            return ">=" if operator == TokenKind.GtEq
+            return "and" if operator == TokenKind.And
+            return "or" if operator == TokenKind.Or
+            return "=>" if operator == TokenKind.FatArrow
+            return "not" if operator == TokenKind.Not
+            return "in" if operator == TokenKind.In
+            return "is" if operator == TokenKind.Is
+            return "as" if operator == TokenKind.As
+            return "|" if operator == TokenKind.Pipe
+            return "^" if operator == TokenKind.Caret
+            return "&" if operator == TokenKind.Ampersand
+            return "<<" if operator == TokenKind.LShift
+            return ">>" if operator == TokenKind.RShift
+            return "range_lt" if operator == TokenKind.RangeLt
+            return "range_le" if operator == TokenKind.RangeLe
+            return "else" if operator == TokenKind.Else
+            return ""
+
+        def proof_replay_ast_matches_kernel(report: ProofReport&, expression: Ast::Expr, root: usize, depth: usize) -> bool:
+            return false if depth >= 128 or root >= report.kernel_nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[root]
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_ast_matches_kernel(report, inner, root, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return node.kind == "int" and node.value == value
+                Ast::Expr.Absent:
+                    return node.kind == "absent"
+                Ast::Expr.BoolLit(value, _):
+                    return node.kind == "bool" and node.value == (1 if value else 0)
+                Ast::Expr.FloatLit(value, _):
+                    return node.kind == "float" and node.name == value
+                Ast::Expr.StringLit(value, _):
+                    return node.kind == "string" and node.name == value
+                Ast::Expr.CharLit(value, _):
+                    return node.kind == "char" and node.name == value
+                Ast::Expr.Ident(name, _):
+                    return node.kind == "ident" and node.name == name
+                Ast::Expr.ShorthandMember(parts, _):
+                    return parts.count == 1 and parts[0] != "" and node.kind == "shorthand" and node.name == parts[0]
+                Ast::Expr.Unary(operator, operand, _):
+                    expected: sview = proof_replay_operator_name(operator)
+                    return expected != "" and node.kind == "unary" and node.operator == expected and proof_replay_ast_matches_kernel(report, operand, node.left, depth + 1)
+                Ast::Expr.Binary(Ast::Expr.Index(object, index, _), TokenKind.Else, fallback, _):
+                    return false if node.kind != "checked-index" or node.left >= report.kernel_nodes.count
+                    index_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[node.left]
+                    return index_node.kind == "index" and proof_replay_ast_matches_kernel(report, object, index_node.left, depth + 1) and proof_replay_ast_matches_kernel(report, index, index_node.right, depth + 1) and proof_replay_ast_matches_kernel(report, fallback, node.right, depth + 1)
+                Ast::Expr.GetElse(Ast::Expr.Index(object, index, _), recovery, _):
+                    return false if recovery.count == 0 or node.kind != "checked-get" or node.left >= report.kernel_nodes.count
+                    index_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[node.left]
+                    return index_node.kind == "index" and proof_replay_ast_matches_kernel(report, object, index_node.left, depth + 1) and proof_replay_ast_matches_kernel(report, index, index_node.right, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    expected: sview = proof_replay_operator_name(operator)
+                    return expected != "" and node.kind == "binary" and node.operator == expected and proof_replay_ast_matches_kernel(report, left, node.left, depth + 1) and proof_replay_ast_matches_kernel(report, right, node.right, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return node.kind == "if" and proof_replay_ast_matches_kernel(report, condition, node.left, depth + 1) and proof_replay_ast_matches_kernel(report, then_expression, node.right, depth + 1) and proof_replay_ast_matches_kernel(report, else_expression, node.auxiliary, depth + 1)
+                Ast::Expr.Move(operand, _):
+                    return node.kind == "move" and proof_replay_ast_matches_kernel(report, operand, node.left, depth + 1)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return false if node.kind != "call" or node.auxiliary != argument_names.count or node.children_count != arguments.count
+                    return false if node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
+                    return false if not proof_replay_ast_matches_kernel(report, callee, node.left, depth + 1)
+                    for index in 0..<arguments.count |index, report, node, arguments, argument_names, depth|:
+                        argument_root: usize = report.kernel_children[node.children_start + index]
+                        return false if argument_root >= report.kernel_nodes.count
+                        argument_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[argument_root]
+                        expected_name: sview = argument_names[index] if index < argument_names.count else ""
+                        return false if argument_node.kind != "call_arg" or argument_node.name != expected_name or not proof_replay_ast_matches_kernel(report, arguments[index], argument_node.left, depth + 1)
+                    return true
+                Ast::Expr.Field(object, field, _):
+                    return node.kind == "field" and node.name == field and proof_replay_ast_matches_kernel(report, object, node.left, depth + 1)
+                Ast::Expr.Scope(base, field, _):
+                    return node.kind == "scope" and node.name == field and proof_replay_ast_matches_kernel(report, base, node.left, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return node.kind == "index" and proof_replay_ast_matches_kernel(report, object, node.left, depth + 1) and proof_replay_ast_matches_kernel(report, index, node.right, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return node.kind == "slice" and proof_replay_ast_matches_kernel(report, object, node.left, depth + 1) and proof_replay_ast_matches_kernel(report, low, node.right, depth + 1) and proof_replay_ast_matches_kernel(report, high, node.auxiliary, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if arguments.count == 0 or node.kind != "index-n" or node.children_count != arguments.count
+                    return false if node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
+                    return false if not proof_replay_ast_matches_kernel(report, object, node.left, depth + 1)
+                    for index in 0..<arguments.count |index, report, node, arguments, depth|:
+                        return false if not proof_replay_ast_matches_kernel(report, arguments[index], report.kernel_children[node.children_start + index], depth + 1)
+                    return true
+                Ast::Expr.Array(elements, _):
+                    return proof_replay_ast_list_matches_kernel(report, elements, node, "array", depth)
+                Ast::Expr.Tuple(elements, _):
+                    return proof_replay_ast_list_matches_kernel(report, elements, node, "tuple", depth)
+                Ast::Expr.SetLit(elements, _):
+                    return proof_replay_ast_list_matches_kernel(report, elements, node, "set", depth)
+                Ast::Expr.DictLit(entries, _):
+                    return false if node.kind != "dict" or node.children_count != entries.count or node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
+                    for index in 0..<entries.count |index, report, node, entries, depth|:
+                        entry_root: usize = report.kernel_children[node.children_start + index]
+                        return false if entry_root >= report.kernel_nodes.count
+                        entry_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[entry_root]
+                        return false if entry_node.kind != "dict_entry" or not proof_replay_ast_matches_kernel(report, entries[index].key, entry_node.left, depth + 1) or not proof_replay_ast_matches_kernel(report, entries[index].value, entry_node.right, depth + 1)
+                    return true
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return proof_replay_ast_fields_match_kernel(report, type_expression, fields, node, "construct", depth)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return proof_replay_ast_fields_match_kernel(report, base, fields, node, "record-update", depth)
+                Ast::Expr.Block(statements, value, _, _):
+                    return false if statements.count == 0 or statements.count > 2 or node.kind != "quantifier" or node.auxiliary != statements.count
+                    source_kind: sview = proof_quantifier_kind(expression, report.source_annotations)
+                    return false if source_kind == "" or node.operator != source_kind
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, _, range_expression, _):
+                            return false if binder == "" or node.name != binder or not proof_replay_ast_matches_kernel(report, range_expression, node.left, depth + 1) or not proof_replay_ast_matches_kernel(report, value, node.right, depth + 1)
+                        _:
+                            return false
+                    if statements.count == 2:
+                        match statements[1]:
+                            # The second dictionary binder is parser-synthesized with an
+                            # unencoded zero initializer. Require that exact placeholder so the
+                            # source mirror cannot agree with a kernel term that erased a hidden
+                            # call or other initializer.
+                            Ast::Stmt.VarDecl(binder, _, Ast::Expr.IntLit(initializer, _), _):
+                                return initializer == 0 and binder != "" and binder != node.name and node.secondary_name == binder
+                            _:
+                                return false
+                    return node.secondary_name == ""
+                _:
+                    return false
+
+        def proof_replay_ast_list_matches_kernel(report: ProofReport&, elements: darray[Ast::Expr]&, node: ElisaProofKernelCore::ProofKernelNode, kind: sview, depth: usize) -> bool:
+            return false if node.kind != kind or node.children_count != elements.count or node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
+            for index in 0..<elements.count |index, report, node, elements, depth|:
+                return false if not proof_replay_ast_matches_kernel(report, elements[index], report.kernel_children[node.children_start + index], depth + 1)
+            return true
+
+        def proof_replay_ast_fields_match_kernel(report: ProofReport&, base: Ast::Expr, fields: darray[Ast::FieldInit]&, node: ElisaProofKernelCore::ProofKernelNode, kind: sview, depth: usize) -> bool:
+            return false if node.kind != kind or node.children_count != fields.count or node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
+            return false if not proof_replay_ast_matches_kernel(report, base, node.left, depth + 1)
+            for index in 0..<fields.count |index, report, node, fields, depth|:
+                field_root: usize = report.kernel_children[node.children_start + index]
+                return false if field_root >= report.kernel_nodes.count
+                field_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[field_root]
+                return false if field_node.kind != "field-init" or field_node.name != fields[index].name or not proof_replay_ast_matches_kernel(report, fields[index].value, field_node.left, depth + 1)
+            return true
+
+        def proof_replay_boundary_trace_kind(kind: sview) -> bool:
+            match kind:
+                "precondition":
+                    return true
+                "type-bound":
+                    return true
+                "runtime-assert":
+                    return true
+                "runtime-guard":
+                    return true
+                "branch-condition":
+                    return true
+                "loop-condition":
+                    return true
+                "loop-invariant":
+                    return true
+                "loop-range":
+                    return true
+                "local-binding":
+                    return true
+                _:
+                    return false
+
+        # The source-neutral trace validator mirrors the source trace policy, but its logical
+        # step check is performed entirely by kernel_replay.elisa. Runtime and summary facts are
+        # explicit semantic boundaries; they are still required to have a well-formed lowered
+        # term and summary dependencies are recursively checked by the existing SCC-aware path.
+        def proof_replay_kernel_fact_trace_is_valid_with_stack[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&, revalidate_arena: bool) -> bool:
+            return false if trace.name != owner or not proof_replay_kernel_trace_range_valid(report, trace)
+            return false if not proof_replay_ast_matches_kernel(report, trace.expression, trace.kernel_expression, 0)
+            return false if trace.premises_count != trace.kernel_premises_count
+            return false if trace.premises_start > report.fact_trace_premises.count or trace.premises_count > report.fact_trace_premises.count - trace.premises_start
+            kernel_premises: mutable darray[usize] = []
+            for index in 0..<trace.premises_count |index, report, trace, kernel_premises|:
+                kernel_premise: usize = report.kernel_fact_trace_premises[trace.kernel_premises_start + index]
+                return false if not proof_replay_ast_matches_kernel(report, report.fact_trace_premises[trace.premises_start + index], kernel_premise, 0)
+                kernel_premises.push(kernel_premise)
+            # Boundary facts do not require a logical derivation, but their serialized terms are
+            # still untrusted input. Admit the complete reachable graph before any early return so
+            # hidden fields, malformed child slices, cycles, and unsupported nodes fail closed.
+            # A fact-trace entry is a public revalidation boundary. The batch certificate pass
+            # may admit its arena once for the duration of that pass, but callers can retain a
+            # mutable report and alter its serialized nodes afterwards. Never let that cached
+            # bit turn a post-mutation fact trace into trusted evidence.
+            return false if (revalidate_arena or not report.kernel_arena_validated) and not ElisaProofKernelReplay::proof_kernel_replay_arena_report(&report.kernel_nodes, &report.kernel_children, kernel_premises, trace.kernel_expression)
+            return true if proof_replay_boundary_trace_kind(trace.kind)
+            if trace.kind == "lemma-summary":
+                return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
+            if trace.kind == "function-summary":
+                return proof_replay_function_summary_is_valid(report, trace, dependency_stack, depth) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
+            return false if trace.kind != "proof-step" and trace.kind != "lemma-step" and trace.kind != "loop-invariant-step" and trace.kind != "branch-conjunct"
+            return false if depth >= 64
+            for premise in kernel_premises |premise, report, owner, depth, dependency_stack, revalidate_arena|:
+                found: mutable bool = false
+                for candidate in report.fact_traces |candidate, premise, report, owner, depth, dependency_stack, found|:
+                    continue if candidate.name != owner
+                    if candidate.kernel_expression < report.kernel_nodes.count and ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(report.kernel_nodes, report.kernel_children, candidate.kernel_expression, premise, 0) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, candidate, owner, depth + 1, dependency_stack, revalidate_arena):
+                        found <- true
+                        break
+                return false if not found
+            return ElisaProofKernelReplay::proof_kernel_replay_goal_report(&report.kernel_nodes, &report.kernel_children, kernel_premises, trace.kernel_expression)
+
+        def proof_replay_kernel_fact_root_is_traced_with_stack[@r](report: mutable ProofReport& @r, fact: usize, owner: sview, dependency_stack: darray[sview]&, revalidate_arena: bool) -> bool:
+            return false if fact >= report.kernel_nodes.count
+            for trace in report.fact_traces |trace, report, fact, owner, dependency_stack, revalidate_arena|:
+                continue if trace.name != owner
+                return true if trace.kernel_expression < report.kernel_nodes.count and ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(report.kernel_nodes, report.kernel_children, trace.kernel_expression, fact, 0) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack, revalidate_arena)
+            return false
+
+        # Resource-disjoint transitions carry their own logical premises inside the resource
+        # trace because the resource certificate has no ordinary top-level proposition. Those
+        # premise roots are still required to correspond to facts explicitly introduced by the
+        # source checker. This closes the provenance gap that would otherwise let a structurally
+        # replayable resource event smuggle in a fabricated inequality.
+        def proof_replay_resource_event_facts_with_owner[@r](report: mutable ProofReport& @r, root: usize, owner: sview, dependency_stack: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 127 or root >= report.kernel_nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[root]
+            active_owner: mutable sview = owner
+            active_owner <- node.name if node.kind == "resource-safety" and node.name != ""
+            if node.kind == "resource-disjoint":
+                return false if node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
+                for index in 0..<node.children_count |index, node, report, active_owner, dependency_stack|:
+                    fact: usize = report.kernel_children[node.children_start + index]
+                    return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, active_owner, dependency_stack, false)
+                return true
+            if node.kind == "resource-safety" or node.kind == "resource-scope":
+                return false if node.children_start > report.kernel_children.count or node.children_count > report.kernel_children.count - node.children_start
+                for index in 0..<node.children_count |index, node, report, active_owner, dependency_stack, depth|:
+                    child: usize = report.kernel_children[node.children_start + index]
+                    return false if not proof_replay_resource_event_facts_with_owner(report, child, active_owner, dependency_stack, depth + 1)
+                return true
+            if node.kind == "resource-call":
+                return proof_replay_resource_event_facts_with_owner(report, node.left, node.name, dependency_stack, depth + 1)
+            return true
+
+        # A certificate may only replay facts that the source checker explicitly introduced.
+        # Derived proof steps are not accepted as axioms: their captured premises are themselves
+        # traced and the independent logical kernel must re-prove the step from those premises.
+        # The trace payload is deliberately checked with this module's structural equality, not
+        # the main checker helper, so replay does not inherit its implementation by reference.
+        def proof_replay_fact_trace_is_valid_with_stack(report: mutable ProofReport&, trace: ProofFactTrace, owner: sview, depth: usize, dependency_stack: darray[sview]&) -> bool:
+            return false if trace.name != owner or not proof_replay_trace_range_valid(report, trace)
+            return true if proof_replay_boundary_trace_kind(trace.kind)
+            if trace.kind == "lemma-summary":
+                return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
+            if trace.kind == "function-summary":
+                return proof_replay_function_summary_is_valid(report, trace, dependency_stack, depth) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth)
+            return false if trace.kind != "proof-step" and trace.kind != "lemma-step" and trace.kind != "loop-invariant-step" and trace.kind != "branch-conjunct"
+            return false if depth >= 64
+            premises: mutable darray[Ast::Expr] = []
+            for index in 0..<trace.premises_count |index, premises, report, trace|:
+                premises.push(report.fact_trace_premises[trace.premises_start + index])
+            for premise in premises |premise, report, owner, depth, dependency_stack|:
+                found: mutable bool = false
+                for candidate in report.fact_traces |candidate, premise, owner, depth, dependency_stack, found|:
+                    continue if candidate.name != owner
+                    if proof_replay_expr_equal(candidate.expression, premise) and proof_replay_fact_trace_is_valid_with_stack(report, candidate, owner, depth + 1, dependency_stack):
+                        found <- true
+                        break
+                return false if not found
+            return proof_replay_goal(premises, trace.expression)
+

@@ -1,0 +1,116 @@
+extend ElisaProofKernelReplay:
+    public:
+            def proof_kernel_replay_resource_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                # Full resource summaries are function-boundary certificates. They must not
+                # leave a lexical region open; only explicit external region parameters may
+                # survive the boundary.
+                return proof_kernel_replay_resource_report_impl(nodes, children, facts, goal_root, true, false)
+
+            # Prefix replay is intentionally separate from report admission. It is used only by
+            # callers that incrementally assemble a resource trace before its final close/result
+            # transitions exist. Such a prefix may have local regions open, but it is never a
+            # successful proof certificate on its own.
+            def proof_kernel_replay_resource_prefix[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_resource_report_impl(nodes, children, facts, goal_root, false, false)
+
+            # These entry points are used only after the report adapter has admitted the complete
+            # arena with `proof_kernel_replay_arena_all_report`. Keeping the fast path separate
+            # preserves the ordinary standalone boundary above.
+            def proof_kernel_replay_resource_report_after_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_resource_report_impl(nodes, children, facts, goal_root, true, true)
+
+            def proof_kernel_replay_structural_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_structural_report_impl(nodes, children, facts, goal_root, false)
+
+            def proof_kernel_replay_structural_report_after_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_structural_report_impl(nodes, children, facts, goal_root, true)
+
+            def proof_kernel_replay_effect_report_after_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_effect_report_impl(nodes, children, facts, goal_root, true)
+
+            def proof_kernel_replay_goal_report_after_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_goal_report_impl(nodes, children, facts, goal_root, true)
+
+            # Public serialization boundary for callers that receive a source-neutral arena
+            # from another process. Admission is deliberately separate from logical replay:
+            # malformed roots, child slices, out-of-range edges, and cycles must be rejected
+            # before any rule can inspect a term.
+            def proof_kernel_replay_arena_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
+
+            # Batch admission for a report-owned arena. This validates every node once, including
+            # nodes not reachable from the first certificate root, so later certificate replay may
+            # reuse the admission without allocating a whole-arena validator per fact trace.
+            def proof_kernel_replay_arena_all_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r) -> bool:
+                return proof_kernel_replay_arena_all_valid(nodes, children)
+
+            # This is the only structural comparison operation exposed to the report adapter.
+            # Keeping the implementation private makes the module boundary explicit: callers
+            # can ask the kernel to compare terms, but cannot depend on its internal state types.
+            # Equality is itself a serialization boundary: the recursive helper intentionally
+            # validates every visited node while walking, so malformed payloads, child slices,
+            # and cycles fail closed without repeatedly allocating a complete-arena worklist.
+            def proof_kernel_replay_expr_equal_public(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
+                requires depth <= 127
+                return proof_kernel_replay_expr_equal(nodes, children, left_root, right_root, depth)
+
+            # Ground congruence closure over the source-neutral term language, exposed on its
+            # own. The AST-level producer consults exactly the rule replay will re-derive rather
+            # than maintaining a second equality engine that could drift away from this one, and
+            # adversarial harnesses can target the rule without the surrounding tiers.
+            def proof_kernel_replay_congruence_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                exhausted: mutable bool = false
+                return proof_kernel_replay_congruence_report_status(nodes, children, facts, goal_root, &exhausted)
+
+            # The same rule with its budget status. `exhausted` is advisory: it is set when the
+            # term or round budget cut the closure short, so a refusal may be "undecided" rather
+            # than "no rule applies". It never changes the verdict.
+            def proof_kernel_replay_congruence_report_status[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, exhausted: mutable bool&) -> bool:
+                return false if not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
+                return false if not proof_kernel_replay_proposition_state_valid(nodes, facts, goal_root)
+                for fact in facts |nodes, children, facts|:
+                    return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, fact)
+                return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, goal_root)
+                return proof_kernel_replay_congruence_goal(nodes, children, facts, goal_root, exhausted)
+
+            # Declared effect containment. The claim is about declared rows: every resolved
+            # callee's `can[...]` row is contained in the caller's. It says nothing about effects
+            # a body performs without a call.
+            def proof_kernel_replay_effect_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return false if not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
+                return false if facts.count != 0
+                return proof_kernel_replay_effect_goal(nodes, children, goal_root)
+
+            def proof_kernel_replay_goal_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_goal_report_impl(nodes, children, facts, goal_root, false)
+
+            def proof_kernel_replay_tactic_step[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, action: sview, accepted: bool, before_solved: bool, after_solved: bool, before_facts: darray[usize], before_goal: usize, after_facts: darray[usize], after_goal: usize, argument: usize, has_argument: bool, secondary: usize, has_secondary: bool, argument_index: usize, has_argument_index: bool, detail: sview) -> bool:
+                return proof_kernel_replay_tactic_step_impl(nodes, children, action, accepted, before_solved, after_solved, before_facts, before_goal, after_facts, after_goal, argument, has_argument, secondary, has_secondary, argument_index, has_argument_index, detail)
+
+            def proof_kernel_replay_tactic_branch[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, action: sview, parent_facts: darray[usize], parent_goal: usize, left_facts: darray[usize], left_goal: usize, right_facts: darray[usize], right_goal: usize) -> bool:
+                return proof_kernel_replay_tactic_branch_report(nodes, children, action, parent_facts, parent_goal, left_facts, left_goal, right_facts, right_goal)
+
+            # A checked-index certificate proves the memory-safety boundary supplied by Elisa's
+            # `get collection[index] else fallback` operator. It is separate from arithmetic
+            # goal replay: the selected element remains opaque, while replay validates only the
+            # guarded load/fallback shape.
+            def proof_kernel_replay_checked_index_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_checked_index_report_impl(nodes, children, facts, goal_root, false)
+
+            def proof_kernel_replay_checked_index_report_after_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_checked_index_report_impl(nodes, children, facts, goal_root, true)
+
+            # A checked-get certificate proves the memory-safety boundary of
+            # `get collection[index] else <control recovery>`. The recovery's termination and
+            # state isolation are checked separately by the source-level control-flow pass.
+            def proof_kernel_replay_checked_get_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_checked_get_report_impl(nodes, children, facts, goal_root, false)
+
+            def proof_kernel_replay_checked_get_report_after_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_checked_get_report_impl(nodes, children, facts, goal_root, true)
+
+            def proof_kernel_replay_quantifier_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, kind: sview, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_quantifier_report_impl(nodes, children, kind, facts, goal_root, false)
+
+            def proof_kernel_replay_quantifier_report_after_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, kind: sview, facts: darray[usize], goal_root: usize) -> bool:
+                return proof_kernel_replay_quantifier_report_impl(nodes, children, kind, facts, goal_root, true)

@@ -1,0 +1,142 @@
+extend ElisaProof:
+    private:
+        def proof_check_return_matches(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
+            match statement:
+                Ast::Stmt.Match(scrutinee, arms, match_position):
+                    scrutinee_value: mutable Ast::Expr = proof_substitute(scrutinee, names, values)
+                    proof_check_frame_calls_in_expression(scrutinee, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(scrutinee)
+                    scrutinee_value <- proof_substitute(scrutinee, names, values) if proof_expr_has_call(scrutinee)
+                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(scrutinee)) if proof_expr_has_call(scrutinee)
+                    arms_may_modify: mutable bool = false
+                    match_has_normal: mutable bool = false
+                    match_valid: mutable bool = true
+                    for arm in arms |names, values, facts, ensures, lemmas, report, name, lemma_steps, arms_may_modify, match_position|:
+                        arm_names: mutable darray[sview] = proof_copy_names(names)
+                        arm_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                        arm_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        arm_flow: mutable ProofFlow = proof_empty_flow()
+                        arm_facts.clear() if proof_expr_has_call(scrutinee)
+                        pattern_supported: bool = proof_bind_pattern(arm.pattern, match_position, scrutinee_value, &arm_names, &arm_values)
+                        pattern_bindings: mutable darray[sview] = []
+                        proof_structural_pattern_bindings(arm.pattern, &pattern_bindings)
+                        proof_remove_type_bound_facts_for_names(&arm_facts, pattern_bindings)
+                        if not pattern_supported:
+                            arm_flow.valid <- false
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "pattern-unsupported", match_position.line, name, "match pattern bindings are not modeled for proof-state substitution")
+                            arm_facts.clear()
+                        if pattern_supported and not proof_expr_has_call(scrutinee):
+                            pattern_condition: Ast::Expr? = proof_pattern_condition(arm.pattern, scrutinee_value, match_position)
+                            if pattern_condition is condition:
+                                proof_add_traced_fact(arm_facts, report, condition, "branch-condition", match_position.line, name)
+                        guard_present: mutable bool = false
+                        match arm.guard:
+                            Ast::Expr.Absent:
+                                pass
+                            _:
+                                guard_present <- true
+                        guard_has_call: mutable bool = false
+                        if guard_present:
+                            guard_supported: bool = proof_expr_supported(arm.guard)
+                            if not guard_supported:
+                                arm_flow.valid <- false
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "expression-unsupported", match_position.line, name, "unsupported match guard cannot enter a verified proof state")
+                                arm_facts.clear()
+                            guard_value: mutable Ast::Expr = proof_substitute(arm.guard, arm_names, arm_values)
+                            guard_has_call <- proof_expr_has_call(arm.guard)
+                            proof_check_frame_calls_in_expression(arm.guard, arm_facts, arm_names, arm_values, frame_parameters, changes, preserves, functions, report, name, annotations) if guard_has_call and guard_supported
+                            guard_value <- proof_substitute(arm.guard, arm_names, arm_values) if guard_has_call and guard_supported
+                            proof_forget_values(arm_names, arm_values, match_position) if guard_has_call and guard_supported
+                            arm_facts.clear() if guard_has_call and guard_supported
+                            proof_add_traced_fact(arm_facts, report, guard_value, "branch-condition", match_position.line, name) if guard_supported
+                        proof_check_returns(arm.body, &arm_names, &arm_values, &arm_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &arm_flow)
+                        match_has_normal <- true if arm_flow.normal
+                        flow.breaks <- flow.breaks or arm_flow.breaks
+                        flow.continues <- flow.continues or arm_flow.continues
+                        proof_append_continue_states(flow, arm_flow)
+                        match_valid <- false if not arm_flow.valid
+                        arms_may_modify <- true if not pattern_supported or guard_has_call or proof_body_may_modify(arm.body)
+                    if arms_may_modify:
+                        proof_forget_values(names, values, Ast::expr_pos(scrutinee))
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                    flow.normal <- match_has_normal if arms.count > 0
+                    flow.valid <- flow.valid and match_valid
+                Ast::Stmt.Block(block_kind, _, binding, block_body, block_position):
+                    if block_kind == "assert_by":
+                        proofed: bool = proof_check_block(block_body, binding, facts, names, values, frame_parameters, lemmas, report, name, annotations)
+                        if proofed and block_body.count > 0:
+                            match block_body[0]:
+                                Ast::Stmt.Contract(_, block_goal, _):
+                                    runtime_goal: mutable Ast::Expr = proof_substitute(block_goal, names, values)
+                                    runtime_goal_has_call: bool = proof_expr_has_call(block_goal)
+                                    # `assert ... by:` still evaluates its runtime guard after
+                                    # the erased proof body. Its calls cannot be allowed to
+                                    # preserve facts established before guard evaluation.
+                                    proof_check_frame_calls_in_expression(block_goal, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if runtime_goal_has_call
+                                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(block_goal)) if runtime_goal_has_call
+                                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if runtime_goal_has_call
+                                    proof_add_traced_fact(facts, report, runtime_goal, "runtime-guard", block_position.line, name) if proof_runtime_fact_is_stable(runtime_goal, functions)
+                                _:
+                                    pass
+                    if block_kind != "assert_by":
+                        block_names: mutable darray[sview] = proof_copy_names(names)
+                        block_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                        block_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        if binding != "":
+                            # Error/success scoped blocks introduce a local binding. Keep it
+                            # opaque and lexical; otherwise a binding that shadows a caller
+                            # parameter could leak the parameter's symbolic value into a
+                            # return from the block.
+                            block_names.push(binding)
+                            block_values.push(Ast::Expr.Invalid)
+                            block_binding_names: mutable darray[sview] = [binding]
+                            proof_remove_type_bound_facts_for_names(&block_facts, block_binding_names)
+                        block_flow: mutable ProofFlow = proof_empty_flow()
+                        proof_check_returns(block_body, &block_names, &block_values, &block_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &block_flow)
+                        flow.normal <- block_flow.normal
+                        flow.breaks <- block_flow.breaks
+                        flow.continues <- block_flow.continues
+                        flow.valid <- flow.valid and block_flow.valid
+                        proof_append_continue_states(flow, block_flow)
+                        if proof_body_may_modify(block_body):
+                            proof_forget_values(names, values, block_position)
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                Ast::Stmt.Break(label, position):
+                    if loop_depth == 0 or label != "":
+                        flow.valid <- false
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "control-flow-unsupported", position.line, name, "break is outside a modeled loop or uses an unsupported label")
+                    else:
+                        flow.valid <- false if not proof_check_loop_control_invariants(loop_invariants, names, values, facts, loop_scope_count, frame_parameters, old_values, report, name, annotations, position.line)
+                        flow.breaks <- true
+                    flow.normal <- false
+                Ast::Stmt.Continue(label, position):
+                    if loop_depth == 0 or label != "":
+                        flow.valid <- false
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "control-flow-unsupported", position.line, name, "continue is outside a modeled loop or uses an unsupported label")
+                    else:
+                        flow.valid <- false if not proof_check_loop_control_invariants(loop_invariants, names, values, facts, loop_scope_count, frame_parameters, old_values, report, name, annotations, position.line)
+                        flow.continues <- true
+                        proof_record_continue_state(flow, names, values, facts)
+                    flow.normal <- false
+                Ast::Stmt.Invalid:
+                    flow.valid <- false
+                    flow.normal <- false
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "statement-unsupported", 0, name, "invalid statement cannot enter a verified proof state")
+                    proof_forget_values(names, values, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+                    proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                _:
+                    # This arm is unreachable for the compiler AST version known to this
+                    # build. Keep it rejecting so adding a future statement variant to the
+                    # live frontend cannot silently turn an unmodeled state transition into
+                    # a verified no-op.
+                    flow.valid <- false
+                    flow.normal <- false
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "statement-unsupported", 0, name, "unknown statement form cannot enter a verified proof state")
+                    proof_forget_values(names, values, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+                    proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+            return true

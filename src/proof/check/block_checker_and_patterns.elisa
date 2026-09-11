@@ -1,0 +1,485 @@
+extend ElisaProof:
+    private:
+        def proof_check_opaque_call_frame(expression: Ast::Expr, names: darray[sview]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview) -> void:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, position):
+                    called: sview = proof_callable_name(callee)
+                    known: bool = called != "" and proof_function_index(functions, called) < functions.names.count
+                    return if known
+                    match callee:
+                        Ast::Expr.Field(receiver, _, _):
+                            proof_check_direct_frame_write(receiver, names, parameter_names, changes, preserves, report, name, position.line)
+                        _:
+                            pass
+                    if changes.count > 0 and proof_call_may_alias_places(arguments, changes, names, parameter_names):
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "frame-call-opaque", position.line, name, "unknown call may write through a caller frame argument")
+                    if preserves.count > 0 and proof_call_may_alias_places(arguments, preserves, names, parameter_names):
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "frame-preserve-opaque", position.line, name, "unknown call may write a preserved caller place")
+                _:
+                    pass
+
+        # Conditions and other compound expressions can contain calls even when there is no
+        # standalone call statement. Track child calls in evaluation order so later subexpressions
+        # see only validated post-call facts; callers that need a disposable state pass a copy.
+        def proof_check_frame_calls_in_expression(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: mutable darray[Ast::Expr]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    # Evaluation proceeds through the callee and arguments before the call
+                    # summary is applied. In particular, the outer postcondition must not
+                    # justify an argument precondition. Once a child call is checked, carry its
+                    # post-call fact state into the next child; otherwise a mutating first
+                    # argument could be incorrectly treated as invisible to a later argument.
+                    proof_check_frame_calls_in_expression(callee, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    for argument in arguments |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(argument, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    current_call: Ast::Expr = proof_substitute(expression, names, values)
+                    pre_call_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
+                    probe_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                    applied: bool = proof_apply_function(current_call, current_call, &probe_facts, functions, names, parameter_names, changes, preserves, report, name, annotations)
+                    proof_check_opaque_call_frame(current_call, names, parameter_names, changes, preserves, functions, report, name) if not applied
+                    facts.clear()
+                    facts.extend(probe_facts) if applied
+                    proof_restore_type_bound_facts(pre_call_facts, facts, names, report, name) if not proof_expr_has_move(expression)
+                    # An opaque nested call reaches an unreferenced by-value scalar local no
+                    # more than a call statement does: the facts over such locals come back.
+                    proof_restore_call_stable_facts(pre_call_facts, facts, names, parameter_names, report, name, proof_statement_lend_roots(expression, functions)) if not applied and not proof_expr_has_move(expression)
+                    # A nested call has no destination binding to preserve. Forget all symbolic
+                    # values after it so a later sibling or the enclosing call sees only the
+                    # current-state identifiers, never a pre-call alias expression.
+                    proof_forget_values(names, values, Ast::expr_pos(expression))
+                Ast::Expr.Paren(inner, _):
+                    proof_check_frame_calls_in_expression(inner, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_check_frame_calls_in_expression(operand, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Binary(left, operator, right, _):
+                    proof_check_frame_calls_in_expression(left, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    if (operator == TokenKind.And or operator == TokenKind.Or) and proof_expr_has_executable_call(right) and not proof_runtime_calls_are_pure(right, functions):
+                        # The right operand of a short-circuit runs only for one value of the
+                        # left, so its calls may or may not have happened. Check their frames
+                        # and preconditions as if they ran -- against the facts without the
+                        # left operand, which is stricter than the run needs -- and take the
+                        # state as if they ran, but keep no fact the run alone established: a
+                        # callee's ensure holds only on the path where the callee executed, and
+                        # this is not a branch that records one. What survives is exactly the
+                        # facts the havoc could not remove, true whether or not the call ran.
+                        before_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
+                        proof_check_frame_calls_in_expression(right, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                        survived: darray[Ast::Expr] = proof_copy_exprs(facts)
+                        facts.clear()
+                        for fact in survived |facts, before_facts|:
+                            facts.push(fact) if any earlier in before_facts where proof_expr_equal(earlier, fact)
+                    else:
+                        proof_check_frame_calls_in_expression(right, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Field(object, _, _):
+                    proof_check_frame_calls_in_expression(object, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Scope(base, _, _):
+                    proof_check_frame_calls_in_expression(base, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Index(object, index, _):
+                    proof_check_frame_calls_in_expression(object, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    proof_check_frame_calls_in_expression(index, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_check_frame_calls_in_expression(object, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    proof_check_frame_calls_in_expression(low, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    proof_check_frame_calls_in_expression(high, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_check_frame_calls_in_expression(object, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    for argument in arguments |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(argument, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Move(operand, _):
+                    proof_check_frame_calls_in_expression(operand, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_check_frame_calls_in_expression(operand, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(element, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(element, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(element, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(entry.key, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                        proof_check_frame_calls_in_expression(entry.value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    proof_check_frame_calls_in_expression(type_expression, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    for field in fields |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(field.value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_check_frame_calls_in_expression(base, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    for field in fields |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(field.value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_check_frame_calls_in_expression(condition, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    proof_check_frame_calls_in_expression(then_expr, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    proof_check_frame_calls_in_expression(else_expr, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_check_frame_calls_in_expression(iterable, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    proof_check_frame_calls_in_expression(condition, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    proof_check_frame_calls_in_expression(body, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_check_frame_calls_in_expression(base, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    proof_check_frame_calls_in_expression(predicate, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.GetElse(guarded, _, _):
+                    # The recovery body is checked as a statement path by proof_check_returns;
+                    # this expression walk covers only calls evaluated on the successful value
+                    # path and prevents a guarded call from being classified as an opaque frame.
+                    proof_check_frame_calls_in_expression(guarded, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                Ast::Expr.Catch(guarded, arms, _):
+                    # The return-boundary catch checker applies the guarded call summary on the
+                    # success arm and performs a disposable frame probe for error arms. Walk the
+                    # guarded expression here as well for callers that inspect a catch before
+                    # reaching that boundary.
+                    proof_check_frame_calls_in_expression(guarded, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    for arm in arms |facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations|:
+                        proof_check_frame_calls_in_expression(arm.guard, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                        if arm.body.count == 1:
+                            match arm.body[0]:
+                                Ast::Stmt.Expr(value, _):
+                                    proof_check_frame_calls_in_expression(value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                                _:
+                                    pass
+                _:
+                    if proof_expr_has_call(expression) and (changes.count > 0 or preserves.count > 0):
+                        position: Ast::Pos = Ast::expr_pos(expression)
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "frame-expression-opaque", position.line, name, "unsupported expression may contain an unmodeled call with frame effects")
+
+        # A summarized outer call must not hide calls evaluated in its callee or arguments.
+        # Check these children against the caller's pre-call facts before applying the outer
+        # summary; the outer ensure is a post-call fact and cannot justify an argument's
+        # precondition.
+        def proof_check_frame_call_children(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: mutable darray[Ast::Expr]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_check_frame_calls_in_expression(callee, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                    for argument in arguments |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        proof_check_frame_calls_in_expression(argument, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations)
+                _:
+                    pass
+
+        # Attach a witness only when the same exact evaluator can show that all current facts
+        # hold and the failed proposition is false. Unsupported/frame failures remain witness-
+        # free, so clients never mistake a heuristic sample for a semantic counterexample.
+        def proof_add_goal_failure(report: mutable ProofReport&, kind: sview, line: u32, name: sview, message: sview, facts: darray[Ast::Expr]&, goal: Ast::Expr) -> void:
+            counterexample: mutable darray[Ast::Expr] = []
+            found: bool = proof_find_counterexample(facts, goal, &counterexample)
+            attempt_exhausted: bool = proof_latest_attempt_exhausted(report)
+            proof_add_finding_with_counterexample(report, kind, line, name, message, &counterexample, found)
+            # A counterexample is a stronger answer than a budget: report "disproved" when one was
+            # found, and "timeout" only when the search never reached a verdict.
+            if attempt_exhausted and not found and report.findings.count > 0:
+                report.findings[report.findings.count - 1].status <- "timeout" if report.findings[report.findings.count - 1].status == "unknown"
+            if report.goal_attempts.count > 0 and report.findings.count > 0:
+                report.findings[report.findings.count - 1].goal_id <- report.goal_attempts.count - 1
+                report.findings[report.findings.count - 1].has_goal <- true
+
+        # Check proof steps in source order. An `assert` is a `have`, not an unchecked axiom:
+        # it becomes a fact only after the current fact set entails it. This is the key trust
+        # boundary that keeps a proof block from proving an arbitrary proposition by repeating
+        # the proposition as its own assertion.
+        def proof_check_block_steps(body: darray[Ast::Stmt]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            for statement in body |facts, names, values, lemmas, report, name|:
+                match statement:
+                    Ast::Stmt.Contract(kind, expression, position):
+                        if kind == "assert":
+                            assertion: Ast::Expr = proof_substitute(expression, names, values)
+                            proven: bool = proof_certify_goal(facts, assertion, report, position.line, name, annotations)
+                            report.proof_obligation(proven)
+                            proof_add_derived_fact(facts, report, assertion, "proof-step", position.line, name) if proven
+                            proof_add_goal_failure(report, "proof-step-unproven", position.line, name, "asserted proof step is not entailed by earlier facts", facts, assertion) if not proven
+                    Ast::Stmt.Expr(expression, position):
+                        match expression:
+                            Ast::Expr.Call(callee, arguments, _, _):
+                                if proof_callable_name(callee) == "assert" and arguments.count == 1:
+                                    step: Ast::Expr = proof_substitute(arguments[0], names, values)
+                                    proven_step: bool = proof_certify_goal(facts, step, report, position.line, name, annotations)
+                                    report.proof_obligation(proven_step)
+                                    proof_add_derived_fact(facts, report, step, "proof-step", position.line, name) if proven_step
+                                    proof_add_goal_failure(report, "proof-step-unproven", position.line, name, "asserted proof step is not entailed by earlier facts", facts, step) if not proven_step
+                                proof_apply_lemma(proof_substitute(expression, names, values), facts, lemmas, names, values, report, name, annotations) if proof_callable_name(callee) != "assert"
+                            _:
+                                pass
+                    Ast::Stmt.Block(block_kind, _, _, nested, _):
+                        proof_check_block_steps(nested, facts, names, values, lemmas, report, name, annotations) if block_kind == "assert_by"
+                    _:
+                        pass
+
+        def proof_check_block(block_body: darray[Ast::Stmt]&, tactic: sview, seed_facts: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, parameters: darray[sview]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if block_body.count == 0
+            goal: mutable Ast::Expr = Ast::Expr.Absent
+            goal_line: mutable u32 = 0
+            match block_body[0]:
+                Ast::Stmt.Contract(_, expression, position):
+                    goal <- proof_substitute(expression, names, values)
+                    goal_line <- position.line
+                _:
+                    proof_add_finding(report, "proof-malformed", 0, name, "proof block has no goal")
+                    return false
+            proof_body: mutable darray[Ast::Stmt] = []
+            index: mutable usize = 1
+            while index < block_body.count |index, block_body, proof_body|:
+                proof_body.push(block_body[index])
+                index <- index + 1
+            proof_check_purity(proof_body, lemmas, report, name)
+            facts: mutable darray[Ast::Expr] = []
+            facts.extend(seed_facts)
+            # A scoped block walls off path assumptions, not the language: the compiler type
+            # of every live binding still holds inside it. Keeping those facts is what lets the
+            # unsigned range guard see a fixed-width symbol instead of an untyped integer.
+            proof_clear_facts_keep_type_bounds(&facts, names, parameters, report, name) if tactic == "scoped"
+            proof_check_block_steps(proof_body, &facts, names, values, lemmas, report, name, annotations)
+            proven: bool = proof_certify_goal(facts, goal, report, goal_line, name, annotations)
+            report.proof_obligation(proven)
+            proof_add_goal_failure(report, "proof-unproven", goal_line, name, "goal is not entailed by the proof facts", facts, goal) if not proven
+            return proven
+
+        # Rebuild a dotted variant path as the same AST shape the compiler parser uses for an
+        # `is` test. Pattern paths are source-backed views, so slicing the view keeps the
+        # generated proposition allocation-free and preserves the compiler-owned lifetime.
+        def proof_pattern_path_expression(path: sview, position: Ast::Pos) -> Ast::Expr:
+            return Ast::Expr.Invalid if sview_len(path) == 0
+            first_dot: mutable usize = sview_len(path)
+            for index in 0..<sview_len(path) |index, path, first_dot|:
+                if sview_at(path, index) == 46:
+                    first_dot <- index
+                    break
+            # The compiler stores a leading-dot pattern as a payload-free Variant whose path
+            # omits the dot (for example `.Ready` becomes `Ready`). A dotless path therefore
+            # denotes enum shorthand here, not an ordinary identifier; preserving that marker
+            # keeps match facts aligned with the source-neutral kernel atom used by expressions.
+            return Ast::Expr.ShorthandMember([path], position) if first_dot == sview_len(path)
+            result: mutable Ast::Expr = Ast::Expr.Ident(sview(path.data, 0, first_dot.i64()), position)
+            segment_start: mutable usize = first_dot + 1
+            while segment_start < sview_len(path) |segment_start, path, result, position|:
+                segment_end: mutable usize = segment_start
+                while segment_end < sview_len(path) and sview_at(path, segment_end) != 46 |segment_end, path|:
+                    segment_end <- segment_end + 1
+                result <- Ast::Expr.Field(result, sview(path.data, segment_start.i64(), segment_end.i64()), position)
+                segment_start <- segment_end + 1
+            return result
+
+        # Decode the integer subset of a raw pattern literal without borrowing the compiler's
+        # parser helper. The pattern AST intentionally retains source text, so this local parser
+        # accepts decimal/hex digits and the compiler's numeric suffix spelling, while rejecting
+        # malformed text and signed overflow. The accumulator stays signed and grows toward zero
+        # for negative literals, which handles i64.min without an overflowing positive magnitude.
+        def proof_pattern_integer_literal(text: sview) -> (known: bool, value: i64):
+            n: usize = sview_len(text)
+            return (false, 0) if n == 0
+            negative: bool = sview_at(text, 0) == 45
+            start: mutable usize = 1 if negative else 0
+            return (false, 0) if start >= n
+            is_hex: bool = n - start >= 2 and sview_at(text, start) == 48 and (sview_at(text, start + 1) == 120 or sview_at(text, start + 1) == 88)
+            start <- start + 2 if is_hex
+            return (false, 0) if start >= n
+            base: i64 = 16 if is_hex else 10
+            result: mutable i64 = 0
+            saw_digit: mutable bool = false
+            index: mutable usize = start
+            while index < n |index, text, base, negative, result, saw_digit|:
+                character: u8 = sview_at(text, index)
+                if character == 95:
+                    index <- index + 1
+                    continue
+                digit: mutable i64 = -1
+                digit <- (character - 48).i64() if character >= 48 and character <= 57
+                digit <- (character - 97 + 10).i64() if digit < 0 and is_hex and character >= 97 and character <= 102
+                digit <- (character - 65 + 10).i64() if digit < 0 and is_hex and character >= 65 and character <= 70
+                # A suffix starts at the first non-digit after at least one digit. The lexer and
+                # semantic pass validate that suffix; it does not alter the integer value.
+                break if digit < 0
+                return (false, 0) if digit >= base
+                if negative:
+                    minimum: i64 = 0 - 9223372036854775807 - 1
+                    return (false, 0) if result < (minimum + digit) / base
+                    result <- result * base - digit
+                else:
+                    maximum: i64 = 9223372036854775807
+                    return (false, 0) if result > (maximum - digit) / base
+                    result <- result * base + digit
+                saw_digit <- true
+                index <- index + 1
+            return (false, 0) if not saw_digit
+            return (true, result)
+
+        def proof_pattern_literal_expression(text: sview, position: Ast::Pos) -> Ast::Expr?:
+            return Ast::Expr.BoolLit(true, position) if text == "true"
+            return Ast::Expr.BoolLit(false, position) if text == "false"
+            parsed: (known: bool, value: i64) = proof_pattern_integer_literal(text)
+            return Ast::Expr.IntLit(parsed.value, position) if parsed.known
+            length: usize = sview_len(text)
+            if length >= 2 and sview_at(text, 0) == 39 and sview_at(text, length - 1) == 39:
+                return Ast::Expr.CharLit(sview(text.data, 1, (length - 1).i64()), position)
+            has_float_marker: mutable bool = false
+            for index in 0..<length |index, text, has_float_marker|:
+                has_float_marker <- true if sview_at(text, index) == 46 or sview_at(text, index) == 101 or sview_at(text, index) == 69
+            return Ast::Expr.FloatLit(text, position) if has_float_marker
+            return null
+
+        # Produce the semantic fact supplied by a successful match arm. The compiler's runtime
+        # match machinery establishes this proposition before entering the arm; replay treats it
+        # as a source transition, just like an ordinary branch condition. Only representations
+        # that map exactly to logical AST values are emitted: variant tags, booleans, and integer
+        # equalities/ranges. Struct destructures and string/char/complex patterns remain omitted
+        # until their exact value-level lowering is represented in the certificate format.
+        def proof_pattern_condition(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos) -> Ast::Expr?:
+            match pattern:
+                Ast::Pattern.As(_, inner):
+                    return proof_pattern_condition(inner[0], scrutinee, position) if inner.count == 1
+                Ast::Pattern.Variant(path, _):
+                    target: Ast::Expr = proof_pattern_path_expression(path, position)
+                    null return if target is Ast::Expr.Invalid
+                    return Ast::Expr.Binary(scrutinee, TokenKind.Is, target, position)
+                Ast::Pattern.Literal(text):
+                    literal: Ast::Expr? = proof_pattern_literal_expression(text, position)
+                    if literal is value:
+                        return Ast::Expr.Binary(scrutinee, TokenKind.EqEq, value, position)
+                Ast::Pattern.Pin(name):
+                    return Ast::Expr.Binary(scrutinee, TokenKind.EqEq, Ast::Expr.Ident(name, position), position) if name != ""
+                Ast::Pattern.Range(low_text, high_text, inclusive):
+                    low: Ast::Expr? = proof_pattern_literal_expression(low_text, position)
+                    high: Ast::Expr? = proof_pattern_literal_expression(high_text, position)
+                    if low is lower and high is upper:
+                        lower_bound: Ast::Expr = Ast::Expr.Binary(scrutinee, TokenKind.GtEq, lower, position)
+                        upper_operator: TokenKind = TokenKind.LtEq if inclusive else TokenKind.Lt
+                        upper_bound: Ast::Expr = Ast::Expr.Binary(scrutinee, upper_operator, upper, position)
+                        return Ast::Expr.Binary(lower_bound, TokenKind.And, upper_bound, position)
+                Ast::Pattern.Or(options):
+                    return null if options.count == 0
+                    conditions: mutable darray[Ast::Expr] = []
+                    for option in options |conditions, scrutinee, position|:
+                        condition: Ast::Expr? = proof_pattern_condition(option, scrutinee, position)
+                        if condition is known_condition:
+                            conditions.push(known_condition)
+                        else:
+                            return null
+                    result: mutable Ast::Expr = conditions[0]
+                    for index in 1..<conditions.count |index, conditions, result, position|:
+                        result <- Ast::Expr.Binary(result, TokenKind.Or, conditions[index], position)
+                    return result
+                _:
+                    pass
+            return null
+
+        # OR-patterns are admitted only for closed alternatives. This gives the proof state one
+        # precise disjunctive match fact while avoiding the unsound choice of a payload binding
+        # that exists in only one alternative or has different projections in each alternative.
+        def proof_pattern_or_closed(pattern: Ast::Pattern) -> bool:
+            match pattern:
+                Ast::Pattern.Literal(_):
+                    return true
+                Ast::Pattern.Range(_, _, _):
+                    return true
+                Ast::Pattern.Variant(_, fields):
+                    return fields.count == 0
+                Ast::Pattern.Or(options):
+                    return false if options.count == 0
+                    for option in options |pattern|:
+                        return false if not proof_pattern_or_closed(option)
+                    return true
+                _:
+                    return false
+
+        # Install lexical bindings introduced by a runtime pattern. A binder now receives a
+        # symbolic projection of the matched scrutinee whenever the syntax identifies that
+        # projection (`Struct{field: value}` / `Variant(field: value)`). This is a definitional
+        # environment update, not an axiom: later substitution can only use the projection that
+        # the compiler's pattern itself selected. Positional enum payloads remain conservative
+        # because the lowered AST does not expose their stable field names here.
+        def proof_bind_pattern(pattern: Ast::Pattern, position: Ast::Pos, source: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&) -> bool:
+            match pattern:
+                Ast::Pattern.Wildcard:
+                    return true
+                Ast::Pattern.Literal(_):
+                    return true
+                Ast::Pattern.Pin(_):
+                    return true
+                Ast::Pattern.Range(_, _, _):
+                    return true
+                Ast::Pattern.Binding(binding):
+                    return false if binding == ""
+                    names.push(binding)
+                    values.push(source)
+                    return true
+                Ast::Pattern.Rest(binding):
+                    return true if binding == ""
+                    names.push(binding)
+                    values.push(Ast::Expr.Invalid)
+                    return true
+                Ast::Pattern.TypeBind(_, binding):
+                    return false if binding == ""
+                    names.push(binding)
+                    values.push(source)
+                    return true
+                Ast::Pattern.As(binding, inner):
+                    return false if binding == ""
+                    names.push(binding)
+                    values.push(source)
+                    return false if inner.count != 1
+                    return proof_bind_pattern(inner[0], position, source, names, values)
+                Ast::Pattern.Variant(_, fields):
+                    for field in fields |names, values, position, source|:
+                        match field:
+                            Ast::Pattern.Field(selector, inner):
+                                return false if selector == "" or inner.count != 1
+                                field_source: Ast::Expr = Ast::Expr.Field(source, selector, position)
+                                return false if not proof_bind_pattern(inner[0], position, field_source, names, values)
+                            Ast::Pattern.Wildcard:
+                                pass
+                            Ast::Pattern.Binding(binding):
+                                # The payload ordinal-to-field map is not carried by this
+                                # compiler AST layer. Keep the binder in lexical scope for the
+                                # structural-recursion checker, but leave its value opaque so it
+                                # cannot be mistaken for the whole enum or an invented field.
+                                return false if binding == ""
+                                names.push(binding)
+                                values.push(Ast::Expr.Invalid)
+                            _:
+                                # Positional variant payloads need the compiler's lowered
+                                # ordinal-to-field map; guessing a field name would be unsound.
+                                return false
+                    return true
+                Ast::Pattern.Struct(_, fields):
+                    for field in fields |names, values, position, source|:
+                        match field:
+                            Ast::Pattern.Field(selector, inner):
+                                return false if selector == "" or inner.count != 1
+                                field_source: Ast::Expr = Ast::Expr.Field(source, selector, position)
+                                return false if not proof_bind_pattern(inner[0], position, field_source, names, values)
+                            Ast::Pattern.Binding(binding):
+                                return false if binding == ""
+                                names.push(binding)
+                                values.push(Ast::Expr.Field(source, binding, position))
+                            Ast::Pattern.Wildcard:
+                                pass
+                            _:
+                                return false
+                    return true
+                Ast::Pattern.Field(_, inner):
+                    return false if inner.count != 1
+                    return proof_bind_pattern(inner[0], position, source, names, values)
+                Ast::Pattern.Tuple(elements):
+                    for index in 0..<elements.count |index, elements, names, values, position, source|:
+                        element_source: Ast::Expr = Ast::Expr.Index(source, Ast::Expr.IntLit(index.i64(), position), position)
+                        return false if not proof_bind_pattern(elements[index], position, element_source, names, values)
+                    return true
+                Ast::Pattern.Or(options):
+                    return false if options.count == 0
+                    for option in options |position|:
+                        return false if not proof_pattern_or_closed(option)
+                    return true
+                Ast::Pattern.Other(_):
+                    return false
+
+        # Check only the expression at this statement level; nested statement bodies are checked
+        # by their own proof_check_returns invocation. This keeps an unsupported runtime form from
+        # being silently reduced to `Invalid` and then accidentally discharged by an unrelated
+        # `ensure true`.
+        # Runtime expression admission runs before executable summaries are scheduled, so it
+        # cannot require the later `verified` bit. It nevertheless requires the already computed
+        # transitive purity fixed point: a nested call is retained as a value only when it cannot
+        # mutate state. Contract reasoning uses the stricter verified-summary predicate above.

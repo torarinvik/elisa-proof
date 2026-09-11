@@ -1,0 +1,483 @@
+extend ElisaProof:
+    private:
+        def proof_statement_has_unmodeled_operator(statement: Ast::Stmt, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> bool:
+            match statement:
+                Ast::Stmt.Expr(expression, _):
+                    return proof_expr_has_unmodeled_operator(expression, facts, functions, 0)
+                Ast::Stmt.VarDecl(_, _, initializer, _):
+                    return proof_expr_has_unmodeled_operator(initializer, facts, functions, 0)
+                Ast::Stmt.Assign(target, _, initializer, _):
+                    return proof_expr_has_unmodeled_operator(target, facts, functions, 0) or proof_expr_has_unmodeled_operator(initializer, facts, functions, 0)
+                Ast::Stmt.Return(value, _):
+                    if value is returned:
+                        return proof_expr_has_unmodeled_operator(returned, facts, functions, 0)
+                    return false
+                Ast::Stmt.If(condition, _, _, _):
+                    return proof_expr_has_unmodeled_operator(condition, facts, functions, 0)
+                Ast::Stmt.While(condition, _, _):
+                    return proof_expr_has_unmodeled_operator(condition, facts, functions, 0)
+                Ast::Stmt.For(_, _, iterable, _, _):
+                    return proof_expr_has_unmodeled_operator(iterable, facts, functions, 0)
+                Ast::Stmt.Match(scrutinee, _, _):
+                    return proof_expr_has_unmodeled_operator(scrutinee, facts, functions, 0)
+                Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                    if block_kind == "assert_by" and block_body.count > 0:
+                        match block_body[0]:
+                            Ast::Stmt.Contract(_, goal, _):
+                                return proof_expr_has_unmodeled_operator(goal, facts, functions, 0)
+                            _:
+                                return true
+                    return false
+                Ast::Stmt.Contract(kind, expression, _):
+                    return kind == "assert" and proof_expr_has_unmodeled_operator(expression, facts, functions, 0)
+                _:
+                    return false
+
+        def proof_statement_expressions_supported(statement: Ast::Stmt, functions: ProofFunctionTable&) -> bool:
+            match statement:
+                Ast::Stmt.Return(value, _):
+                    if value is returned:
+                        return proof_statement_value_supported(returned, functions)
+                    return true
+                Ast::Stmt.Expr(expression, _):
+                    return proof_statement_value_supported(expression, functions)
+                Ast::Stmt.VarDecl(_, _, initializer, _):
+                    return proof_statement_value_supported(initializer, functions)
+                Ast::Stmt.Assign(target, _, initializer, _):
+                    return proof_expr_supported(target) and proof_statement_value_supported(initializer, functions)
+                Ast::Stmt.If(condition, _, _, _):
+                    return proof_expr_supported(condition) and proof_runtime_branch_calls_allowed(condition, functions)
+                Ast::Stmt.While(condition, _, _):
+                    return proof_expr_supported(condition) and proof_runtime_expression_calls_allowed(condition, functions)
+                Ast::Stmt.For(_, _, iterable, _, _):
+                    return proof_expr_supported(iterable) and proof_runtime_expression_calls_allowed(iterable, functions)
+                Ast::Stmt.Match(scrutinee, _, _):
+                    return proof_expr_supported(scrutinee) and proof_runtime_expression_calls_allowed(scrutinee, functions)
+                Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                    if block_kind == "assert_by" and block_body.count > 0:
+                        match block_body[0]:
+                            Ast::Stmt.Contract(_, goal, _):
+                                return proof_expr_supported(goal) and proof_runtime_expression_calls_allowed(goal, functions)
+                            _:
+                                return false
+                    return true
+                Ast::Stmt.Contract(kind, expression, _):
+                    return true if kind != "assert"
+                    return proof_expr_supported(expression) and proof_runtime_expression_calls_allowed(expression, functions)
+                _:
+                    return true
+
+        # Extract only a top-level statement value recovery. This deliberately does not walk the
+        # recovery body: the main proof-state checker must do that with an isolated state so a
+        # failure branch cannot leak bindings or facts into the successful path.
+        def proof_statement_getelse_recovery(statement: Ast::Stmt) -> (known: bool, recovery: darray[Ast::Stmt], line: u32):
+            match statement:
+                Ast::Stmt.Return(value, _):
+                    if value is returned:
+                        match returned:
+                            Ast::Expr.GetElse(_, recovery, position):
+                                return (true, recovery, position.line)
+                            _:
+                                pass
+                Ast::Stmt.Expr(expression, _):
+                    match expression:
+                        Ast::Expr.GetElse(_, recovery, position):
+                            return (true, recovery, position.line)
+                        _:
+                            pass
+                Ast::Stmt.VarDecl(_, _, initializer, _):
+                    match initializer:
+                        Ast::Expr.GetElse(_, recovery, position):
+                            return (true, recovery, position.line)
+                        _:
+                            pass
+                Ast::Stmt.Assign(_, _, initializer, _):
+                    match initializer:
+                        Ast::Expr.GetElse(_, recovery, position):
+                            return (true, recovery, position.line)
+                        _:
+                            pass
+                _:
+                    pass
+            return (false, [], 0)
+
+        # A runtime index is a memory-safety obligation, not merely an expression the arithmetic
+        # prover may ignore. This first heap slice handles directly tracked collection-like
+        # places whose length is expressed as `.count`; calls, literals, nested dynamic indexes,
+        # and multi-index forms stay opaque until the heap model can describe them soundly.
+        def proof_indexable_object(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_indexable_object(inner)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_indexable_object(base)
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Field(object, _, _):
+                    return proof_indexable_object(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_indexable_object(base)
+                _:
+                    return false
+
+        # Elisa's `value.cast[Type]` syntax is represented by the compiler AST as an Index whose
+        # receiver is the reserved `cast` selector. The bracket contains a type expression, not a
+        # runtime position, so treating it as collection indexing manufactures false memory-safety
+        # obligations (especially in trusted low-level pointer adapters). Ordinary `value[index]`
+        # expressions do not match this shape and remain fully checked below.
+        def proof_is_type_cast_index(object: Ast::Expr) -> bool:
+            match object:
+                Ast::Expr.Field(_, field, _):
+                    return field == "cast"
+                Ast::Expr.Paren(inner, _):
+                    return proof_is_type_cast_index(inner)
+                _:
+                    return false
+
+        def proof_expr_is_invalid(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Invalid:
+                    return true
+                _:
+                    return false
+
+        # Purity only proves that an index-producing call cannot mutate the collection. It does
+        # not prove that the returned position is safe. Admit the call only when its verified
+        # executable summary contains an exact, call-free result equation; the caller's ordinary
+        # arithmetic facts then prove the bounds for that returned expression.
+        def proof_index_call_result(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, summary_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview) -> (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview):
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_index_call_result(inner, facts, functions, annotations, summary_facts, report, owner)
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    function_name: sview = proof_callable_name(callee)
+                    function_index: usize = proof_function_index(functions, function_name)
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if function_name == "" or function_index >= functions.names.count
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if function_index >= functions.pure.count or not functions.pure[function_index]
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if function_index >= functions.verified.count or not functions.verified[function_index]
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if function_index >= functions.param_counts.count or arguments.count > functions.param_counts[function_index]
+                    parameter_names: mutable darray[sview] = []
+                    parameter_start: usize = functions.param_starts[function_index]
+                    for parameter_index in 0..<functions.param_counts[function_index] |parameter_names, functions, parameter_start|:
+                        parameter_names.push(functions.all_params[parameter_start + parameter_index])
+                    default_flags: mutable darray[bool] = []
+                    default_values: mutable darray[Ast::Expr] = []
+                    for parameter_index in 0..<functions.param_counts[function_index] |default_flags, default_values, functions, parameter_start|:
+                        default_flags.push(functions.all_has_defaults[parameter_start + parameter_index])
+                        default_values.push(functions.all_defaults[parameter_start + parameter_index])
+                    mapped_arguments: mutable darray[Ast::Expr] = []
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if not proof_map_runtime_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions)
+                    requires_start: usize = functions.requires_starts[function_index] if function_index < functions.requires_starts.count else functions.all_requires.count
+                    requires_count: usize = functions.requires_counts[function_index] if function_index < functions.requires_counts.count else 0
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if requires_start > functions.all_requires.count or requires_count > functions.all_requires.count - requires_start
+                    require_goal_ids: mutable darray[usize] = []
+                    for requires_index in 0..<requires_count |requires_index, functions, requires_start, parameter_names, mapped_arguments, facts, annotations, report, position, owner, require_goal_ids|:
+                        required: Ast::Expr = proof_substitute(functions.all_requires[requires_start + requires_index], parameter_names, mapped_arguments)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_has_old(required)
+                        required_proven: bool = proof_certify_goal(facts, required, report, position.line, owner, annotations)
+                        require_goal_ids.push(report.goal_attempts.count - 1) if report.goal_attempts.count > 0
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if not required_proven
+                    ensures_start: usize = functions.ensure_starts[function_index] if function_index < functions.ensure_starts.count else functions.all_ensures.count
+                    ensures_count: usize = functions.ensure_counts[function_index] if function_index < functions.ensure_counts.count else 0
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if ensures_start > functions.all_ensures.count or ensures_count > functions.all_ensures.count - ensures_start
+                    result_name: darray[sview] = ["result"]
+                    result_value: darray[Ast::Expr] = [expression]
+                    for ensures_index in 0..<ensures_count |ensures_index, functions, ensures_start, parameter_names, mapped_arguments, result_name, result_value, expression|:
+                        ensured: Ast::Expr = proof_substitute(functions.all_ensures[ensures_start + ensures_index], parameter_names, mapped_arguments)
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_has_old(ensured)
+                        instantiated: Ast::Expr = proof_substitute(ensured, result_name, result_value)
+                        match instantiated:
+                            Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                                candidate: Ast::Expr = right if proof_expr_equal(left, expression) else (left if proof_expr_equal(right, expression) else Ast::Expr.Invalid)
+                                if not proof_expr_is_invalid(candidate) and proof_expr_supported(candidate) and not proof_expr_has_call(candidate) and not proof_expr_has_move(candidate):
+                                    proof_add_function_summary_fact(summary_facts, report, instantiated, position.line, owner, function_name, parameter_names, mapped_arguments, expression, require_goal_ids, ensures_index)
+                                    return (true, candidate, instantiated, function_name)
+                            _:
+                                pass
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "")
+                _:
+                    return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "")
+
+        def proof_check_index_access(object: Ast::Expr, index: Ast::Expr, position: Ast::Pos, facts: mutable darray[Ast::Expr]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> void:
+            return if proof_is_type_cast_index(object)
+            checked_index: mutable Ast::Expr = index
+            checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+            if proof_expr_has_call(index):
+                resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name)
+                if resolved.known:
+                    checked_index <- resolved.value
+                else:
+                    checked_index <- Ast::Expr.Invalid
+            if not proof_indexable_object(object) or proof_expr_has_call(object) or proof_expr_has_move(object) or proof_expr_is_invalid(checked_index) or proof_expr_has_call(checked_index) or proof_expr_has_move(checked_index):
+                report.proof_obligation(false)
+                proof_add_finding(report, "index-bounds-opaque", position.line, name, "indexed access has no statically tracked collection bound")
+                return
+            lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, checked_index, position)
+            count: Ast::Expr = Ast::Expr.Field(object, "count", position)
+            upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, count, position)
+            lower_proven: bool = proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "index-lower")
+            report.proof_obligation(lower_proven)
+            proof_add_latest_goal_finding(report, "index-lower-unproven", position.line, name, "indexed access may use a negative position") if not lower_proven
+            # A fixed-array parameter has an exact runtime count. We first prove the
+            # source index below that literal extent, then import the corresponding
+            # `.count` fact with explicit type-bound provenance. If that proof fails,
+            # retain the ordinary dynamic-count obligation and fail closed.
+            fixed_extent: i64 = proof_fixed_array_extent_for_object(object, fixed_names, fixed_extents)
+            fixed_upper_proven: mutable bool = false
+            if fixed_extent >= 0:
+                fixed_upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, Ast::Expr.IntLit(fixed_extent, position), position)
+                fixed_upper_proven <- proof_goal(checked_facts, fixed_upper, annotations)
+                proof_add_type_bound_fact(checked_facts, report, upper, position.line, name) if fixed_upper_proven
+            upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "index-upper")
+            report.proof_obligation(upper_proven)
+            proof_add_latest_goal_finding(report, "index-upper-unproven", position.line, name, "indexed access may exceed the collection bound") if not upper_proven
+
+        # A compiler `IndexN` can denote nested fixed-array access (`matrix[row, column]`).
+        # Check each argument against the corresponding literal dimension. This is deliberately
+        # narrower than treating every IndexN as nested indexing: generic applications, dynamic
+        # inner arrays, calls, and aliases have no independently tracked storage bound here.
+        def proof_check_indexn_access(object: Ast::Expr, arguments: darray[Ast::Expr]&, position: Ast::Pos, facts: mutable darray[Ast::Expr]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> void:
+            if arguments.count == 0 or not proof_indexable_object(object) or proof_expr_has_call(object) or proof_expr_has_move(object):
+                report.proof_obligation(false)
+                proof_add_finding(report, "index-bounds-opaque", position.line, name, "multi-index access has no checked heap bound model")
+                return
+            dimension: mutable usize = 0
+            for index in arguments |facts, fixed_names, fixed_extents, report, name, annotations, position, dimension, functions|:
+                checked_index: mutable Ast::Expr = index
+                checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                if proof_expr_has_call(index):
+                    resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name)
+                    if resolved.known:
+                        checked_index <- resolved.value
+                    else:
+                        checked_index <- Ast::Expr.Invalid
+                if proof_expr_is_invalid(checked_index) or proof_expr_has_call(checked_index) or proof_expr_has_move(checked_index):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "index-bounds-opaque", position.line, name, "multi-index position has no statically checked value")
+                else:
+                    extent: i64 = proof_fixed_array_dimension_extent(object, dimension, fixed_names, fixed_extents)
+                    if extent < 0:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "index-bounds-opaque", position.line, name, "multi-index dimension has no statically tracked bound")
+                    else:
+                        lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, checked_index, position)
+                        upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, Ast::Expr.IntLit(extent, position), position)
+                        lower_proven: bool = proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "index-lower")
+                        report.proof_obligation(lower_proven)
+                        proof_add_latest_goal_finding(report, "index-lower-unproven", position.line, name, "multi-index position may be negative") if not lower_proven
+                        upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "index-upper")
+                        report.proof_obligation(upper_proven)
+                        proof_add_latest_goal_finding(report, "index-upper-unproven", position.line, name, "multi-index position may exceed its fixed dimension") if not upper_proven
+                dimension <- dimension + 1
+
+        # The checked-index operator is a compiler/runtime boundary, not an arithmetic claim:
+        # either the guarded load is in range or the fallback is selected. Record a dedicated
+        # certificate so a successful report cannot silently omit this memory-safety transition.
+        # The selected element remains opaque; value properties must still be proved separately.
+        def proof_certify_checked_index(expression: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32) -> void:
+            return if not proof_kernel_expression_supported(expression)
+            empty_checked_facts: darray[Ast::Expr] = []
+            proof_add_goal_attempt(report, empty_checked_facts, expression, line, name, "checked-index", true)
+            report.proof_obligation(true)
+
+        # A control-recovery get (`get collection[index] else return/raise/break/continue`)
+        # provides the same runtime no-load guarantee as the value-fallback form, but its
+        # recovery is not an expression and therefore cannot be represented by the checked-index
+        # arena node. Emit a distinct certificate so replay cannot confuse the two semantics.
+        def proof_certify_checked_get(expression: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32) -> void:
+            return if not proof_kernel_expression_supported(expression)
+            empty_checked_facts: darray[Ast::Expr] = []
+            proof_add_goal_attempt(report, empty_checked_facts, expression, line, name, "checked-get", true)
+            report.proof_obligation(true)
+
+        # Slices use an exclusive high endpoint (`object[low:high]`). Open endpoints are
+        # already represented by Ast::Expr.Absent and inherit the implicit safe bounds 0 and
+        # object.count. As with single indexes, a receiver whose storage shape is not directly
+        # tracked is unsupported rather than guessed; this avoids treating an arbitrary view or
+        # returned collection as if its `.count` were the backing allocation's bound.
+        def proof_check_slice_access(object: Ast::Expr, low: Ast::Expr, high: Ast::Expr, position: Ast::Pos, facts: mutable darray[Ast::Expr]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> void:
+            checked_low: mutable Ast::Expr = low
+            checked_high: mutable Ast::Expr = high
+            checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+            if proof_expr_has_call(low):
+                resolved_low: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(low, facts, functions, annotations, &checked_facts, report, name)
+                if resolved_low.known:
+                    checked_low <- resolved_low.value
+                else:
+                    checked_low <- Ast::Expr.Invalid
+            if proof_expr_has_call(high):
+                resolved_high: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(high, facts, functions, annotations, &checked_facts, report, name)
+                if resolved_high.known:
+                    checked_high <- resolved_high.value
+                else:
+                    checked_high <- Ast::Expr.Invalid
+            if not proof_indexable_object(object) or proof_expr_has_call(object) or proof_expr_has_move(object) or proof_expr_is_invalid(checked_low) or proof_expr_has_move(checked_low) or proof_expr_is_invalid(checked_high) or proof_expr_has_move(checked_high):
+                report.proof_obligation(false)
+                proof_add_finding(report, "slice-bounds-opaque", position.line, name, "slice has no statically tracked collection bound")
+                return
+            match checked_low:
+                Ast::Expr.Absent:
+                    pass
+                _:
+                    lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, checked_low, position)
+                    lower_proven: bool = proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "slice-lower")
+                    report.proof_obligation(lower_proven)
+                    proof_add_latest_goal_finding(report, "slice-lower-unproven", position.line, name, "slice may begin before the collection") if not lower_proven
+            match checked_high:
+                Ast::Expr.Absent:
+                    pass
+                _:
+                    count: Ast::Expr = Ast::Expr.Field(object, "count", position)
+                    upper: Ast::Expr = Ast::Expr.Binary(checked_high, TokenKind.LtEq, count, position)
+                    # As with a single index, a fixed-array parameter may supply the
+                    # count relation only after the high endpoint is proved below the
+                    # declared literal extent. Dynamic views still use the normal count
+                    # obligation and therefore cannot inherit this fact.
+                    fixed_extent: i64 = proof_fixed_array_extent_for_object(object, fixed_names, fixed_extents)
+                    if fixed_extent >= 0:
+                        fixed_upper: Ast::Expr = Ast::Expr.Binary(checked_high, TokenKind.LtEq, Ast::Expr.IntLit(fixed_extent, position), position)
+                        if proof_goal(checked_facts, fixed_upper, annotations):
+                            proof_add_type_bound_fact(checked_facts, report, upper, position.line, name)
+                    upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "slice-upper")
+                    report.proof_obligation(upper_proven)
+                    proof_add_latest_goal_finding(report, "slice-upper-unproven", position.line, name, "slice may end beyond the collection") if not upper_proven
+            match checked_low:
+                Ast::Expr.Absent:
+                    pass
+                _:
+                    match checked_high:
+                        Ast::Expr.Absent:
+                            pass
+                        _:
+                            ordered: Ast::Expr = Ast::Expr.Binary(checked_low, TokenKind.LtEq, checked_high, position)
+                            ordered_proven: bool = proof_certify_goal_with_rule(checked_facts, ordered, report, position.line, name, annotations, "slice-order")
+                            report.proof_obligation(ordered_proven)
+                            proof_add_latest_goal_finding(report, "slice-order-unproven", position.line, name, "slice bounds may be reversed") if not ordered_proven
+
+        def proof_check_index_safety_value(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, line: u32, functions: ProofFunctionTable&) -> void:
+            match expression:
+                Ast::Expr.Index(object, index, position):
+                    proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    return if proof_is_type_cast_index(object)
+                    proof_check_index_safety_value(index, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_index_access(object, index, position, facts, fixed_names, fixed_extents, report, name, annotations, functions)
+                Ast::Expr.IndexN(object, arguments, position):
+                    proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    for argument in arguments |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        proof_check_index_safety_value(argument, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_indexn_access(object, arguments, position, facts, fixed_names, fixed_extents, report, name, annotations, functions)
+                Ast::Expr.Paren(inner, _):
+                    proof_check_index_safety_value(inner, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_check_index_safety_value(operand, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.GetElse(guarded, _, getelse_position):
+                    # The recovery is checked in an isolated statement proof state. For a direct
+                    # index, the runtime either loads an in-range element or takes that recovery,
+                    # so ordinary lower/upper obligations would be false positives. Nested
+                    # accesses in the receiver or index remain ordinary obligations.
+                    match guarded:
+                        Ast::Expr.Index(checked_object, checked_index_position, _):
+                            proof_certify_checked_get(expression, report, name, getelse_position.line)
+                            proof_check_index_safety_value(checked_object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                            proof_check_index_safety_value(checked_index_position, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                        _:
+                            proof_check_index_safety_value(guarded, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                # `get xs[i] else fallback` is lowered by the compiler to
+                # `Binary(Index(xs, i), Else, fallback)`. The Else operator is the runtime
+                # bounds guard itself: when the index is outside the collection no element
+                # load occurs and the fallback is evaluated. Do not manufacture ordinary
+                # `0 <= i` / `i < xs.count` obligations for the guarded access. Still walk
+                # the receiver, index expression, and fallback so nested accesses, calls,
+                # and unsupported forms cannot be hidden behind the outer recovery.
+                Ast::Expr.Binary(checked_index, TokenKind.Else, checked_fallback, checked_position):
+                    match checked_index:
+                        Ast::Expr.Index(checked_object, checked_index_position, _):
+                            proof_certify_checked_index(expression, report, name, checked_position.line)
+                            proof_check_index_safety_value(checked_object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                            proof_check_index_safety_value(checked_index_position, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                            proof_check_index_safety_value(checked_fallback, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                        _:
+                            proof_check_index_safety_value(checked_index, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                            proof_check_index_safety_value(checked_fallback, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Binary(left, binary_operator, right, _):
+                    proof_check_index_safety_value(left, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    # `index < xs.count and xs[index] > 0` is the idiomatic guard, and the one
+                    # every accessor over a parallel state array in this codebase is written with.
+                    # The right operand of `and` is evaluated only when the left is true, and the
+                    # right of `or` only when it is false, so an obligation inside it is discharged
+                    # under that condition exactly as the body of an `if` is -- which already
+                    # worked, and was the only spelling that did.
+                    #
+                    # The guard must be a stable term for the reason a branch condition must: a
+                    # call in it is a second call when the fact is used, so a guard carrying one
+                    # records nothing and the operand is checked against the facts already standing.
+                    short_circuit: bool = binary_operator == TokenKind.And or binary_operator == TokenKind.Or
+                    if short_circuit and not proof_expr_has_call(left) and not proof_expr_has_move(left) and proof_expr_supported(left):
+                        guarded_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        guard_position: Ast::Pos = Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}
+                        if binary_operator == TokenKind.And:
+                            proof_add_branch_condition_facts(guarded_facts, report, left, line, name)
+                        else:
+                            proof_add_branch_condition_facts(guarded_facts, report, proof_branch_negation(left, guard_position), line, name)
+                        proof_check_index_safety_value(right, guarded_facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    else:
+                        proof_check_index_safety_value(right, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_check_index_safety_value(callee, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    for argument in arguments |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        proof_check_index_safety_value(argument, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Field(object, _, _):
+                    proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Scope(base, _, _):
+                    proof_check_index_safety_value(base, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Slice(object, low, high, position):
+                    proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_index_safety_value(low, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_index_safety_value(high, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_slice_access(object, low, high, position, facts, fixed_names, fixed_extents, report, name, annotations, functions)
+                Ast::Expr.Move(operand, _):
+                    proof_check_index_safety_value(operand, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_check_index_safety_value(operand, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        proof_check_index_safety_value(element, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        proof_check_index_safety_value(element, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        proof_check_index_safety_value(element, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        proof_check_index_safety_value(entry.key, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                        proof_check_index_safety_value(entry.value, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        proof_check_index_safety_value(field.value, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_check_index_safety_value(base, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    for field in fields |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        proof_check_index_safety_value(field.value, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_check_index_safety_value(condition, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_index_safety_value(then_expr, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_index_safety_value(else_expr, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_check_index_safety_value(iterable, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_index_safety_value(condition, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_index_safety_value(body, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_check_index_safety_value(base, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                    proof_check_index_safety_value(predicate, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                proof_check_index_safety_value(initializer, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                            _:
+                                pass
+                    proof_check_index_safety_value(value, facts, fixed_names, fixed_extents, report, name, annotations, line, functions)
+                _:
+                    pass
+

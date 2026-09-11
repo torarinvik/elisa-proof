@@ -1,0 +1,417 @@
+extend ElisaProof:
+    private:
+        def proof_resource_record_lend_call[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, callee_name: sview, callee_index: usize, mapped: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> bool:
+            # The argument mode is the actual's own shape, exactly as on the summary path, so the
+            # kernel decodes the lent place with the same routine. The event kind is what carries
+            # the claim that every one of them is lent as a shared capability.
+            return false if callee_name == ""
+            return false if callee_index >= functions.param_starts.count or callee_index >= functions.param_counts.count
+            return false if mapped.count != functions.param_counts[callee_index]
+            param_start: usize = functions.param_starts[callee_index]
+            encoded_arguments: mutable darray[usize] = []
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, report, encoded_arguments|:
+                actual: Ast::Expr = mapped[parameter_index]
+                encoded: mutable usize = proof_kernel_encode_expression(actual, &report.kernel_nodes, &report.kernel_children)
+                match actual:
+                    Ast::Expr.Unary(operator, operand, _):
+                        encoded <- proof_resource_encode_access_place(operand, report) if operator == TokenKind.Ampersand
+                    Ast::Expr.Paren(inner, _):
+                        match inner:
+                            Ast::Expr.Unary(operator, operand, _):
+                                encoded <- proof_resource_encode_access_place(operand, report) if operator == TokenKind.Ampersand
+                            _:
+                                pass
+                    _:
+                        pass
+                return false if encoded >= report.kernel_nodes.count
+                encoded_arguments.push(encoded)
+            argument_kinds: mutable darray[sview] = []
+            for parameter_index in 0..<mapped.count |parameter_index, mapped, state, report, argument_kinds|:
+                kind: sview = proof_resource_call_argument_kind(mapped[parameter_index], state, report)
+                return false if kind != "value" and kind != "borrow" and kind != "reference"
+                argument_kinds.push(kind)
+            start: usize = report.kernel_children.count
+            for parameter_index in 0..<mapped.count |parameter_index, encoded_arguments, argument_kinds, report, functions, param_start|:
+                return false if param_start + parameter_index >= functions.all_params.count
+                child: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-arg", argument_kinds[parameter_index], encoded_arguments[parameter_index], 0, 0, 0, 0, 0, functions.all_params[param_start + parameter_index], "")
+                report.kernel_children.push(child)
+            # The callee's declared parameter modes are the whole premise of the rule, so they are
+            # recorded alongside the actuals rather than left as the producer's word. Replay pairs
+            # each formal with its actual and re-derives the permission each mode requires, and
+            # over-approximates an exclusive formal by a write to the whole lent place.
+            for parameter_index in 0..<mapped.count |parameter_index, report, functions, param_start|:
+                slot: usize = param_start + parameter_index
+                return false if slot >= functions.all_params.count or slot >= functions.all_parameter_references.count or slot >= functions.all_parameter_mutable_references.count
+                reference_formal: bool = functions.all_parameter_references[slot]
+                exclusive_formal: bool = functions.all_parameter_mutable_references[slot]
+                return false if exclusive_formal and not reference_formal
+                shared_mode: sview = "external-shared" if reference_formal else "value"
+                mode: sview = "external-mutable" if exclusive_formal else shared_mode
+                formal_region: sview = proof_resource_function_parameter_region(functions, callee_index, parameter_index)
+                formal: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-formal", mode, 0, 0, 0, 0, 0, 0, functions.all_params[slot], formal_region)
+                report.kernel_children.push(formal)
+            lend_formal_regions: mutable darray[sview] = []
+            lend_actual_regions: mutable darray[sview] = []
+            lend_frame_pinned: mutable bool = false
+            return false if not proof_resource_collect_call_regions_framed(state, functions, callee_index, mapped, &lend_formal_regions, &lend_actual_regions, &lend_frame_pinned, report, true)
+            for region_index in 0..<lend_formal_regions.count |region_index, lend_formal_regions, lend_actual_regions, report|:
+                region_child: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-region", "param", 0, 0, 0, 0, 0, 0, lend_formal_regions[region_index], lend_actual_regions[region_index])
+                report.kernel_children.push(region_child)
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-lend", "", 0, lend_formal_regions.count, mapped.count, start, mapped.count * 2 + lend_formal_regions.count, 0, callee_name, "")
+            state.trace_events.push(event)
+            return true
+
+        def proof_resource_lookup(state: ProofResourceState&, name: sview) -> usize:
+            index: mutable usize = state.binding_names.count
+            while index > 0 |index, state, name|:
+                index <- index - 1
+                return index if state.binding_names[index] == name
+            return state.binding_names.count
+
+        def proof_resource_binding_is_moved(state: ProofResourceState&, slot: usize) -> bool:
+            return slot < state.binding_moved.count and state.binding_moved[slot]
+
+        # A whole binding write needs mutable storage. Mutable references are writable by their
+        # type; ordinary bindings carry the explicit `mutable` capability bit. Path writes are
+        # checked separately because struct fields may be mutable even when their root is not.
+        def proof_resource_binding_is_writable(state: ProofResourceState&, slot: usize) -> bool:
+            is_reference: bool = slot < state.binding_reference.count and state.binding_reference[slot]
+            if is_reference:
+                return slot < state.binding_mutable_reference.count and state.binding_mutable_reference[slot]
+            return slot < state.binding_writable.count and state.binding_writable[slot]
+
+        def proof_resource_mark_binding_moved(state: mutable ProofResourceState&, slot: usize) -> void:
+            state.binding_moved[slot] <- true if slot < state.binding_moved.count
+
+        def proof_resource_has_borrow_for(state: ProofResourceState&, target_slot: usize, except_slot: usize) -> bool:
+            for index in 0..<state.borrow_target_slots.count |index, state, target_slot, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and state.borrow_target_slots[index] == target_slot
+            return false
+
+        def proof_resource_has_mutable_borrow_for(state: ProofResourceState&, target_slot: usize, except_slot: usize) -> bool:
+            for index in 0..<state.borrow_target_slots.count |index, state, target_slot, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and state.borrow_target_slots[index] == target_slot and index < state.borrow_mutable.count and state.borrow_mutable[index]
+            return false
+
+        def proof_resource_has_borrow_overlap[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: ProofResourcePlace, except_slot: usize) -> bool:
+            return false if target.root == ""
+            for index in 0..<state.borrow_target_places.count |index, state, report, target, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and proof_resource_places_overlap(state, report, state.borrow_target_places[index], target)
+            return false
+
+        def proof_resource_has_mutable_borrow_overlap[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: ProofResourcePlace, except_slot: usize) -> bool:
+            return false if target.root == ""
+            for index in 0..<state.borrow_target_places.count |index, state, report, target, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and index < state.borrow_mutable.count and state.borrow_mutable[index] and proof_resource_places_overlap(state, report, state.borrow_target_places[index], target)
+            return false
+
+        # Read-only callers such as contract escape diagnostics must not emit resource proof
+        # events. Root equality is intentionally conservative here; the permission transitions
+        # above use the fact-aware mutable relation when they decide acceptance.
+        def proof_resource_has_borrow_overlap_readonly(state: ProofResourceState&, target: ProofResourcePlace, except_slot: usize) -> bool:
+            return false if target.root == ""
+            for index in 0..<state.borrow_target_places.count |index, state, target, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and state.borrow_target_places[index].root == target.root
+            return false
+
+        def proof_resource_add_failing_obligation(report: mutable ProofReport&, kind: sview, position: Ast::Pos, function_name: sview, message: sview) -> void:
+            report.proof_obligation(false)
+            proof_add_finding(report, kind, position.line, function_name, message)
+
+        def proof_resource_expr_has_call(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_has_call(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_resource_expr_has_call(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_resource_expr_has_call(left) or proof_resource_expr_has_call(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_has_call(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_has_call(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_resource_expr_has_call(object) or proof_resource_expr_has_call(index)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_resource_expr_has_call(object)
+                    for argument in arguments:
+                        return true if proof_resource_expr_has_call(argument)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_resource_expr_has_call(object) or proof_resource_expr_has_call(low) or proof_resource_expr_has_call(high)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_resource_expr_has_call(condition) or proof_resource_expr_has_call(then_expression) or proof_resource_expr_has_call(else_expression)
+                Ast::Expr.Move(operand, _):
+                    return proof_resource_expr_has_call(operand)
+                _:
+                    return false
+
+        def proof_resource_expr_has_move(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Move(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_has_move(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_resource_expr_has_move(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_resource_expr_has_move(left) or proof_resource_expr_has_move(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_has_move(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_has_move(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_resource_expr_has_move(object) or proof_resource_expr_has_move(index)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_resource_expr_has_move(object)
+                    for argument in arguments:
+                        return true if proof_resource_expr_has_move(argument)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_resource_expr_has_move(object) or proof_resource_expr_has_move(low) or proof_resource_expr_has_move(high)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_resource_expr_has_move(condition) or proof_resource_expr_has_move(then_expression) or proof_resource_expr_has_move(else_expression)
+                _:
+                    return false
+
+        def proof_resource_add_binding[@s](state: mutable ProofResourceState& @s, name: sview, is_reference: bool, is_mutable_reference: bool, is_writable: bool, target_slot: usize, borrow_is_mutable: bool, target_place: ProofResourcePlace) -> void:
+            borrow_is_present: bool = target_slot < state.binding_names.count
+            state.binding_names.push(name)
+            state.binding_reference.push(is_reference)
+            state.binding_mutable_reference.push(is_mutable_reference)
+            state.binding_writable.push(is_writable)
+            state.binding_moved.push(false)
+            state.binding_region.push("")
+            state.binding_region_live.push(false)
+            state.binding_region_owner.push(false)
+            state.binding_scalar.push(false)
+            state.binding_extent.push(false)
+            state.borrow_target_slots.push(target_slot)
+            state.borrow_target_places.push(target_place)
+            state.borrow_mutable.push(borrow_is_mutable)
+            state.borrow_present.push(borrow_is_present)
+
+        def proof_resource_expr_has_address_of(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Unary(operator, operand, _):
+                    return true if operator == TokenKind.Ampersand
+                    return proof_resource_expr_has_address_of(operand)
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_has_address_of(inner)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_resource_expr_has_address_of(left) or proof_resource_expr_has_address_of(right)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_resource_expr_has_address_of(callee)
+                    for argument in arguments |argument|:
+                        return true if proof_resource_expr_has_address_of(argument)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_has_address_of(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_has_address_of(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_resource_expr_has_address_of(object) or proof_resource_expr_has_address_of(index)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_resource_expr_has_address_of(object)
+                    for argument in arguments |argument|:
+                        return true if proof_resource_expr_has_address_of(argument)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_resource_expr_has_address_of(object) or proof_resource_expr_has_address_of(low) or proof_resource_expr_has_address_of(high)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_resource_expr_has_address_of(operand)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |element|:
+                        return true if proof_resource_expr_has_address_of(element)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |element|:
+                        return true if proof_resource_expr_has_address_of(element)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |element|:
+                        return true if proof_resource_expr_has_address_of(element)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry|:
+                        return true if proof_resource_expr_has_address_of(entry.key) or proof_resource_expr_has_address_of(entry.value)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |field|:
+                        return true if proof_resource_expr_has_address_of(field.value)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_resource_expr_has_address_of(base)
+                    for field in fields |field|:
+                        return true if proof_resource_expr_has_address_of(field.value)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_resource_expr_has_address_of(condition) or proof_resource_expr_has_address_of(then_expr) or proof_resource_expr_has_address_of(else_expr)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_resource_expr_has_address_of(iterable) or proof_resource_expr_has_address_of(condition) or proof_resource_expr_has_address_of(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_resource_expr_has_address_of(base) or proof_resource_expr_has_address_of(predicate)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_resource_expr_has_address_of(scrutinee)
+                    for arm in arms |arm|:
+                        return true if proof_resource_expr_has_address_of(arm.guard)
+                        return true if proof_resource_statements_have_address_of(arm.body)
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_resource_expr_has_address_of(guarded)
+                    for arm in arms |arm|:
+                        return true if proof_resource_expr_has_address_of(arm.guard)
+                        return true if proof_resource_statements_have_address_of(arm.body)
+                    return false
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_resource_expr_has_address_of(guarded) or proof_resource_statements_have_address_of(recovery)
+                Ast::Expr.Lambda(_, body, _):
+                    return proof_resource_statements_have_address_of(body)
+                Ast::Expr.Block(statements, value, _, _):
+                    return proof_resource_statements_have_address_of(statements) or proof_resource_expr_has_address_of(value)
+                _:
+                    return false
+
+        def proof_resource_statements_have_address_of(statements: darray[Ast::Stmt]&) -> bool:
+            for statement in statements:
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return true if proof_resource_expr_has_address_of(initializer)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return true if proof_resource_expr_has_address_of(target) or proof_resource_expr_has_address_of(initializer)
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_resource_expr_has_address_of(expression)
+                    Ast::Stmt.Return(value, _):
+                        return true if value is returned and proof_resource_expr_has_address_of(returned)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_resource_expr_has_address_of(condition) or proof_resource_statements_have_address_of(then_body) or proof_resource_statements_have_address_of(else_body)
+                    Ast::Stmt.While(condition, while_body, _):
+                        return true if proof_resource_expr_has_address_of(condition) or proof_resource_statements_have_address_of(while_body)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        return true if proof_resource_expr_has_address_of(iterable) or proof_resource_statements_have_address_of(for_body)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_resource_expr_has_address_of(scrutinee)
+                        for arm in arms |arm|:
+                            return true if proof_resource_expr_has_address_of(arm.guard) or proof_resource_statements_have_address_of(arm.body)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        return true if proof_resource_statements_have_address_of(block_body)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_resource_expr_has_address_of(expression)
+                    _:
+                        pass
+            return false
+
+        def proof_resource_expr_uses_local_borrow(expression: Ast::Expr, state: ProofResourceState&) -> bool:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    slot: usize = proof_resource_lookup(state, name)
+                    return slot < state.borrow_present.count and state.borrow_present[slot]
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_resource_expr_uses_local_borrow(operand, state)
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_uses_local_borrow(inner, state)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_resource_expr_uses_local_borrow(left, state) or proof_resource_expr_uses_local_borrow(right, state)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_resource_expr_uses_local_borrow(callee, state)
+                    for argument in arguments |argument, state|:
+                        return true if proof_resource_expr_uses_local_borrow(argument, state)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_expr_uses_local_borrow(object, state)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_expr_uses_local_borrow(base, state)
+                Ast::Expr.Index(object, index, _):
+                    return proof_resource_expr_uses_local_borrow(object, state) or proof_resource_expr_uses_local_borrow(index, state)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_resource_expr_uses_local_borrow(object, state)
+                    for argument in arguments |argument, state|:
+                        return true if proof_resource_expr_uses_local_borrow(argument, state)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_resource_expr_uses_local_borrow(object, state) or proof_resource_expr_uses_local_borrow(low, state) or proof_resource_expr_uses_local_borrow(high, state)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_resource_expr_uses_local_borrow(operand, state)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |element, state|:
+                        return true if proof_resource_expr_uses_local_borrow(element, state)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |element, state|:
+                        return true if proof_resource_expr_uses_local_borrow(element, state)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, state|:
+                        return true if proof_resource_expr_uses_local_borrow(element, state)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, state|:
+                        return true if proof_resource_expr_uses_local_borrow(entry.key, state) or proof_resource_expr_uses_local_borrow(entry.value, state)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |field, state|:
+                        return true if proof_resource_expr_uses_local_borrow(field.value, state)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_resource_expr_uses_local_borrow(base, state)
+                    for field in fields |field, state|:
+                        return true if proof_resource_expr_uses_local_borrow(field.value, state)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_resource_expr_uses_local_borrow(condition, state) or proof_resource_expr_uses_local_borrow(then_expr, state) or proof_resource_expr_uses_local_borrow(else_expr, state)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_resource_expr_uses_local_borrow(iterable, state) or proof_resource_expr_uses_local_borrow(condition, state) or proof_resource_expr_uses_local_borrow(body, state)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_resource_expr_uses_local_borrow(base, state) or proof_resource_expr_uses_local_borrow(predicate, state)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_resource_expr_uses_local_borrow(scrutinee, state)
+                    for arm in arms |arm, state|:
+                        return true if proof_resource_expr_uses_local_borrow(arm.guard, state)
+                        return true if proof_resource_statements_use_local_borrow(arm.body, state)
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_resource_expr_uses_local_borrow(guarded, state)
+                    for arm in arms |arm, state|:
+                        return true if proof_resource_expr_uses_local_borrow(arm.guard, state)
+                        return true if proof_resource_statements_use_local_borrow(arm.body, state)
+                    return false
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_resource_expr_uses_local_borrow(guarded, state) or proof_resource_statements_use_local_borrow(recovery, state)
+                Ast::Expr.Lambda(_, body, _):
+                    return proof_resource_statements_use_local_borrow(body, state)
+                Ast::Expr.Block(statements, value, _, _):
+                    return proof_resource_statements_use_local_borrow(statements, state) or proof_resource_expr_uses_local_borrow(value, state)
+                _:
+                    return false
+
+        def proof_resource_statements_use_local_borrow(statements: darray[Ast::Stmt]&, state: ProofResourceState&) -> bool:
+            for statement in statements:
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return true if proof_resource_expr_uses_local_borrow(initializer, state)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return true if proof_resource_expr_uses_local_borrow(target, state) or proof_resource_expr_uses_local_borrow(initializer, state)
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_resource_expr_uses_local_borrow(expression, state)
+                    Ast::Stmt.Return(value, _):
+                        return true if value is returned and proof_resource_expr_uses_local_borrow(returned, state)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_resource_expr_uses_local_borrow(condition, state) or proof_resource_statements_use_local_borrow(then_body, state) or proof_resource_statements_use_local_borrow(else_body, state)
+                    Ast::Stmt.While(condition, while_body, _):
+                        return true if proof_resource_expr_uses_local_borrow(condition, state) or proof_resource_statements_use_local_borrow(while_body, state)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        return true if proof_resource_expr_uses_local_borrow(iterable, state) or proof_resource_statements_use_local_borrow(for_body, state)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_resource_expr_uses_local_borrow(scrutinee, state)
+                        for arm in arms |arm, state|:
+                            return true if proof_resource_expr_uses_local_borrow(arm.guard, state) or proof_resource_statements_use_local_borrow(arm.body, state)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        return true if proof_resource_statements_use_local_borrow(block_body, state)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_resource_expr_uses_local_borrow(expression, state)
+                    _:
+                        pass
+            return false
+

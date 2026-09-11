@@ -1,0 +1,54 @@
+extend ElisaProof:
+    public:
+        # Standalone provenance entry point for auditors and adversarial harnesses. Require both
+        # independently implemented views so this audit API detects drift between source-level
+        # reconstruction and the authoritative source-neutral kernel trace.
+        def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool:
+            return false if trace_index >= report.fact_traces.count
+            trace: ProofFactTrace = report.fact_traces[trace_index]
+            dependency_stack: mutable darray[sview] = [trace.name]
+            return proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack) and proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, true)
+
+        def proof_replay_fact_trace_index(report: ProofReport&, fact: Ast::Expr, owner: sview) -> usize:
+            for index in 0..<report.fact_traces.count |index, report, fact, owner|:
+                trace: ProofFactTrace = report.fact_traces[index]
+                if trace.name == owner and proof_replay_expr_equal(trace.expression, fact):
+                    return index
+            return report.fact_traces.count
+
+        def proof_replay_fact_origin(report: ProofReport&, fact: Ast::Expr, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
+            index: usize = proof_replay_fact_trace_index(report, fact, owner)
+            return (true, report.fact_traces[index].kind, report.fact_traces[index].line, report.fact_traces[index].name, report.fact_traces[index].dependency, report.fact_traces[index].premises_count) if index < report.fact_traces.count
+            return (false, "", 0, "", "", 0)
+
+        def proof_replay_cache_fact_origins(report: mutable ProofReport&) -> void:
+            sentinel: usize = report.fact_traces.count
+            report.fact_origin_trace_indices.clear()
+            report.fact_origin_trace_indices.resize(report.certificate_facts.count)
+            for index in 0..<report.fact_origin_trace_indices.count |index, report, sentinel|:
+                report.fact_origin_trace_indices[index] <- sentinel
+            for certificate in report.certificates |certificate, report|:
+                return if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
+                for offset in 0..<certificate.facts_count |offset, certificate, report|:
+                    fact_index: usize = certificate.facts_start + offset
+                    report.fact_origin_trace_indices[fact_index] <- proof_replay_fact_trace_index(report, report.certificate_facts[fact_index], certificate.name)
+
+        def proof_replay_fact_origin_at(report: ProofReport&, fact_index: usize, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
+            if fact_index < report.fact_origin_trace_indices.count:
+                trace_index: usize = report.fact_origin_trace_indices[fact_index]
+                if trace_index < report.fact_traces.count and report.fact_traces[trace_index].name == owner:
+                    cached: ProofFactTrace = report.fact_traces[trace_index]
+                    return (true, cached.kind, cached.line, cached.name, cached.dependency, cached.premises_count)
+            return proof_replay_fact_origin(report, report.certificate_facts[fact_index], owner) if fact_index < report.certificate_facts.count
+            return (false, "", 0, "", "", 0)
+
+        def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> void:
+            report.kernel_arena_validated <- ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel_nodes, &report.kernel_children)
+            for index in 0..<report.certificates.count |index, report|:
+                replayed: bool = proof_replay_certificate(report, report.certificates[index])
+                report.certificates[index].replayed <- replayed
+                if replayed:
+                    report.replayed <- report.replayed + 1
+                else:
+                    report.replay_gaps <- report.replay_gaps + 1
+            proof_replay_cache_fact_origins(report)

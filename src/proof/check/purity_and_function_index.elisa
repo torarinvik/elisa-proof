@@ -1,0 +1,417 @@
+extend ElisaProof:
+    private:
+        def proof_parameter_type_is_mutable(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Unary(operator, operand, _):
+                    return true if operator == TokenKind.Mutable or operator == TokenKind.Lmut
+                    return proof_parameter_type_is_mutable(operand)
+                Ast::Expr.Binary(left, _, _, _):
+                    return proof_parameter_type_is_mutable(left)
+                Ast::Expr.Paren(inner, _):
+                    return proof_parameter_type_is_mutable(inner)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_parameter_type_is_mutable(base)
+                _:
+                    return false
+
+        def proof_expr_mentions_any_global(expression: Ast::Expr, mutable_globals: darray[sview]&) -> bool:
+            for global_name in mutable_globals:
+                return true if proof_expr_mentions_name(expression, global_name)
+            return false
+
+        # A total pure summary cannot observe mutable ambient state. The compiler parser records
+        # `global mutable` declarations in its annotation side table; reject those names in every
+        # expression of the candidate body/defaults. Name collisions with a local are rejected
+        # conservatively because this kernel does not carry binding identities through the AST.
+        def proof_pure_body_reads_mutable_global(body: darray[Ast::Stmt]&, mutable_globals: darray[sview]&) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return true if proof_expr_mentions_any_global(returned, mutable_globals)
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_expr_mentions_any_global(expression, mutable_globals)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return true if proof_expr_mentions_any_global(initializer, mutable_globals)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_expr_mentions_any_global(condition, mutable_globals) or proof_pure_body_reads_mutable_global(then_body, mutable_globals) or proof_pure_body_reads_mutable_global(else_body, mutable_globals)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_expr_mentions_any_global(expression, mutable_globals)
+                    _:
+                        return true
+            return false
+
+        def proof_pure_body_direct(body: darray[Ast::Stmt]&) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return false if not proof_expr_supported(returned)
+                            return false if not proof_pure_expression_shape(returned)
+                    Ast::Stmt.Expr(expression, _):
+                        return false if not proof_expr_supported(expression)
+                        return false if not proof_pure_expression_shape(expression)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return false if not proof_expr_supported(initializer)
+                        return false if not proof_pure_expression_shape(initializer)
+                    Ast::Stmt.Assign(_, _, _, _):
+                        return false
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if not proof_expr_supported(condition)
+                        return false if not proof_pure_expression_shape(condition)
+                        return false if not proof_pure_body_direct(then_body) or not proof_pure_body_direct(else_body)
+                    Ast::Stmt.While(_, _, _):
+                        return false
+                    Ast::Stmt.For(_, _, _, _, _):
+                        return false
+                    Ast::Stmt.Match(_, _, _):
+                        return false
+                    Ast::Stmt.Block(_, _, _, _, _):
+                        return false
+                    Ast::Stmt.Contract(kind, expression, _):
+                        return false if kind != "requires" and kind != "ensure" and kind != "decreases" and kind != "decreases*"
+                        return false if proof_expr_has_old(expression) or proof_expr_has_call(expression) or not proof_expr_supported(expression)
+                    Ast::Stmt.Break(_, _):
+                        return false
+                    Ast::Stmt.Continue(_, _):
+                        return false
+                    Ast::Stmt.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
+
+        def proof_function_is_directly_pure(functions: ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, mutable_globals: darray[sview]&) -> bool:
+            return false if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
+            return false if function_index >= functions.requires_counts.count or function_index >= functions.changes_counts.count or function_index >= functions.preserves_counts.count
+            return false if functions.requires_counts[function_index] > 0 or functions.changes_counts[function_index] > 0 or functions.preserves_counts[function_index] > 0
+            return false if effects.count > 0
+            param_start: usize = functions.param_starts[function_index]
+            return false if function_index >= functions.param_counts.count or functions.param_counts[function_index] != parameters.count
+            for parameter_index in 0..<parameters.count |parameter_index, functions, param_start|:
+                slot: usize = param_start + parameter_index
+                return false if slot >= functions.all_parameter_mutable.count or functions.all_parameter_mutable[slot] or parameter_index >= parameters.count or parameters[parameter_index].is_mutable or proof_parameter_type_is_mutable(parameters[parameter_index].type_expression)
+                if parameters[parameter_index].has_default:
+                    # Defaults execute when the argument is omitted. Their call edges are added
+                    # to the same fixed-point graph as body calls, so only verified pure calls
+                    # can participate in a pure function's default computation.
+                    return false if not proof_expr_supported(parameters[parameter_index].default_value)
+                    return false if not proof_pure_expression_shape(parameters[parameter_index].default_value)
+                    return false if proof_expr_has_old(parameters[parameter_index].default_value)
+                    return false if proof_expr_mentions_any_global(parameters[parameter_index].default_value, mutable_globals)
+            return false if proof_pure_body_reads_mutable_global(body, mutable_globals)
+            return proof_pure_body_direct(body)
+
+        def proof_recursive_purity_eligible(functions: ProofFunctionTable&, function_index: usize) -> bool:
+            return false if function_index >= functions.recursive.count or not functions.recursive[function_index]
+            return false if function_index >= functions.decreases_counts.count or function_index >= functions.decreases_unbounded.count or function_index >= functions.decreases_starts.count
+            return false if functions.decreases_counts[function_index] == 0 or functions.decreases_unbounded[function_index]
+            return proof_decreases_range_valid(functions.decreases_starts[function_index], functions.decreases_counts[function_index], functions.all_decreases.count)
+
+        # Recursive purity is a component certificate, not a per-edge shortcut. In particular,
+        # one locally pure member must not become pure by pointing at another member whose body
+        # reaches an unknown or effectful function. Inspect every member and every outgoing edge
+        # together before allowing any recursive summary edge in the fixed point.
+        def proof_recursive_component_is_pure_candidate(functions: ProofFunctionTable&, source: usize) -> bool:
+            return false if source >= functions.names.count
+            member_index: mutable usize = 0
+            while member_index < functions.names.count |member_index, functions, source|:
+                if proof_functions_same_recursive_component(functions, source, member_index):
+                    return false if member_index >= functions.direct_pure.count or not functions.direct_pure[member_index]
+                    return false if not proof_recursive_purity_eligible(functions, member_index)
+                    return false if member_index >= functions.call_starts.count or member_index >= functions.call_counts.count
+                    member_start: usize = functions.call_starts[member_index]
+                    member_count: usize = functions.call_counts[member_index]
+                    return false if member_start > functions.all_calls.count or member_count > functions.all_calls.count - member_start
+                    for call_offset in 0..<member_count |call_offset, member_start, functions, source|:
+                        called: sview = functions.all_calls[member_start + call_offset]
+                        return false if called == "__opaque_call__"
+                        called_index: usize = proof_function_index(functions, called)
+                        return false if called_index >= functions.names.count
+                        if not proof_functions_same_recursive_component(functions, source, called_index):
+                            return false if called_index >= functions.pure.count or not functions.pure[called_index]
+                member_index <- member_index + 1
+            return true
+
+        # A recursive pure function may use calls within its own SCC as total values only when
+        # every recursive member has an explicit bounded decreases tuple and a declaration-local
+        # purity certificate. The ordinary call checker still proves each edge's nonnegativity
+        # and strict descent while checking the bodies; this helper only opens the summary fixed
+        # point for that already-certified recursive component.
+        def proof_function_calls_are_pure(functions: ProofFunctionTable&, function_index: usize, allow_recursive_component: bool) -> bool:
+            return false if function_index >= functions.call_starts.count or function_index >= functions.call_counts.count
+            start: usize = functions.call_starts[function_index]
+            count: usize = functions.call_counts[function_index]
+            return false if start > functions.all_calls.count or count > functions.all_calls.count - start
+            for offset in 0..<count |offset, start, functions, function_index, allow_recursive_component|:
+                called: sview = functions.all_calls[start + offset]
+                called_index: usize = proof_function_index(functions, called)
+                return false if called == "__opaque_call__"
+                continue if called_index < functions.pure.count and functions.pure[called_index]
+                recursive_member: bool = allow_recursive_component and called_index < functions.recursive.count and functions.recursive[called_index] and proof_functions_same_recursive_component(functions, function_index, called_index)
+                continue if recursive_member and proof_recursive_component_is_pure_candidate(functions, function_index)
+                return false
+            return true
+
+        # Compute declaration-local purity before the call-graph fixed point. This pass must cover
+        # the complete table first: otherwise a mutually recursive pair would be classified based
+        # on declaration order rather than on the properties of the entire component.
+        def proof_mark_direct_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, mutable_globals: darray[sview]&) -> void:
+            for declaration in declarations |file, functions, cursor, mutable_globals|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, effects, _, _):
+                        # The executable table already excludes lemmas. Resolve the declaration
+                        # through that indexed table instead of rescanning every annotation.
+                        continue if proof_function_index(functions, name) >= functions.names.count
+                        function_index: usize = cursor
+                        cursor <- cursor + 1
+                        if function_index < functions.direct_pure.count:
+                            functions.direct_pure[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, mutable_globals)
+                    Ast::Decl.Module(_, module_body, _):
+                        proof_mark_direct_pure_functions_pass(file, module_body, functions, cursor, mutable_globals)
+                    Ast::Decl.Scoped(scoped_body, _):
+                        proof_mark_direct_pure_functions_pass(file, scoped_body, functions, cursor, mutable_globals)
+                    _:
+                        pass
+
+        # Populate purity after the complete function table exists. The fixed point admits an
+        # acyclic chain of pure calls, plus recursive SCCs whose ordinary body checker will prove
+        # bounded decreases on every edge.
+        def proof_mark_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, changed: mutable bool&) -> void:
+            for declaration in declarations |file, functions, cursor, changed|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, effects, _, _):
+                        # The executable table already excludes lemmas. Resolve the declaration
+                        # through that indexed table instead of rescanning every annotation.
+                        continue if proof_function_index(functions, name) >= functions.names.count
+                        function_index: usize = cursor
+                        cursor <- cursor + 1
+                        candidate: mutable bool = function_index < functions.direct_pure.count and functions.direct_pure[function_index]
+                        recursive_allowed: bool = proof_recursive_purity_eligible(functions, function_index)
+                        candidate <- false if function_index < functions.recursive.count and functions.recursive[function_index] and not recursive_allowed
+                        candidate <- false if not proof_function_calls_are_pure(functions, function_index, recursive_allowed)
+                        if candidate and function_index < functions.pure.count and not functions.pure[function_index]:
+                            functions.pure[function_index] <- true
+                            changed <- true
+                    Ast::Decl.Module(_, module_body, _):
+                        proof_mark_pure_functions_pass(file, module_body, functions, cursor, changed)
+                    Ast::Decl.Scoped(scoped_body, _):
+                        proof_mark_pure_functions_pass(file, scoped_body, functions, cursor, changed)
+                    _:
+                        pass
+
+        def proof_mark_pure_functions(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&) -> void:
+            functions.direct_pure.clear()
+            for _ in 0..<functions.names.count |functions|:
+                functions.direct_pure.push(false)
+            mutable_global_names: mutable darray[sview] = []
+            for annotation in file.enum_annotations |mutable_global_names|:
+                if annotation.name == "__global_mutable" and not (any existing in mutable_global_names where existing == annotation.owner):
+                    mutable_global_names.push(annotation.owner)
+            direct_cursor: mutable usize = 0
+            proof_mark_direct_pure_functions_pass(file, declarations, functions, direct_cursor, mutable_global_names)
+            functions.pure.clear()
+            for _ in 0..<functions.names.count |functions|:
+                functions.pure.push(false)
+            changed: mutable bool = true
+            pass_index: mutable usize = 0
+            while changed and pass_index <= functions.names.count |functions, declarations, changed, pass_index|:
+                changed <- false
+                cursor: mutable usize = 0
+                proof_mark_pure_functions_pass(file, declarations, functions, cursor, changed)
+                pass_index <- pass_index + 1
+
+        # Runtime calls may materialize a default that invokes a verified pure function. This is
+        # separate from the lemma mapper because erased lemma defaults remain intentionally
+        # call-free. Evaluation is left-to-right: every missing formal can depend only on earlier
+        # formals, and the resolved default must contain no unresolved formal or old-state read.
+        def proof_map_runtime_call_arguments(parameters: darray[sview]&, has_defaults: darray[bool]&, defaults: darray[Ast::Expr]&, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, mapped: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&) -> bool:
+            mapped.clear()
+            return false if argument_names.count != 0 and argument_names.count != arguments.count
+            used: mutable darray[bool] = []
+            for parameter in parameters |mapped, used|:
+                mapped.push(Ast::Expr.Absent)
+                used.push(false)
+            saw_named: mutable bool = false
+            next_positional: mutable usize = 0
+            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, parameters, mapped, used, saw_named, next_positional|:
+                label: sview = argument_names[argument_index] if argument_names.count == arguments.count else ""
+                parameter_index: mutable usize = parameters.count
+                if label == "":
+                    return false if saw_named
+                    while next_positional < parameters.count and used[next_positional] |next_positional, used, parameters|:
+                        next_positional <- next_positional + 1
+                    return false if next_positional >= parameters.count
+                    parameter_index <- next_positional
+                    next_positional <- next_positional + 1
+                else:
+                    saw_named <- true
+                    parameter_index <- proof_parameter_index(parameters, label)
+                    return false if parameter_index >= parameters.count
+                return false if used[parameter_index]
+                mapped[parameter_index] <- arguments[argument_index]
+                used[parameter_index] <- true
+            for parameter_index in 0..<parameters.count |parameter_index, used, parameters, has_defaults, defaults, mapped, functions|:
+                if not used[parameter_index]:
+                    return false if parameter_index >= has_defaults.count or parameter_index >= defaults.count or not has_defaults[parameter_index]
+                    default_expression: Ast::Expr = defaults[parameter_index]
+                    return false if not proof_expr_supported(default_expression) or proof_expr_has_old(default_expression)
+                    if parameter_index + 1 < parameters.count:
+                        for later_index in parameter_index + 1..<parameters.count |later_index, parameters, default_expression|:
+                            return false if proof_expr_mentions_name(default_expression, parameters[later_index])
+                    resolved_default: Ast::Expr = proof_substitute(default_expression, parameters, mapped)
+                    return false if not proof_expr_supported(resolved_default) or proof_expr_has_old(resolved_default)
+                    return false if proof_expr_has_call(resolved_default) and not proof_contract_calls_are_pure(resolved_default, functions)
+                    mapped[parameter_index] <- resolved_default
+                    used[parameter_index] <- true
+            return true
+
+        # Collect executable function contracts for modular call checking. The callee's
+        # contract is the only fact an ordinary call may contribute; its body is checked in the
+        # same report, so an invalid summary still makes the whole command fail.
+        def proof_collect_functions(file: Ast::File&, declarations: darray[Ast::Decl], lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&) -> void:
+            for declaration in declarations |file, lemmas, functions|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, return_type, body, declared_effects, _, position):
+                        # Lemmas are erased proof declarations, never executable summaries.
+                        # Keeping them out of this table prevents a runtime assignment or
+                        # return from manufacturing facts through a proof-only call.
+                        continue if proof_lemma_index(lemmas, name) < lemmas.names.count
+                        functions.names <- functions.names.push(name)
+                        functions.declarations <- functions.declarations.push(declaration)
+                        functions.name_hashes <- functions.name_hashes.push(proof_name_hash(name))
+                        functions.param_starts <- functions.param_starts.push(functions.all_params.count)
+                        functions.param_counts <- functions.param_counts.push(parameters.count)
+                        functions.region_param_starts <- functions.region_param_starts.push(functions.all_region_params.count)
+                        region_parameter_count: mutable usize = 0
+                        for annotation in file.local_region_annotations |functions, region_parameter_count|:
+                            if annotation.name == "__region_param" and annotation.line == position.line:
+                                functions.all_region_params <- functions.all_region_params.push(annotation.region)
+                                region_parameter_count <- region_parameter_count + 1
+                        functions.region_param_counts <- functions.region_param_counts.push(region_parameter_count)
+                        functions.all_param_region_starts <- functions.all_param_region_starts.push(functions.all_param_regions.count)
+                        for parameter in parameters |functions|:
+                            functions.all_params <- functions.all_params.push(parameter.name)
+                            functions.all_parameter_references <- functions.all_parameter_references.push(proof_resource_is_reference_type(parameter.type_expression))
+                            functions.all_parameter_mutable_references <- functions.all_parameter_mutable_references.push(proof_resource_is_mutable_reference_type(parameter.type_expression))
+                            functions.all_parameter_may_contain_float <- functions.all_parameter_may_contain_float.push(proof_type_may_contain_float(parameter.type_expression, file.top_decls, file.top_decls, 0))
+                            functions.all_parameter_target_reference_free <- functions.all_parameter_target_reference_free.push(proof_type_is_reference_free(proof_type_strip_reference(parameter.type_expression, 0), declarations, 0))
+                            functions.all_parameter_mutable <- functions.all_parameter_mutable.push(parameter.is_mutable)
+                            functions.all_has_defaults <- functions.all_has_defaults.push(parameter.has_default)
+                            functions.all_defaults <- functions.all_defaults.push(parameter.default_value)
+                            parameter_region: mutable sview = ""
+                            for annotation in file.local_region_annotations |parameter, position, parameter_region|:
+                                parameter_region <- annotation.region if annotation.name == parameter.name and annotation.line == position.line
+                            functions.all_param_regions <- functions.all_param_regions.push(parameter_region)
+                        if return_type is declared_return_type:
+                            functions.return_scalar <- functions.return_scalar.push(proof_scalar_type_kind(declared_return_type, declarations, 0) == 1)
+                            functions.return_references <- functions.return_references.push(proof_resource_is_reference_type(declared_return_type))
+                            functions.return_reference_free <- functions.return_reference_free.push(proof_type_is_reference_free(declared_return_type, declarations, 0))
+                            functions.return_mutable_references <- functions.return_mutable_references.push(proof_resource_is_mutable_reference_type(declared_return_type))
+                            functions.return_reference_parameters <- functions.return_reference_parameters.push(proof_resource_reference_return_parameter(parameters, return_type, body))
+                        else:
+                            functions.return_scalar <- functions.return_scalar.push(false)
+                            functions.return_references <- functions.return_references.push(false)
+                            functions.return_reference_free <- functions.return_reference_free.push(true)
+                            functions.return_mutable_references <- functions.return_mutable_references.push(false)
+                            functions.return_reference_parameters <- functions.return_reference_parameters.push(parameters.count)
+                        return_region: mutable sview = ""
+                        for annotation in file.local_region_annotations |position, return_region|:
+                            return_region <- annotation.region if annotation.name == "__region_return" and annotation.line == position.line
+                        functions.return_regions <- functions.return_regions.push(return_region)
+                        functions.effect_starts <- functions.effect_starts.push(functions.all_effects.count)
+                        functions.effect_counts <- functions.effect_counts.push(declared_effects.count)
+                        functions.effects_declared <- functions.effects_declared.push(declared_effects.count > 0)
+                        for effect in declared_effects |functions|:
+                            functions.all_effects <- functions.all_effects.push(effect)
+                        functions.call_starts <- functions.call_starts.push(functions.all_calls.count)
+                        call_names: mutable darray[sview] = []
+                        proof_collect_body_call_names(body, &call_names)
+                        for parameter in parameters |call_names|:
+                            proof_collect_call_names(parameter.default_value, &call_names) if parameter.has_default
+                        for called in call_names |functions|:
+                            functions.all_calls <- functions.all_calls.push(called)
+                        functions.call_counts <- functions.call_counts.push(call_names.count)
+                        functions.requires_starts <- functions.requires_starts.push(functions.all_requires.count)
+                        functions.ensure_starts <- functions.ensure_starts.push(functions.all_ensures.count)
+                        functions.changes_starts <- functions.changes_starts.push(functions.all_changes.count)
+                        functions.preserves_starts <- functions.preserves_starts.push(functions.all_preserves.count)
+                        functions.decreases_starts <- functions.decreases_starts.push(functions.all_decreases.count)
+                        decreases_components: mutable darray[Ast::Expr] = []
+                        has_unbounded_decreases: mutable bool = false
+                        for statement in body |functions, decreases_components, has_unbounded_decreases|:
+                            match statement:
+                                Ast::Stmt.Contract(kind, expression, _):
+                                    if kind == "decreases":
+                                        proof_decreases_components(expression, &decreases_components)
+                                    if kind == "decreases*":
+                                        has_unbounded_decreases <- true
+                                _:
+                                    pass
+                        if decreases_components.count == 0 and not has_unbounded_decreases:
+                            inferred: (known: bool, parameter: sview, position: usize, type_name: sview) = proof_infer_structural_decrease(file, parameters)
+                            if inferred.known:
+                                decreases_components.push(Ast::Expr.Ident(inferred.parameter, position))
+                        functions.all_decreases.extend(decreases_components)
+                        functions.decreases_counts <- functions.decreases_counts.push(decreases_components.count)
+                        functions.decreases_unbounded <- functions.decreases_unbounded.push(has_unbounded_decreases)
+                        structural_measure: mutable bool = false
+                        structural_subject_position: mutable usize = parameters.count
+                        structural_subject_type: mutable sview = ""
+                        if decreases_components.count == 1:
+                            structural_subject: sview = proof_ident_name(decreases_components[0])
+                            structural_subject_position <- proof_enum_parameter_position(file.top_decls, parameters, structural_subject)
+                            structural_measure <- structural_subject_position < parameters.count
+                            structural_subject_type <- proof_callable_name(parameters[structural_subject_position].type_expression) if structural_measure
+                        functions.structural <- functions.structural.push(structural_measure)
+                        functions.structural_subject_positions <- functions.structural_subject_positions.push(structural_subject_position)
+                        functions.structural_subject_types <- functions.structural_subject_types.push(structural_subject_type)
+                        requires_count: mutable usize = 0
+                        ensures_count: mutable usize = 0
+                        for statement in body |functions, requires_count, ensures_count|:
+                            match statement:
+                                Ast::Stmt.Contract(kind, expression, _):
+                                    if kind == "requires":
+                                        functions.all_requires <- functions.all_requires.push(expression)
+                                        requires_count <- requires_count + 1
+                                    if kind == "ensure":
+                                        functions.all_ensures <- functions.all_ensures.push(expression)
+                                        ensures_count <- ensures_count + 1
+                                _:
+                                    pass
+                        signature_requires: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "requires")
+                        signature_ensures: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "ensure")
+                        functions.all_requires.extend(signature_requires)
+                        functions.all_ensures.extend(signature_ensures)
+                        requires_count <- requires_count + signature_requires.count
+                        ensures_count <- ensures_count + signature_ensures.count
+                        functions.requires_counts <- functions.requires_counts.push(requires_count)
+                        functions.ensure_counts <- functions.ensure_counts.push(ensures_count)
+                        changes_before: usize = functions.all_changes.count
+                        preserves_before: usize = functions.all_preserves.count
+                        for statement in body |functions|:
+                            match statement:
+                                Ast::Stmt.Contract(contract_kind, expression, _):
+                                    decoded: (known: bool, place: ProofFramePlace) = proof_frame_place(expression)
+                                    functions.all_changes <- functions.all_changes.push(decoded.place) if contract_kind == "changes" and decoded.known
+                                    functions.all_preserves <- functions.all_preserves.push(decoded.place) if contract_kind == "preserves" and decoded.known
+                                _:
+                                    pass
+                        proof_frame_collect_annotations(file, name, &functions.all_changes, &functions.all_preserves)
+                        functions.changes_counts <- functions.changes_counts.push(functions.all_changes.count - changes_before)
+                        functions.preserves_counts <- functions.preserves_counts.push(functions.all_preserves.count - preserves_before)
+                    Ast::Decl.Module(_, module_body, _):
+                        proof_collect_functions(file, module_body, lemmas, functions)
+                    Ast::Decl.Scoped(scoped_body, _):
+                        proof_collect_functions(file, scoped_body, lemmas, functions)
+                    _:
+                        pass
+
+        # Apply an executable call summary. An explicit, checked `changes` frame allows facts
+        # about disjoint places to survive; an unframed or lossy summary clears them. The caller's
+        # own frame and preserves clauses are checked at the same boundary, so modular proofs
+        # cannot smuggle an out-of-frame write through an opaque call. A summary edge inside a
+        # recursive component is exceptional: it is available only after both functions provide
+        # checked decreases measures, with the callee measure nonnegative and strictly smaller.
+        # `result_value` is `Absent` for a statement call and the call expression for an assigned
+        # or returned value.

@@ -1,0 +1,271 @@
+extend ElisaProof:
+    public:
+        def proof_tactic_split[@r](state: mutable ProofTacticState& @r, left_state: mutable ProofTacticState& @r, right_state: mutable ProofTacticState& @r) -> bool:
+            match state.goal:
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    proof_tactic_initialize_child(state, left, state.facts.count, Ast::Expr.Absent, left_state)
+                    proof_tactic_initialize_child(state, right, state.facts.count, Ast::Expr.Absent, right_state)
+                    return proof_tactic_record(state, "split", true, "created independent states for both conjunction branches")
+                _:
+                    return proof_tactic_record(state, "split", false, "the goal is not a conjunction")
+
+        # Select one side of a disjunctive goal. The selected goal is still unsolved; the
+        # operation only performs the constructive introduction rule and cannot manufacture a
+        # proof of either branch.
+        def proof_tactic_left(state: mutable ProofTacticState&) -> bool:
+            return proof_tactic_record(state, "left", false, "a solved goal cannot accept another action") if state.solved
+            match state.goal:
+                Ast::Expr.Binary(left, TokenKind.Or, _, _):
+                    state.goal <- left
+                    return proof_tactic_record(state, "left", true, "selected the left disjunct")
+                _:
+                    return proof_tactic_record(state, "left", false, "the goal is not a disjunction")
+
+        def proof_tactic_right(state: mutable ProofTacticState&) -> bool:
+            return proof_tactic_record(state, "right", false, "a solved goal cannot accept another action") if state.solved
+            match state.goal:
+                Ast::Expr.Binary(_, TokenKind.Or, right, _):
+                    state.goal <- right
+                    return proof_tactic_record(state, "right", true, "selected the right disjunct")
+                _:
+                    return proof_tactic_record(state, "right", false, "the goal is not a disjunction")
+
+        # Disjunction case analysis is similarly explicit. The selected disjunct is removed
+        # from each child context and replaced by one branch hypothesis.
+        def proof_tactic_cases[@r](state: mutable ProofTacticState& @r, left_state: mutable ProofTacticState& @r, right_state: mutable ProofTacticState& @r) -> bool:
+            for index in 0..<state.facts.count |index, state, left_state, right_state|:
+                match state.facts[index]:
+                    Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                        proof_tactic_initialize_child(state, state.goal, index, left, left_state)
+                        proof_tactic_initialize_child(state, state.goal, index, right, right_state)
+                        return proof_tactic_record(state, "cases", true, "created independent states for both disjunction branches")
+                    _:
+                        pass
+            return proof_tactic_record(state, "cases", false, "no disjunction hypothesis is available")
+
+        # Compare the observable part of one recorded action. The trace includes the post-state
+        # snapshot and all explicit arguments, so a client can distinguish an accepted action
+        # from a merely attempted one without scraping prose diagnostics.
+        def proof_tactic_step_equal(left: ProofTacticStep, right: ProofTacticStep) -> bool:
+            return false if left.action != right.action or left.accepted != right.accepted or left.facts_start != right.facts_start or left.facts_count != right.facts_count or left.solved != right.solved or left.reason != right.reason or left.has_argument != right.has_argument or left.has_secondary != right.has_secondary or left.argument_index != right.argument_index or left.has_argument_index != right.has_argument_index or left.detail != right.detail
+            return false if not proof_expr_equal(left.goal, right.goal)
+            return false if not proof_expr_equal(left.argument, right.argument)
+            return proof_expr_equal(left.secondary, right.secondary)
+
+        def proof_tactic_state_equal(left: ProofTacticState&, right: ProofTacticState&) -> bool:
+            return false if left.solved != right.solved or left.action_count != right.action_count or left.last_action != right.last_action or left.last_reason != right.last_reason
+            return false if not proof_expr_equal(left.initial_goal, right.initial_goal)
+            return false if not proof_expr_array_equal(left.initial_facts, right.initial_facts)
+            return false if not proof_expr_equal(left.goal, right.goal)
+            return false if not proof_expr_array_equal(left.facts, right.facts)
+            return false if left.trace.count != right.trace.count
+            return false if not proof_expr_array_equal(left.trace_facts, right.trace_facts)
+            for index in 0..<left.trace.count |index, left, right|:
+                return false if not proof_tactic_step_equal(left.trace[index], right.trace[index])
+            return true
+
+        # Deterministically replay the complete action history from the state snapshot. This is
+        # intentionally separate from mutation: a failed or partial proof remains inspectable,
+        # and replay returns false if any accepted/rejected transition or post-state diverges.
+        # The proposition-closing actions still delegate to the existing proof kernel, while the
+        # trace itself records structural and derived-fact transitions for later independent
+        # certificate work.
+        def proof_tactic_replay(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            replay_state: mutable ProofTacticState = proof_tactic_state(state.initial_facts, state.initial_goal)
+            empty: mutable darray[Ast::Expr] = []
+            for expected in state.trace |expected, replay_state, annotations, empty|:
+                before_count: usize = replay_state.trace.count
+                accepted: mutable bool = false
+                if expected.action == "assumption":
+                    accepted <- proof_tactic_assumption(&replay_state, annotations)
+                elif expected.action == "exact":
+                    accepted <- proof_tactic_exact(&replay_state, annotations)
+                elif expected.action == "decide":
+                    accepted <- proof_tactic_decide(&replay_state, annotations)
+                elif expected.action == "intro":
+                    accepted <- proof_tactic_intro(&replay_state)
+                elif expected.action == "apply":
+                    accepted <- proof_tactic_apply(&replay_state, annotations)
+                elif expected.action == "simp":
+                    accepted <- proof_tactic_simplify(&replay_state, annotations)
+                elif expected.action == "have":
+                    accepted <- proof_tactic_have(&replay_state, expected.argument, annotations)
+                elif expected.action == "instantiate":
+                    accepted <- proof_tactic_instantiate(&replay_state, expected.argument_index, expected.argument, annotations)
+                elif expected.action == "rewrite":
+                    accepted <- proof_tactic_rewrite(&replay_state, expected.argument, expected.secondary)
+                elif expected.action == "split":
+                    split_left: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, Ast::pos_at_line(0)))
+                    split_right: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, Ast::pos_at_line(0)))
+                    accepted <- proof_tactic_split(&replay_state, &split_left, &split_right)
+                elif expected.action == "left":
+                    accepted <- proof_tactic_left(&replay_state)
+                elif expected.action == "right":
+                    accepted <- proof_tactic_right(&replay_state)
+                elif expected.action == "cases":
+                    cases_left: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, Ast::pos_at_line(0)))
+                    cases_right: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, Ast::pos_at_line(0)))
+                    accepted <- proof_tactic_cases(&replay_state, &cases_left, &cases_right)
+                else:
+                    return false
+                return false if replay_state.trace.count != before_count + 1
+                return false if accepted != expected.accepted
+                return false if not proof_tactic_step_equal(replay_state.trace[before_count], expected)
+            return proof_tactic_state_equal(replay_state, state)
+
+        # Independently replay a solved tactic state through the source-neutral kernel. This
+        # deliberately does not call `proof_goal` or any tactic implementation: AST expressions
+        # are lowered into the canonical arena, then the independent replay module decides the
+        # final proposition from those roots. Unsupported AST terms return false and can never
+        # become a successful tactic certificate by accident.
+        def proof_tactic_kernel_encode_annotated(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&) -> usize:
+            return proof_kernel_encode_annotated(expression, nodes, children, annotations)
+
+        # Imported AST handles may belong to a different store. Compare their canonical
+        # arena terms with the reparsed state, preserving the ordered hypotheses as well as
+        # the goal. A matching fact count alone does not bind a proof to a source obligation.
+        # The CLI uses this kernel-only relation after reparsing the source state in a fresh store.
+        def proof_tactic_source_state_kernel_matches(report: ProofReport&, goal_id: usize, facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            return false if goal_id >= report.goal_attempts.count
+            attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+            match attempt.rule:
+                "resource-safety":
+                    return false
+                "structural-safety":
+                    return false
+                _:
+                    pass
+            return false if facts.count != attempt.facts_count or facts.count != attempt.kernel_facts_count
+            return false if attempt.facts_start > report.certificate_facts.count or attempt.facts_count > report.certificate_facts.count - attempt.facts_start
+            return false if attempt.kernel_facts_start > report.kernel_certificate_facts.count or attempt.kernel_facts_count > report.kernel_certificate_facts.count - attempt.kernel_facts_start
+            return false if attempt.kernel_goal >= report.kernel_nodes.count
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            nodes.extend(report.kernel_nodes)
+            children.extend(report.kernel_children)
+            goal_root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, report.source_annotations)
+            return false if not ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(nodes, children, attempt.kernel_goal, goal_root, 0)
+            for index in 0..<facts.count |index, report, attempt, facts, nodes, children|:
+                expected: usize = report.kernel_certificate_facts[attempt.kernel_facts_start + index]
+                return false if expected >= report.kernel_nodes.count
+                actual: usize = proof_kernel_encode_annotated(facts[index], &nodes, &children, report.source_annotations)
+                return false if not ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(nodes, children, expected, actual, 0)
+            return true
+
+        # Same-store clients can bind the exact source AST in addition to its kernel encoding. Keep
+        # this stronger API separate from the cross-store CLI path so an unavailable imported AST
+        # can never be mistaken for a real source value.
+        def proof_tactic_source_state_matches(report: ProofReport&, goal_id: usize, facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            return false if not proof_tactic_source_state_kernel_matches(report, goal_id, facts, goal)
+            attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+            return false if not proof_expr_equal(goal, attempt.goal)
+            for index in 0..<facts.count |index, facts, attempt, report|:
+                return false if not proof_expr_equal(facts[index], report.certificate_facts[attempt.facts_start + index])
+            return true
+
+        def proof_tactic_kernel_replay(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if not state.solved
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            facts: mutable darray[usize] = []
+            for fact in state.facts |fact, nodes, children, facts, annotations|:
+                return false if not proof_kernel_expression_supported(fact)
+                facts.push(proof_tactic_kernel_encode_annotated(fact, annotations, nodes, children))
+            return false if not proof_kernel_expression_supported(state.goal)
+            goal_root: usize = proof_tactic_kernel_encode_annotated(state.goal, annotations, nodes, children)
+            return ElisaProofKernelReplay::proof_kernel_replay_goal_report(&nodes, &children, facts, goal_root)
+
+        # Lower and replay the complete tactic trace through the source-neutral transition
+        # checker. Unlike `proof_tactic_replay`, this path never invokes a tactic implementation
+        # or compares compiler AST values. Every snapshot and explicit argument is encoded into
+        # one arena, then the independent kernel validates the action rule and the final mutable
+        # state against the last certificate snapshot.
+        def proof_tactic_kernel_encode_facts(source: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, roots: mutable darray[usize]&) -> bool:
+            for fact in source |fact, nodes, children, roots, annotations|:
+                return false if not proof_kernel_expression_supported(fact)
+                roots.push(proof_tactic_kernel_encode_annotated(fact, annotations, nodes, children))
+            return true
+
+        def proof_tactic_kernel_trace_replay(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if state.action_count != state.trace.count
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            before_facts: mutable darray[usize] = []
+            return false if not proof_tactic_kernel_encode_facts(state.initial_facts, annotations, &nodes, &children, &before_facts)
+            return false if not proof_kernel_expression_supported(state.initial_goal)
+            before_goal: mutable usize = proof_tactic_kernel_encode_annotated(state.initial_goal, annotations, &nodes, &children)
+            before_solved: mutable bool = false
+            snapshot_cursor: mutable usize = 0
+            for expected in state.trace |expected, state, nodes, children, before_facts, before_goal, before_solved, snapshot_cursor|:
+                return false if expected.facts_start != snapshot_cursor
+                return false if expected.facts_start > state.trace_facts.count
+                return false if expected.facts_count > state.trace_facts.count - expected.facts_start
+                after_facts: mutable darray[usize] = []
+                for index in 0..<expected.facts_count |index, expected, state, nodes, children, after_facts, annotations|:
+                    fact: Ast::Expr = state.trace_facts[expected.facts_start + index]
+                    return false if not proof_kernel_expression_supported(fact)
+                    after_facts.push(proof_tactic_kernel_encode_annotated(fact, annotations, nodes, children))
+                return false if not proof_kernel_expression_supported(expected.goal)
+                after_goal: usize = proof_tactic_kernel_encode_annotated(expected.goal, annotations, nodes, children)
+                argument: mutable usize = 0
+                secondary: mutable usize = 0
+                if expected.has_argument:
+                    return false if not proof_kernel_expression_supported(expected.argument)
+                    argument <- proof_tactic_kernel_encode_annotated(expected.argument, annotations, nodes, children)
+                if expected.has_secondary:
+                    return false if not proof_kernel_expression_supported(expected.secondary)
+                    secondary <- proof_tactic_kernel_encode_annotated(expected.secondary, annotations, nodes, children)
+                return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_step(&nodes, &children, expected.action, expected.accepted, before_solved, expected.solved, before_facts, before_goal, after_facts, after_goal, argument, expected.has_argument, secondary, expected.has_secondary, expected.argument_index, expected.has_argument_index, expected.detail)
+                before_facts <- []
+                before_facts.extend(after_facts)
+                before_goal <- after_goal
+                before_solved <- expected.solved
+                snapshot_cursor <- snapshot_cursor + expected.facts_count
+            return false if snapshot_cursor != state.trace_facts.count
+            final_facts: mutable darray[usize] = []
+            return false if not proof_tactic_kernel_encode_facts(state.facts, annotations, &nodes, &children, &final_facts)
+            return false if final_facts.count != before_facts.count
+            for index in 0..<final_facts.count |index, final_facts, before_facts, nodes, children|:
+                return false if not ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(&nodes, &children, final_facts[index], before_facts[index], 0)
+            return false if not proof_kernel_expression_supported(state.goal)
+            final_goal: usize = proof_tactic_kernel_encode_annotated(state.goal, annotations, &nodes, &children)
+            return false if not ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(&nodes, &children, final_goal, before_goal, 0)
+            return state.solved == before_solved
+
+        # Complete certificate admission for clients that require both dimensions at once:
+        # source-neutral validation of every transition and independent proof of the solved
+        # proposition. Partial/unsolved tactic states remain useful through the trace API but
+        # cannot pass this final certificate boundary.
+        def proof_tactic_kernel_certificate_replay(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return proof_tactic_kernel_trace_replay(state, annotations) and proof_tactic_kernel_replay(state, annotations)
+
+        # Replay only the parent-to-child part of a branching proof. Keeping this relation separate
+        # from child closure lets serialized proof trees compose branches recursively without
+        # making the parent verifier trust the tactic interpreter's in-memory child references.
+        def proof_tactic_kernel_branch_transition_replay(parent: ProofTacticState&, left: ProofTacticState&, right: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if parent.trace.count == 0
+            branch: ProofTacticStep = parent.trace[parent.trace.count - 1]
+            return false if not branch.accepted or (branch.action != "split" and branch.action != "cases")
+            return false if not proof_tactic_kernel_trace_replay(parent, annotations)
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            parent_facts: mutable darray[usize] = []
+            left_facts: mutable darray[usize] = []
+            right_facts: mutable darray[usize] = []
+            return false if not proof_tactic_kernel_encode_facts(parent.facts, annotations, &nodes, &children, &parent_facts)
+            return false if not proof_kernel_expression_supported(parent.goal) or not proof_kernel_expression_supported(left.initial_goal) or not proof_kernel_expression_supported(right.initial_goal)
+            parent_goal: usize = proof_tactic_kernel_encode_annotated(parent.goal, annotations, &nodes, &children)
+            return false if not proof_tactic_kernel_encode_facts(left.initial_facts, annotations, &nodes, &children, &left_facts)
+            left_goal: usize = proof_tactic_kernel_encode_annotated(left.initial_goal, annotations, &nodes, &children)
+            return false if not proof_tactic_kernel_encode_facts(right.initial_facts, annotations, &nodes, &children, &right_facts)
+            right_goal: usize = proof_tactic_kernel_encode_annotated(right.initial_goal, annotations, &nodes, &children)
+            return ElisaProofKernelReplay::proof_kernel_replay_tactic_branch(&nodes, &children, branch.action, parent_facts, parent_goal, left_facts, left_goal, right_facts, right_goal)
+
+        # Compose a completed branching proof. The parent trace proves that the branch action was
+        # a valid state transition; the independent branch kernel below additionally binds both
+        # child initial contexts to the parent's proposition and requires each child certificate
+        # to close. This prevents separately valid child proofs from being attached to the wrong
+        # conjunction or disjunction.
+        def proof_tactic_kernel_branch_certificate_replay(parent: ProofTacticState&, left: ProofTacticState&, right: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if not proof_tactic_kernel_branch_transition_replay(parent, left, right, annotations)
+            return proof_tactic_kernel_certificate_replay(left, annotations) and proof_tactic_kernel_certificate_replay(right, annotations)

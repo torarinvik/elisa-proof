@@ -1,0 +1,403 @@
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_arena_push_children(node: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, depth: usize, work: mutable darray[ProofKernelReplayArenaWork]&) -> bool:
+            next_depth: usize = depth + 1
+            if node.kind == "unary" or node.kind == "move" or node.kind == "field" or node.kind == "scope" or node.kind == "call_arg" or node.kind == "field-init" or node.kind == "effect-call" or node.kind == "checked-get" or node.kind == "resource-call-arg" or node.kind == "resource-region-alloc" or node.kind == "resource-region-alloc-discard" or node.kind == "resource-region-return-alloc" or node.kind == "resource-region-call-alloc" or node.kind == "resource-region-rebind-alloc" or node.kind == "resource-region-bind" or node.kind == "resource-region-assign" or node.kind == "resource-region-return" or node.kind == "resource-call-result":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "binary" or node.kind == "index" or node.kind == "dict_entry" or node.kind == "checked-index":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "slice":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
+                work.push(ProofKernelReplayArenaWork{root: node.auxiliary, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "if" or node.kind == "quantifier":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
+                if node.kind == "if":
+                    work.push(ProofKernelReplayArenaWork{root: node.auxiliary, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "effect-containment":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known
+                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "effect-row" or node.kind == "effect-containment" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "resource-call" or node.kind == "resource-call-lend":
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "resource-call":
+                    work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known
+                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "resource-scope" or node.kind == "resource-safety" or node.kind == "structural-safety" or node.kind == "structural-edge":
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known
+                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "resource-disjoint":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                work.push(ProofKernelReplayArenaWork{root: node.right, depth: next_depth, exiting: false})
+                work.push(ProofKernelReplayArenaWork{root: node.auxiliary, depth: next_depth, exiting: false})
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, work, next_depth|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known
+                    work.push(ProofKernelReplayArenaWork{root: child.value, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "resource-bind":
+                return true if node.operator == "value" or node.operator == "external-shared" or node.operator == "external-mutable"
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "resource-write" or node.kind == "resource-move":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                return true
+            if node.kind == "resource-use":
+                work.push(ProofKernelReplayArenaWork{root: node.left, depth: next_depth, exiting: false})
+                return true
+            return true
+
+        # Iterative fail-closed arena admission. `visiting` is the active DFS color, `visited`
+        # memoizes completed nodes, and `validity` prevents a malformed shared child from being
+        # accepted on a later path. The work stack is bounded by the input graph's own size, while
+        # the explicit depth field retains the certificate-level term bound.
+        def proof_kernel_replay_arena_valid_iterative(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+            visiting: mutable darray[bool] = []
+            visited: mutable darray[bool] = []
+            validity: mutable darray[bool] = []
+            # A DAG node can be reached at multiple depths. Memoizing only a boolean would let
+            # a shallow first path hide a later path that exceeds the certificate depth bound.
+            # Revisit the node whenever the new path is deeper than the deepest path validated.
+            visited_depth: mutable darray[usize] = []
+            visiting.resize(nodes.count)
+            visited.resize(nodes.count)
+            validity.resize(nodes.count)
+            visited_depth.resize(nodes.count)
+            work: mutable darray[ProofKernelReplayArenaWork] = [ProofKernelReplayArenaWork{root: goal_root, depth: 0, exiting: false}]
+            work.extend([ProofKernelReplayArenaWork{root: fact, depth: 0, exiting: false} for fact in facts])
+            while work.count > 0 |work, nodes, children, visiting, visited, validity, visited_depth|:
+                current: ProofKernelReplayArenaWork = work.pop()
+                return false if current.root >= nodes.count
+                return false if current.depth >= 127 or not ElisaProofKernelCore::depth_valid(current.depth)
+                if current.exiting:
+                    located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, current.root)
+                    return false if not located.known
+                    valid: bool = proof_kernel_replay_arena_shape_valid(located.node) and proof_kernel_replay_arena_children_valid(nodes, located.node, children, validity)
+                    return false if not proof_kernel_replay_bool_set(visiting, current.root, false)
+                    return false if not proof_kernel_replay_bool_set(visited, current.root, true)
+                    visited_depth[current.root] <- current.depth
+                    return false if not proof_kernel_replay_bool_set(validity, current.root, valid)
+                    return false if not valid
+                    continue
+                visited_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(visited, current.root)
+                visiting_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(visiting, current.root)
+                validity_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, current.root)
+                return false if not visited_value.known or not visiting_value.known or not validity_value.known
+                return false if visiting_value.value
+                if visited_value.value:
+                    return false if not validity_value.value
+                    continue if current.depth <= visited_depth[current.root]
+                    # This is a valid node, but its children have not yet been checked at this
+                    # deeper path. Clear the memoized completion and perform a fresh DFS below.
+                    return false if not proof_kernel_replay_bool_set(visited, current.root, false)
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, current.root)
+                return false if not located.known or not proof_kernel_replay_arena_shape_valid(located.node)
+                return false if not proof_kernel_replay_bool_set(visiting, current.root, true)
+                work.push(ProofKernelReplayArenaWork{root: current.root, depth: current.depth, exiting: true})
+                return false if not proof_kernel_replay_arena_push_children(located.node, children, current.depth, &work)
+            return true
+
+        def proof_kernel_replay_arena_valid[@r](nodes: darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
+            return proof_kernel_replay_arena_valid_iterative(nodes, children, facts, goal_root)
+
+        def proof_kernel_replay_arena_all_child_roots_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, start: usize, count: usize, parent: usize) -> bool:
+            return false if not proof_kernel_replay_child_range_valid(start, count, children.count)
+            for index in 0..<count |index, nodes, children, start, parent|:
+                child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, start + index)
+                return false if not child.known or child.value >= parent
+            return true
+
+        def proof_kernel_replay_arena_all_valid[@r](nodes: darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r) -> bool:
+            # The serialized arena is canonical postorder: every edge points to a node emitted
+            # earlier. This is already how the producer's append-only `add_node` protocol works.
+            # Enforcing that order here rejects every cycle (including a cycle in an otherwise
+            # disconnected component) during the single local pass, without retaining a second
+            # graph-sized worklist for a large report. Keep the semantic child-validity bitset as
+            # part of this same pass: after this result is cached, the report replay fast path must
+            # not be able to bypass the per-root validator's child-kind checks.
+            validity: mutable darray[bool] = []
+            validity.resize(nodes.count)
+            for index in 0..<nodes.count |index, nodes, children|:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, index)
+                return false if not located.known or not proof_kernel_replay_arena_shape_valid(located.node)
+                node: ElisaProofKernelCore::ProofKernelNode = located.node
+                if node.kind == "unary" or node.kind == "move" or node.kind == "field" or node.kind == "scope" or node.kind == "call_arg" or node.kind == "field-init" or node.kind == "effect-call" or node.kind == "effect-containment" or node.kind == "checked-get" or node.kind == "resource-call-arg" or node.kind == "resource-region-alloc" or node.kind == "resource-region-alloc-discard" or node.kind == "resource-region-return-alloc" or node.kind == "resource-region-call-alloc" or node.kind == "resource-region-rebind-alloc" or node.kind == "resource-region-bind" or node.kind == "resource-region-assign" or node.kind == "resource-region-return" or node.kind == "resource-write" or node.kind == "resource-move" or node.kind == "resource-use" or node.kind == "resource-call-result":
+                    return false if node.left >= index
+                if node.kind == "binary" or node.kind == "index" or node.kind == "dict_entry" or node.kind == "checked-index":
+                    return false if node.left >= index or node.right >= index
+                if node.kind == "slice" or node.kind == "resource-disjoint":
+                    return false if node.left >= index or node.right >= index or node.auxiliary >= index
+                if node.kind == "if" or node.kind == "quantifier":
+                    return false if node.left >= index or node.right >= index
+                    return false if node.kind == "if" and node.auxiliary >= index
+                if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "effect-row" or node.kind == "effect-containment" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "resource-call" or node.kind == "resource-call-lend" or node.kind == "resource-scope" or node.kind == "resource-safety" or node.kind == "resource-disjoint" or node.kind == "structural-safety" or node.kind == "structural-edge":
+                    return false if not proof_kernel_replay_arena_all_child_roots_valid(nodes, children, node.children_start, node.children_count, index)
+                if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call" or node.kind == "resource-call":
+                    return false if node.left >= index
+                if node.kind == "resource-bind" and (node.operator == "shared" or node.operator == "mutable"):
+                    return false if node.left >= index
+                return false if not proof_kernel_replay_arena_children_valid(nodes, node, children, validity)
+                validity[index] <- true
+            return true
+
+        # The source-neutral arena is intentionally untyped, but its logical entry points still
+        # need a proposition boundary. Without this check, an ill-typed direct caller could use
+        # exact fact containment to "prove" a scalar term such as `7` from the identical scalar
+        # fact. Source type checking normally prevents that shape; the independent kernel must
+        # not rely on that frontend invariant when it is called on serialized data.
+        def proof_kernel_replay_proposition_shape(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= 127 or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return true if node.kind == "bool" or node.kind == "ident" or node.kind == "call" or node.kind == "field" or node.kind == "scope" or node.kind == "index" or node.kind == "index-n" or node.kind == "slice" or node.kind == "checked-index" or node.kind == "checked-get" or node.kind == "shorthand"
+            if node.kind == "unary" and node.operator == "not":
+                return proof_kernel_replay_proposition_shape(nodes, node.left, depth + 1)
+            if node.kind == "binary":
+                if node.operator == "and" or node.operator == "or" or node.operator == "=>":
+                    return proof_kernel_replay_proposition_shape(nodes, node.left, depth + 1) and proof_kernel_replay_proposition_shape(nodes, node.right, depth + 1)
+                return true if node.operator == "==" or node.operator == "!=" or node.operator == "<" or node.operator == ">" or node.operator == "<=" or node.operator == ">=" or node.operator == "in" or node.operator == "is"
+            if node.kind == "if":
+                return proof_kernel_replay_proposition_shape(nodes, node.left, depth + 1) and proof_kernel_replay_proposition_shape(nodes, node.right, depth + 1) and proof_kernel_replay_proposition_shape(nodes, node.auxiliary, depth + 1)
+            if node.kind == "quantifier":
+                # A quantifier's block shape is not enough to determine its proposition. The
+                # parser erases forall/exists, so logical replay requires the producer to bind
+                # that semantic kind into the node before the term can enter a fact or goal.
+                return false if node.operator != "forall" and node.operator != "exists"
+                return proof_kernel_replay_proposition_shape(nodes, node.right, depth + 1)
+            return false
+
+        def proof_kernel_replay_proposition_state_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, facts: darray[usize], goal_root: usize) -> bool:
+            return false if not proof_kernel_replay_proposition_shape(nodes, goal_root, 0)
+            for fact in facts:
+                return false if not proof_kernel_replay_proposition_shape(nodes, fact, 0)
+            return true
+
+        # Source-neutral transition checks for the interactive tactic protocol. The caller
+        # supplies complete before/after snapshots; this kernel never re-runs an AST tactic.
+        # Structural actions are checked by their exact term shape, while closing actions are
+        # discharged through the same independent logical replay used for report certificates.
+        def proof_kernel_replay_tactic_facts_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left: darray[usize], right: darray[usize]) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |index, left, right, nodes, children|:
+                return false if not proof_kernel_replay_expr_equal(nodes, children, left[index], right[index], 0)
+            return true
+
+        def proof_kernel_replay_tactic_same_state(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, before_facts: darray[usize], before_goal: usize, after_facts: darray[usize], after_goal: usize) -> bool:
+            return proof_kernel_replay_expr_equal(nodes, children, before_goal, after_goal, 0) and proof_kernel_replay_tactic_facts_equal(nodes, children, before_facts, after_facts)
+
+        def proof_kernel_replay_tactic_appended(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, before_facts: darray[usize], after_facts: darray[usize], appended: usize) -> bool:
+            return false if after_facts.count != before_facts.count + 1
+            for index in 0..<before_facts.count |index, before_facts, after_facts, nodes, children|:
+                return false if not proof_kernel_replay_expr_equal(nodes, children, before_facts[index], after_facts[index], 0)
+            return proof_kernel_replay_expr_equal(nodes, children, appended, after_facts[after_facts.count - 1], 0)
+
+        def proof_kernel_replay_tactic_binary(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, operator: sview) -> (known: bool, node: ElisaProofKernelCore::ProofKernelNode):
+            empty: ElisaProofKernelCore::ProofKernelNode = ElisaProofKernelCore::ProofKernelNode{kind: "", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
+            return (false, empty) if not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, empty) if not located.known or located.node.kind != "binary" or located.node.operator != operator
+            return located
+
+        def proof_kernel_replay_tactic_effect_free(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= 127 or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return false if node.kind == "call" or node.kind == "move"
+            return false if node.kind == "unsupported"
+            return true if node.kind == "int" or node.kind == "bool" or node.kind == "float" or node.kind == "string" or node.kind == "char" or node.kind == "ident" or node.kind == "shorthand" or node.kind == "absent"
+            if node.kind == "unary" or node.kind == "field" or node.kind == "scope" or node.kind == "call_arg" or node.kind == "field-init" or node.kind == "checked-get":
+                return proof_kernel_replay_tactic_effect_free(nodes, children, node.left, depth + 1)
+            if node.kind == "binary" or node.kind == "index" or node.kind == "dict_entry" or node.kind == "checked-index":
+                return proof_kernel_replay_tactic_effect_free(nodes, children, node.left, depth + 1) and proof_kernel_replay_tactic_effect_free(nodes, children, node.right, depth + 1)
+            if node.kind == "slice" or node.kind == "if":
+                return proof_kernel_replay_tactic_effect_free(nodes, children, node.left, depth + 1) and proof_kernel_replay_tactic_effect_free(nodes, children, node.right, depth + 1) and proof_kernel_replay_tactic_effect_free(nodes, children, node.auxiliary, depth + 1)
+            if node.kind == "index-n" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call":
+                return false if node.children_start > children.count or node.children_count > children.count - node.children_start
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                return false if node.kind != "array" and node.kind != "tuple" and node.kind != "set" and node.kind != "dict" and not proof_kernel_replay_tactic_effect_free(nodes, children, node.left, depth + 1)
+                for index in 0..<node.children_count |index, node, children, nodes, depth|:
+                    return false if not proof_kernel_replay_tactic_effect_free(nodes, children, children[node.children_start + index], depth + 1)
+                return true
+            if node.kind == "quantifier":
+                return proof_kernel_replay_tactic_effect_free(nodes, children, node.left, depth + 1) and proof_kernel_replay_tactic_effect_free(nodes, children, node.right, depth + 1)
+            return false
+
+        def proof_kernel_replay_tactic_step_impl[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, action: sview, accepted: bool, before_solved: bool, after_solved: bool, before_facts: darray[usize], before_goal: usize, after_facts: darray[usize], after_goal: usize, argument: usize, has_argument: bool, secondary: usize, has_secondary: bool, argument_index: usize, has_argument_index: bool, detail: sview) -> bool:
+            return false if not proof_kernel_replay_arena_valid(nodes, children, before_facts, before_goal)
+            return false if not proof_kernel_replay_arena_valid(nodes, children, after_facts, after_goal)
+            return false if not proof_kernel_replay_proposition_state_valid(nodes, before_facts, before_goal)
+            return false if not proof_kernel_replay_proposition_state_valid(nodes, after_facts, after_goal)
+            # Auxiliary tactic terms are independent roots: they are not necessarily reachable
+            # from either state snapshot. Admit them through the same canonical arena validator,
+            # rather than checking only the numeric index and letting malformed scalar payloads
+            # participate in instantiate/rewrite/have replay.
+            return false if has_argument and not proof_kernel_replay_arena_valid(nodes, children, [], argument)
+            return false if has_secondary and not proof_kernel_replay_arena_valid(nodes, children, [], secondary)
+            return false if action != "assumption" and action != "exact" and action != "decide" and action != "intro" and action != "apply" and action != "simp" and action != "have" and action != "instantiate" and action != "rewrite" and action != "split" and action != "left" and action != "right" and action != "cases"
+            return false if accepted and before_solved
+            if action == "assumption" or action == "exact" or action == "decide" or action == "intro" or action == "apply" or action == "simp" or action == "split" or action == "left" or action == "right" or action == "cases":
+                return false if has_argument or has_secondary or has_argument_index or detail != ""
+            if action == "have":
+                return false if not has_argument or has_secondary or has_argument_index or detail != ""
+            if action == "instantiate":
+                return false if not has_argument or has_secondary or not has_argument_index or detail != "forall"
+            if action == "rewrite":
+                return false if not has_argument or not has_secondary or has_argument_index or detail != ""
+            return before_solved == after_solved and proof_kernel_replay_tactic_same_state(nodes, children, before_facts, before_goal, after_facts, after_goal) if not accepted
+            if action == "assumption":
+                return false if not after_solved
+                return false if not proof_kernel_replay_tactic_same_state(nodes, children, before_facts, before_goal, after_facts, after_goal)
+                for fact in before_facts |fact, nodes, children, before_goal|:
+                    return true if proof_kernel_replay_fact_contains(nodes, children, fact, before_goal, 0)
+                return false
+            if action == "exact" or action == "decide":
+                return false if not after_solved
+                return false if not proof_kernel_replay_tactic_same_state(nodes, children, before_facts, before_goal, after_facts, after_goal)
+                return proof_kernel_replay_goal_depth(nodes, children, before_facts, before_goal, 0, 0)
+            if action == "intro":
+                return false if after_solved
+                shape: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_tactic_binary(nodes, before_goal, "=>")
+                return false if not shape.known or not proof_kernel_replay_tactic_appended(nodes, children, before_facts, after_facts, shape.node.left)
+                return proof_kernel_replay_expr_equal(nodes, children, after_goal, shape.node.right, 0)
+            if action == "apply":
+                return false if after_solved
+                return false if not proof_kernel_replay_tactic_facts_equal(nodes, children, before_facts, after_facts)
+                for fact in before_facts |fact, nodes, children, before_goal, after_goal|:
+                    shape: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_tactic_binary(nodes, fact, "=>")
+                    return true if shape.known and proof_kernel_replay_tactic_effect_free(nodes, children, fact, 0) and proof_kernel_replay_expr_equal(nodes, children, shape.node.right, before_goal, 0) and proof_kernel_replay_expr_equal(nodes, children, shape.node.left, after_goal, 0)
+                return false
+            if action == "have":
+                return false if after_solved
+                return false if not has_argument or not proof_kernel_replay_tactic_appended(nodes, children, before_facts, after_facts, argument)
+                return false if not proof_kernel_replay_proposition_shape(nodes, argument, 0)
+                # `have` adds a proved fact but does not change the target. Comparing the
+                # pre-state with itself would let a forged trace replace an arbitrary goal with
+                # a convenient one and then close that replacement.
+                return false if not proof_kernel_replay_expr_equal(nodes, children, before_goal, after_goal, 0)
+                return false if not proof_kernel_replay_tactic_effect_free(nodes, children, argument, 0)
+                return proof_kernel_replay_goal_depth(nodes, children, before_facts, argument, 0, 0)
+            if action == "instantiate":
+                return false if after_solved or not has_argument or not has_argument_index or detail != "forall"
+                return false if argument_index >= before_facts.count
+                return false if not proof_kernel_replay_tactic_effect_free(nodes, children, argument, 0)
+                return false if not proof_kernel_replay_expr_equal(nodes, children, before_goal, after_goal, 0)
+                return false if after_facts.count != before_facts.count + 1
+                for index in 0..<before_facts.count |index, before_facts, after_facts, nodes, children|:
+                    return false if not proof_kernel_replay_expr_equal(nodes, children, before_facts[index], after_facts[index], 0)
+                selected_fact: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, before_facts[argument_index])
+                return false if not selected_fact.known or selected_fact.node.kind != "quantifier"
+                quantifier: ElisaProofKernelCore::ProofKernelNode = selected_fact.node
+                # The trace detail is an action claim, not evidence about the proposition. The
+                # encoded node must independently carry the universal kind before instantiation
+                # can add an instance to the context.
+                return false if quantifier.operator != "forall"
+                return false if not proof_kernel_replay_tactic_effect_free(nodes, children, before_facts[argument_index], 0)
+                member: mutable bool = false
+                range_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, quantifier.left)
+                return false if not range_located.known
+                range_node: ElisaProofKernelCore::ProofKernelNode = range_located.node
+                if range_node.kind == "binary" and (range_node.operator == "range_lt" or range_node.operator == "range_le"):
+                    selected: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, argument, 0)
+                    lower: ProofKernelReplayInt = proof_kernel_replay_exact_int(nodes, range_node.left, before_facts)
+                    upper: ProofKernelReplayInt = proof_kernel_replay_exact_int(nodes, range_node.right, before_facts)
+                    member <- selected.known and lower.known and upper.known and selected.value >= lower.value and (selected.value < upper.value if range_node.operator == "range_lt" else selected.value <= upper.value)
+                if range_node.kind == "array" or range_node.kind == "tuple" or range_node.kind == "set":
+                    return false if range_node.children_start > children.count or range_node.children_count > children.count - range_node.children_start
+                    return false if not proof_kernel_replay_child_range_valid(range_node.children_start, range_node.children_count, children.count)
+                    for index in 0..<range_node.children_count |index, range_node, children, nodes, argument, member|:
+                        member <- true if proof_kernel_replay_expr_equal(nodes, children, children[range_node.children_start + index], argument, 0)
+                return false if not member
+                instance: usize = proof_kernel_replay_substitute(nodes, children, quantifier.right, quantifier.name, argument, 0)
+                return proof_kernel_replay_expr_equal(nodes, children, instance, after_facts[after_facts.count - 1], 0)
+            if action == "rewrite":
+                return false if after_solved or not has_argument or not has_secondary
+                return false if not proof_kernel_replay_tactic_effect_free(nodes, children, before_goal, 0)
+                return false if not proof_kernel_replay_tactic_effect_free(nodes, children, argument, 0) or not proof_kernel_replay_tactic_effect_free(nodes, children, secondary, 0)
+                return false if not proof_kernel_replay_tactic_facts_equal(nodes, children, before_facts, after_facts)
+                equality_found: mutable bool = false
+                for fact in before_facts |fact, nodes, children, argument, secondary, equality_found|:
+                    shape: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_tactic_binary(nodes, fact, "==")
+                    if shape.known:
+                        equality_found <- true if proof_kernel_replay_tactic_effect_free(nodes, children, fact, 0) and ((proof_kernel_replay_expr_equal(nodes, children, shape.node.left, argument, 0) and proof_kernel_replay_expr_equal(nodes, children, shape.node.right, secondary, 0)) or (proof_kernel_replay_expr_equal(nodes, children, shape.node.left, secondary, 0) and proof_kernel_replay_expr_equal(nodes, children, shape.node.right, argument, 0)))
+                return false if not equality_found
+                rewritten: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, before_goal, argument, secondary, 0)
+                return rewritten.changed and proof_kernel_replay_expr_equal(nodes, children, rewritten.value, after_goal, 0)
+            if action == "left" or action == "right":
+                return false if after_solved
+                shape: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_tactic_binary(nodes, before_goal, "or")
+                return false if not shape.known or not proof_kernel_replay_tactic_facts_equal(nodes, children, before_facts, after_facts)
+                return proof_kernel_replay_expr_equal(nodes, children, after_goal, shape.node.left if action == "left" else shape.node.right, 0)
+            if action == "split":
+                return false if after_solved
+                shape: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_tactic_binary(nodes, before_goal, "and")
+                return shape.known and proof_kernel_replay_tactic_same_state(nodes, children, before_facts, before_goal, after_facts, after_goal)
+            if action == "cases":
+                return false if after_solved
+                return false if not proof_kernel_replay_tactic_same_state(nodes, children, before_facts, before_goal, after_facts, after_goal)
+                for fact in before_facts |fact, nodes|:
+                    shape: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_tactic_binary(nodes, fact, "or")
+                    return true if shape.known
+                return false
+            if action == "simp":
+                return false if not proof_kernel_replay_tactic_facts_equal(nodes, children, before_facts, after_facts)
+                simplified: ProofKernelReplaySimplified = proof_kernel_replay_simplify(nodes, children, before_goal, 0)
+                return false if not simplified.known or not simplified.changed
+                return false if not proof_kernel_replay_expr_equal(nodes, children, simplified.root, after_goal, 0)
+                if after_solved:
+                    return proof_kernel_replay_goal_depth(nodes, children, after_facts, after_goal, 0, 0)
+                return true
+            return false
+
+        # Link the two child contexts produced by a branching tactic back to the parent state.
+        # This rule is intentionally independent of the AST tactic implementation: it checks the
+        # proposition shape and the exact source-neutral fact ordering used by the branch rule.
+        def proof_kernel_replay_tactic_branch_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, action: sview, parent_facts: darray[usize], parent_goal: usize, left_facts: darray[usize], left_goal: usize, right_facts: darray[usize], right_goal: usize) -> bool:
+            return false if action != "split" and action != "cases"
+            return false if not proof_kernel_replay_arena_valid(nodes, children, parent_facts, parent_goal)
+            return false if not proof_kernel_replay_arena_valid(nodes, children, left_facts, left_goal)
+            return false if not proof_kernel_replay_arena_valid(nodes, children, right_facts, right_goal)
+            return false if not proof_kernel_replay_proposition_state_valid(nodes, parent_facts, parent_goal)
+            return false if not proof_kernel_replay_proposition_state_valid(nodes, left_facts, left_goal)
+            return false if not proof_kernel_replay_proposition_state_valid(nodes, right_facts, right_goal)
+            if action == "split":
+                shape: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_tactic_binary(nodes, parent_goal, "and")
+                return false if not shape.known
+                return false if not proof_kernel_replay_tactic_facts_equal(nodes, children, parent_facts, left_facts) or not proof_kernel_replay_tactic_facts_equal(nodes, children, parent_facts, right_facts)
+                return proof_kernel_replay_expr_equal(nodes, children, left_goal, shape.node.left, 0) and proof_kernel_replay_expr_equal(nodes, children, right_goal, shape.node.right, 0)
+            return false if not proof_kernel_replay_expr_equal(nodes, children, left_goal, parent_goal, 0) or not proof_kernel_replay_expr_equal(nodes, children, right_goal, parent_goal, 0)
+            return false if left_facts.count != parent_facts.count or right_facts.count != parent_facts.count or parent_facts.count == 0
+            for selected_index in 0..<parent_facts.count |selected_index, parent_facts, left_facts, right_facts, nodes, children|:
+                shape: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_tactic_binary(nodes, parent_facts[selected_index], "or")
+                continue if not shape.known
+                for parent_index in 0..<parent_facts.count |parent_index, selected_index, parent_facts, left_facts, right_facts, nodes, children|:
+                    if parent_index < selected_index:
+                        return false if not proof_kernel_replay_expr_equal(nodes, children, parent_facts[parent_index], left_facts[parent_index], 0) or not proof_kernel_replay_expr_equal(nodes, children, parent_facts[parent_index], right_facts[parent_index], 0)
+                    elif parent_index > selected_index:
+                        return false if not proof_kernel_replay_expr_equal(nodes, children, parent_facts[parent_index], left_facts[parent_index - 1], 0) or not proof_kernel_replay_expr_equal(nodes, children, parent_facts[parent_index], right_facts[parent_index - 1], 0)
+                return proof_kernel_replay_expr_equal(nodes, children, left_facts[left_facts.count - 1], shape.node.left, 0) and proof_kernel_replay_expr_equal(nodes, children, right_facts[right_facts.count - 1], shape.node.right, 0)
+            return false

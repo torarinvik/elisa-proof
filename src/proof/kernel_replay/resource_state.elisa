@@ -1,0 +1,471 @@
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_resource_empty() -> ProofKernelReplayResourceState:
+            return ProofKernelReplayResourceState{binding_names: [], binding_scope_depth: [], scope_depth: 0, binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], active_regions: [], protected_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], resource_call_events: [], resource_call_allocations: [], resource_call_allocations_used: [], resource_call_results: [], resource_return_alloc_regions: [], resource_return_witnesses: [], resource_return_witnesses_used: [], pending_join_moves: [], binding_origin_places: []}
+
+        def proof_kernel_replay_resource_copy(source: ProofKernelReplayResourceState&, target: mutable ProofKernelReplayResourceState&) -> void:
+            target.binding_names.clear()
+            target.binding_scope_depth.clear()
+            target.binding_reference.clear()
+            target.binding_mutable_reference.clear()
+            target.binding_writable.clear()
+            target.binding_moved.clear()
+            target.binding_region.clear()
+            target.binding_region_live.clear()
+            target.binding_region_owner.clear()
+            target.active_regions.clear()
+            target.protected_regions.clear()
+            target.external_regions.clear()
+            target.borrow_target_slots.clear()
+            target.borrow_target_places.clear()
+            target.borrow_mutable.clear()
+            target.borrow_present.clear()
+            target.disjoint_left.clear()
+            target.disjoint_right.clear()
+            target.resource_call_events.clear()
+            target.resource_call_allocations.clear()
+            target.resource_call_allocations_used.clear()
+            target.resource_call_results.clear()
+            target.resource_return_alloc_regions.clear()
+            target.resource_return_witnesses.clear()
+            target.resource_return_witnesses_used.clear()
+            target.pending_join_moves.clear()
+            target.binding_origin_places.clear()
+            target.binding_names.extend(source.binding_names)
+            target.binding_scope_depth.extend(source.binding_scope_depth)
+            target.scope_depth <- source.scope_depth
+            target.binding_reference.extend(source.binding_reference)
+            target.binding_mutable_reference.extend(source.binding_mutable_reference)
+            target.binding_writable.extend(source.binding_writable)
+            target.binding_moved.extend(source.binding_moved)
+            target.binding_region.extend(source.binding_region)
+            target.binding_region_live.extend(source.binding_region_live)
+            target.binding_region_owner.extend(source.binding_region_owner)
+            target.active_regions.extend(source.active_regions)
+            target.protected_regions.extend(source.protected_regions)
+            target.external_regions.extend(source.external_regions)
+            target.borrow_target_slots.extend(source.borrow_target_slots)
+            target.borrow_target_places.extend(source.borrow_target_places)
+            target.borrow_mutable.extend(source.borrow_mutable)
+            target.borrow_present.extend(source.borrow_present)
+            target.disjoint_left.extend(source.disjoint_left)
+            target.disjoint_right.extend(source.disjoint_right)
+            target.resource_call_events.extend(source.resource_call_events)
+            target.resource_call_allocations.extend(source.resource_call_allocations)
+            target.resource_call_allocations_used.extend(source.resource_call_allocations_used)
+            target.resource_call_results.extend(source.resource_call_results)
+            target.resource_return_alloc_regions.extend(source.resource_return_alloc_regions)
+            target.resource_return_witnesses.extend(source.resource_return_witnesses)
+            target.resource_return_witnesses_used.extend(source.resource_return_witnesses_used)
+            target.pending_join_moves.extend(source.pending_join_moves)
+            target.binding_origin_places.extend(source.binding_origin_places)
+
+        # A lexical resource scope may introduce and discharge its own region, but it cannot
+        # destroy or otherwise invalidate a region inherited from its parent. The child state is
+        # intentionally discarded after replay, so compare inherited liveness before accepting
+        # the scope; otherwise `destroy r` inside a plain nested block could disappear with the
+        # snapshot and make a later use of an r-owned binding look live again.
+        def proof_kernel_replay_resource_scope_preserves_parent(parent: ProofKernelReplayResourceState&, child: ProofKernelReplayResourceState&) -> bool:
+            # A scope join discards the child resource state. Therefore the active region stack
+            # must be exactly the inherited stack at the join: membership alone would allow a
+            # forged child to leak a fresh local region, or to reorder lifetimes before its state
+            # disappears. Nested region blocks must close their own regions before returning.
+            return false if child.active_regions.count != parent.active_regions.count
+            for index in 0..<parent.active_regions.count |index, parent, child|:
+                return false if child.active_regions[index] != parent.active_regions[index]
+            # The child is a snapshot whose non-move state is discarded at scope exit. An
+            # inherited binding therefore cannot be redirected to a different region in the
+            # child: otherwise the parent would retain the old metadata while the executed
+            # child had made the binding point at storage with a different lifetime.
+            for index in 0..<parent.binding_region.count:
+                return false if index >= child.binding_region.count or child.binding_region[index] != parent.binding_region[index]
+            for index in 0..<parent.binding_region_owner.count:
+                return false if index >= child.binding_region_owner.count or child.binding_region_owner[index] != parent.binding_region_owner[index]
+            for index in 0..<parent.binding_region_live.count:
+                if parent.binding_region_live[index]:
+                    return false if index >= child.binding_region_live.count or not child.binding_region_live[index]
+            return true
+
+        def proof_kernel_replay_resource_lookup(state: ProofKernelReplayResourceState&, name: sview) -> usize:
+            # A forward scan that keeps the last match returns the same slot the downward scan
+            # returned -- the highest index whose name matches, which is the innermost binding
+            # under shadowing -- and its index is bounded by the loop range rather than by an
+            # invariant. `elisac-stage1` declines any body carrying a loop `invariant`, so the
+            # fact this loop needed could not be written; the loop is written not to need it.
+            found: mutable usize = state.binding_names.count
+            for index in 0..<state.binding_names.count |index, state, name, found|:
+                found <- index if state.binding_names[index] == name
+            return found
+
+        def proof_kernel_replay_resource_binding_name_available(state: ProofKernelReplayResourceState&, name: sview) -> bool:
+            return false if name == ""
+            for index in 0..<state.binding_names.count |index, state, name|:
+                return false if index >= state.binding_scope_depth.count or state.binding_scope_depth[index] == state.scope_depth and state.binding_names[index] == name
+            return true
+
+        def proof_kernel_replay_resource_has_pending_join(state: ProofKernelReplayResourceState&) -> bool:
+            for pending in state.pending_join_moves:
+                return true if pending
+            return false
+
+        # A whole binding may be written only when its serialized resource capability is
+        # writable. Mutable references are intrinsically writable; ordinary bindings require
+        # the explicit writable bit. Field/index writes remain governed by their path-level
+        # model, which is where struct-field mutability is represented.
+        def proof_kernel_replay_resource_binding_is_writable(state: ProofKernelReplayResourceState&, slot: usize) -> bool:
+            is_reference: bool = slot < state.binding_reference.count and state.binding_reference[slot]
+            if is_reference:
+                return slot < state.binding_mutable_reference.count and state.binding_mutable_reference[slot]
+            return slot < state.binding_writable.count and state.binding_writable[slot]
+
+        def proof_kernel_replay_resource_region_active(state: ProofKernelReplayResourceState&, region: sview) -> bool:
+            return false if region == ""
+            # An existence check does not depend on scan order, and a forward scan's index is
+            # bounded by the loop range rather than by an invariant the compiler will not accept.
+            found: mutable bool = false
+            for index in 0..<state.active_regions.count |index, state, region, found|:
+                found <- true if state.active_regions[index] == region
+            return found
+
+        # Allocation operands are source expressions, not resource-transition roots. A region
+        # value copied into a fresh allocation would otherwise smuggle a shorter lifetime into the
+        # destination region. Keep this check independent of the AST producer: every identifier
+        # operand must have an explicit resource binding. An untracked name may be a scalar, but it
+        # may also be a region-owned value omitted from a forged trace, so replay rejects it.
+        # The constructed type of a `construct` node. A type expression denotes no runtime value
+        # and therefore carries no lifetime of its own; the constructed value's lifetime comes
+        # from the allocation that holds it. Only a plain or qualified type name is accepted, so
+        # anything richer — a region-parameterized or otherwise unrecognized form — is refused
+        # rather than assumed lifetime-free.
+        def proof_kernel_replay_resource_type_term(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= 127
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            return true if located.node.kind == "ident" and located.node.name != ""
+            return false if located.node.kind != "field" or located.node.name == ""
+            return proof_kernel_replay_resource_type_term(nodes, located.node.left, depth + 1)
+
+        def proof_kernel_replay_resource_value_term_has_no_region(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, state: ProofKernelReplayResourceState&, root: usize, depth: usize) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= 127 or root >= nodes.count
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "int" or node.kind == "bool" or node.kind == "float" or node.kind == "string" or node.kind == "char" or node.kind == "shorthand" or node.kind == "absent":
+                return true
+            if node.kind == "ident":
+                slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
+                return false if slot >= state.binding_names.count
+                return proof_kernel_replay_resource_binding_region(state, slot) == ""
+            # The neutral `checked-get` node does not retain its recovery expression. Treating it
+            # as a unary expression here could hide a region value in that recovery branch.
+            return false if node.kind == "checked-get"
+            if node.kind == "unary" or node.kind == "move" or node.kind == "field" or node.kind == "scope" or node.kind == "call_arg" or node.kind == "field-init":
+                return proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1)
+            if node.kind == "binary" or node.kind == "index" or node.kind == "dict_entry" or node.kind == "checked-index":
+                return proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1) and proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.right, depth + 1)
+            if node.kind == "slice" or node.kind == "if":
+                return proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1) and proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.right, depth + 1) and proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.auxiliary, depth + 1)
+            if node.kind == "quantifier":
+                return proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1) and proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.right, depth + 1)
+            if node.kind == "index-n" or node.kind == "call" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "construct" or node.kind == "record-update":
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                # A construction's left edge is the constructed *type*, not a value: it is the
+                # encoded type expression, unlike a record update's left edge, which is the base
+                # record being copied. Reading it as a value term looks the type name up as a
+                # binding, finds none, and refuses every struct literal allocated into a region.
+                return false if node.kind == "construct" and not proof_kernel_replay_resource_type_term(nodes, node.left, 0)
+                if node.kind == "index-n" or node.kind == "call" or node.kind == "record-update":
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, depth + 1)
+                for index in 0..<node.children_count |index, node, children, nodes, state, depth|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not child.known
+                    return false if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, child.value, depth + 1)
+                return true
+            # Resource transitions are never valid as expression operands. This also makes a
+            # malformed certificate fail closed instead of treating an ignored node kind as a
+            # scalar value.
+            return false
+
+        # A direct reference identifier cannot be reclassified as a scalar at a call boundary.
+        # Derived scalar projections such as `nodes.count` remain valid value terms; their shape
+        # is intentionally handled by the recursive no-region check above.
+        def proof_kernel_replay_resource_value_term_is_direct_reference(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, root: usize) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known or located.node.kind != "ident"
+            slot: usize = proof_kernel_replay_resource_lookup(state, located.node.name)
+            return slot < state.binding_names.count and slot < state.binding_reference.count and state.binding_reference[slot]
+
+        def proof_kernel_replay_resource_region_external(state: ProofKernelReplayResourceState&, region: sview) -> bool:
+            return any external in state.external_regions where external == region
+
+        def proof_kernel_replay_resource_region_protected(state: ProofKernelReplayResourceState&, region: sview) -> bool:
+            return any protected in state.protected_regions where protected == region
+
+        def proof_kernel_replay_resource_binding_region(state: ProofKernelReplayResourceState&, slot: usize) -> sview:
+            return state.binding_region[slot] if slot < state.binding_region.count
+            return ""
+
+        def proof_kernel_replay_resource_binding_region_is_live(state: ProofKernelReplayResourceState&, slot: usize) -> bool:
+            return slot < state.binding_region_live.count and state.binding_region_live[slot]
+
+        def proof_kernel_replay_resource_invalidate_region_bindings(state: mutable ProofKernelReplayResourceState&, region: sview) -> void:
+            for index in 0..<state.binding_region.count |index, state, region|:
+                if index < state.binding_region_live.count and state.binding_region[index] == region:
+                    state.binding_region_live[index] <- false
+
+        def proof_kernel_replay_resource_has_borrow(state: ProofKernelReplayResourceState&, target_slot: usize, except_slot: usize) -> bool:
+            for index in 0..<state.borrow_target_slots.count |index, state, target_slot, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and state.borrow_target_slots[index] == target_slot
+            return false
+
+        def proof_kernel_replay_resource_has_mutable_borrow(state: ProofKernelReplayResourceState&, target_slot: usize, except_slot: usize) -> bool:
+            for index in 0..<state.borrow_target_slots.count |index, state, target_slot, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and state.borrow_target_slots[index] == target_slot and index < state.borrow_mutable.count and state.borrow_mutable[index]
+            return false
+
+        def proof_kernel_replay_resource_has_borrow_overlap(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, target: ProofKernelReplayResourcePlace, except_slot: usize) -> bool:
+            return false if target.root == ""
+            for index in 0..<state.borrow_target_places.count |index, state, target, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and proof_kernel_replay_resource_places_overlap(state, nodes, state.borrow_target_places[index], target)
+            return false
+
+        def proof_kernel_replay_resource_has_mutable_borrow_overlap(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, target: ProofKernelReplayResourcePlace, except_slot: usize) -> bool:
+            return false if target.root == ""
+            for index in 0..<state.borrow_target_places.count |index, state, target, except_slot|:
+                return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and index < state.borrow_mutable.count and state.borrow_mutable[index] and proof_kernel_replay_resource_places_overlap(state, nodes, state.borrow_target_places[index], target)
+            return false
+
+        def proof_kernel_replay_resource_origin_for(state: ProofKernelReplayResourceState&, slot: usize) -> (known: bool, place: ProofKernelReplayResourcePlace):
+            empty: ProofKernelReplayResourcePlace = proof_kernel_replay_resource_empty_place()
+            return (false, empty) if slot >= state.binding_origin_places.count
+            origin: ProofKernelReplayResourcePlace = state.binding_origin_places[slot]
+            return (origin.root != "", origin)
+
+        def proof_kernel_replay_resource_resolve_origin(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, decoded: ProofKernelReplayResourcePlace, binding_name: sview) -> (known: bool, place: ProofKernelReplayResourcePlace):
+            empty: ProofKernelReplayResourcePlace = proof_kernel_replay_resource_empty_place()
+            return (false, empty) if decoded.root == "" or decoded.root != binding_name
+            slot: usize = proof_kernel_replay_resource_lookup(state, binding_name)
+            return (false, empty) if slot >= state.binding_names.count
+            origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(state, slot)
+            return (false, empty) if not origin.known
+            return proof_kernel_replay_resource_place_append(nodes, origin.place, decoded)
+
+        # Replay the ownership transition language without consulting the AST checker. A scope
+        # node receives a copy of its parent's resource state. Ordinary lexical scopes discard
+        # child transitions on return. Moves of inherited bindings are represented by explicit
+        # resource-join-move transitions emitted after the scope, keeping the parent-state update
+        # flat and replayable without aliasing the nested state object.
+        def proof_kernel_replay_resource_parameters(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, names: mutable darray[sview]&, references: mutable darray[bool]&, mutable_references: mutable darray[bool]&, regions: mutable darray[sview]&) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known or located.node.kind != "resource-safety"
+            return false if located.node.auxiliary > located.node.children_count
+            return false if not proof_kernel_replay_child_range_valid(located.node.children_start, located.node.children_count, children.count)
+            # The decoder owns the output contract: every result array describes only this
+            # resource-safety root. Clear all arrays, not just region metadata, so a future
+            # caller reusing scratch storage cannot accidentally retain a prior formal name,
+            # reference mode, or mutability bit and authorize a mismatched call argument.
+            names.clear()
+            references.clear()
+            mutable_references.clear()
+            regions.clear()
+            scan: mutable usize = 0
+            region_prefix: mutable bool = true
+            while scan < located.node.children_count |scan, located, children, names, references, mutable_references, regions, region_prefix|:
+                child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, located.node.children_start + scan)
+                return false if not child.known
+                bind_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, child.value)
+                return false if not bind_located.known
+                if bind_located.node.kind == "resource-region-param":
+                    return false if not region_prefix
+                    scan <- scan + 1
+                    continue
+                region_prefix <- false
+                if names.count < located.node.auxiliary:
+                    return false if bind_located.node.kind != "resource-bind"
+                    bind: ElisaProofKernelCore::ProofKernelNode = bind_located.node
+                    return false if bind.operator != "value" and bind.operator != "external-shared" and bind.operator != "external-mutable"
+                    return false if bind.name == "" or (any prior in names where prior == bind.name)
+                    names.push(bind.name)
+                    references.push(bind.operator == "external-shared" or bind.operator == "external-mutable")
+                    mutable_references.push(bind.operator == "external-mutable")
+                    regions.push(bind.secondary_name if bind.operator == "external-shared" or bind.operator == "external-mutable" else "")
+                    scan <- scan + 1
+                    continue
+                break
+            # Once the formal prefix ends, a region parameter is body data and therefore
+            # malformed. Do not let the call composer invent a lifetime parameter from it.
+            while scan < located.node.children_count |scan, located, children, nodes|:
+                child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, located.node.children_start + scan)
+                return false if not child.known
+                child_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, child.value)
+                return false if not child_node.known or child_node.node.kind == "resource-region-param"
+                scan <- scan + 1
+            return false if names.count != located.node.auxiliary
+            return true
+
+        def proof_kernel_replay_resource_call_actual(state: ProofKernelReplayResourceState&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, argument: ElisaProofKernelCore::ProofKernelNode, arena_admitted: bool) -> (known: bool, place: ProofKernelReplayResourcePlace, slot: usize, has_slot: bool, mutable_reference: bool):
+            empty: ProofKernelReplayResourcePlace = proof_kernel_replay_resource_empty_place()
+            if argument.operator == "region-new":
+                allocation: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, argument.left)
+                return (false, empty, state.binding_names.count, false, false) if not allocation.known or allocation.node.kind != "resource-region-call-alloc" or allocation.node.secondary_name != argument.secondary_name
+                return (false, empty, state.binding_names.count, false, false) if not any prior_allocation in state.resource_call_allocations where prior_allocation == argument.left
+                return (false, empty, state.binding_names.count, false, false) if not proof_kernel_replay_resource_region_active(state, argument.secondary_name)
+                return (false, empty, state.binding_names.count, false, false) if not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, [], allocation.node.left)
+                # A fresh allocation has no pre-existing caller place and is writable for the
+                # duration of this call. Its callee effects are checked as temporary effects and
+                # are not exported to the caller state.
+                return (true, empty, state.binding_names.count, false, true)
+            if argument.operator == "value":
+                # A value formal is scalar/resource-neutral at this boundary. The source
+                # checker rejects a region-owned actual here; replay must inspect the actual
+                # term too, otherwise a forged value argument can erase its lifetime label.
+                return (false, empty, state.binding_names.count, false, false) if proof_kernel_replay_resource_value_term_is_direct_reference(nodes, state, argument.left)
+                return (false, empty, state.binding_names.count, false, false) if not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, argument.left, 0)
+                return (true, empty, state.binding_names.count, false, false)
+            decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, argument.left, 0)
+            return (false, empty, state.binding_names.count, false, false) if not decoded.known
+            slot: usize = proof_kernel_replay_resource_lookup(state, decoded.place.root)
+            if argument.operator == "reference":
+                return (false, empty, state.binding_names.count, false, false) if slot >= state.binding_names.count or slot >= state.binding_reference.count or not state.binding_reference[slot]
+                return (false, empty, state.binding_names.count, false, false) if slot >= state.binding_moved.count or state.binding_moved[slot]
+                reference_region: sview = proof_kernel_replay_resource_binding_region(state, slot)
+                return (false, empty, state.binding_names.count, false, false) if reference_region != "" and (not proof_kernel_replay_resource_binding_region_is_live(state, slot) or not proof_kernel_replay_resource_region_active(state, reference_region))
+                if slot < state.borrow_present.count and state.borrow_present[slot] and slot < state.borrow_target_places.count and state.borrow_target_places[slot].root != "":
+                    return (true, state.borrow_target_places[slot], slot, true, slot < state.binding_mutable_reference.count and state.binding_mutable_reference[slot])
+                origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(state, slot)
+                # A direct region allocation has no older origin; the binding itself is still a
+                # valid resource place. Borrow aliases do carry an origin and retain that exact
+                # provenance for effect composition.
+                return (true, decoded.place, slot, true, slot < state.binding_mutable_reference.count and state.binding_mutable_reference[slot]) if not origin.known
+                return (true, origin.place, slot, true, slot < state.binding_mutable_reference.count and state.binding_mutable_reference[slot])
+            return (false, empty, state.binding_names.count, false, false) if argument.operator != "borrow"
+            return (false, empty, state.binding_names.count, false, false) if slot >= state.binding_names.count
+            return (false, empty, state.binding_names.count, false, false) if slot >= state.binding_moved.count or state.binding_moved[slot]
+            borrowed_region: sview = proof_kernel_replay_resource_binding_region(state, slot)
+            return (false, empty, state.binding_names.count, false, false) if borrowed_region != "" and (not proof_kernel_replay_resource_binding_region_is_live(state, slot) or not proof_kernel_replay_resource_region_active(state, borrowed_region))
+            if slot < state.binding_reference.count and state.binding_reference[slot]:
+                origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(state, slot)
+                return (false, empty, state.binding_names.count, false, false) if not origin.known
+                composed: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place_append(nodes, origin.place, decoded.place)
+                return (false, empty, state.binding_names.count, false, false) if not composed.known
+                return (true, composed.place, slot, false, slot < state.binding_mutable_reference.count and state.binding_mutable_reference[slot])
+            return (true, decoded.place, slot, false, false)
+
+        # Compose a verified callee trace at a call site. The callee is replayed from an empty
+        # state first; only writes whose origin is one of its formal reference capabilities are
+        # exported. A move cannot yet be summarized, so the kernel rejects it instead of
+        # silently treating ownership transfer as an ordinary write.
+        # A call that lends only references the caller already holds. Every permission is derived
+        # from the recorded parameter modes and the lent places, so no callee trace is needed --
+        # which is the only way a recursive component can be checked, since it can never consume a
+        # summary it is still computing. A shared formal exports nothing. An exclusive formal
+        # exports a write to the whole lent place: the summary composer refuses any callee effect
+        # that is not a write rooted at a mutable formal, so the whole-place write subsumes every
+        # effect a summary for this callee could ever have produced.
+        def proof_kernel_replay_resource_lend[@r, @e, @s](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, state: mutable ProofKernelReplayResourceState& @s, effects: mutable darray[ProofKernelReplayResourceEffect]& @e, node: ElisaProofKernelCore::ProofKernelNode) -> bool:
+            return false if node.children_count != node.auxiliary * 2 + node.right
+            return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+            # A region-polymorphic callee may allocate into a mapped caller region, which the
+            # caller cannot observe, and cannot close it: the region is external in the callee's
+            # own frame and no trace may close an external region. Every mapped lifetime must name
+            # a distinct formal region and resolve to a region active right here.
+            lend_regions: mutable darray[sview] = []
+            for region_index in 0..<node.right |region_index, node, children, nodes, state, lend_regions|:
+                region_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + node.auxiliary * 2 + region_index)
+                return false if not region_child.known
+                region_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, region_child.value)
+                return false if not region_located.known or region_located.node.kind != "resource-call-region" or region_located.node.operator != "param"
+                return false if region_located.node.name == "" or region_located.node.secondary_name == ""
+                return false if any prior in lend_regions where prior == region_located.node.name
+                return false if not proof_kernel_replay_resource_region_active(state, region_located.node.secondary_name)
+                lend_regions.push(region_located.node.name)
+                lend_regions.push(region_located.node.secondary_name)
+            lent: mutable darray[ProofKernelReplayLentArgument] = []
+            for index in 0..<node.auxiliary |index, node, children, nodes, state, lent|:
+                actual_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                formal_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + node.auxiliary + index)
+                return false if not actual_child.known or not formal_child.known
+                actual_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, actual_child.value)
+                formal_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, formal_child.value)
+                return false if not actual_located.known or not formal_located.known
+                argument: ElisaProofKernelCore::ProofKernelNode = actual_located.node
+                formal: ElisaProofKernelCore::ProofKernelNode = formal_located.node
+                return false if argument.kind != "resource-call-arg" or formal.kind != "resource-call-formal"
+                # The actual and the mode must describe the same formal, or the modes could be
+                # permuted until every exclusive one lands on a scalar.
+                return false if formal.name == "" or formal.name != argument.name
+                exclusive: bool = formal.operator == "external-mutable"
+                # A fresh region allocation is not a lend: its lifetime is the callee's, which is
+                # exactly what needs the callee's own trace.
+                return false if argument.operator == "region-new"
+                actual: (known: bool, place: ProofKernelReplayResourcePlace, slot: usize, has_slot: bool, mutable_reference: bool) = proof_kernel_replay_resource_call_actual(state, nodes, children, argument, false)
+                return false if not actual.known
+                # A region-annotated formal must be pinned to the caller region its actual already
+                # carries, or the callee is handed a lifetime the caller never established.
+                if formal.secondary_name != "":
+                    mapped_region: mutable sview = ""
+                    for region_index in 0..<node.right |region_index, lend_regions, formal, mapped_region|:
+                        mapped_region <- lend_regions[region_index * 2 + 1] if lend_regions[region_index * 2] == formal.secondary_name
+                    return false if mapped_region == ""
+                    # `has_slot` marks a reference actual specifically; a borrow actual resolves a
+                    # binding slot too, and its region is just as much the caller's claim.
+                    return false if actual.slot >= state.binding_names.count
+                    return false if proof_kernel_replay_resource_binding_region(state, actual.slot) != mapped_region
+                lent.push(ProofKernelReplayLentArgument{place: proof_kernel_replay_resource_empty_place(), known: false, exclusive: exclusive})
+                # A by-value formal receives no capability, so the actual must not be one either:
+                # otherwise the call would be a move and the caller state would change.
+                if formal.operator != "external-shared" and not exclusive:
+                    return false if argument.operator != "value"
+                    continue
+                # A shared formal may use Elisa's implicit-borrow spelling, recorded as
+                # `value`; unlike the old fast-path, it must still resolve below to a tracked
+                # caller place. Exclusive formals require explicit borrow/reference syntax.
+                return false if exclusive and argument.operator != "borrow" and argument.operator != "reference"
+                return false if not exclusive and argument.operator != "value" and argument.operator != "borrow" and argument.operator != "reference"
+                return false if actual.place.root == ""
+                lent[lent.count - 1] <- ProofKernelReplayLentArgument{place: actual.place, known: true, exclusive: exclusive}
+                if exclusive:
+                    # The callee may write through this one, so the caller must hold the
+                    # permission to write the whole place, and no other borrow may be live on it.
+                    if argument.operator == "reference":
+                        return false if not actual.mutable_reference
+                    else:
+                        if actual.slot < state.binding_reference.count and state.binding_reference[actual.slot]:
+                            return false if not actual.mutable_reference
+                        else:
+                            return false if actual.slot >= state.binding_writable.count or not state.binding_writable[actual.slot]
+                    return false if proof_kernel_replay_resource_has_borrow_overlap(nodes, state, actual.place, state.binding_names.count)
+                else:
+                    # No borrow is excluded here, unlike the summary path: without a callee
+                    # summary there is nothing that says the callee reads only through the very
+                    # reference being reborrowed, so any live exclusive borrow of the lent place
+                    # refuses the event.
+                    return false if proof_kernel_replay_resource_has_mutable_borrow_overlap(nodes, state, actual.place, state.binding_names.count)
+            # Every lent capability is live at once while the callee runs, so two of them may
+            # overlap only when neither is exclusive.
+            for left_index in 0..<lent.count |left_index, lent, state, nodes|:
+                left_argument: ProofKernelReplayLentArgument = lent[left_index]
+                continue if not left_argument.known
+                for right_index in 0..<lent.count |right_index, left_index, left_argument, lent, state, nodes|:
+                    continue if right_index <= left_index
+                    right_argument: ProofKernelReplayLentArgument = lent[right_index]
+                    continue if not right_argument.known
+                    continue if not left_argument.exclusive and not right_argument.exclusive
+                    return false if proof_kernel_replay_resource_places_overlap(state, nodes, left_argument.place, right_argument.place)
+            for index in 0..<lent.count |index, lent, state, nodes, effects|:
+                argument_lent: ProofKernelReplayLentArgument = lent[index]
+                continue if not argument_lent.known or not argument_lent.exclusive
+                owner_slot: usize = proof_kernel_replay_resource_lookup(state, argument_lent.place.root)
+                return false if owner_slot >= state.binding_names.count
+                owner_origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_resolve_origin(nodes, state, argument_lent.place, argument_lent.place.root)
+                effects.push(ProofKernelReplayResourceEffect{kind: "write", place: owner_origin.place}) if owner_origin.known
+            return true
+
+        # A lifetime pinned to the caller's own frame rather than to a region. The caller's frame
+        # outlives any call it makes, so an actual the caller holds outright — a live, unmoved
+        # binding with no region of its own — satisfies it. The name is outside the identifier
+        # grammar, so no source region can be spelled this way.

@@ -1,0 +1,198 @@
+extend ElisaProof:
+    private:
+        def proof_finding_only_widens_state(kind: sview) -> bool:
+            return true if kind == "captured-block-unsupported"
+            return kind == "loop-invariant-missing"
+
+        # A lemma has no state to widen. Its body may contain only contracts, proof calls and
+        # assert-by blocks, so neither construct above can appear in one without `lemma-impure`
+        # beside it -- but the lemma scheduler is kept on the strict rule rather than left to rest
+        # on that coincidence. The relaxation is justified by a havocked execution state, and a
+        # lemma has none.
+        def proof_report_lemma_is_clean(report: ProofReport&, lemma_name: sview) -> bool:
+            for finding in report.findings:
+                return false if finding.name == lemma_name
+            return true
+
+        def proof_report_function_is_clean(report: ProofReport&, function_name: sview) -> bool:
+            for finding in report.findings:
+                continue if finding.name != function_name
+                return false if not proof_finding_only_widens_state(finding.kind)
+            return true
+
+        def proof_report_function_has_widened_finding(report: ProofReport&, function_name: sview) -> bool:
+            for finding in report.findings:
+                return true if finding.name == function_name and proof_finding_only_widens_state(finding.kind)
+            return false
+
+        def proof_report_function_has_finding(report: ProofReport&, function_name: sview, kind: sview) -> bool:
+            for finding in report.findings:
+                return true if finding.name == function_name and finding.kind == kind
+            return false
+
+        def proof_function_component_ready(functions: ProofFunctionTable&, scheduled: darray[bool]&, source: usize) -> bool:
+            return false if source >= functions.names.count or source >= functions.call_starts.count or source >= functions.call_counts.count
+            start: usize = functions.call_starts[source]
+            count: usize = functions.call_counts[source]
+            return false if start > functions.all_calls.count or count > functions.all_calls.count - start
+            for offset in 0..<count |offset, start, functions, scheduled, source|:
+                called: sview = functions.all_calls[start + offset]
+                continue if called == "__opaque_call__"
+                next: usize = proof_function_index(functions, called)
+                continue if next >= functions.names.count
+                continue if proof_functions_same_recursive_component(functions, source, next)
+                return false if next >= scheduled.count or not scheduled[next]
+            return true
+
+        def proof_check_scheduled_function(file: Ast::File&, declarations: darray[Ast::Decl]&, target: usize, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> bool:
+            return false if target >= functions.declarations.count
+            match functions.declarations[target]:
+                Ast::Decl.Func(name, parameters, _, body, _, _, position):
+                    proof_check_function(file, name, parameters, body, position, lemmas, functions, report)
+                    return true
+                _:
+                    return false
+
+        def proof_lemma_component_ready(lemmas: ProofLemmaTable&, scheduled: darray[bool]&, source: usize) -> bool:
+            return false if source >= lemmas.names.count or source >= lemmas.call_starts.count or source >= lemmas.call_counts.count
+            start: usize = lemmas.call_starts[source]
+            count: usize = lemmas.call_counts[source]
+            return false if start > lemmas.all_calls.count or count > lemmas.all_calls.count - start
+            for offset in 0..<count |offset, start, lemmas, scheduled, source|:
+                called: sview = lemmas.all_calls[start + offset]
+                next: usize = proof_lemma_index(lemmas, called)
+                continue if next >= lemmas.names.count
+                continue if proof_lemmas_same_recursive_component(lemmas, source, next)
+                return false if next >= scheduled.count or not scheduled[next]
+            return true
+
+        def proof_check_scheduled_lemma(file: Ast::File&, declarations: darray[Ast::Decl]&, target: usize, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> bool:
+            for declaration in declarations |file, declarations, lemmas, functions, report|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
+                        if proof_lemma_index(lemmas, name) == target:
+                            if return_type is lemma_return_type:
+                                proof_add_finding(report, "lemma-return", position.line, name, "lemmas are proof-only and may not return runtime values")
+                            proof_check_function(file, name, parameters, body, position, lemmas, functions, report)
+                            return true
+                    Ast::Decl.Module(_, module_body, _):
+                        return true if proof_check_scheduled_lemma(file, module_body, target, lemmas, functions, report)
+                    Ast::Decl.Scoped(scoped_body, _):
+                        return true if proof_check_scheduled_lemma(file, scoped_body, target, lemmas, functions, report)
+                    _:
+                        pass
+            return false
+
+        def proof_compute_verified_lemmas(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: mutable ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
+            lemmas.verified.clear()
+            lemmas.verification_reasons.clear()
+            for _ in 0..<lemmas.names.count |lemmas|:
+                lemmas.verified.push(false)
+                lemmas.verification_reasons.push("pending")
+            scheduled: mutable darray[bool] = []
+            for _ in 0..<lemmas.names.count |scheduled|:
+                scheduled.push(false)
+            scheduled_count: mutable usize = 0
+            while scheduled_count < lemmas.names.count |scheduled_count, scheduled, lemmas, file, declarations, functions, report|:
+                candidate: mutable usize = lemmas.names.count
+                for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, scheduled, candidate|:
+                    if not scheduled[lemma_index] and proof_lemma_component_ready(lemmas, scheduled, lemma_index):
+                        candidate <- lemma_index
+                        break
+                if candidate >= lemmas.names.count:
+                    for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, scheduled, report|:
+                        if not scheduled[lemma_index]:
+                            lemmas.verification_reasons[lemma_index] <- "verification-schedule-stuck"
+                            proof_add_finding(report, "lemma-summary-unverified", 0, lemmas.names[lemma_index], "lemma dependency graph could not produce a verified scheduling component")
+                            scheduled[lemma_index] <- true
+                            scheduled_count <- scheduled_count + 1
+                    break
+                component: mutable darray[usize] = []
+                for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, scheduled, candidate, component|:
+                    if not scheduled[lemma_index] and proof_lemmas_same_recursive_component(lemmas, candidate, lemma_index):
+                        component.push(lemma_index)
+                        lemmas.verified[lemma_index] <- true
+                        lemmas.verification_reasons[lemma_index] <- "pending"
+                for member in component |member, component, file, declarations, lemmas, functions, report|:
+                    found: bool = proof_check_scheduled_lemma(file, declarations, member, lemmas, functions, report)
+                    lemmas.verification_reasons[member] <- "body-missing" if not found
+                component_ok: mutable bool = true
+                for member in component |member, component, lemmas, report, component_ok|:
+                    component_ok <- false if not proof_report_lemma_is_clean(report, lemmas.names[member])
+                for member in component |member, component, lemmas, component_ok, report|:
+                    lemmas.verified[member] <- component_ok
+                    lemmas.verification_reasons[member] <- "verified" if component_ok
+                    lemmas.verification_reasons[member] <- "recursive-component-unverified" if not component_ok and lemmas.verification_reasons[member] == "pending"
+                    lemmas.verification_reasons[member] <- "body-unverified" if not component_ok and not lemmas.recursive[member]
+                    lemmas.verification_reasons[member] <- "dependency-unverified" if not component_ok and proof_report_function_has_finding(report, lemmas.names[member], "lemma-summary-unverified")
+                    scheduled[member] <- true
+                    scheduled_count <- scheduled_count + 1
+
+        def proof_compute_verified_functions(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void:
+            functions.verified.clear()
+            functions.verification_reasons.clear()
+            for _ in 0..<functions.names.count |functions|:
+                functions.verified.push(false)
+                functions.verification_reasons.push("pending")
+            scheduled: mutable darray[bool] = []
+            for _ in 0..<functions.names.count |scheduled|:
+                scheduled.push(false)
+            scheduled_count: mutable usize = 0
+            while scheduled_count < functions.names.count |scheduled_count, scheduled, functions, file, declarations, lemmas, report|:
+                candidate: mutable usize = functions.names.count
+                for function_index in 0..<functions.names.count |function_index, functions, scheduled, candidate|:
+                    if not scheduled[function_index] and proof_function_component_ready(functions, scheduled, function_index):
+                        candidate <- function_index
+                        break
+                if candidate >= functions.names.count:
+                    # A well-formed collected call graph should always expose a ready SCC. If
+                    # metadata becomes malformed, reject every remaining summary explicitly.
+                    for function_index in 0..<functions.names.count |function_index, functions, scheduled, report|:
+                        if not scheduled[function_index]:
+                            functions.verification_reasons[function_index] <- "verification-schedule-stuck"
+                            proof_add_finding(report, "function-summary-unverified", 0, functions.names[function_index], "function dependency graph could not produce a verified scheduling component")
+                            scheduled[function_index] <- true
+                            scheduled_count <- scheduled_count + 1
+                    break
+                component: mutable darray[usize] = []
+                for function_index in 0..<functions.names.count |function_index, functions, scheduled, candidate, component|:
+                    if not scheduled[function_index] and proof_functions_same_recursive_component(functions, candidate, function_index):
+                        component.push(function_index)
+                        functions.verified[function_index] <- true
+                        functions.verification_reasons[function_index] <- "pending"
+                for member in component |member, component, file, declarations, lemmas, functions, report|:
+                    found: bool = proof_check_scheduled_function(file, declarations, member, lemmas, functions, report)
+                    functions.verification_reasons[member] <- "body-missing" if not found
+                component_ok: mutable bool = true
+                for member in component |member, component, functions, report, component_ok|:
+                    component_ok <- false if not proof_report_function_is_clean(report, functions.names[member])
+                # A caller whose proof rests on a widened-state summary is in the same position as
+                # the callee, so the marking travels the call graph. Components are scheduled in
+                # dependency order, so every callee outside this component already carries its
+                # final reason by the time it is read here.
+                component_widened: mutable bool = false
+                for member in component |member, component, functions, report, component_widened|:
+                    component_widened <- true if proof_report_function_has_widened_finding(report, functions.names[member])
+                    call_start: usize = functions.call_starts[member]
+                    call_count: usize = functions.call_counts[member]
+                    continue if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start
+                    for offset in 0..<call_count |offset, call_start, functions, member, component_widened|:
+                        called: sview = functions.all_calls[call_start + offset]
+                        continue if called == "__opaque_call__"
+                        called_index: usize = proof_function_index(functions, called)
+                        continue if called_index >= functions.verification_reasons.count
+                        continue if proof_functions_same_recursive_component(functions, member, called_index)
+                        component_widened <- true if functions.verification_reasons[called_index] == "contract-verified-widened-state"
+                for member in component |member, component, functions, component_ok, component_widened|:
+                    functions.verified[member] <- component_ok
+                    # `verified` is what gates summary availability, so it stays true here -- that
+                    # is the whole change. What separates a fully checked contract from one derived
+                    # through an over-approximated construct is the reason, not the flag, so a
+                    # reader who needs that distinction has to read the reason.
+                    functions.verification_reasons[member] <- "verified" if component_ok and not component_widened
+                    functions.verification_reasons[member] <- "contract-verified-widened-state" if component_ok and component_widened
+                    functions.verification_reasons[member] <- "recursive-component-unverified" if not component_ok and functions.verification_reasons[member] == "pending"
+                    functions.verification_reasons[member] <- "body-unverified" if not component_ok and not functions.recursive[member]
+                    functions.verification_reasons[member] <- "dependency-unverified" if not component_ok and (proof_report_function_has_finding(report, functions.names[member], "function-summary-unverified") or proof_report_function_has_finding(report, functions.names[member], "lemma-summary-unverified"))
+                    scheduled[member] <- true
+                    scheduled_count <- scheduled_count + 1

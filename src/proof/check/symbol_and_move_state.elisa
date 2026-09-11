@@ -1,0 +1,402 @@
+extend ElisaProof:
+    private:
+        def proof_clear_facts_after_call(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            original: darray[Ast::Expr] = proof_copy_exprs(facts)
+            keep: mutable darray[bool] = []
+            for fact in original |keep, original, names, parameters, report, owner, analyzed|:
+                bound_name: sview = proof_type_bound_name(fact)
+                retained: mutable bool = false
+                retained <- true if bound_name != "" and ((any candidate in names where candidate == bound_name) or (any parameter in parameters where parameter == bound_name)) and proof_fact_is_type_bound(report, fact, owner)
+                retained <- true if not retained and analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
+                keep.push(retained)
+            write_index: mutable usize = 0
+            for read_index in 0..<original.count |facts, original, keep, write_index|:
+                continue if not keep[read_index]
+                facts[write_index] <- original[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
+
+        def proof_clear_facts_keep_type_bounds(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            original_count: usize = facts.count
+            write_index: mutable usize = 0
+            for read_index in 0..<original_count |facts, names, parameters, report, owner, original_count, write_index|:
+                bound_name: sview = proof_type_bound_name(facts[read_index])
+                continue if bound_name == ""
+                continue if not (any candidate in names where candidate == bound_name) and not (any parameter in parameters where parameter == bound_name)
+                continue if not proof_fact_is_type_bound(report, facts[read_index], owner)
+                facts[write_index] <- facts[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
+
+        # A binding becomes an opaque symbol again whenever its new value is not expressible in
+        # terms of the existing symbols: a declaration reuses a spelling, an unsigned local is
+        # bound or rebound, or any binding is updated by a compound assignment. Every fact that
+        # mentions the old symbol, and every other binding whose recorded value mentions it,
+        # would otherwise silently describe the new value. Purge both transitively. Only the
+        # compiler type facts of cascaded bindings are re-established; their types are unchanged.
+        def proof_resymbolize_binding(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, target: sview, position: Ast::Pos) -> void:
+            return if target == ""
+            targets: mutable darray[sview] = [target]
+            changed: mutable bool = true
+            while changed |changed, targets, names, values|:
+                changed <- false
+                for index in 0..<values.count |index, names, values, targets, changed|:
+                    continue if index >= names.count
+                    continue if any existing in targets where existing == names[index]
+                    mentions: mutable bool = false
+                    for candidate in targets |candidate, values, index, mentions|:
+                        mentions <- true if proof_expr_mentions_name(values[index], candidate)
+                    if mentions:
+                        targets.push(names[index])
+                        changed <- true
+            cascaded_widths: mutable darray[i64] = []
+            for candidate in targets |candidate, facts, cascaded_widths|:
+                cascaded_widths.push(proof_unsigned_marker_width_for_name(facts, candidate))
+            original_count: usize = facts.count
+            write_index: mutable usize = 0
+            for read_index in 0..<original_count |facts, targets, original_count, write_index|:
+                mentions: mutable bool = false
+                for candidate in targets |candidate, facts, read_index, mentions|:
+                    mentions <- true if proof_expr_mentions_name(facts[read_index], candidate)
+                continue if mentions
+                facts[write_index] <- facts[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
+            for index in 0..<values.count |index, names, values, targets, position|:
+                continue if index >= names.count
+                values[index] <- Ast::Expr.Ident(names[index], position) if any candidate in targets where candidate == names[index]
+            for target_index in 0..<targets.count |target_index, targets, cascaded_widths, facts, report, owner, position|:
+                continue if target_index == 0 or target_index >= cascaded_widths.count
+                proof_add_unsigned_binding_facts(facts, report, targets[target_index], cascaded_widths[target_index], position.line, owner, position)
+
+        # Bind an unsigned local to its own symbol instead of substituting its value. The symbol
+        # keeps its compiler width through every later substitution, so wrapping arithmetic on
+        # it stays visible to the unsigned range guard rather than being folded into signed
+        # literal arithmetic. The value is recorded as an equality only when it is itself
+        # range-safe under the current facts; a possibly wrapping initializer leaves the symbol
+        # opaque within its declared type range.
+        # A rebind whose value is written over the binding's own symbol cannot record that value
+        # under that symbol: `rounds == rounds + 1` is cyclic, and refusing it is what dropped the
+        # new value and, with it, every fact about the old one. The new value gets a fresh symbol
+        # instead. The old symbol then denotes the old value and nothing else -- the source name is
+        # bound to the fresh symbol, so every substitution reaches the new value and every fact
+        # already recorded stays true of the value it was taken over.
+        #
+        # The names are drawn from a fixed pool rather than built, and the pool is per function:
+        # nothing here can construct an identifier, and a shared counter would run a long program
+        # out of names for a short one. Exhausting the pool falls back to the old behaviour, which
+        # forgets rather than assumes. The prefix is reserved exactly as the type markers' is.
+        def proof_rebind_symbol(report: mutable ProofReport&) -> sview:
+            index: usize = report.rebind_symbols
+            return "" if index >= 64
+            report.rebind_symbols <- index + 1
+            return "__elisa_rebind_0" if index == 0
+            return "__elisa_rebind_1" if index == 1
+            return "__elisa_rebind_2" if index == 2
+            return "__elisa_rebind_3" if index == 3
+            return "__elisa_rebind_4" if index == 4
+            return "__elisa_rebind_5" if index == 5
+            return "__elisa_rebind_6" if index == 6
+            return "__elisa_rebind_7" if index == 7
+            return "__elisa_rebind_8" if index == 8
+            return "__elisa_rebind_9" if index == 9
+            return "__elisa_rebind_10" if index == 10
+            return "__elisa_rebind_11" if index == 11
+            return "__elisa_rebind_12" if index == 12
+            return "__elisa_rebind_13" if index == 13
+            return "__elisa_rebind_14" if index == 14
+            return "__elisa_rebind_15" if index == 15
+            return "__elisa_rebind_16" if index == 16
+            return "__elisa_rebind_17" if index == 17
+            return "__elisa_rebind_18" if index == 18
+            return "__elisa_rebind_19" if index == 19
+            return "__elisa_rebind_20" if index == 20
+            return "__elisa_rebind_21" if index == 21
+            return "__elisa_rebind_22" if index == 22
+            return "__elisa_rebind_23" if index == 23
+            return "__elisa_rebind_24" if index == 24
+            return "__elisa_rebind_25" if index == 25
+            return "__elisa_rebind_26" if index == 26
+            return "__elisa_rebind_27" if index == 27
+            return "__elisa_rebind_28" if index == 28
+            return "__elisa_rebind_29" if index == 29
+            return "__elisa_rebind_30" if index == 30
+            return "__elisa_rebind_31" if index == 31
+            return "__elisa_rebind_32" if index == 32
+            return "__elisa_rebind_33" if index == 33
+            return "__elisa_rebind_34" if index == 34
+            return "__elisa_rebind_35" if index == 35
+            return "__elisa_rebind_36" if index == 36
+            return "__elisa_rebind_37" if index == 37
+            return "__elisa_rebind_38" if index == 38
+            return "__elisa_rebind_39" if index == 39
+            return "__elisa_rebind_40" if index == 40
+            return "__elisa_rebind_41" if index == 41
+            return "__elisa_rebind_42" if index == 42
+            return "__elisa_rebind_43" if index == 43
+            return "__elisa_rebind_44" if index == 44
+            return "__elisa_rebind_45" if index == 45
+            return "__elisa_rebind_46" if index == 46
+            return "__elisa_rebind_47" if index == 47
+            return "__elisa_rebind_48" if index == 48
+            return "__elisa_rebind_49" if index == 49
+            return "__elisa_rebind_50" if index == 50
+            return "__elisa_rebind_51" if index == 51
+            return "__elisa_rebind_52" if index == 52
+            return "__elisa_rebind_53" if index == 53
+            return "__elisa_rebind_54" if index == 54
+            return "__elisa_rebind_55" if index == 55
+            return "__elisa_rebind_56" if index == 56
+            return "__elisa_rebind_57" if index == 57
+            return "__elisa_rebind_58" if index == 58
+            return "__elisa_rebind_59" if index == 59
+            return "__elisa_rebind_60" if index == 60
+            return "__elisa_rebind_61" if index == 61
+            return "__elisa_rebind_62" if index == 62
+            return "__elisa_rebind_63" if index == 63
+            return ""
+
+        def proof_bind_unsigned_symbol(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, slot: usize, width: i64, value: Ast::Expr, position: Ast::Pos) -> void:
+            return if slot >= names.count or slot >= values.count or width <= 0
+            declared: sview = names[slot]
+            value_known: mutable bool = true
+            match value:
+                Ast::Expr.Invalid:
+                    value_known <- false
+                Ast::Expr.Absent:
+                    value_known <- false
+                _:
+                    pass
+            # Only a self-referential value needs a fresh symbol, and only then is the old symbol
+            # left standing. Every other rebind keeps the source name as its symbol, so the facts
+            # over the old value -- which that name would otherwise still denote -- are dropped.
+            fresh: sview = proof_rebind_symbol(report) if value_known and proof_expr_mentions_name(value, declared) else ""
+            symbol: sview = declared if fresh == "" else fresh
+            proof_resymbolize_binding(names, values, facts, report, owner, declared, position) if fresh == ""
+            values[slot] <- Ast::Expr.Ident(symbol, position)
+            proof_add_unsigned_binding_facts(facts, report, symbol, width, position.line, owner, position)
+            return if not value_known or proof_expr_mentions_name(value, symbol)
+            return if not proof_unsigned_expression_safe(value, facts)
+            binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.EqEq, value, position)
+            proof_add_traced_fact(facts, report, binding, "local-binding", position.line, owner)
+
+        # A scalar local whose initializer is opaque still denotes one value. Keep its own name as
+        # the symbol instead of the unexpressible initializer, so `reading == reading` is decided
+        # over the witnessed binding rather than over two copies of an unknown. Nothing about the
+        # value is assumed: an opaque initializer contributes no binding fact.
+        def proof_bind_scalar_symbol(names: darray[sview]&, values: mutable darray[Ast::Expr]&, slot: usize, position: Ast::Pos) -> void:
+            return if slot >= names.count or slot >= values.count
+            match values[slot]:
+                Ast::Expr.Invalid:
+                    values[slot] <- Ast::Expr.Ident(names[slot], position)
+                Ast::Expr.Absent:
+                    values[slot] <- Ast::Expr.Ident(names[slot], position)
+                _:
+                    pass
+
+        def proof_statement_declared_name(statement: Ast::Stmt) -> sview:
+            match statement:
+                Ast::Stmt.VarDecl(local_name, _, _, _):
+                    return local_name
+                _:
+                    return ""
+
+        def proof_restore_type_bound_facts_except(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, report: ProofReport&, owner: sview, excluded: sview) -> void:
+            for fact in source |fact, facts, names, report, owner, excluded|:
+                bound_name: sview = proof_type_bound_name(fact)
+                continue if bound_name == "" or bound_name == excluded
+                continue if not (any candidate in names where candidate == bound_name)
+                continue if not proof_fact_is_type_bound(report, fact, owner)
+                duplicate: mutable bool = false
+                for existing in facts |existing, fact, duplicate|:
+                    duplicate <- true if proof_expr_equal(existing, fact)
+                facts.push(fact) if not duplicate
+
+        # Return the binding root affected by a move. Field and index moves consume the
+        # containing binding from this kernel's name-based state; precise subfield ownership is
+        # intentionally left to the compiler's affine checker until the proof state has binding
+        # identities rather than source spellings.
+        def proof_move_root(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Field(object, _, _):
+                    return proof_move_root(object)
+                Ast::Expr.Index(object, _, _):
+                    return proof_move_root(object)
+                Ast::Expr.IndexN(object, _, _):
+                    return proof_move_root(object)
+                Ast::Expr.Slice(object, _, _, _):
+                    return proof_move_root(object)
+                Ast::Expr.Paren(inner, _):
+                    return proof_move_root(inner)
+                Ast::Expr.Move(operand, _):
+                    return proof_move_root(operand)
+                _:
+                    return ""
+
+        def proof_collect_move_roots(expression: Ast::Expr, roots: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Move(operand, _):
+                    root: sview = proof_move_root(operand)
+                    roots.push(root) if root != "" and not (any existing in roots where existing == root)
+                    proof_collect_move_roots(operand, roots)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_move_roots(inner, roots)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_move_roots(operand, roots)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_move_roots(left, roots)
+                    proof_collect_move_roots(right, roots)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_collect_move_roots(callee, roots)
+                    for argument in arguments |roots|:
+                        proof_collect_move_roots(argument, roots)
+                Ast::Expr.Field(object, _, _):
+                    proof_collect_move_roots(object, roots)
+                Ast::Expr.Scope(base, _, _):
+                    proof_collect_move_roots(base, roots)
+                Ast::Expr.Index(object, index, _):
+                    proof_collect_move_roots(object, roots)
+                    proof_collect_move_roots(index, roots)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_collect_move_roots(object, roots)
+                    proof_collect_move_roots(low, roots)
+                    proof_collect_move_roots(high, roots)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_collect_move_roots(object, roots)
+                    for argument in arguments |roots|:
+                        proof_collect_move_roots(argument, roots)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_collect_move_roots(operand, roots)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |roots|:
+                        proof_collect_move_roots(element, roots)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |roots|:
+                        proof_collect_move_roots(element, roots)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |roots|:
+                        proof_collect_move_roots(element, roots)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |roots|:
+                        proof_collect_move_roots(entry.key, roots)
+                        proof_collect_move_roots(entry.value, roots)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |roots|:
+                        proof_collect_move_roots(field.value, roots)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_collect_move_roots(base, roots)
+                    for field in fields |roots|:
+                        proof_collect_move_roots(field.value, roots)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_collect_move_roots(condition, roots)
+                    proof_collect_move_roots(then_expr, roots)
+                    proof_collect_move_roots(else_expr, roots)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_collect_move_roots(iterable, roots)
+                    proof_collect_move_roots(condition, roots)
+                    proof_collect_move_roots(body, roots)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_collect_move_roots(base, roots)
+                    proof_collect_move_roots(predicate, roots)
+                Ast::Expr.GetElse(guarded, _, _):
+                    # Recovery statements execute on the failure branch and are checked against
+                    # a cloned state. Only a move in the successful guarded value invalidates the
+                    # enclosing success-path binding here; recovery-side moves are collected by
+                    # the nested proof_check_returns invocation.
+                    proof_collect_move_roots(guarded, roots)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements |roots|:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                proof_collect_move_roots(initializer, roots)
+                            Ast::Stmt.Assign(_, _, initializer, _):
+                                proof_collect_move_roots(initializer, roots)
+                            Ast::Stmt.Expr(statement_expression, _):
+                                proof_collect_move_roots(statement_expression, roots)
+                            Ast::Stmt.Return(statement_value, _):
+                                if statement_value is returned:
+                                    proof_collect_move_roots(returned, roots)
+                            _:
+                                pass
+                    proof_collect_move_roots(value, roots)
+                _:
+                    pass
+
+        def proof_statement_move_roots(statement: Ast::Stmt, roots: mutable darray[sview]&) -> void:
+            match statement:
+                Ast::Stmt.Return(value, _):
+                    if value is returned:
+                        proof_collect_move_roots(returned, roots)
+                Ast::Stmt.Expr(expression, _):
+                    proof_collect_move_roots(expression, roots)
+                Ast::Stmt.VarDecl(_, _, initializer, _):
+                    proof_collect_move_roots(initializer, roots)
+                Ast::Stmt.Assign(target, _, initializer, _):
+                    proof_collect_move_roots(target, roots)
+                    proof_collect_move_roots(initializer, roots)
+                Ast::Stmt.If(condition, _, _, _):
+                    proof_collect_move_roots(condition, roots)
+                Ast::Stmt.While(condition, _, _):
+                    proof_collect_move_roots(condition, roots)
+                Ast::Stmt.For(_, _, iterable, _, _):
+                    proof_collect_move_roots(iterable, roots)
+                Ast::Stmt.Match(scrutinee, _, _):
+                    proof_collect_move_roots(scrutinee, roots)
+                Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                    if block_kind == "assert_by" and block_body.count > 0:
+                        match block_body[0]:
+                            Ast::Stmt.Contract(_, goal, _):
+                                proof_collect_move_roots(goal, roots)
+                            _:
+                                pass
+                Ast::Stmt.Contract(kind, expression, _):
+                    proof_collect_move_roots(expression, roots) if kind == "assert"
+                _:
+                    pass
+
+        # A move invalidates all symbolic values conservatively, then marks the consumed root as
+        # unavailable. This makes a later use substitute to Invalid and prevents the proof
+        # checker from proving a post-move property from a pre-move alias. The compiler's own
+        # affine/linear/region passes remain the authority for exact ownership legality.
+        def proof_invalidate_moved_roots(roots: darray[sview], names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            return if roots.count == 0
+            proof_forget_values(names, values, position)
+            # A transfer invalidates what is known about the moved roots, not the declared type of
+            # every other binding: an unrelated `y: i64` is still an `i64` afterwards. Keep the
+            # traced type bounds of live, unmoved names and discard everything else, which is the
+            # same retention rule used at call and control-flow havoc points.
+            original_count: usize = facts.count
+            write_index: mutable usize = 0
+            for read_index in 0..<original_count |facts, names, roots, report, owner, original_count, write_index|:
+                bound_name: sview = proof_type_bound_name(facts[read_index])
+                continue if bound_name == ""
+                continue if any root in roots where root == bound_name
+                continue if not (any candidate in names where candidate == bound_name)
+                continue if not proof_fact_is_type_bound(report, facts[read_index], owner)
+                facts[write_index] <- facts[read_index]
+                write_index <- write_index + 1
+            facts.resize(write_index)
+            for root in roots |root, names, values|:
+                for index in 0..<names.count |index, names, values, root|:
+                    values[index] <- Ast::Expr.Invalid if names[index] == root
+
+        def proof_contracts(body: darray[Ast::Stmt]&, kind: sview) -> darray[Ast::Expr]:
+            result: mutable darray[Ast::Expr] = []
+            for statement in body |result, kind|:
+                match statement:
+                    Ast::Stmt.Contract(contract_kind, expression, _):
+                        result.push(expression) if contract_kind == kind
+                    _:
+                        pass
+            return result
+
+        # Function/loop specifications are logical state, not executable expression contexts.
+        # `old(...)` is modeled separately; other calls require an explicit purity proof and a
+        # state-observation model for contract evaluation.
+        # A contract may mention a call only when the callee was independently classified as a
+        # total pure function. This is deliberately stricter than merely checking that the call
+        # has an `ensure`: a precondition, mutable parameter, write, or opaque transitive call
+        # would make the call a partial/effectful expression rather than a stable logical value.

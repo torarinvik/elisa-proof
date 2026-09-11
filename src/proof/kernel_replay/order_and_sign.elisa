@@ -1,0 +1,432 @@
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_congruence_has_seed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return proof_kernel_replay_congruence_has_seed(nodes, node.left, depth + 1) or proof_kernel_replay_congruence_has_seed(nodes, node.right, depth + 1) if node.kind == "binary" and node.operator == "and"
+            return true if node.kind == "binary" and node.operator == "=="
+            if node.kind == "unary" and node.operator == "not":
+                inner: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+                return inner.known and inner.node.kind == "binary" and inner.node.operator == "!="
+            return false
+
+        def proof_kernel_replay_congruence_has_seed_in_facts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, facts: darray[usize]) -> bool:
+            for fact in facts |fact, nodes|:
+                return true if proof_kernel_replay_congruence_has_seed(nodes, fact, 0)
+            return false
+
+        # Reflexivity, symmetry, and coherence with arithmetic are not universal in Elisa: `==`
+        # and the ordering operators dispatch to a user `__eq__`/`__cmp__` for a struct operand,
+        # and no protocol method is required to have those properties. Both operands of a
+        # comparison concluded from two terms denoting the same value must therefore be witnessed
+        # as primitive scalars. An unwitnessed shape declines; it is never admitted by default.
+        # The sign of a product. This mirrors the producer's rule exactly, and deliberately stays
+        # syntactic for that reason: the required sign facts must be present as facts, matched
+        # structurally, never re-derived by another search. A tier the two sides could only
+        # approximate would surface as a replay gap rather than as a proof.
+        #
+        # Both operands must be witnessed primitive scalars, because `*` on a struct operand is a
+        # user `__mul__` and obeys no sign law.
+        def proof_kernel_replay_zero_literal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            return located.node.kind == "int" and located.node.value == 0
+
+        def proof_kernel_replay_product_operands(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, left: usize, right: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0, 0) if not located.known
+            return (false, 0, 0) if located.node.kind != "binary" or located.node.operator != "*"
+            return (true, located.node.left, located.node.right)
+
+        def proof_kernel_replay_sign_mirror(relation: sview) -> sview:
+            return "<=" if relation == ">="
+            return ">=" if relation == "<="
+            return "<" if relation == ">"
+            return ">" if relation == "<"
+            return relation
+
+        def proof_kernel_replay_sign_fact(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], term: usize, relation: sview) -> bool:
+            mirrored: sview = proof_kernel_replay_sign_mirror(relation)
+            for fact in facts |fact, nodes, children, term, relation, mirrored|:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+                continue if not located.known or located.node.kind != "binary"
+                if located.node.operator == relation and proof_kernel_replay_zero_literal(nodes, located.node.right) and proof_kernel_replay_expr_equal(nodes, children, located.node.left, term, 0):
+                    return true
+                if located.node.operator == mirrored and proof_kernel_replay_zero_literal(nodes, located.node.left) and proof_kernel_replay_expr_equal(nodes, children, located.node.right, term, 0):
+                    return true
+            return false
+
+        def proof_kernel_replay_product_sign(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
+            product: mutable (known: bool, left: usize, right: usize) = proof_kernel_replay_product_operands(nodes, left)
+            relation: mutable sview = operator
+            if not product.known:
+                product <- proof_kernel_replay_product_operands(nodes, right)
+                relation <- proof_kernel_replay_sign_mirror(operator)
+                return false if not product.known or not proof_kernel_replay_zero_literal(nodes, left)
+            else:
+                return false if not proof_kernel_replay_zero_literal(nodes, right)
+            return false if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, product.left, 0)
+            return false if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, product.right, 0)
+            if relation == ">=":
+                return true if proof_kernel_replay_sign_fact(nodes, children, facts, product.left, ">=") and proof_kernel_replay_sign_fact(nodes, children, facts, product.right, ">=")
+                return proof_kernel_replay_sign_fact(nodes, children, facts, product.left, "<=") and proof_kernel_replay_sign_fact(nodes, children, facts, product.right, "<=")
+            if relation == "<=":
+                return true if proof_kernel_replay_sign_fact(nodes, children, facts, product.left, ">=") and proof_kernel_replay_sign_fact(nodes, children, facts, product.right, "<=")
+                return proof_kernel_replay_sign_fact(nodes, children, facts, product.left, "<=") and proof_kernel_replay_sign_fact(nodes, children, facts, product.right, ">=")
+            if relation == ">":
+                return true if proof_kernel_replay_sign_fact(nodes, children, facts, product.left, ">") and proof_kernel_replay_sign_fact(nodes, children, facts, product.right, ">")
+                return proof_kernel_replay_sign_fact(nodes, children, facts, product.left, "<") and proof_kernel_replay_sign_fact(nodes, children, facts, product.right, "<")
+            if relation == "<":
+                return true if proof_kernel_replay_sign_fact(nodes, children, facts, product.left, ">") and proof_kernel_replay_sign_fact(nodes, children, facts, product.right, "<")
+                return proof_kernel_replay_sign_fact(nodes, children, facts, product.left, "<") and proof_kernel_replay_sign_fact(nodes, children, facts, product.right, ">")
+            return false
+
+        def proof_kernel_replay_primitive_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, right: usize) -> bool:
+            return proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, left, 0) and proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, right, 0)
+
+        # Replay of the producer's structural transitivity. The difference engine here names its
+        # atoms exactly as the producer's does, so a premise over a field term is invisible to it
+        # for the same reason; chaining through a structurally equal middle term needs no atom.
+        #
+        # `<` and `<=` are the primitive integer order only for witnessed scalars -- on a struct
+        # they are a user comparison under no transitivity law -- so all three terms are put
+        # through the same witness guard the neighbouring rules use.
+        const PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET: usize = 32
+
+        def proof_kernel_replay_chain_ascending(operator: sview) -> bool:
+            return operator == "<" or operator == "<="
+
+        def proof_kernel_replay_chain_discharges(first: sview, second: sview, goal: sview) -> bool:
+            return true if first == "<" or second == "<"
+            return goal == "<="
+
+        # One ascending step out of a fact. With `from_lower` the fact must read
+        # `anchor op middle`, otherwise `middle op anchor`. A `>`/`>=` fact is the same step
+        # written backwards and is accepted mirrored.
+        def proof_kernel_replay_chain_step(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, fact: usize, anchor: usize, from_lower: bool) -> (known: bool, middle: usize, operator: sview):
+            unknown: (known: bool, middle: usize, operator: sview) = (false, 0, "")
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+            return unknown if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return unknown if node.kind != "binary"
+            return unknown if not proof_kernel_replay_arena_shape_valid(node)
+            # Mirror of the producer's equality step: `b == c` is `b <= c` and `c <= b`, so it
+            # reads as a non-strict step from either end and in either direction. The scalar
+            # witness on both of the fact's operands is the caller's, exactly as for an order
+            # step, and a step from an equality is never strict.
+            if node.operator == "==":
+                if from_lower:
+                    return (true, node.right, "<=") if proof_kernel_replay_expr_equal(nodes, children, node.left, anchor, 0)
+                    return (true, node.left, "<=") if proof_kernel_replay_expr_equal(nodes, children, node.right, anchor, 0)
+                    return unknown
+                return (true, node.left, "<=") if proof_kernel_replay_expr_equal(nodes, children, node.right, anchor, 0)
+                return (true, node.right, "<=") if proof_kernel_replay_expr_equal(nodes, children, node.left, anchor, 0)
+                return unknown
+            ascending: mutable bool = proof_kernel_replay_chain_ascending(node.operator)
+            normalized: mutable sview = node.operator
+            low: mutable usize = node.left
+            high: mutable usize = node.right
+            if node.operator == ">":
+                ascending <- true
+                normalized <- "<"
+                low <- node.right
+                high <- node.left
+            if node.operator == ">=":
+                ascending <- true
+                normalized <- "<="
+                low <- node.right
+                high <- node.left
+            return unknown if not ascending
+            if from_lower:
+                return (true, high, normalized) if proof_kernel_replay_expr_equal(nodes, children, low, anchor, 0)
+                return unknown
+            return (true, low, normalized) if proof_kernel_replay_expr_equal(nodes, children, high, anchor, 0)
+            return unknown
+
+        # Mirror of the producer's strict shift: `a < R` gives `a + 1 <= R` for any term `R`, matched
+        # structurally rather than through an atom, which is what lets it reach a field place the
+        # difference engine cannot name. The shift is sound only if `a + 1` does not wrap, which is
+        # the same guard the producer consults, and a `<` goal is not this rule.
+        # Mirror of the producer's sum bound. A sum of two non-constant terms is not an affine form
+        # here either, and both facts that bound one are structural, so the search is too:
+        # `m <= C - a` with `a <= C` gives `a + m <= C`, and a term under `m` inherits it. There is
+        # deliberately no rule reading `a + m <= C` as a premise -- for a fixed-width type that is a
+        # claim about a sum that may already have wrapped.
+        def proof_kernel_replay_binary_operands(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, operator: sview) -> (known: bool, left: usize, right: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0, 0) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (false, 0, 0) if node.kind != "binary" or node.operator != operator
+            return (true, node.left, node.right)
+
+        # Mirror of the producer's conjunct flattening: a conjunction asserts both of its sides,
+        # so a structural scan has to see inside one.
+        def proof_kernel_replay_push_conjuncts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, conjuncts: mutable darray[usize]&, depth: usize) -> void:
+            requires depth <= 32
+            decreases 32 - depth
+            if depth < 32:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+                if located.known and located.node.kind == "binary" and located.node.operator == "and":
+                    proof_kernel_replay_push_conjuncts(nodes, located.node.left, conjuncts, depth + 1)
+                    proof_kernel_replay_push_conjuncts(nodes, located.node.right, conjuncts, depth + 1)
+                    return
+            conjuncts.push(root)
+
+        # Mirror: `not e` where the node is one.
+        def proof_kernel_replay_negated_operand(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, operand: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0) if not located.known
+            return (false, 0) if located.node.kind != "unary" or located.node.operator != "not"
+            return (true, located.node.left)
+
+        # Mirror: a candidate an existing fact denies outright.
+        def proof_kernel_replay_fact_denies(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, candidate: usize, facts: darray[usize]) -> bool:
+            negated: (known: bool, operand: usize) = proof_kernel_replay_negated_operand(nodes, candidate)
+            for fact in facts |fact, nodes, children, candidate, negated|:
+                return true if negated.known and proof_kernel_replay_expr_equal(nodes, children, fact, negated.operand, 0)
+                fact_negated: (known: bool, operand: usize) = proof_kernel_replay_negated_operand(nodes, fact)
+                return true if fact_negated.known and proof_kernel_replay_expr_equal(nodes, children, fact_negated.operand, candidate, 0)
+            return false
+
+        # Mirror of the producer's readable-fact view, with conjunctions flattened.
+        def proof_kernel_replay_conjunct_facts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize]) -> darray[usize]:
+            conjuncts: mutable darray[usize] = []
+            for fact in facts |fact, nodes, conjuncts|:
+                proof_kernel_replay_push_conjuncts(nodes, fact, &conjuncts, 0)
+            return conjuncts
+
+        def proof_kernel_replay_is_order_operator(operator: sview) -> bool:
+            return operator == "<" or operator == "<=" or operator == ">" or operator == ">="
+
+        # Mirror: the order a fact states, seeing through the negation an early-return guard leaves
+        # behind. Reading `not (x > n)` as `x <= n` is the totality of the primitive order, which a
+        # user comparison method need not have, so both operands must carry a primitive scalar
+        # witness. A positive fact is used as itself and needs none.
+        def proof_kernel_replay_readable_order(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact: usize) -> (known: bool, left: usize, operator: sview, right: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+            return (false, 0, "", 0) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (proof_kernel_replay_is_order_operator(node.operator), node.left, node.operator, node.right) if node.kind == "binary"
+            return (false, 0, "", 0) if node.kind != "unary" or node.operator != "not"
+            inner: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return (false, 0, "", 0) if not inner.known or inner.node.kind != "binary"
+            negated: sview = proof_kernel_replay_negation(inner.node.operator)
+            return (false, 0, "", 0) if not proof_kernel_replay_is_order_operator(negated)
+            return (false, 0, "", 0) if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, inner.node.left, 0)
+            return (false, 0, "", 0) if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, inner.node.right, 0)
+            return (true, inner.node.left, negated, inner.node.right)
+
+        def proof_kernel_replay_has_order_fact(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, term: usize, bound: usize, strict_only: bool, facts: darray[usize]) -> bool:
+            conjuncts: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
+            for fact in conjuncts |fact, nodes, children, term, bound, strict_only, facts|:
+                readable: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order(nodes, children, facts, fact)
+                continue if not readable.known
+                if readable.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, readable.left, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.right, bound, 0):
+                    return true
+                if readable.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, readable.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.left, bound, 0):
+                    return true
+                continue if strict_only
+                if readable.operator == "<=" and proof_kernel_replay_expr_equal(nodes, children, readable.left, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.right, bound, 0):
+                    return true
+                if readable.operator == ">=" and proof_kernel_replay_expr_equal(nodes, children, readable.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.left, bound, 0):
+                    return true
+            return false
+
+        def proof_kernel_replay_sum_witness_for(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, first: usize, second: usize, facts: darray[usize]) -> (known: bool, bound: usize, strict: bool):
+            conjuncts: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
+            for fact in conjuncts |fact, nodes, children, first, second, facts|:
+                readable: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order(nodes, children, facts, fact)
+                continue if not readable.known
+                continue if readable.operator != "<" and readable.operator != "<="
+                difference: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, readable.right, "-")
+                continue if not difference.known
+                continue if not proof_kernel_replay_expr_equal(nodes, children, difference.right, first, 0)
+                continue if not proof_kernel_replay_has_order_fact(nodes, children, first, difference.left, false, facts)
+                if proof_kernel_replay_expr_equal(nodes, children, readable.left, second, 0):
+                    return (true, difference.left, readable.operator == "<")
+                if proof_kernel_replay_has_order_fact(nodes, children, second, readable.left, true, facts):
+                    return (true, difference.left, true)
+                if readable.operator == "<" and proof_kernel_replay_has_order_fact(nodes, children, second, readable.left, false, facts):
+                    return (true, difference.left, true)
+                if proof_kernel_replay_has_order_fact(nodes, children, second, readable.left, false, facts):
+                    return (true, difference.left, false)
+            return (false, 0, false)
+
+        def proof_kernel_replay_sum_upper_witness(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left: usize, right: usize, facts: darray[usize]) -> (known: bool, bound: usize, strict: bool):
+            forward: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_witness_for(nodes, children, left, right, facts)
+            return forward if forward.known
+            return proof_kernel_replay_sum_witness_for(nodes, children, right, left, facts)
+
+        # Mirror of the producer's place-form width marker: the same marker over a term rather
+        # than a bare name, read only to answer whether a term has an unsigned type.
+        def proof_kernel_replay_place_marker_width(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], term: usize) -> i64:
+            width: mutable i64 = 0
+            for fact in facts |fact, nodes, children, term, width|:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+                continue if not located.known
+                node: ElisaProofKernelCore::ProofKernelNode = located.node
+                continue if node.kind != "call" or node.children_count != 2
+                callee: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+                continue if not callee.known or callee.node.kind != "ident" or callee.node.name != "__elisa_unsigned_type_bound"
+                first: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start)
+                second: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + 1)
+                continue if not first.known or not second.known
+                first_argument: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, first.value)
+                second_argument: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, second.value)
+                continue if not first_argument.known or not second_argument.known
+                marked_term: mutable usize = first.value
+                marked_term <- first_argument.node.left if first_argument.node.kind == "call_arg"
+                marked_width: mutable usize = second.value
+                marked_width <- second_argument.node.left if second_argument.node.kind == "call_arg"
+                continue if not proof_kernel_replay_expr_equal(nodes, children, marked_term, term, 0)
+                value: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, marked_width, 0)
+                continue if not value.known or value.value < 8 or value.value > 64
+                width <- value.value if width == 0 or value.value < width
+            return width
+
+        # Mirror: whether a term has an unsigned type. One unsigned atom settles the term,
+        # because arithmetic mixing an unsigned operand with another type does not typecheck.
+        def proof_kernel_replay_term_is_unsigned(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, depth: usize) -> bool:
+            requires depth <= 32
+            decreases 32 - depth
+            return false if depth >= 32
+            return true if proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, 0) != 0
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "binary":
+                arithmetic: bool = node.operator == "+" or node.operator == "-" or node.operator == "*" or node.operator == "/" or node.operator == "%" or node.operator == "<<" or node.operator == ">>"
+                return false if not arithmetic
+                return proof_kernel_replay_term_is_unsigned(nodes, children, facts, node.left, depth + 1) or proof_kernel_replay_term_is_unsigned(nodes, children, facts, node.right, depth + 1)
+            return proof_kernel_replay_place_marker_width(nodes, children, facts, root) != 0
+
+        # Mirror: the nonnegativity rule addressed by the whole goal, so it can run before the
+        # fixed-width guards.
+        def proof_kernel_replay_unsigned_nonnegative_shape(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return false if node.kind != "binary"
+            return proof_kernel_replay_unsigned_nonnegative(nodes, children, facts, node.left, node.operator, node.right)
+
+        # Mirror: whether a term is built without subtraction. Every leaf of an arithmetic term
+        # one unsigned atom settles is itself unsigned, so nonnegative, and every operator here
+        # carries nonnegativity forward. Any node kind this does not name counts as containing a
+        # subtraction.
+        def proof_kernel_replay_subtraction_free(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> bool:
+            return false if depth >= 64
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return node.value >= 0 if node.kind == "int"
+            return true if node.kind == "ident" or node.kind == "field" or node.kind == "tuple"
+            if node.kind == "unary":
+                return false if node.operator != "+"
+                return proof_kernel_replay_subtraction_free(nodes, node.left, depth + 1)
+            if node.kind == "binary":
+                allowed: bool = node.operator == "+" or node.operator == "*" or node.operator == "/" or node.operator == "%" or node.operator == "<<" or node.operator == ">>"
+                return false if not allowed
+                return proof_kernel_replay_subtraction_free(nodes, node.left, depth + 1) and proof_kernel_replay_subtraction_free(nodes, node.right, depth + 1)
+            return false
+
+        # Mirror: a non-wrapping unsigned expression is nonnegative, because its mathematical
+        # value is its machine value and an unsigned machine value is nonnegative. A
+        # subtraction-free unsigned term is nonnegative without the wrap premise at all.
+        def proof_kernel_replay_unsigned_nonnegative(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
+            return false if operator != "<=" and operator != ">="
+            zero_left: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left, 0)
+            zero_right: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right, 0)
+            term: mutable usize = 0
+            if zero_left.known and zero_left.value == 0 and operator == "<=":
+                term <- right
+            elif zero_right.known and zero_right.value == 0 and operator == ">=":
+                term <- left
+            else:
+                return false
+            return false if not proof_kernel_replay_term_is_unsigned(nodes, children, facts, term, 0)
+            return true if proof_kernel_replay_subtraction_free(nodes, term, 0)
+            return proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, term)
+
+        def proof_kernel_replay_sum_bound(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
+            return false if operator != "<" and operator != "<="
+            operands: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, left, "+")
+            return false if not operands.known
+            witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness(nodes, children, operands.left, operands.right, facts)
+            return false if not witness.known
+            return false if not proof_kernel_replay_expr_equal(nodes, children, witness.bound, right, 0)
+            return false if operator == "<" and not witness.strict
+            width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, left, facts, 0)
+            return proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, left) if width == 0
+            return proof_kernel_replay_peer_is_nameable(nodes, witness.bound) and proof_kernel_replay_peer_unsigned_width(nodes, children, witness.bound, facts) == width
+
+        def proof_kernel_replay_shifted_unit_base(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, base: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (false, 0) if node.kind != "binary" or node.operator != "+"
+            return proof_kernel_replay_unsigned_unit_increment_base(nodes, node.left, node.right)
+
+        def proof_kernel_replay_strict_shift(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
+            return false if operator != "<="
+            shifted: (known: bool, base: usize) = proof_kernel_replay_shifted_unit_base(nodes, left)
+            return false if not shifted.known
+            return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, left)
+            for fact in facts |fact, nodes, children, shifted, right|:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+                continue if not located.known
+                node: ElisaProofKernelCore::ProofKernelNode = located.node
+                continue if node.kind != "binary"
+                if node.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, node.left, shifted.base, 0) and proof_kernel_replay_expr_equal(nodes, children, node.right, right, 0):
+                    return true
+                if node.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, node.right, shifted.base, 0) and proof_kernel_replay_expr_equal(nodes, children, node.left, right, 0):
+                    return true
+            return false
+
+        def proof_kernel_replay_comparison_chain(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize) -> bool:
+            goal_operator: mutable sview = operator
+            lower: mutable usize = left
+            upper: mutable usize = right
+            if operator == ">":
+                goal_operator <- "<"
+                lower <- right
+                upper <- left
+            if operator == ">=":
+                goal_operator <- "<="
+                lower <- right
+                upper <- left
+            return false if not proof_kernel_replay_chain_ascending(goal_operator)
+            # Mirrors the producer's filter: the difference engine above already chains every
+            # goal whose two sides it can name, so this tier only ever answers for one it cannot.
+            lower_affine: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, lower, 0)
+            upper_affine: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, upper, 0)
+            return false if lower_affine.known and lower_affine.base != "" and upper_affine.known and upper_affine.base != ""
+            return false if not proof_kernel_replay_primitive_comparison(nodes, children, facts, lower, upper)
+            # Same shape and the same cap as the producer: one pass per endpoint to collect the
+            # facts that actually mention it, then pair only those. A spent cap refuses, which
+            # only ever loses a replay -- it can never admit one.
+            lower_middles: mutable darray[usize] = []
+            lower_operators: mutable darray[sview] = []
+            for fact in facts |nodes, children, lower, lower_middles, lower_operators|:
+                break if lower_middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
+                step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, lower, true)
+                continue if not step.known
+                lower_middles.push(step.middle)
+                lower_operators.push(step.operator)
+            return false if lower_middles.count == 0
+            upper_middles: mutable darray[usize] = []
+            upper_operators: mutable darray[sview] = []
+            for fact in facts |nodes, children, upper, upper_middles, upper_operators|:
+                break if upper_middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
+                step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, upper, false)
+                continue if not step.known
+                upper_middles.push(step.middle)
+                upper_operators.push(step.operator)
+            return false if upper_middles.count == 0
+            for first_index in 0..<lower_middles.count |nodes, children, facts, goal_operator, lower_middles, lower_operators, upper_middles, upper_operators|:
+                for second_index in 0..<upper_middles.count |nodes, children, facts, goal_operator, first_index, lower_middles, lower_operators, upper_middles, upper_operators|:
+                    continue if not proof_kernel_replay_chain_discharges(lower_operators[first_index], upper_operators[second_index], goal_operator)
+                    continue if not proof_kernel_replay_expr_equal(nodes, children, lower_middles[first_index], upper_middles[second_index], 0)
+                    return true if proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, lower_middles[first_index], 0)
+            return false

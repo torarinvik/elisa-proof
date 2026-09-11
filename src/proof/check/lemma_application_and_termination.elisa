@@ -1,0 +1,541 @@
+extend ElisaProof:
+    private:
+        def proof_lemmas_same_recursive_component(lemmas: ProofLemmaTable&, source: usize, target: usize) -> bool:
+            return false if source >= lemmas.names.count or target >= lemmas.names.count
+            return true if source == target
+            return false if source >= lemmas.recursive.count or target >= lemmas.recursive.count
+            return false if not lemmas.recursive[source] or not lemmas.recursive[target]
+            if source < lemmas.recursive_component_ids.count and target < lemmas.recursive_component_ids.count:
+                return lemmas.recursive_component_ids[source] == lemmas.recursive_component_ids[target]
+            return proof_lemma_reaches(lemmas, source, target) and proof_lemma_reaches(lemmas, target, source)
+
+        # Map actual arguments to formal parameters using Elisa's named-argument rules. The
+        # compiler stores labels separately from values, so positional substitution is not
+        # sufficient: `f(second: y, first: x)` must instantiate the same summary as `f(x, y)`.
+        # Missing/defaulted parameters are declined here until summary metadata carries a
+        # validated default-value substitution; this is conservative and avoids guessing.
+        def proof_parameter_index(parameters: darray[sview]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < parameters.count |index, parameters, name|:
+                return index if parameters[index] == name
+                index <- index + 1
+            return parameters.count
+
+        def proof_map_call_arguments(parameters: darray[sview]&, has_defaults: darray[bool]&, defaults: darray[Ast::Expr]&, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, mapped: mutable darray[Ast::Expr]&) -> bool:
+            mapped.clear()
+            return false if argument_names.count != 0 and argument_names.count != arguments.count
+            used: mutable darray[bool] = []
+            for parameter in parameters |mapped, used|:
+                mapped.push(Ast::Expr.Absent)
+                used.push(false)
+            saw_named: mutable bool = false
+            next_positional: mutable usize = 0
+            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, parameters, mapped, used, saw_named, next_positional|:
+                label: sview = argument_names[argument_index] if argument_names.count == arguments.count else ""
+                parameter_index: mutable usize = parameters.count
+                if label == "":
+                    return false if saw_named
+                    while next_positional < parameters.count and used[next_positional] |next_positional, used, parameters|:
+                        next_positional <- next_positional + 1
+                    return false if next_positional >= parameters.count
+                    parameter_index <- next_positional
+                    next_positional <- next_positional + 1
+                else:
+                    saw_named <- true
+                    parameter_index <- proof_parameter_index(parameters, label)
+                    return false if parameter_index >= parameters.count
+                return false if used[parameter_index]
+                mapped[parameter_index] <- arguments[argument_index]
+                used[parameter_index] <- true
+            for parameter_index in 0..<parameters.count |parameter_index, used|:
+                if not used[parameter_index]:
+                    # Defaults are executable expressions. To keep the summary boundary
+                    # proof-safe, only pure defaults are materialized here; calls, `old`, and
+                    # unresolved later-formal dependencies require a future effect-aware call
+                    # evaluator and therefore decline conservatively.
+                    return false if parameter_index >= has_defaults.count or parameter_index >= defaults.count or not has_defaults[parameter_index]
+                    default_expression: Ast::Expr = defaults[parameter_index]
+                    return false if proof_expr_has_call(default_expression) or proof_expr_has_old(default_expression)
+                    if parameter_index + 1 < parameters.count:
+                        for later_index in parameter_index + 1..<parameters.count |later_index, parameters, default_expression|:
+                            return false if proof_expr_mentions_name(default_expression, parameters[later_index])
+                    resolved_default: Ast::Expr = proof_substitute(default_expression, parameters, mapped)
+                    return false if proof_expr_has_call(resolved_default) or proof_expr_has_old(resolved_default)
+                    for formal_name in parameters |formal_name, resolved_default|:
+                        return false if proof_expr_mentions_name(resolved_default, formal_name)
+                    mapped[parameter_index] <- resolved_default
+                    used[parameter_index] <- true
+            return true
+
+        def proof_apply_lemma(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, lemmas: ProofLemmaTable&, caller_names: darray[sview]&, caller_values: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    lemma_name: sview = proof_callable_name(callee)
+                    lemma_index: usize = proof_lemma_index(lemmas, lemma_name)
+                    return false if lemma_name == "" or lemma_index >= lemmas.names.count
+                    if lemma_index >= lemmas.verified.count or not lemmas.verified[lemma_index]:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "lemma-summary-unverified", position.line, name, "lemma body has not established a verified proof summary")
+                        return false
+                    return false if lemma_index >= lemmas.param_counts.count or arguments.count > lemmas.param_counts[lemma_index]
+                    parameter_names: mutable darray[sview] = []
+                    argument_values: mutable darray[Ast::Expr] = []
+                    param_start: usize = lemmas.param_starts[lemma_index]
+                    for argument_index in 0..<lemmas.param_counts[lemma_index] |parameter_names, arguments, lemmas, param_start|:
+                        parameter_names.push(lemmas.all_params[param_start + argument_index])
+                    mapped_arguments: mutable darray[Ast::Expr] = []
+                    default_start: usize = lemmas.param_starts[lemma_index]
+                    default_flags: mutable darray[bool] = []
+                    default_values: mutable darray[Ast::Expr] = []
+                    for parameter_index in 0..<lemmas.param_counts[lemma_index] |default_flags, default_values, lemmas, default_start|:
+                        default_flags.push(lemmas.all_has_defaults[default_start + parameter_index])
+                        default_values.push(lemmas.all_defaults[default_start + parameter_index])
+                    return false if not proof_map_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments)
+                    argument_values.extend(mapped_arguments)
+                    requires_ok: mutable bool = true
+                    require_goal_ids: mutable darray[usize] = []
+                    requires_start: usize = lemmas.requires_starts[lemma_index]
+                    requires_count: usize = lemmas.requires_counts[lemma_index]
+                    for requires_index in 0..<requires_count |requires_ok, facts, parameter_names, argument_values, lemmas, requires_start|:
+                        required: Ast::Expr = proof_substitute(lemmas.all_requires[requires_start + requires_index], parameter_names, argument_values)
+                        goal_id: usize = report.goal_attempts.count
+                        required_proven: bool = proof_certify_goal(facts, required, report, position.line, name, annotations)
+                        require_goal_ids.push(goal_id) if goal_id < report.goal_attempts.count
+                        report.proof_obligation(required_proven)
+                        requires_ok <- false if not required_proven
+                        proof_add_latest_goal_finding(report, "lemma-requires-unproven", position.line, name, "lemma precondition is not established at the call") if not required_proven
+                    return false if not requires_ok
+                    if lemma_index < lemmas.recursive.count and lemmas.recursive[lemma_index]:
+                        caller_lemma_index: usize = proof_lemma_index(lemmas, name)
+                        same_recursive_component: bool = caller_lemma_index < lemmas.names.count and proof_lemmas_same_recursive_component(lemmas, caller_lemma_index, lemma_index)
+                        if same_recursive_component:
+                            caller_has_measure: bool = caller_lemma_index < lemmas.decreases_counts.count and caller_lemma_index < lemmas.decreases_starts.count and caller_lemma_index < lemmas.decreases_unbounded.count and lemmas.decreases_counts[caller_lemma_index] > 0 and not lemmas.decreases_unbounded[caller_lemma_index] and proof_decreases_range_valid(lemmas.decreases_starts[caller_lemma_index], lemmas.decreases_counts[caller_lemma_index], lemmas.all_decreases.count)
+                            callee_has_measure: bool = lemma_index < lemmas.decreases_counts.count and lemma_index < lemmas.decreases_starts.count and lemma_index < lemmas.decreases_unbounded.count and lemmas.decreases_counts[lemma_index] > 0 and not lemmas.decreases_unbounded[lemma_index] and proof_decreases_range_valid(lemmas.decreases_starts[lemma_index], lemmas.decreases_counts[lemma_index], lemmas.all_decreases.count)
+                            same_measure_arity: bool = caller_has_measure and callee_has_measure and lemmas.decreases_counts[caller_lemma_index] == lemmas.decreases_counts[lemma_index]
+                            if not same_measure_arity:
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "lemma-recursive-unsupported", position.line, name, "recursive lemma summaries require matching checked lexicographic termination measures")
+                                return false
+                            caller_param_names: mutable darray[sview] = []
+                            caller_param_values: mutable darray[Ast::Expr] = []
+                            caller_param_start: usize = lemmas.param_starts[caller_lemma_index]
+                            caller_param_count: usize = lemmas.param_counts[caller_lemma_index]
+                            for parameter_index in 0..<caller_param_count |caller_param_names, caller_param_values, lemmas, caller_param_start, caller_names, caller_values, position|:
+                                parameter_name: sview = lemmas.all_params[caller_param_start + parameter_index]
+                                caller_param_names.push(parameter_name)
+                                caller_param_values.push(proof_substitute(Ast::Expr.Ident(parameter_name, position), caller_names, caller_values))
+                            current_components: mutable darray[Ast::Expr] = []
+                            recursive_components: mutable darray[Ast::Expr] = []
+                            caller_measure_start: usize = lemmas.decreases_starts[caller_lemma_index]
+                            callee_measure_start: usize = lemmas.decreases_starts[lemma_index]
+                            for component_index in 0..<lemmas.decreases_counts[caller_lemma_index] |component_index, current_components, lemmas, caller_measure_start, caller_param_names, caller_param_values|:
+                                current_components.push(proof_substitute(lemmas.all_decreases[caller_measure_start + component_index], caller_param_names, caller_param_values))
+                            for component_index in 0..<lemmas.decreases_counts[lemma_index] |component_index, recursive_components, lemmas, callee_measure_start, parameter_names, argument_values|:
+                                recursive_components.push(proof_substitute(lemmas.all_decreases[callee_measure_start + component_index], parameter_names, argument_values))
+                            current_nonnegative_proven: mutable bool = true
+                            recursive_nonnegative_proven: mutable bool = true
+                            for component in current_components |facts, annotations, report, name, position, current_nonnegative_proven|:
+                                current_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0, position), position)
+                                component_proven: bool = proof_certify_goal(facts, current_nonnegative, report, position.line, name, annotations)
+                                report.proof_obligation(component_proven)
+                                current_nonnegative_proven <- false if not component_proven
+                                proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma decreases component is not proven nonnegative") if not component_proven
+                            for component in recursive_components |facts, annotations, report, name, position, recursive_nonnegative_proven|:
+                                recursive_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0, position), position)
+                                component_proven: bool = proof_certify_goal(facts, recursive_nonnegative, report, position.line, name, annotations)
+                                report.proof_obligation(component_proven)
+                                recursive_nonnegative_proven <- false if not component_proven
+                                proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma callee measure is not proven nonnegative") if not component_proven
+                            smaller_proven: bool = proof_lexicographic_smaller(current_components, recursive_components, facts, annotations, position, report, name)
+                            report.proof_obligation(smaller_proven)
+                            proof_add_latest_goal_finding(report, "lemma-recursive-decreases-unproven", position.line, name, "recursive lemma lexicographic measure is not proven to strictly decrease") if not smaller_proven
+                            return false if not current_nonnegative_proven or not recursive_nonnegative_proven or not smaller_proven
+                    ensures_start: usize = lemmas.ensure_starts[lemma_index]
+                    ensures_count: usize = lemmas.ensure_counts[lemma_index]
+                    for ensure_index in 0..<ensures_count |facts, parameter_names, argument_values, lemmas, ensures_start, report, name, position|:
+                        ensure_expression: Ast::Expr = lemmas.all_ensures[ensures_start + ensure_index]
+                        # A statement-form lemma call has no result slot to substitute. Do not
+                        # let a bare `result` from a returning lemma become a caller fact.
+                        if proof_expr_mentions_name(ensure_expression, "result"):
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "lemma-result-unbound", position.line, name, "returning lemma ensure cannot be used without a result binding")
+                            return false
+                        proof_add_lemma_summary_fact(facts, report, proof_substitute(ensure_expression, parameter_names, argument_values), position.line, name, lemma_name, parameter_names, argument_values, require_goal_ids, ensure_index)
+                    return true
+                _:
+                    return false
+
+        def proof_function_index(functions: ProofFunctionTable&, name: sview) -> usize:
+            if functions.index_values.count > 0:
+                wanted_hash: u32 = proof_name_hash(name)
+                capacity: usize = functions.index_values.count
+                slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, wanted_hash, name, functions, capacity|:
+                    current: usize = functions.index_values[slot]
+                    return functions.names.count if current == functions.names.count
+                    return functions.names.count if current > functions.names.count
+                    if functions.index_hashes[slot] == wanted_hash and functions.names[current] == name:
+                        return current
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return functions.names.count
+            index: mutable usize = 0
+            found: mutable usize = functions.names.count
+            wanted_hash: u32 = proof_name_hash(name)
+            while index < functions.names.count |index, functions, name|:
+                if index >= functions.name_hashes.count or functions.name_hashes[index] == wanted_hash:
+                    if functions.names[index] == name:
+                        return functions.names.count if found < functions.names.count
+                        found <- index
+                index <- index + 1
+            return found
+
+        def proof_structural_name_in(names: darray[sview]&, wanted: sview) -> bool:
+            return wanted != "" and (any candidate in names where candidate == wanted)
+
+        # A value block may capture mutable loop state that is unrelated to the
+        # structural subject. Such a capture does not affect termination evidence unless
+        # it is itself one of the strict-subterm binders used by a recursive edge. Keep
+        # the conservative rejection for captures that overlap those binders, but do not
+        # let an accumulator or parser cursor hide an otherwise checked descent.
+        def proof_structural_captures_overlap(captures: darray[sview]&, smaller: darray[ProofStructuralSmaller]&) -> bool:
+            for capture in captures |smaller|:
+                return true if any candidate in smaller where candidate.name == capture
+            return false
+
+        # Structural termination environments are name-based because the compiler AST does not
+        # expose stable binding identities. Remove every outer fact shadowed by a nested binder;
+        # retaining the spelling would let an unrelated local masquerade as a strict subterm.
+        def proof_structural_without(source: darray[sview]&, blocked: darray[sview]&) -> darray[sview]:
+            result: mutable darray[sview] = []
+            for candidate in source |result, blocked|:
+                result.push(candidate) if not proof_structural_name_in(blocked, candidate)
+            return result
+
+        # After a branch or loop, a structural binding remains usable only if both the incoming
+        # state and every normal path preserve it. Newly introduced arm/block locals are never
+        # merged because they are outside the enclosing lexical scope.
+        def proof_structural_intersect(left: darray[sview]&, right: darray[sview]&) -> darray[sview]:
+            result: mutable darray[sview] = []
+            for candidate in left |result, right|:
+                result.push(candidate) if proof_structural_name_in(right, candidate)
+            return result
+
+        def proof_structural_smaller_without(source: darray[ProofStructuralSmaller]&, blocked: darray[sview]&) -> darray[ProofStructuralSmaller]:
+            result: mutable darray[ProofStructuralSmaller] = []
+            for candidate in source |result, blocked|:
+                result.push(candidate) if not proof_structural_name_in(blocked, candidate.name)
+            return result
+
+        # Branch joins retain a mapped subterm only when both paths preserve the same origin
+        # subject. Matching names with different subjects would recreate the product-ranking bug
+        # this provenance exists to prevent.
+        def proof_structural_smaller_intersect(left: darray[ProofStructuralSmaller]&, right: darray[ProofStructuralSmaller]&) -> darray[ProofStructuralSmaller]:
+            result: mutable darray[ProofStructuralSmaller] = []
+            for candidate in left |result, right|:
+                result.push(candidate) if any other in right where other.name == candidate.name and other.subject == candidate.subject
+            return result
+
+        # Pattern bindings that are in scope after a match. This list is used only to decide
+        # which values can themselves be destructured later; it is intentionally broader than
+        # the strict-subterm list below.
+        def proof_structural_pattern_bindings(pattern: Ast::Pattern, bindings: mutable darray[sview]&) -> void:
+            match pattern:
+                Ast::Pattern.Binding(name):
+                    bindings.push(name) if name != ""
+                Ast::Pattern.As(name, inner):
+                    bindings.push(name) if name != ""
+                    for subpattern in inner |bindings|:
+                        proof_structural_pattern_bindings(subpattern, bindings)
+                Ast::Pattern.TypeBind(_, binder):
+                    bindings.push(binder) if binder != ""
+                Ast::Pattern.Variant(_, fields):
+                    for subpattern in fields |bindings|:
+                        proof_structural_pattern_bindings(subpattern, bindings)
+                Ast::Pattern.Struct(_, fields):
+                    for subpattern in fields |bindings|:
+                        proof_structural_pattern_bindings(subpattern, bindings)
+                Ast::Pattern.Field(_, inner):
+                    for subpattern in inner |bindings|:
+                        proof_structural_pattern_bindings(subpattern, bindings)
+                Ast::Pattern.Tuple(elements):
+                    for subpattern in elements |bindings|:
+                        proof_structural_pattern_bindings(subpattern, bindings)
+                Ast::Pattern.Rest(name):
+                    bindings.push(name) if name != ""
+                Ast::Pattern.Or(options):
+                    for option in options |bindings|:
+                        proof_structural_pattern_bindings(option, bindings)
+                _:
+                    pass
+
+        # Only payload/field binders are strict subterms. A bare binding, `as whole`, or
+        # category binder names the complete matched value and is therefore never accepted as a
+        # structural decrease. Or-patterns are left opaque because a binder may exist in only one
+        # alternative; rejecting them is safer than guessing which names are common.
+        def proof_structural_pattern_subterms(pattern: Ast::Pattern, subject: sview, subterms: mutable darray[ProofStructuralSmaller]&) -> void:
+            match pattern:
+                Ast::Pattern.Variant(_, fields):
+                    for subpattern in fields |subterms|:
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                Ast::Pattern.Struct(_, fields):
+                    for subpattern in fields |subterms|:
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                Ast::Pattern.Field(_, inner):
+                    for subpattern in inner |subterms|:
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                Ast::Pattern.Tuple(elements):
+                    for subpattern in elements |subterms|:
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                Ast::Pattern.Binding(name):
+                    subterms.push(ProofStructuralSmaller{name: name, subject: subject}) if name != ""
+                Ast::Pattern.As(_, inner):
+                    for subpattern in inner |subterms|:
+                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                _:
+                    pass
+
+        # A recursive AST walker often reaches a child through a compiler-owned side table:
+        # `for argument in arguments: visit(argument)`. The loop variable is a strict subterm of
+        # the matched enum value when the iterable itself is a matched subterm. Direct projections
+        # from that element (for example `field.value`) are strict as well. The compiler has
+        # already type-checked the recursive call; this helper recognizes only the structural
+        # shape and never infers a type from a spelling.
+        def proof_structural_argument_root(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_structural_argument_root(inner)
+                Ast::Expr.Field(object, _, _):
+                    return proof_structural_argument_root(object)
+                Ast::Expr.Index(object, _, _):
+                    return proof_structural_argument_root(object)
+                Ast::Expr.IndexN(object, _, _):
+                    return proof_structural_argument_root(object)
+                _:
+                    return ""
+
+        def proof_structural_argument_is_smaller(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> bool:
+            root: sview = proof_structural_argument_root(expression)
+            return root != "" and any candidate in smaller where candidate.name == root
+
+        def proof_structural_argument_is_smaller_for_subject(expression: Ast::Expr, subject: sview, smaller: darray[ProofStructuralSmaller]&) -> bool:
+            root: sview = proof_structural_argument_root(expression)
+            return root != "" and any candidate in smaller where candidate.name == root and candidate.subject == subject
+
+        def proof_structural_argument_subject(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> sview:
+            root: sview = proof_structural_argument_root(expression)
+            for candidate in smaller |root|:
+                return candidate.subject if candidate.name == root
+            return ""
+
+        def proof_structural_call_argument(arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, parameters: darray[Ast::ParamDecl]&, position: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if position >= parameters.count
+            if argument_names.count == 0:
+                if position < arguments.count:
+                    return arguments[position]
+                return Ast::Expr.Invalid
+            return Ast::Expr.Invalid if argument_names.count != arguments.count
+            has_named: bool = any label in argument_names where label != ""
+            return Ast::Expr.Invalid if has_named and (any label in argument_names where label == "")
+            if not has_named:
+                if position < arguments.count:
+                    return arguments[position]
+            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, parameters, position|:
+                return arguments[argument_index] if argument_names[argument_index] == parameters[position].name
+            return Ast::Expr.Invalid
+
+        def proof_parameter_position(parameters: darray[Ast::ParamDecl]&, wanted: sview) -> usize:
+            for index in 0..<parameters.count |index, parameters, wanted|:
+                return index if parameters[index].name == wanted
+            return parameters.count
+
+        # The structural walker receives the currently live destructurable names. At the entry
+        # of an inferred multi-subject function those names are exactly its enum parameters; a
+        # shadowing declaration or pattern removes the name before any recursive edge is
+        # inspected. Explicitly annotated single-subject functions do not use this helper.
+        def proof_enum_parameter_names_from_parameters(parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&) -> darray[sview]:
+            result: mutable darray[sview] = []
+            for parameter in parameters |result, destructurable|:
+                result.push(parameter.name) if proof_structural_name_in(destructurable, parameter.name)
+            return result
+
+        def proof_structural_report_index(report: ProofReport&, wanted: sview) -> usize:
+            for index in 0..<report.structural_names.count |index, report, wanted|:
+                return index if report.structural_names[index] == wanted
+            return report.structural_names.count
+
+        def proof_structural_report_same_component(report: ProofReport&, left: usize, right: usize) -> bool:
+            return false if left >= report.structural_component_ids.count or right >= report.structural_component_ids.count
+            return report.structural_component_ids[left] == report.structural_component_ids[right]
+
+        def proof_structural_termination_finding(report: mutable ProofReport&, line: u32, name: sview, message: sview) -> void:
+            report.proof_obligation(false)
+            proof_add_finding(report, "structural-decreases-unproven", line, name, message)
+
+        # Once a structural function has a termination finding, arithmetic fallback on the same
+        # recursive edge only creates duplicate diagnostics. It is still rejected by the
+        # recorded structural obligation; this helper merely keeps the report focused and does
+        # not authorize the edge as a summary.
+        def proof_structural_report_failed(report: ProofReport&, wanted: sview) -> bool:
+            for finding in report.findings:
+                return true if finding.kind == "structural-decreases-unproven" and finding.name == wanted
+            return false
+
+        # Check every recursive edge in one structural function with its lexical match
+        # environment. The environment is copied for each arm, so a binder from one branch can
+        # never justify a call in a sibling or after the match. Mutual structural edges use the
+        # callee's own decreasing-parameter position, but still require the same enum subject
+        # type and a binder from the caller's matched strict subterms.
+        def proof_structural_check_expression(expression: Ast::Expr, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview) -> void:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    called_name: sview = proof_callable_name(callee)
+                    own_index: usize = proof_structural_report_index(report, own_name)
+                    called_index: usize = proof_structural_report_index(report, called_name)
+                    direct_recursive: bool = called_name == own_name
+                    mutual_recursive: bool = not direct_recursive and own_index < report.structural_names.count and called_index < report.structural_names.count and proof_structural_report_same_component(report, own_index, called_index) and own_index < report.structural_subject_types.count and called_index < report.structural_subject_types.count and report.structural_subject_types[own_index] != "" and report.structural_subject_types[own_index] == report.structural_subject_types[called_index]
+                    if direct_recursive or mutual_recursive:
+                        # When the ranking was inferred from an unannotated function with
+                        # multiple enum parameters, use the sum of their constructor heights.
+                        # Every subject must be passed unchanged or as a known strict subterm,
+                        # and at least one subject must be strict. This is the only place where
+                        # a multi-parameter product ranking is admitted; explicit `decreases`
+                        # clauses retain their exact single-subject meaning.
+                        if subject_position >= parameters.count and direct_recursive:
+                            enum_subjects: darray[sview] = proof_enum_parameter_names_from_parameters(parameters, destructurable)
+                            multi_valid: mutable bool = enum_subjects.count > 0
+                            multi_strict: mutable bool = false
+                            witnesses: mutable darray[ProofStructuralWitness] = []
+                            for subject in enum_subjects |subject, arguments, argument_names, parameters, smaller, multi_valid, multi_strict, witnesses|:
+                                subject_index: usize = proof_parameter_position(parameters, subject)
+                                recursive_argument: Ast::Expr = proof_structural_call_argument(arguments, argument_names, parameters, subject_index)
+                                recursive_name: sview = proof_ident_name(recursive_argument)
+                                if proof_structural_argument_is_smaller_for_subject(recursive_argument, subject, smaller):
+                                    multi_strict <- true
+                                    argument_root: sview = proof_structural_argument_root(recursive_argument)
+                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: argument_root, strict: true}) if argument_root != ""
+                                elif recursive_name != subject:
+                                    multi_valid <- false
+                                else:
+                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: subject, strict: false})
+                            if multi_valid and multi_strict:
+                                report.proof_obligation(true)
+                                proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line)
+                            else:
+                                proof_structural_termination_finding(report, position.line, name, "recursive call must preserve or strictly descend every inferred enum subject")
+                        else:
+                            recursive_position: mutable usize = subject_position
+                            recursive_position <- report.structural_subject_positions[called_index] if mutual_recursive and called_index < report.structural_subject_positions.count
+                            recursive_argument: Ast::Expr = proof_structural_call_argument(arguments, argument_names, parameters, recursive_position)
+                            recursive_name: sview = proof_ident_name(recursive_argument)
+                            if proof_structural_argument_is_smaller(recursive_argument, smaller):
+                                report.proof_obligation(true)
+                                argument_root: sview = proof_structural_argument_root(recursive_argument)
+                                witness_subject: mutable sview = proof_structural_argument_subject(recursive_argument, smaller)
+                                witness_subject <- parameters[recursive_position].name if witness_subject == "" and recursive_position < parameters.count
+                                witnesses: darray[ProofStructuralWitness] = [ProofStructuralWitness{subject: witness_subject, argument: argument_root, strict: true}]
+                                proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line)
+                            else:
+                                proof_structural_termination_finding(report, position.line, name, "recursive call does not pass a binder from a matched strict subterm")
+                    proof_structural_check_expression(callee, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for argument in arguments |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(argument, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Paren(inner, _):
+                    proof_structural_check_expression(inner, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_structural_check_expression(left, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(right, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Field(object, _, _):
+                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Scope(base, _, _):
+                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Index(object, index, _):
+                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(index, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(low, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(high, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for argument in arguments |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(argument, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Move(operand, _):
+                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_structural_check_expression(operand, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(element, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(entry.key, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                        proof_structural_check_expression(entry.value, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(field.value, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for field in fields |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(field.value, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_structural_check_expression(condition, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(then_expr, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(else_expr, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    proof_structural_check_expression(iterable, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    comprehension_blocked: darray[sview] = [variable]
+                    comprehension_destructurable: darray[sview] = proof_structural_without(destructurable, comprehension_blocked)
+                    comprehension_smaller: darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, comprehension_blocked)
+                    proof_structural_check_expression(condition, own_name, subject_position, parameters, comprehension_destructurable, comprehension_smaller, report, name)
+                    proof_structural_check_expression(body, own_name, subject_position, parameters, comprehension_destructurable, comprehension_smaller, report, name)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_expression(predicate, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    proof_structural_check_expression(scrutinee, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for arm in arms |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        arm_bindings: mutable darray[sview] = []
+                        proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
+                        arm_destructurable: mutable darray[sview] = proof_structural_without(destructurable, arm_bindings)
+                        arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, arm_bindings)
+                        scrutinee_name: sview = proof_ident_name(scrutinee)
+                        if proof_structural_name_in(destructurable, scrutinee_name):
+                            proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
+                            proof_structural_pattern_subterms(arm.pattern, scrutinee_name, &arm_smaller)
+                        proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
+                        proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
+                Ast::Expr.Catch(guarded, arms, _):
+                    proof_structural_check_expression(guarded, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    for arm in arms |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                        proof_structural_check_body(arm.body, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_structural_check_expression(guarded, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_check_body(recovery, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.ShorthandMember(_, _):
+                    # A leading-dot const-enum member is a closed value atom and cannot hide a
+                    # recursive call or structural projection.
+                    pass
+                Ast::Expr.Block(statements, value, captures, _):
+                    block_destructurable: darray[sview] = proof_copy_names(destructurable)
+                    block_smaller: darray[ProofStructuralSmaller] = proof_copy_structural_smaller(smaller)
+                    proof_structural_check_body(statements, own_name, subject_position, parameters, &block_destructurable, &block_smaller, report, name)
+                    proof_structural_check_expression(value, own_name, subject_position, parameters, block_destructurable, block_smaller, report, name)
+                    proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "captured value block is not structurally certified") if captures.count > 0 and proof_expr_has_call(expression) and proof_structural_captures_overlap(captures, block_smaller)
+                Ast::Expr.Lambda(_, _, position):
+                    proof_structural_termination_finding(report, position.line, name, "recursive calls inside a closure are not structurally certified")
+                _:
+                    proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "unsupported expression may hide a structural recursive call") if proof_expr_has_call(expression)
+

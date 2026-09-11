@@ -1,0 +1,359 @@
+extend ElisaProof:
+    private:
+        def proof_resource_check_var[@s, @r](statement_name: sview, type_expression: Ast::Expr, initializer: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos, functions: ProofFunctionTable&) -> void:
+            is_reference: bool = proof_resource_is_reference_type(type_expression)
+            is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(type_expression)
+            direct_region: mutable sview = ""
+            direct_region_operand: mutable Ast::Expr = Ast::Expr.Invalid
+            match initializer:
+                Ast::Expr.RegionNew(operand, region, _):
+                    direct_region <- region
+                    direct_region_operand <- operand
+                _:
+                    pass
+            if direct_region != "":
+                proof_resource_check_expression(direct_region_operand, state, report, function_name, functions)
+                proof_resource_add_region_allocation(state, report, statement_name, type_expression, direct_region_operand, direct_region, position, function_name)
+                return
+            # A scalar copied out of a region-owned value is a plain value, not a view into the
+            # region. Only reference-like results carry the source lifetime.
+            scalar_binding: bool = proof_resource_type_is_scalar(type_expression)
+            source_region: sview = "" if scalar_binding else proof_resource_expr_result_region(initializer, state, functions, report)
+            if source_region != "":
+                proof_resource_check_expression(initializer, state, report, function_name, functions)
+                callee_name: mutable sview = ""
+                match initializer:
+                    Ast::Expr.Call(callee, _, _, _):
+                        callee_name <- proof_callable_name(callee)
+                    _:
+                        pass
+                result_function_index: usize = proof_resource_function_index(functions, callee_name) if callee_name != "" else functions.names.count
+                result_is_reference: bool = result_function_index < functions.return_references.count and functions.return_references[result_function_index]
+                if result_is_reference and callee_name != "":
+                    is_mutable_result: bool = result_function_index < functions.return_mutable_references.count and functions.return_mutable_references[result_function_index]
+                    writable_result: bool = is_mutable_result or proof_resource_type_has_marker(type_expression, TokenKind.Mutable)
+                    result_source: (known: bool, aliases_source: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_result_source_actual(initializer, state, functions, report)
+                    result_target_slot: mutable usize = state.binding_names.count
+                    result_target_place: mutable ProofResourcePlace = proof_resource_empty_place()
+                    result_alias: mutable bool = false
+                    result_owner: mutable bool = result_source.known and not result_source.aliases_source
+                    if not result_source.known:
+                        proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "a region reference result is neither tied to a direct returned formal nor backed by a fresh return allocation")
+                    elif result_source.aliases_source:
+                        result_target_slot <- result_source.slot
+                        result_target_place <- result_source.place
+                        result_alias <- result_source.slot < state.binding_names.count and result_source.place.root != ""
+                        if result_alias:
+                            if is_mutable_result and proof_resource_has_borrow_overlap(state, report, result_source.place, result_source.slot if result_source.is_reference else state.binding_names.count):
+                                proof_resource_add_failing_obligation(report, "borrow-alias-conflict", position, function_name, "a returned mutable reference conflicts with another live borrow of its source place")
+                            elif not is_mutable_result and proof_resource_has_mutable_borrow_overlap(state, report, result_source.place, result_source.slot if result_source.is_reference else state.binding_names.count):
+                                proof_resource_add_failing_obligation(report, "borrow-alias-conflict", position, function_name, "a returned shared reference conflicts with a live mutable borrow of its source place")
+                            # Passing a reference handle through a direct-return callee transfers
+                            # that handle to the result. Keeping both names live would mint two
+                            # independently writable capabilities for one underlying place.
+                            result_owner <- result_source.slot < state.binding_region_owner.count and state.binding_region_owner[result_source.slot]
+                            proof_resource_mark_binding_moved(state, result_source.slot) if result_source.is_reference
+                        else:
+                            proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "a returned reference source did not resolve to a live caller place")
+                    proof_resource_add_binding(state, statement_name, true, is_mutable_result, writable_result, result_target_slot if result_alias else state.binding_names.count, is_mutable_result if result_alias else false, result_target_place if result_alias else proof_resource_empty_place())
+                    state.binding_region[state.binding_region.count - 1] <- source_region
+                    state.binding_region_live[state.binding_region_live.count - 1] <- proof_resource_region_is_active(state, source_region)
+                    state.binding_region_owner[state.binding_region_owner.count - 1] <- result_owner
+                    call_event: usize = state.trace_events[state.trace_events.count - 1] if state.trace_events.count > 0 else report.kernel_nodes.count
+                    valid_call_event: bool = call_event < report.kernel_nodes.count and report.kernel_nodes[call_event].kind == "resource-call"
+                    proof_resource_record_event(state, report, "resource-call-result", "", call_event, statement_name, source_region, (1 if writable_result else 0) + 2 + (4 if is_mutable_result else 0)) if valid_call_event
+                    proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a region-returning call did not leave a replayable call transition") if not valid_call_event
+                    return
+                proof_resource_add_region_binding(state, report, statement_name, type_expression, initializer, source_region, position, function_name)
+                return
+            if not scalar_binding and proof_resource_expr_contains_unresolved_region_value(initializer, state, functions, report):
+                proof_resource_check_expression(initializer, state, report, function_name, functions)
+                proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region value flows through an expression without a lifetime summary")
+                proof_resource_add_binding_traced(state, report, statement_name, is_reference, is_mutable_reference, is_mutable_reference or proof_resource_type_has_marker(type_expression, TokenKind.Mutable), state.binding_names.count, false, "", proof_resource_empty_place(), 0)
+                return
+            direct_root: sview = proof_resource_direct_borrow_root(initializer)
+            borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(initializer, report)
+            proof_resource_check_expression(initializer, state, report, function_name, functions)
+            if is_reference and not borrowed.known:
+                proof_resource_add_failing_obligation(report, "borrow-source-opaque", position, function_name, "reference initializer is not a bounded static address-of borrow")
+            elif not is_reference and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
+                proof_resource_add_failing_obligation(report, "borrow-source-opaque", position, function_name, "address-of value enters a non-reference binding")
+            target_slot: mutable usize = state.binding_names.count
+            borrow_is_mutable: mutable bool = false
+            source_place_root: mutable usize = 0
+            source_name: sview = borrowed.place.root if borrowed.known else direct_root
+            if borrowed.known:
+                target_slot <- proof_resource_lookup(state, borrowed.place.root)
+                if target_slot >= state.binding_names.count:
+                    proof_resource_add_failing_obligation(report, "borrow-source-opaque", position, function_name, "borrow target is not a live proof binding")
+                elif proof_resource_binding_is_moved(state, target_slot):
+                    proof_resource_add_failing_obligation(report, "resource-use-after-move", position, function_name, "a borrow cannot be created from a moved resource binding")
+                else:
+                    borrow_is_mutable <- is_mutable_reference
+                    if borrow_is_mutable and proof_resource_has_borrow_overlap(state, report, borrowed.place, state.binding_names.count):
+                        proof_resource_add_failing_obligation(report, "borrow-alias-conflict", position, function_name, "mutable borrow conflicts with another live borrow of the same root")
+                    elif not borrow_is_mutable and proof_resource_has_mutable_borrow_overlap(state, report, borrowed.place, state.binding_names.count):
+                        proof_resource_add_failing_obligation(report, "borrow-alias-conflict", position, function_name, "shared borrow conflicts with a live mutable borrow of the same root")
+                    # Reuse the exact path already stored in the resource state. Re-encoding the
+                    # same AST would create structurally equal but numerically different roots,
+                    # which would make replayed resource-disjoint evidence unable to identify the
+                    # path component it justified.
+                    source_place_root <- borrowed.place.path_root
+            if borrowed.known and target_slot < state.binding_names.count and borrow_is_mutable:
+                source_writable: bool = target_slot < state.binding_writable.count and (state.binding_writable[target_slot] or (target_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[target_slot]))
+                proof_resource_add_failing_obligation(report, "borrow-mutable-source", position, function_name, "mutable borrow requires a writable source binding") if not source_writable
+            writable: bool = is_mutable_reference or proof_resource_type_has_marker(type_expression, TokenKind.Mutable)
+            proof_resource_add_binding_traced(state, report, statement_name, is_reference, is_mutable_reference, writable, target_slot, borrow_is_mutable, source_name, borrowed.place, source_place_root) if is_reference
+            proof_resource_add_binding_traced(state, report, statement_name, false, false, writable, state.binding_names.count, false, "", proof_resource_empty_place(), 0) if not is_reference
+
+        def proof_resource_check_pattern_names[@s, @r](pattern: Ast::Pattern, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, functions: ProofFunctionTable&) -> void:
+            match pattern:
+                Ast::Pattern.Binding(binding):
+                    proof_resource_add_binding_traced(state, report, binding, false, false, false, state.binding_names.count, false, "", proof_resource_empty_place(), 0) if binding != ""
+                Ast::Pattern.Rest(binding):
+                    proof_resource_add_binding_traced(state, report, binding, false, false, false, state.binding_names.count, false, "", proof_resource_empty_place(), 0) if binding != ""
+                Ast::Pattern.TypeBind(_, binding):
+                    proof_resource_add_binding_traced(state, report, binding, false, false, false, state.binding_names.count, false, "", proof_resource_empty_place(), 0) if binding != ""
+                Ast::Pattern.As(binding, inner):
+                    proof_resource_add_binding_traced(state, report, binding, false, false, false, state.binding_names.count, false, "", proof_resource_empty_place(), 0) if binding != ""
+                    for nested in inner |nested, state, report|:
+                        proof_resource_check_pattern_names(nested, state, report, functions)
+                Ast::Pattern.Variant(_, fields):
+                    for field in fields |field, state, report|:
+                        match field:
+                            Ast::Pattern.Field(_, inner):
+                                for nested in inner |nested, state, report|:
+                                    proof_resource_check_pattern_names(nested, state, report, functions)
+                            _:
+                                pass
+                Ast::Pattern.Or(options):
+                    # Alternatives are checked independently by the statement walker. Their
+                    # bindings are deliberately not merged into one resource state.
+                    pass
+                _:
+                    pass
+
+        def proof_resource_check_statements[@s, @r](statements: darray[Ast::Stmt]&, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, functions: ProofFunctionTable&) -> void:
+            for statement in statements |state, report, function_name|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                        shadowed: bool = proof_resource_lookup(state, local_name) < state.binding_names.count
+                        proof_resource_check_var(local_name, type_expression, initializer, state, report, function_name, position, functions)
+                        if proof_resource_type_is_scalar(type_expression):
+                            scalar_slot: usize = proof_resource_lookup(state, local_name)
+                            state.binding_scalar[scalar_slot] <- true if scalar_slot < state.binding_scalar.count
+                        if proof_resource_type_is_collection(type_expression):
+                            extent_slot: usize = proof_resource_lookup(state, local_name)
+                            state.binding_extent[extent_slot] <- true if extent_slot < state.binding_extent.count
+                        state.facts.clear() if shadowed or proof_resource_expr_has_call(initializer) or proof_resource_expr_has_move(initializer)
+                    Ast::Stmt.Assign(target, _, initializer, position):
+                        if not proof_resource_is_discard_target(target) and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
+                            proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a newly created borrow is assigned across a binding boundary")
+                        proof_resource_check_write(target, state, report, function_name, position, functions)
+                        proof_resource_check_expression(target, state, report, function_name, functions)
+                        proof_resource_check_expression(initializer, state, report, function_name, functions)
+                        proof_resource_handle_region_assignment(target, initializer, state, report, function_name, position, functions)
+                        state.facts.clear()
+                    Ast::Stmt.Expr(expression, position):
+                        match expression:
+                            Ast::Expr.RegionNew(operand, region, _):
+                                # `new[r] value` is itself the resource transition. A bare
+                                # expression statement discards the resulting reference, but
+                                # the allocation remains valid and must be replayed explicitly.
+                                proof_resource_check_expression(operand, state, report, function_name, functions)
+                                proof_resource_add_region_discard(state, report, operand, region, position, function_name)
+                            _:
+                                proof_resource_check_expression(expression, state, report, function_name, functions)
+                                proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a region-owned expression must be bound or explicitly rejected at this resource boundary") if proof_resource_expr_statement_discards_region_value(expression, state, functions, report)
+                        state.facts.clear() if proof_resource_expr_has_call(expression) or proof_resource_expr_has_move(expression)
+                    Ast::Stmt.Return(value, position):
+                        if value is returned:
+                            if proof_resource_expr_returns_local_borrow(returned, state, functions, report):
+                                proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a borrow cannot escape this lexical proof resource state")
+                            proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "a region-owned value cannot escape the region that owns its storage") if proof_resource_expr_returns_local_region_value(returned, state, functions, report)
+                            returned_region: sview = proof_resource_expr_result_region(returned, state, functions, report)
+                            return_function_index: usize = proof_resource_function_index(functions, function_name)
+                            return_mutable_reference: bool = return_function_index < functions.return_mutable_references.count and functions.return_mutable_references[return_function_index]
+                            # Check the returned expression before emitting its summary marker. The
+                            # resulting resource-use/call transition (or the explicit allocation
+                            # transition below) is then available as the marker's witness.
+                            proof_resource_check_expression(returned, state, report, function_name, functions)
+                            return_witness: usize = report.kernel_nodes.count
+                            match returned:
+                                Ast::Expr.RegionNew(operand, allocated_region, _):
+                                    return_witness <- proof_resource_add_region_return_alloc(state, report, operand, allocated_region, position, function_name) if allocated_region != "" and proof_resource_region_is_external(state, allocated_region)
+                                _:
+                                    # The witness has to be the use of the binding that carries the
+                                    # returned region, not just the last transition the expression
+                                    # happened to produce. `return nodes[index].left` records a use
+                                    # of `nodes` and then one of `index`; only the first is in the
+                                    # region. Independent replay checks exactly that the witness's
+                                    # binding is in the region the marker names, so handing it the
+                                    # other use produced a certificate the kernel refused and a
+                                    # `proved_with_replay_gaps` verdict. Scanning back for the
+                                    # right use is bounded: past the cap the witness stays unset
+                                    # and the obligation below refuses, which only loses a proof.
+                                    witness_found: mutable bool = false
+                                    witness_scan_limit: usize = PROOF_RESOURCE_RETURN_WITNESS_SCAN if state.trace_events.count > PROOF_RESOURCE_RETURN_WITNESS_SCAN else state.trace_events.count
+                                    for offset in 0..<witness_scan_limit |offset, state, report, returned_region, return_mutable_reference, witness_found|:
+                                        continue if witness_found
+                                        candidate: usize = state.trace_events[state.trace_events.count - 1 - offset]
+                                        continue if candidate >= report.kernel_nodes.count
+                                        continue if report.kernel_nodes[candidate].kind != "resource-use"
+                                        candidate_name: sview = report.kernel_nodes[candidate].name
+                                        candidate_slot: usize = proof_resource_lookup(state, candidate_name)
+                                        continue if candidate_slot >= state.binding_names.count
+                                        continue if proof_resource_binding_region(state, candidate_slot) != returned_region
+                                        # The marker records the return's own mutability, and
+                                        # replay requires the witness binding to match it exactly:
+                                        # a shared binding may not witness a `mutable T&` return,
+                                        # which is what stops a summary from handing the caller
+                                        # write access it never had. Requiring the match here too
+                                        # turns what was an unreplayable certificate into a clean
+                                        # refusal from the obligation below.
+                                        candidate_mutable: bool = candidate_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[candidate_slot]
+                                        continue if candidate_mutable != return_mutable_reference
+                                        return_witness <- candidate
+                                        witness_found <- true
+                            # A function whose declared return type is a scalar primitive returns
+                            # a copy. It cannot carry a lifetime however the expression that
+                            # produced it was written, so `return cell.value` out of a region-owned
+                            # binding is not a region return and needs no marker at all. Emitting
+                            # one made the ordinary shape -- read a number out of a region-owned
+                            # parameter -- depend on a witness whose mutability had to match a
+                            # return that is not a reference in the first place.
+                            return_is_scalar: bool = return_function_index < functions.return_scalar.count and functions.return_scalar[return_function_index]
+                            if returned_region != "" and not return_is_scalar and proof_resource_region_is_external(state, returned_region):
+                                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a region return must be tied to a replayed resource use or returned allocation") if return_witness >= report.kernel_nodes.count
+                                proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if return_witness < report.kernel_nodes.count
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_resource_check_expression(condition, state, report, function_name, functions)
+                        then_state: mutable ProofResourceState = proof_resource_empty()
+                        else_state: mutable ProofResourceState = proof_resource_empty()
+                        proof_resource_copy_into(state, &then_state)
+                        proof_resource_copy_into(state, &else_state)
+                        proof_resource_mark_scope_inherited(state, &then_state)
+                        proof_resource_mark_scope_inherited(state, &else_state)
+                        proof_resource_check_statements(then_body, &then_state, report, function_name, functions)
+                        proof_resource_check_statements(else_body, &else_state, report, function_name, functions)
+                        proof_resource_close_child(state, then_state, report, true)
+                        proof_resource_close_child(state, else_state, report, true)
+                        state.facts.clear()
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_resource_check_expression(condition, state, report, function_name, functions)
+                        while_state: mutable ProofResourceState = proof_resource_empty()
+                        proof_resource_copy_into(state, &while_state)
+                        proof_resource_mark_scope_inherited(state, &while_state)
+                        proof_resource_check_statements(while_body, &while_state, report, function_name, functions)
+                        proof_resource_close_child(state, while_state, report, true)
+                        state.facts.clear()
+                    Ast::Stmt.For(_, variables, iterable, for_body, _):
+                        proof_resource_check_expression(iterable, state, report, function_name, functions)
+                        for_state: mutable ProofResourceState = proof_resource_empty()
+                        proof_resource_copy_into(state, &for_state)
+                        proof_resource_mark_scope_inherited(state, &for_state)
+                        for variable in variables |variable, for_state|:
+                            proof_resource_add_binding_traced(&for_state, report, variable, false, false, false, for_state.binding_names.count, false, "", proof_resource_empty_place(), 0) if variable != ""
+                        proof_resource_check_statements(for_body, &for_state, report, function_name, functions)
+                        proof_resource_close_child(state, for_state, report, true)
+                        state.facts.clear()
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_resource_check_expression(scrutinee, state, report, function_name, functions)
+                        for arm in arms |arm, state, report, function_name|:
+                            arm_state: mutable ProofResourceState = proof_resource_empty()
+                            proof_resource_copy_into(state, &arm_state)
+                            proof_resource_mark_scope_inherited(state, &arm_state)
+                            proof_resource_check_pattern_names(arm.pattern, &arm_state, report, functions)
+                            match arm.guard:
+                                Ast::Expr.Absent:
+                                    pass
+                                _:
+                                    proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions)
+                            proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions)
+                            proof_resource_close_child(state, arm_state, report, true)
+                        state.facts.clear()
+                    Ast::Stmt.Block(block_kind, clause, binding, block_body, block_position):
+                        if block_kind == "destroy":
+                            region_name: sview = clause[0] if clause.count > 0 else binding
+                            proof_resource_close_named_region(state, report, region_name, block_position, function_name)
+                            state.facts.clear()
+                            continue
+                        if block_kind == "region" and binding != "" and block_body.count == 0:
+                            # Canonical statement form: `region r(size)` is an owner declaration,
+                            # not an ordinary binding and not a zero-body lexical block. Its
+                            # lifetime extends over subsequent statements until `destroy r` (or
+                            # the implicit function-scope close in proof_resource_finish).
+                            region_valid: bool = not proof_resource_region_is_active(state, binding)
+                            proof_resource_add_failing_obligation(report, "region-scope-unsupported", block_position, function_name, "region declaration must introduce a fresh named lexical region") if binding == "" or not region_valid
+                            if region_valid:
+                                state.active_regions.push(binding)
+                                proof_resource_record_event(state, report, "resource-region-open", "", 0, binding, "", 0)
+                            state.facts.clear()
+                            continue
+                        block_state: mutable ProofResourceState = proof_resource_empty()
+                        proof_resource_copy_into(state, &block_state)
+                        proof_resource_mark_scope_inherited(state, &block_state)
+                        if block_kind == "region" and binding == "":
+                            region_name: sview = clause[0] if clause.count > 0 else ""
+                            region_valid: bool = region_name != "" and not proof_resource_region_is_active(state, region_name)
+                            proof_resource_add_failing_obligation(report, "region-scope-unsupported", block_position, function_name, "region block must introduce a fresh named lexical region") if not region_valid
+                            if region_valid:
+                                block_state.active_regions.push(region_name)
+                                proof_resource_record_event(&block_state, report, "resource-region-open", "", 0, region_name, "", 0)
+                            proof_resource_check_statements(block_body, &block_state, report, function_name, functions)
+                            proof_resource_check_region_boundary(state, block_state, report, function_name, block_position)
+                            if region_valid:
+                                if block_state.active_regions.count == state.active_regions.count:
+                                    proof_resource_add_failing_obligation(report, "region-scope-unsupported", block_position, function_name, "region scope did not close in the resource transition trace")
+                                else:
+                                    block_state.active_regions <- block_state.active_regions.truncate(block_state.active_regions.count - 1)
+                                    proof_resource_invalidate_region_bindings(&block_state, region_name)
+                                    proof_resource_record_event(&block_state, report, "resource-region-close", "", 0, region_name, "", 0)
+                            proof_resource_close_child(state, block_state, report, true)
+                            state.facts.clear()
+                            continue
+                        proof_resource_add_binding_traced(&block_state, report, binding, false, false, false, block_state.binding_names.count, false, "", proof_resource_empty_place(), 0) if binding != ""
+                        proof_resource_check_statements(block_body, &block_state, report, function_name, functions)
+                        proof_resource_close_child(state, block_state, report, true)
+                        state.facts.clear()
+                    Ast::Stmt.Contract(kind, expression, position):
+                        if kind == "assert" or kind == "requires" or kind == "ensure":
+                            proof_resource_check_expression(expression, state, report, function_name, functions)
+                            proof_resource_add_failing_obligation(report, "borrow-contract-unsupported", position, function_name, "resource-bearing expressions are not admitted in logical contracts") if proof_resource_expr_has_address_of(expression) or proof_resource_expr_uses_local_borrow(expression, state)
+                            proof_resource_add_failing_obligation(report, "region-contract-unsupported", position, function_name, "region-owned expressions are not admitted in logical contracts") if proof_resource_expr_contains_region_value(expression, state)
+                    Ast::Stmt.Break(_, _):
+                        pass
+                    Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        # The main proof-state walker owns the canonical invalid-statement
+                        # diagnostic. Resource replay has no additional transition to emit.
+                        pass
+                    _:
+                        proof_resource_add_failing_obligation(report, "statement-unsupported", Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}, function_name, "unknown statement form has no resource transition model")
+
+        def proof_check_resource_safety[@r](parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, facts: darray[Ast::Expr]&, report: mutable ProofReport& @r, function_name: sview, line: u32, functions: ProofFunctionTable&) -> void:
+            failed_before: u32 = report.failed
+            state: mutable ProofResourceState = proof_resource_empty()
+            state.facts.extend(facts)
+            function_index: usize = proof_resource_function_index(functions, function_name)
+            region_parameter_count: usize = proof_resource_function_region_param_count(functions, function_index)
+            for region_index in 0..<region_parameter_count |region_index, functions, function_index, state, report|:
+                region: sview = proof_resource_function_region_param_at(functions, function_index, region_index)
+                valid_region: bool = region != "" and not proof_resource_region_is_active(state, region)
+                proof_resource_add_failing_obligation(report, "region-scope-unsupported", Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}, function_name, "region-polymorphic parameters must be distinct lifetime capabilities") if not valid_region
+                if valid_region:
+                    state.active_regions.push(region)
+                    state.external_regions.push(region)
+                    proof_resource_record_event(&state, report, "resource-region-param", "external", 0, region, "", 0)
+            for parameter in parameters |state, report|:
+                is_reference: bool = proof_resource_is_reference_type(parameter.type_expression)
+                is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(parameter.type_expression)
+                writable: bool = parameter.is_mutable or proof_resource_type_has_marker(parameter.type_expression, TokenKind.Mutable) or is_mutable_reference
+                proof_resource_add_binding_traced(&state, report, parameter.name, is_reference, is_mutable_reference, writable, state.binding_names.count, false, "", proof_resource_empty_place(), 0)
+                parameter_index: usize = state.binding_names.count - 1
+                state.binding_extent[parameter_index] <- true if parameter_index < state.binding_extent.count and proof_resource_type_is_collection(parameter.type_expression)
+                parameter_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
+                proof_resource_set_binding_region(&state, report, parameter.name, parameter_region) if is_reference and parameter_region != ""
+            proof_resource_check_statements(body, &state, report, function_name, functions)
+            proof_resource_finish(&state, report, function_name, line, failed_before, parameters.count)

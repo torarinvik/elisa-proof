@@ -1,0 +1,68 @@
+extend ElisaProof:
+    private:
+        def proof_replay_fact_trace_is_valid(report: mutable ProofReport&, trace: ProofFactTrace, owner: sview, depth: usize) -> bool:
+            dependency_stack: mutable darray[sview] = [owner]
+            return proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, depth, dependency_stack)
+
+        def proof_replay_fact_is_traced_with_stack(report: mutable ProofReport&, fact: Ast::Expr, owner: sview, dependency_stack: darray[sview]&) -> bool:
+            for trace in report.fact_traces:
+                continue if trace.name != owner
+                return true if proof_replay_expr_equal(trace.expression, fact) and proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack)
+            return false
+
+        def proof_replay_fact_is_traced(report: mutable ProofReport&, fact: Ast::Expr, owner: sview) -> bool:
+            dependency_stack: mutable darray[sview] = [owner]
+            return proof_replay_fact_is_traced_with_stack(report, fact, owner, dependency_stack)
+
+        # Certificates are not standalone propositions: each one must be the exact root emitted
+        # for a successful goal attempt. Check both source-level fields and arena ranges before
+        # replaying the logical claim. This prevents a future serialized certificate from
+        # attaching an otherwise replayable root to an unrelated or fabricated obligation.
+        def proof_replay_certificate_root_is_proven(report: ProofReport&, certificate: ProofGoalCertificate) -> bool:
+            return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
+            for attempt in report.goal_attempts:
+                continue if not attempt.has_certificate or not attempt.proven
+                continue if attempt.facts_start != certificate.facts_start or attempt.facts_count != certificate.facts_count
+                continue if attempt.kernel_goal != certificate.kernel_goal or attempt.kernel_facts_start != certificate.kernel_facts_start or attempt.kernel_facts_count != certificate.kernel_facts_count
+                continue if attempt.line != certificate.line or attempt.name != certificate.name or attempt.rule != certificate.rule
+                # `kernel_goal` is the canonical semantic identity. The source AST mirror is
+                # presentation data and can contain compiler expression forms (for example
+                # quantifier blocks) that the small source diagnostic equality intentionally does
+                # not normalize; the exact arena root/range match above remains authoritative.
+                return true
+            return false
+
+        def proof_replay_certificate_with_stack[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate, dependency_stack: darray[sview]&, dependency_depth: usize) -> bool:
+            return false if not report.kernel_arena_validated
+            return false if not proof_replay_certificate_root_is_proven(report, certificate)
+            return false if certificate.kernel_facts_start > report.kernel_certificate_facts.count or certificate.kernel_facts_count > report.kernel_certificate_facts.count - certificate.kernel_facts_start
+            return false if certificate.kernel_goal >= report.kernel_nodes.count
+            return false if certificate.facts_count != certificate.kernel_facts_count
+            if certificate.rule != "resource-safety" and certificate.rule != "structural-safety" and certificate.rule != "effect-containment":
+                return false if not proof_replay_ast_matches_kernel(report, certificate.goal, certificate.kernel_goal, 0)
+            for index in 0..<certificate.facts_count |index, report, certificate|:
+                source_fact: Ast::Expr = report.certificate_facts[certificate.facts_start + index]
+                kernel_fact: usize = report.kernel_certificate_facts[certificate.kernel_facts_start + index]
+                return false if not proof_replay_ast_matches_kernel(report, source_fact, kernel_fact, 0)
+            facts: mutable darray[usize] = []
+            for index in 0..<certificate.kernel_facts_count |index, facts, report, certificate|:
+                fact: usize = report.kernel_certificate_facts[certificate.kernel_facts_start + index]
+                return false if fact >= report.kernel_nodes.count
+                facts.push(fact)
+            for fact in facts |fact, report, certificate, dependency_stack|:
+                return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, certificate.name, dependency_stack, false)
+            return false if certificate.rule == "resource-safety" and not proof_replay_resource_event_facts_with_owner(report, certificate.kernel_goal, certificate.name, dependency_stack, 0)
+            return ElisaProofKernelReplay::proof_kernel_replay_resource_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "resource-safety"
+            return ElisaProofKernelReplay::proof_kernel_replay_structural_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "structural-safety"
+            return ElisaProofKernelReplay::proof_kernel_replay_effect_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "effect-containment"
+            return ElisaProofKernelReplay::proof_kernel_replay_checked_index_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-index"
+            return ElisaProofKernelReplay::proof_kernel_replay_checked_get_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-get"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_after_arena(&report.kernel_nodes, &report.kernel_children, "forall", facts, certificate.kernel_goal) if certificate.rule == "quantifier-forall"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_after_arena(&report.kernel_nodes, &report.kernel_children, "exists", facts, certificate.kernel_goal) if certificate.rule == "quantifier-exists"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_after_arena(&report.kernel_nodes, &report.kernel_children, report.kernel_nodes[certificate.kernel_goal].operator, facts, certificate.kernel_goal) if report.kernel_nodes[certificate.kernel_goal].kind == "quantifier"
+            return ElisaProofKernelReplay::proof_kernel_replay_goal_report_after_arena(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal)
+
+        def proof_replay_certificate[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate) -> bool:
+            dependency_stack: mutable darray[sview] = [certificate.name]
+            return proof_replay_certificate_with_stack(report, certificate, dependency_stack, 0)
+

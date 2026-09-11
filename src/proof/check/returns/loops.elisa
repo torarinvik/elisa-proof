@@ -1,0 +1,339 @@
+extend ElisaProof:
+    private:
+        def proof_check_return_loops(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
+            match statement:
+                Ast::Stmt.While(condition, while_body, position):
+                    # A loop without an invariant is not treated as verified. With one,
+                    # establish and check preservation on the one symbolic iteration.
+                    invariants: darray[Ast::Expr] = proof_contracts(while_body, "invariant")
+                    loop_condition_value: mutable Ast::Expr = proof_substitute(condition, names, values)
+                    proof_check_frame_calls_in_expression(condition, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(condition)
+                    loop_condition_value <- proof_substitute(condition, names, values) if proof_expr_has_call(condition)
+                    proof_add_finding(report, "loop-condition-opaque", position.line, name, "loop condition may mutate state and has no frame model") if proof_expr_has_call(condition)
+                    proof_forget_values(names, values, position) if proof_expr_has_call(condition)
+                    loop_exit_valid: mutable bool = invariants.count > 0 and not proof_expr_has_call(condition)
+                    loop_scope_count: usize = names.count
+                    loop_body_flow: mutable ProofFlow = proof_empty_flow()
+                    loop_block: (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) = proof_single_captured_block(while_body)
+                    if invariants.count == 0:
+                        proof_add_finding(report, "loop-invariant-missing", position.line, name, "loop has no invariant for symbolic verification")
+                        # A missing invariant rejects the loop's post-state reasoning, but
+                        # it must not hide obligations in the loop body. Check the body for an
+                        # arbitrary iteration: every binding it may rewrite is opaque at entry,
+                        # so nested indexing, calls, moves, and returns remain visible to the
+                        # fail-closed checker without the entry values standing in for them.
+                        # The body runs only when the condition holds, so the condition is a
+                        # fact at every iteration's entry -- over that opaque state. A
+                        # condition that calls is excluded: it may mutate the state the body
+                        # is then checked in, and its own value is already reported opaque.
+                        entry_conditions: mutable darray[Ast::Expr] = []
+                        entry_conditions.push(condition) if not proof_expr_has_call(condition)
+                        no_entry_invariants: mutable darray[Ast::Expr] = []
+                        unchecked_loop_names: mutable darray[sview] = proof_copy_names(names)
+                        unchecked_loop_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                        unchecked_loop_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        if loop_block.known:
+                            unchecked_end_names: mutable darray[sview] = []
+                            unchecked_end_values: mutable darray[Ast::Expr] = []
+                            unchecked_end_facts: mutable darray[Ast::Expr] = []
+                            unchecked_end_flow: mutable ProofFlow = proof_empty_flow()
+                            proof_check_captured_block(loop_block.body, loop_block.captures, loop_block.position, true, entry_conditions, no_entry_invariants, loop_scope_count, &unchecked_loop_names, &unchecked_loop_values, &unchecked_loop_facts, &unchecked_end_names, &unchecked_end_values, &unchecked_end_facts, &unchecked_end_flow, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, &loop_body_flow)
+                        else:
+                            proof_forget_loop_entry(unchecked_loop_names, &unchecked_loop_values, &unchecked_loop_facts, while_body, functions, frame_parameters, report, name, position)
+                            for entry_condition in entry_conditions |unchecked_loop_facts, unchecked_loop_names, unchecked_loop_values, report, name, position|:
+                                proof_add_traced_fact(&unchecked_loop_facts, report, proof_substitute(entry_condition, unchecked_loop_names, unchecked_loop_values), "loop-condition", position.line, name)
+                            proof_check_returns(while_body, &unchecked_loop_names, &unchecked_loop_values, &unchecked_loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &loop_body_flow)
+                    else:
+                        established_invariants: mutable darray[Ast::Expr] = []
+                        for invariant in invariants |report, name, facts, names, values, condition, while_body, position, established_invariants|:
+                            entry: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
+                            established: bool = proof_certify_goal(facts, entry, report, position.line, name, annotations)
+                            report.proof_obligation(established)
+                            proof_add_latest_goal_finding(report, "invariant-unproven", position.line, name, "loop invariant is not established") if not established
+                            loop_exit_valid <- false if not established
+                            established_invariants.push(invariant) if established
+                        # One arbitrary iteration: the bindings the body may rewrite are opaque
+                        # at entry, and the established invariants and the condition are the
+                        # facts over that state. Preservation is checked on the body's end
+                        # state.
+                        loop_entry_conditions: mutable darray[Ast::Expr] = [condition]
+                        loop_names: mutable darray[sview] = proof_copy_names(names)
+                        loop_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                        loop_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        loop_end_names: mutable darray[sview] = []
+                        loop_end_values: mutable darray[Ast::Expr] = []
+                        loop_end_facts: mutable darray[Ast::Expr] = []
+                        if loop_block.known:
+                            loop_end_flow: mutable ProofFlow = proof_empty_flow()
+                            proof_check_captured_block(loop_block.body, loop_block.captures, loop_block.position, true, loop_entry_conditions, established_invariants, loop_scope_count, &loop_names, &loop_values, &loop_facts, &loop_end_names, &loop_end_values, &loop_end_facts, &loop_end_flow, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, &loop_body_flow)
+                            loop_body_flow.normal <- loop_end_flow.normal
+                        else:
+                            proof_forget_loop_entry(loop_names, &loop_values, &loop_facts, while_body, functions, frame_parameters, report, name, position)
+                            proof_add_traced_fact(loop_facts, report, proof_substitute(condition, loop_names, loop_values), "loop-condition", position.line, name)
+                            for invariant in established_invariants |loop_facts, loop_names, loop_values, frame_parameters, old_values, loop_scope_count, report, name, position|:
+                                proof_add_traced_fact(loop_facts, report, proof_substitute_scoped_contract(invariant, loop_names, loop_values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
+                            proof_check_returns(while_body, &loop_names, &loop_values, &loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &loop_body_flow)
+                            proof_replace_names(&loop_end_names, loop_names)
+                            proof_replace_exprs(&loop_end_values, loop_values)
+                            proof_replace_exprs(&loop_end_facts, loop_facts)
+                        loop_exit_valid <- false if not loop_body_flow.valid
+                        if loop_body_flow.normal:
+                            for invariant in invariants |report, name, loop_end_facts, loop_end_names, loop_end_values|:
+                                preserved: Ast::Expr = proof_substitute_scoped_contract(invariant, loop_end_names, loop_end_values, loop_scope_count, frame_parameters, old_values)
+                                preservation_proven: bool = proof_certify_goal(loop_end_facts, preserved, report, position.line, name, annotations)
+                                report.proof_obligation(preservation_proven)
+                                proof_add_latest_goal_finding(report, "invariant-not-preserved", position.line, name, "loop body does not re-establish the invariant") if not preservation_proven
+                                loop_exit_valid <- false if not preservation_proven
+                        elif not loop_body_flow.breaks and not loop_body_flow.continues:
+                            # A body with no path to another iteration may still return, but
+                            # an invalid/unsupported transfer cannot establish a loop exit.
+                            loop_exit_valid <- false
+                    decreases: darray[Ast::Expr] = proof_contracts(while_body, "decreases")
+                    decreases_components: mutable darray[Ast::Expr] = []
+                    proof_decreases_component_slice(decreases, &decreases_components)
+                    has_unbounded_decreases: mutable bool = false
+                    for statement in while_body |has_unbounded_decreases|:
+                        match statement:
+                            Ast::Stmt.Contract(kind, _, _):
+                                has_unbounded_decreases <- true if kind == "decreases*"
+                            _:
+                                pass
+                    if has_unbounded_decreases:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "loop-decreases-unproven", position.line, name, "unbounded decreases* is not a checked termination proof")
+                    if decreases.count > 0 and decreases_components.count == 0:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "loop-decreases-malformed", position.line, name, "a loop decreases tuple must contain at least one component")
+                    if decreases_components.count > 0 and not has_unbounded_decreases:
+                        # The measure is taken at the entry of an arbitrary iteration, so the
+                        # bindings the body may rewrite are opaque here as well; the invariants
+                        # and the condition are the facts over that state.
+                        termination_entry_names: mutable darray[sview] = proof_copy_names(names)
+                        termination_entry_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                        termination_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        proof_forget_loop_entry(termination_entry_names, &termination_entry_values, &termination_facts, while_body, functions, frame_parameters, report, name, position)
+                        measure_components: mutable darray[Ast::Expr] = []
+                        for component in decreases_components |measure_components, termination_entry_names, termination_entry_values|:
+                            measure_components.push(proof_substitute(component, termination_entry_names, termination_entry_values))
+                        for invariant in invariants |termination_facts, termination_entry_names, termination_entry_values, report, name, position|:
+                            proof_add_traced_fact(termination_facts, report, proof_substitute_scoped_contract(invariant, termination_entry_names, termination_entry_values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
+                        proof_add_traced_fact(termination_facts, report, proof_substitute(condition, termination_entry_names, termination_entry_values), "loop-condition", position.line, name) if not proof_expr_has_call(condition)
+                        nonnegative_proven: mutable bool = true
+                        for measure in measure_components |termination_facts, annotations, report, name, position, nonnegative_proven|:
+                            measure_nonnegative: Ast::Expr = Ast::Expr.Binary(measure, TokenKind.GtEq, Ast::Expr.IntLit(0, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0}), Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0})
+                            component_proven: bool = proof_certify_goal(termination_facts, measure_nonnegative, report, position.line, name, annotations)
+                            report.proof_obligation(component_proven)
+                            nonnegative_proven <- false if not component_proven
+                            proof_add_latest_goal_finding(report, "loop-decreases-unproven", position.line, name, "decreases component is not proven nonnegative at loop entry") if not component_proven
+                        termination_names: mutable darray[sview] = proof_copy_names(termination_entry_names)
+                        termination_values: mutable darray[Ast::Expr] = proof_copy_exprs(termination_entry_values)
+                        empty_control_invariants: mutable darray[Ast::Expr] = []
+                        termination_flow: mutable ProofFlow = proof_empty_flow()
+                        if loop_block.known:
+                            # The block's own entry treatment repeats the forgetting above on an
+                            # already opaque state, which changes nothing; the entry facts it is
+                            # given are the ones just recorded.
+                            termination_entry_conditions: mutable darray[Ast::Expr] = []
+                            termination_entry_conditions.push(condition) if not proof_expr_has_call(condition)
+                            termination_end_names: mutable darray[sview] = []
+                            termination_end_values: mutable darray[Ast::Expr] = []
+                            termination_end_facts: mutable darray[Ast::Expr] = []
+                            termination_end_flow: mutable ProofFlow = proof_empty_flow()
+                            proof_check_captured_block(loop_block.body, loop_block.captures, loop_block.position, true, termination_entry_conditions, invariants, loop_scope_count, &termination_names, &termination_values, &termination_facts, &termination_end_names, &termination_end_values, &termination_end_facts, &termination_end_flow, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, &termination_flow)
+                            termination_flow.normal <- termination_end_flow.normal
+                            proof_replace_names(&termination_names, termination_end_names)
+                            proof_replace_exprs(&termination_values, termination_end_values)
+                            proof_replace_exprs(&termination_facts, termination_end_facts)
+                        else:
+                            proof_check_returns(while_body, &termination_names, &termination_values, &termination_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", empty_control_invariants, loop_scope_count, &termination_flow)
+                        termination_paths_valid: mutable bool = true
+                        if loop_body_flow.continues:
+                            # The termination pass must expose one exact state for every
+                            # continue edge. If it cannot, reject the edge rather than using
+                            # the enclosing join state as a proxy.
+                            continue_states_available: bool = loop_body_flow.valid and termination_flow.valid and termination_flow.continues and termination_flow.continue_name_starts.count > 0
+                            if not continue_states_available:
+                                termination_paths_valid <- false
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "loop-decreases-unproven", position.line, name, "continue path requires a separate checked termination step")
+                            else:
+                                for edge_index in 0..<termination_flow.continue_name_starts.count |edge_index, termination_flow, measure_components, decreases_components, annotations, report, name, position, termination_paths_valid|:
+                                    edge_names: mutable darray[sview] = []
+                                    edge_values: mutable darray[Ast::Expr] = []
+                                    edge_facts: mutable darray[Ast::Expr] = []
+                                    edge_name_start: usize = termination_flow.continue_name_starts[edge_index]
+                                    edge_name_count: usize = termination_flow.continue_name_counts[edge_index]
+                                    edge_value_start: usize = termination_flow.continue_value_starts[edge_index]
+                                    edge_value_count: usize = termination_flow.continue_value_counts[edge_index]
+                                    edge_fact_start: usize = termination_flow.continue_fact_starts[edge_index]
+                                    edge_fact_count: usize = termination_flow.continue_fact_counts[edge_index]
+                                    for offset in 0..<edge_name_count |offset, edge_names, termination_flow, edge_name_start|:
+                                        edge_names.push(termination_flow.continue_names[edge_name_start + offset])
+                                    for offset in 0..<edge_value_count |offset, edge_values, termination_flow, edge_value_start|:
+                                        edge_values.push(termination_flow.continue_values[edge_value_start + offset])
+                                    for offset in 0..<edge_fact_count |offset, edge_facts, termination_flow, edge_fact_start|:
+                                        edge_facts.push(termination_flow.continue_facts[edge_fact_start + offset])
+                                    edge_proven: bool = proof_check_decreases_step(measure_components, decreases_components, edge_names, edge_values, edge_facts, annotations, report, name, position)
+                                    termination_paths_valid <- false if not edge_proven
+                        if loop_body_flow.normal:
+                            normal_step_proven: bool = proof_check_decreases_step(measure_components, decreases_components, termination_names, termination_values, termination_facts, annotations, report, name, position)
+                            termination_paths_valid <- false if not normal_step_proven
+                        loop_exit_valid <- false if not termination_paths_valid
+                    if loop_exit_valid:
+                        # At a normally completed loop, the invariant and the negated
+                        # condition describe the current state. Forget the old symbolic
+                        # values first: a local may have changed on any number of iterations,
+                        # so retaining its entry expression would be an unsound shortcut.
+                        for index in 0..<values.count |index, names, values|:
+                            values[index] <- Ast::Expr.Ident(names[index], position)
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                        for invariant in invariants |facts, names, values, report, name, position|:
+                            proof_add_traced_fact(facts, report, proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
+                        exit_condition: Ast::Expr = proof_substitute(condition, names, values)
+                        # A break can leave while the condition is still true. In that case
+                        # the invariant is the only sound post-loop fact; adding `not
+                        # condition` would turn a path-local loop fact into a false global
+                        # claim.
+                        proof_add_traced_fact(facts, report, Ast::Expr.Unary(TokenKind.Not, exit_condition, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0}), "loop-condition", position.line, name) if not loop_body_flow.breaks
+                    else:
+                        proof_forget_values(names, values, position)
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                Ast::Stmt.For(bind, variables, iterable, for_body, position):
+                    # `parallel for` is not an ordinary sequential loop. The compiler checks
+                    # its pool grant and cross-thread capture rules, but this proof state does
+                    # not yet model worker isolation, reduction ownership, or the join. Check
+                    # the worker body in a private state so nested safety obligations are not
+                    # skipped, then make the scheduling boundary explicit: no sequential fact
+                    # or symbolic value may justify a post-loop goal.
+                    if bind == "parallel":
+                        parallel_iterable: mutable Ast::Expr = proof_substitute(iterable, names, values)
+                        parallel_names: mutable darray[sview] = proof_copy_names(names)
+                        parallel_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                        parallel_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                        proof_check_frame_calls_in_expression(iterable, parallel_facts, parallel_names, parallel_values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(iterable)
+                        parallel_iterable <- proof_substitute(iterable, parallel_names, parallel_values) if proof_expr_has_call(iterable)
+                        parallel_facts.clear() if proof_expr_has_call(iterable)
+                        for variable in variables |parallel_names, parallel_values, position|:
+                            if variable != "":
+                                parallel_names.push(variable)
+                                parallel_values.push(proof_loop_binder_value(variable, position))
+                        proof_remove_type_bound_facts_for_names(&parallel_facts, variables)
+                        proof_add_loop_range_facts(parallel_iterable, variables, position, &parallel_facts, report, name, position.line) if not proof_expr_has_call(iterable)
+                        parallel_body_flow: mutable ProofFlow = proof_empty_flow()
+                        empty_parallel_invariants: mutable darray[Ast::Expr] = []
+                        proof_check_returns(for_body, &parallel_names, &parallel_values, &parallel_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", empty_parallel_invariants, 0, &parallel_body_flow)
+                        flow.valid <- false if not parallel_body_flow.valid
+                        if not parallel_body_flow.normal or parallel_body_flow.breaks or parallel_body_flow.continues:
+                            flow.valid <- false
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "parallel-control-flow-unsupported", position.line, name, "parallel loop worker must not transfer control to the enclosing sequential proof state")
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "parallel-state-unsupported", position.line, name, "parallel loop join semantics are not modeled by the proof state")
+                        proof_forget_values(names, values, Ast::expr_pos(iterable))
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                        return true
+                    iterable_value: mutable Ast::Expr = proof_substitute(iterable, names, values)
+                    proof_check_frame_calls_in_expression(iterable, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(iterable)
+                    iterable_value <- proof_substitute(iterable, names, values) if proof_expr_has_call(iterable)
+                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(iterable)) if proof_expr_has_call(iterable)
+                    for_names: mutable darray[sview] = proof_copy_names(names)
+                    for_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                    for_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                    for_facts.clear() if proof_expr_has_call(iterable)
+                    # Loop variables are lexical binders. Give each one a fresh proof atom in
+                    # the body so range facts can mention it, while a loop variable that
+                    # shadows an outer parameter cannot be substituted with the parameter's
+                    # pre-loop expression.
+                    for variable in variables |for_names, for_values, position|:
+                        if variable != "":
+                            for_names.push(variable)
+                            for_values.push(proof_loop_binder_value(variable, position))
+                    proof_remove_type_bound_facts_for_names(&for_facts, variables)
+                    proof_add_loop_range_facts(iterable_value, variables, position, &for_facts, report, name, position.line) if not proof_expr_has_call(iterable)
+                    invariants: darray[Ast::Expr] = proof_contracts(for_body, "invariant")
+                    loop_block: (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) = proof_single_captured_block(for_body)
+                    no_for_entry_conditions: mutable darray[Ast::Expr] = []
+                    if invariants.count == 0:
+                        # Preserve the conservative behavior for an ordinary iterable loop
+                        # without a specification: inspect its body for an arbitrary iteration
+                        # -- every binding it may rewrite is opaque at entry -- but do not
+                        # export symbolic values or facts across an unknown iteration join.
+                        empty_for_invariants: mutable darray[Ast::Expr] = []
+                        for_body_flow: mutable ProofFlow = proof_empty_flow()
+                        if loop_block.known:
+                            for_end_names: mutable darray[sview] = []
+                            for_end_values: mutable darray[Ast::Expr] = []
+                            for_end_facts: mutable darray[Ast::Expr] = []
+                            for_end_flow: mutable ProofFlow = proof_empty_flow()
+                            proof_check_captured_block(loop_block.body, loop_block.captures, loop_block.position, true, no_for_entry_conditions, empty_for_invariants, 0, &for_names, &for_values, &for_facts, &for_end_names, &for_end_values, &for_end_facts, &for_end_flow, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, &for_body_flow)
+                        else:
+                            proof_forget_loop_entry(for_names, &for_values, &for_facts, for_body, functions, frame_parameters, report, name, position)
+                            proof_check_returns(for_body, &for_names, &for_values, &for_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", empty_for_invariants, 0, &for_body_flow)
+                        flow.valid <- false if not for_body_flow.valid
+                        if proof_body_may_modify(for_body):
+                            proof_forget_values(names, values, Ast::expr_pos(iterable))
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                    else:
+                        # Establish the invariant after evaluating the iterable, then check
+                        # one arbitrary iteration: the bindings the body may rewrite are
+                        # opaque at its entry and the established invariants are the facts
+                        # over that state. Only outer-scope facts are exported: a for binder
+                        # is not in scope once the loop exits.
+                        loop_scope_count: usize = names.count
+                        loop_facts: mutable darray[Ast::Expr] = proof_copy_exprs(for_facts)
+                        loop_exit_valid: mutable bool = true
+                        invariant_scope_valid: mutable bool = true
+                        established_invariants: mutable darray[Ast::Expr] = []
+                        for invariant in invariants |report, name, facts, names, values, frame_parameters, old_values, position, loop_facts, loop_exit_valid, invariant_scope_valid, established_invariants|:
+                            if proof_loop_invariant_mentions_binder(invariant, variables):
+                                invariant_scope_valid <- false
+                                loop_exit_valid <- false
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "loop-invariant-scope", position.line, name, "for-loop invariants may refer only to bindings that remain in scope after the loop")
+                            else:
+                                entry: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
+                                established: bool = proof_certify_goal(facts, entry, report, position.line, name, annotations)
+                                report.proof_obligation(established)
+                                loop_exit_valid <- false if not established
+                                proof_add_latest_goal_finding(report, "invariant-unproven", position.line, name, "for-loop invariant is not established") if not established
+                                established_invariants.push(invariant) if established
+                        for_body_flow: mutable ProofFlow = proof_empty_flow()
+                        loop_end_names: mutable darray[sview] = []
+                        loop_end_values: mutable darray[Ast::Expr] = []
+                        loop_end_facts: mutable darray[Ast::Expr] = []
+                        if loop_block.known:
+                            loop_end_flow: mutable ProofFlow = proof_empty_flow()
+                            proof_check_captured_block(loop_block.body, loop_block.captures, loop_block.position, true, no_for_entry_conditions, established_invariants, loop_scope_count, &for_names, &for_values, &loop_facts, &loop_end_names, &loop_end_values, &loop_end_facts, &loop_end_flow, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, &for_body_flow)
+                            for_body_flow.normal <- loop_end_flow.normal
+                        else:
+                            proof_forget_loop_entry(for_names, &for_values, &loop_facts, for_body, functions, frame_parameters, report, name, position)
+                            for invariant in established_invariants |loop_facts, for_names, for_values, loop_scope_count, frame_parameters, old_values, report, name, position|:
+                                proof_add_traced_fact(loop_facts, report, proof_substitute_scoped_contract(invariant, for_names, for_values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
+                            proof_check_returns(for_body, &for_names, &for_values, &loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &for_body_flow)
+                            proof_replace_names(&loop_end_names, for_names)
+                            proof_replace_exprs(&loop_end_values, for_values)
+                            proof_replace_exprs(&loop_end_facts, loop_facts)
+                        loop_exit_valid <- false if not for_body_flow.valid
+                        if invariant_scope_valid and for_body_flow.normal:
+                            for invariant in invariants |report, name, loop_end_facts, loop_end_names, loop_end_values, frame_parameters, old_values, position, loop_exit_valid|:
+                                preserved: Ast::Expr = proof_substitute_scoped_contract(invariant, loop_end_names, loop_end_values, loop_scope_count, frame_parameters, old_values)
+                                preservation_proven: bool = proof_certify_goal(loop_end_facts, preserved, report, position.line, name, annotations)
+                                report.proof_obligation(preservation_proven)
+                                proof_add_latest_goal_finding(report, "invariant-not-preserved", position.line, name, "for-loop body does not re-establish the invariant") if not preservation_proven
+                                loop_exit_valid <- false if not preservation_proven
+                        if loop_exit_valid:
+                            # Any outer local may have changed on an arbitrary number of
+                            # iterations. Reintroduce only checked invariant facts and use
+                            # opaque current-value atoms for the outer bindings.
+                            for index in 0..<values.count |index, names, values, position|:
+                                values[index] <- Ast::Expr.Ident(names[index], position)
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                            for invariant in invariants |facts, names, values, frame_parameters, old_values, loop_scope_count, report, name, position|:
+                                post_invariant: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
+                                proof_add_traced_fact(facts, report, post_invariant, "loop-invariant", position.line, name)
+                        else:
+                            proof_forget_values(names, values, position)
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                _:
+                    return false
+            return true

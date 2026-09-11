@@ -1,0 +1,135 @@
+# Private statement-transition submodule for the checker.
+extend ElisaProof:
+    private:
+        def proof_check_return_declarations(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
+            match statement:
+                Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                    value: mutable Ast::Expr = proof_substitute(initializer, names, values)
+                    prior_value_count: usize = values.count
+                    shadowed: mutable bool = false
+                    for existing_name in names |shadowed, local_name|:
+                        shadowed <- true if existing_name == local_name
+                    call_applied: mutable bool = false
+                    match value:
+                        Ast::Expr.Call(_, _, _, _):
+                            proof_check_frame_call_children(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
+                            call_applied <- proof_apply_function(value, value, facts, functions, names, frame_parameters, changes, preserves, report, name, annotations)
+                            proof_check_opaque_call_frame(value, names, frame_parameters, changes, preserves, functions, report, name) if not call_applied
+                            value <- Ast::Expr.Invalid if not call_applied
+                        _:
+                            proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(initializer)
+                            value <- proof_substitute(initializer, names, values) if proof_expr_has_call(initializer)
+                    # A declaration's initializer is evaluated before its binding enters
+                    # scope. Commit the new local only after nested calls have seen the
+                    # pre-declaration environment; otherwise `x: T = f(x)` would pass the
+                    # freshly assigned x back into f instead of the outer x.
+                    # The spelling may already denote an earlier symbol: a shadowed local,
+                    # a parameter, or a binding forgotten to its own name. Purge everything
+                    # that refers to that symbol before it denotes the new binding; a value
+                    # that mentions its own new name has no expressible meaning either.
+                    proof_resymbolize_binding(names, values, facts, report, name, local_name, position)
+                    value <- Ast::Expr.Invalid if proof_expr_mentions_name(value, local_name)
+                    # A local that holds a container keeps its own symbol when its initializer
+                    # is a call. A call is not a place, and every extent rule is written over
+                    # places, so substituting it turns `values.count` into `<call>.count` --
+                    # a term with no place root, which no extent, alias or stability rule can
+                    # say anything about. The equality with the call was never usable for a
+                    # container anyway: nothing folds it, and an opaque callee's result is not
+                    # a value this state models. The symbol is what carries the facts.
+                    # The same holds for a tuple or a struct local: `located.node` is a place
+                    # only while `located` is one. A scalar local is excluded because the two
+                    # binders below already give it its own symbol.
+                    aggregate_local: bool = proof_scalar_type_kind(type_expression, report.source_declarations, 0) != 1
+                    value <- Ast::Expr.Ident(local_name, position) if aggregate_local and proof_expr_has_call(initializer)
+                    names <- names.push(local_name)
+                    values <- values.push(value)
+                    values[prior_value_count] <- value if proof_expr_has_call(initializer) and prior_value_count < values.count
+                    unsigned_width: i64 = proof_unsigned_type_width(type_expression, report.source_declarations, 0)
+                    if unsigned_width < 0:
+                        values[prior_value_count] <- Ast::Expr.Invalid
+                        proof_add_finding(report, "contract-expression-unsupported", position.line, name, "local numeric type alias cannot be resolved uniquely")
+                    if proof_expr_has_call(initializer):
+                        # The new local contains the call result, so retain its binding, but
+                        # forget every pre-existing binding that the call may have mutated.
+                        proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, prior_value_count, values.count, position)
+                    proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if shadowed
+                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if not shadowed and proof_expr_has_call(initializer) and not call_applied
+                    proof_bind_unsigned_symbol(names, values, facts, report, name, prior_value_count, unsigned_width, value, position) if unsigned_width > 0
+                    # A scalar local carries the same primitive-type witness as a parameter, so
+                    # equality reasoning over it is not held back by the binding form. An
+                    # unsigned width marker already witnesses the same thing.
+                    local_scalar_kind: i64 = proof_scalar_type_kind(type_expression, report.source_declarations, 0)
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(local_name, position), position.line, name) if local_scalar_kind == 1 and unsigned_width <= 0
+                    proof_bind_scalar_symbol(names, values, prior_value_count, position) if local_scalar_kind == 1 and unsigned_width <= 0
+                    local_witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
+                    proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(local_name, position), type_expression, position.line, name, position, &local_witness_budget, 0) if local_scalar_kind != 1
+                    # A local that holds its value rather than a reference to one is a binding
+                    # no callee can name, so its fields and its extent survive a call the way
+                    # a by-value scalar does. The entry is rewritten on every declaration of
+                    # the spelling, so a redeclaration to a reference type withdraws it rather
+                    # than inheriting the earlier claim.
+                    proof_drop_local_extent(report, local_name)
+                    if not proof_resource_is_reference_type(type_expression):
+                        report.local_extent_names.push(local_name)
+                Ast::Stmt.Assign(target, operator, initializer, position):
+                    target_name: sview = proof_ident_name(target)
+                    if target_name != "":
+                        proof_check_direct_frame_write(proof_substitute(target, names, values), names, frame_parameters, changes, preserves, report, name, position.line)
+                        value: mutable Ast::Expr = proof_substitute(initializer, names, values)
+                        slot: mutable usize = names.count
+                        target_slot: mutable usize = names.count
+                        while slot > 0 |slot, names, target_name|:
+                            slot <- slot - 1
+                            if names[slot] == target_name:
+                                target_slot <- slot
+                                # Only a plain rebind has the RHS as the new value. A
+                                # compound assignment (`+=`, `-=`, …) depends on the old
+                                # value and is opaque until the assignment algebra is modeled.
+                                values[slot] <- Ast::Expr.Absent if operator != TokenKind.LArrow and operator != TokenKind.Assign
+                                break
+                        call_applied: mutable bool = false
+                        match value:
+                            Ast::Expr.Call(_, _, _, _):
+                                proof_check_frame_call_children(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if operator == TokenKind.LArrow or operator == TokenKind.Assign
+                                call_applied <- proof_apply_function(value, value, facts, functions, names, frame_parameters, changes, preserves, report, name, annotations) if operator == TokenKind.LArrow or operator == TokenKind.Assign
+                                proof_check_opaque_call_frame(value, names, frame_parameters, changes, preserves, functions, report, name) if not call_applied
+                                value <- Ast::Expr.Invalid if not call_applied
+                                proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if operator != TokenKind.LArrow and operator != TokenKind.Assign
+                                value <- proof_substitute(initializer, names, values) if operator != TokenKind.LArrow and operator != TokenKind.Assign
+                            _:
+                                proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(initializer)
+                                value <- proof_substitute(initializer, names, values) if proof_expr_has_call(initializer)
+                        values[target_slot] <- value if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and target_slot < values.count
+                        if proof_expr_has_call(initializer):
+                            if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and target_slot < values.count:
+                                # Preserve the assigned result, but do not let the call's
+                                # possible mutation of another binding survive this point.
+                                proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, target_slot, position)
+                            else:
+                                proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position)
+                        # An unsigned local keeps its width by staying symbolic; its new
+                        # value becomes an equality fact when it is range-safe.
+                        rebound_width: i64 = proof_unsigned_marker_width_for_name(facts, target_name) if target_slot < values.count else 0
+                        proof_bind_unsigned_symbol(names, values, facts, report, name, target_slot, rebound_width, value, position) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and rebound_width > 0
+                        # A compound assignment still executes its RHS call, but the
+                        # resulting value depends on the old target and is not modeled.
+                        # Discard all facts after it, including when the RHS call had a
+                        # usable executable summary. The target denotes a new opaque value,
+                        # so bindings that recorded the old symbol are forgotten with it.
+                        proof_resymbolize_binding(names, values, facts, report, name, target_name, position) if operator != TokenKind.LArrow and operator != TokenKind.Assign
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if operator != TokenKind.LArrow and operator != TokenKind.Assign
+                        # A plain local rebind is represented in `values`, so keep facts
+                        # about prior symbolic values available for the substitution-based
+                        # postcondition check. Parameter rebinding is different: it changes
+                        # an externally visible root, so all facts must be discarded. Calls
+                        # still clear facts when no checked summary was applied.
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name)
+                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
+                    else:
+                        # Field/index/compound assignments can mutate aliases whose
+                        # dependencies are not represented in this small state model.
+                        proof_check_direct_frame_write(proof_substitute(target, names, values), names, frame_parameters, changes, preserves, report, name, position.line)
+                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
+                _:
+                    return false
+            return true

@@ -1,0 +1,412 @@
+extend ElisaProof:
+    private:
+        def proof_structural_check_body(body: darray[Ast::Stmt]&, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview) -> void:
+            current_destructurable: mutable darray[sview] = proof_copy_names(destructurable)
+            current_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(smaller)
+            for statement in body |own_name, subject_position, parameters, current_destructurable, current_smaller, report, name|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        proof_structural_check_expression(returned, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name) if value is returned
+                    Ast::Stmt.Expr(expression, _):
+                        proof_structural_check_expression(expression, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                    Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                        proof_structural_check_expression(initializer, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        blocked: darray[sview] = [local_name]
+                        current_destructurable <- proof_structural_without(current_destructurable, blocked)
+                        current_smaller <- proof_structural_smaller_without(current_smaller, blocked)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        proof_structural_check_expression(target, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        proof_structural_check_expression(initializer, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        blocked: darray[sview] = [proof_ident_name(target)]
+                        current_destructurable <- proof_structural_without(current_destructurable, blocked)
+                        current_smaller <- proof_structural_smaller_without(current_smaller, blocked)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_structural_check_expression(condition, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        then_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
+                        then_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
+                        proof_structural_check_body(then_body, own_name, subject_position, parameters, &then_destructurable, &then_smaller, report, name)
+                        else_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
+                        else_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
+                        proof_structural_check_body(else_body, own_name, subject_position, parameters, &else_destructurable, &else_smaller, report, name)
+                        current_destructurable <- proof_structural_intersect(then_destructurable, else_destructurable)
+                        current_smaller <- proof_structural_smaller_intersect(then_smaller, else_smaller)
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_structural_check_expression(condition, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        loop_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
+                        loop_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
+                        proof_structural_check_body(while_body, own_name, subject_position, parameters, &loop_destructurable, &loop_smaller, report, name)
+                        current_destructurable <- proof_structural_intersect(current_destructurable, loop_destructurable)
+                        current_smaller <- proof_structural_smaller_intersect(current_smaller, loop_smaller)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        proof_structural_check_expression(iterable, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        loop_variables: mutable darray[sview] = []
+                        match statement:
+                            Ast::Stmt.For(_, variables, _, _, _):
+                                loop_variables <- variables
+                            _:
+                                pass
+                        loop_destructurable: mutable darray[sview] = proof_structural_without(current_destructurable, loop_variables)
+                        loop_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(current_smaller, loop_variables)
+                        # Each element of a matched AST side-table is a strict subterm of the
+                        # enclosing AST node. Promote loop variables only for an iterable already
+                        # known to be such a subterm; ordinary user collections never enter this
+                        # structural environment.
+                        if proof_structural_argument_is_smaller(iterable, current_smaller):
+                            for loop_variable in loop_variables |loop_variable, loop_smaller|:
+                                loop_smaller.push(ProofStructuralSmaller{name: loop_variable, subject: proof_structural_argument_subject(iterable, current_smaller)}) if not any candidate in loop_smaller where candidate.name == loop_variable
+                        proof_structural_check_body(for_body, own_name, subject_position, parameters, &loop_destructurable, &loop_smaller, report, name)
+                        current_destructurable <- proof_structural_intersect(current_destructurable, loop_destructurable)
+                        current_smaller <- proof_structural_smaller_intersect(current_smaller, loop_smaller)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_structural_check_expression(scrutinee, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                        merged_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
+                        merged_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
+                        first_arm: mutable bool = true
+                        for arm in arms |own_name, subject_position, parameters, current_destructurable, current_smaller, report, name, merged_destructurable, merged_smaller, first_arm|:
+                            arm_bindings: mutable darray[sview] = []
+                            proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
+                            arm_destructurable: mutable darray[sview] = proof_structural_without(current_destructurable, arm_bindings)
+                            arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(current_smaller, arm_bindings)
+                            scrutinee_name: sview = proof_ident_name(scrutinee)
+                            if proof_structural_name_in(current_destructurable, scrutinee_name):
+                                proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
+                                proof_structural_pattern_subterms(arm.pattern, scrutinee_name, &arm_smaller)
+                            proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
+                            proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
+                            arm_outer_destructurable: darray[sview] = proof_structural_intersect(current_destructurable, arm_destructurable)
+                            arm_outer_smaller: darray[ProofStructuralSmaller] = proof_structural_smaller_intersect(current_smaller, arm_smaller)
+                            if first_arm:
+                                merged_destructurable <- arm_outer_destructurable
+                                merged_smaller <- arm_outer_smaller
+                                first_arm <- false
+                            else:
+                                merged_destructurable <- proof_structural_intersect(merged_destructurable, arm_outer_destructurable)
+                                merged_smaller <- proof_structural_smaller_intersect(merged_smaller, arm_outer_smaller)
+                        current_destructurable <- merged_destructurable if not first_arm
+                        current_smaller <- merged_smaller if not first_arm
+                    Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                        if block_kind == "assert_by" and block_body.count > 0:
+                            match block_body[0]:
+                                Ast::Stmt.Contract(_, goal, _):
+                                    proof_structural_check_expression(goal, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name)
+                                _:
+                                    pass
+                        if block_kind != "assert_by":
+                            block_destructurable: mutable darray[sview] = proof_copy_names(current_destructurable)
+                            block_smaller: mutable darray[ProofStructuralSmaller] = proof_copy_structural_smaller(current_smaller)
+                            match statement:
+                                Ast::Stmt.Block(_, _, binding, _, _):
+                                    blocked: darray[sview] = [binding]
+                                    block_destructurable <- proof_structural_without(block_destructurable, blocked) if binding != ""
+                                    block_smaller <- proof_structural_smaller_without(block_smaller, blocked) if binding != ""
+                                _:
+                                    pass
+                            proof_structural_check_body(block_body, own_name, subject_position, parameters, &block_destructurable, &block_smaller, report, name)
+                            current_destructurable <- proof_structural_intersect(current_destructurable, block_destructurable)
+                            current_smaller <- proof_structural_smaller_intersect(current_smaller, block_smaller)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        proof_structural_check_expression(expression, own_name, subject_position, parameters, current_destructurable, current_smaller, report, name) if kind == "assert"
+                    _:
+                        pass
+
+        def proof_check_structural_function(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], report: mutable ProofReport&) -> void:
+            decreases_clauses: darray[Ast::Expr] = proof_contracts(body, "decreases")
+            components: mutable darray[Ast::Expr] = []
+            proof_decreases_component_slice(decreases_clauses, &components)
+            inferred_structural: mutable bool = false
+            if components.count == 0:
+                inferred: (known: bool, parameter: sview, position: usize, type_name: sview) = proof_infer_structural_decrease(file, parameters)
+                components.push(Ast::Expr.Ident(inferred.parameter, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})) if inferred.known
+                inferred_structural <- inferred.known
+            return if components.count != 1
+            subject: sview = proof_ident_name(components[0])
+            subject_position: mutable usize = proof_enum_parameter_position(file.top_decls, parameters, subject)
+            return if subject_position >= parameters.count
+            # A missing decreases clause on a function with several enum parameters denotes the
+            # product ranking handled by the recursive-edge check above. Use the parameter-count
+            # sentinel to select that mode without widening explicitly written rankings.
+            enum_subjects: darray[sview] = proof_enum_parameter_names(file, parameters)
+            subject_position <- parameters.count if inferred_structural and enum_subjects.count > 1
+            destructurable: mutable darray[sview] = [subject]
+            destructurable <- enum_subjects if subject_position >= parameters.count
+            smaller: mutable darray[ProofStructuralSmaller] = []
+            own_index: usize = proof_structural_report_index(report, function_name)
+            has_mutual_structural_member: mutable bool = false
+            if own_index < report.structural_names.count and own_index < report.structural_component_ids.count and own_index < report.structural_subject_types.count:
+                for candidate in 0..<report.structural_names.count |candidate, report, own_index, has_mutual_structural_member|:
+                    has_mutual_structural_member <- true if candidate != own_index and candidate < report.structural_members.count and report.structural_members[candidate] and proof_structural_report_same_component(report, own_index, candidate) and candidate < report.structural_subject_types.count and report.structural_subject_types[own_index] != "" and report.structural_subject_types[own_index] == report.structural_subject_types[candidate]
+            finding_start: usize = report.findings.count
+            proof_structural_check_body(body, function_name, subject_position, parameters, destructurable, smaller, report, function_name)
+            structural_failed: mutable bool = false
+            for finding_index in finding_start..<report.findings.count |finding_index, report, function_name, structural_failed|:
+                structural_failed <- true if report.findings[finding_index].kind == "structural-decreases-unproven" and report.findings[finding_index].name == function_name
+            if not structural_failed:
+                report.structural_verified_names.push(function_name)
+
+        def proof_check_structural_termination(file: Ast::File&, declarations: darray[Ast::Decl], functions: ProofFunctionTable&, report: mutable ProofReport&, initialize: bool) -> void:
+            # This routine recurses into nested modules/scopes. Publish the immutable
+            # function-table metadata only for the outer invocation; clearing it in a nested
+            # invocation would erase the accumulated structural certificates and repeat the
+            # whole SCC comparison work.
+            if initialize:
+                report.structural_names.clear()
+                report.structural_subject_positions.clear()
+                report.structural_subject_types.clear()
+                report.structural_component_ids.clear()
+                report.structural_members.clear()
+                for index in 0..<functions.names.count |index, functions, report|:
+                    report.structural_names.push(functions.names[index])
+                    report.structural_subject_positions.push(functions.structural_subject_positions[index] if index < functions.structural_subject_positions.count else functions.param_counts[index])
+                    report.structural_subject_types.push(functions.structural_subject_types[index] if index < functions.structural_subject_types.count else "")
+                    report.structural_members.push(functions.structural[index] if index < functions.structural.count else false)
+                    component: mutable usize = index
+                    for candidate in 0..<index |candidate, functions, index, component|:
+                        if proof_functions_same_recursive_component(functions, index, candidate):
+                            component <- candidate
+                            break
+                    report.structural_component_ids.push(component)
+            for declaration in declarations |file, functions, report|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, _, _, _):
+                        function_index: usize = proof_function_index(functions, name)
+                        proof_check_structural_function(file, name, parameters, body, report) if function_index < functions.structural.count and functions.structural[function_index]
+                    Ast::Decl.Module(_, module_body, _):
+                        proof_check_structural_termination(file, module_body, functions, report, false)
+                    Ast::Decl.Scoped(scoped_body, _):
+                        proof_check_structural_termination(file, scoped_body, functions, report, false)
+                    _:
+                        pass
+
+        # Determine whether a function can reach a target in the collected executable call
+        # graph. This is deliberately finite and name-based; ambiguous/unknown targets are not
+        # treated as edges, while an unsupported expression marks its own function opaque below.
+        def proof_function_reaches(functions: ProofFunctionTable&, source: usize, target: usize) -> bool:
+            return false if source >= functions.names.count or target >= functions.names.count
+            reachable: mutable darray[usize] = [source]
+            cursor: mutable usize = 0
+            while cursor < reachable.count |cursor, reachable, functions, target|:
+                current: usize = reachable[cursor]
+                # A malformed flat-table alignment must fail closed: if this node is the
+                # queried target, do not let missing graph metadata turn a possible self-edge
+                # into an admitted summary.
+                return true if current == target and (current >= functions.call_starts.count or current >= functions.call_counts.count)
+                return false if current >= functions.call_starts.count or current >= functions.call_counts.count
+                start: usize = functions.call_starts[current]
+                count: usize = functions.call_counts[current]
+                for offset in 0..<count |offset, start, functions, reachable, target|:
+                    return true if current == target and start + offset >= functions.all_calls.count
+                    continue if start + offset >= functions.all_calls.count
+                    called: sview = functions.all_calls[start + offset]
+                    if called == "__opaque_call__":
+                        return true if current == target
+                    else:
+                        next: usize = proof_function_index(functions, called)
+                        if next < functions.names.count:
+                            return true if next == target
+                            already_seen: bool = proof_usize_seen(reachable, next)
+                            reachable.push(next) if not already_seen
+                cursor <- cursor + 1
+            return false
+
+        def proof_functions_same_recursive_component(functions: ProofFunctionTable&, source: usize, target: usize) -> bool:
+            return false if source >= functions.names.count or target >= functions.names.count
+            return true if source == target
+            return false if source >= functions.recursive.count or target >= functions.recursive.count
+            return false if not functions.recursive[source] or not functions.recursive[target]
+            if source < functions.recursive_component_ids.count and target < functions.recursive_component_ids.count:
+                return functions.recursive_component_ids[source] == functions.recursive_component_ids[target]
+            return proof_function_reaches(functions, source, target) and proof_function_reaches(functions, target, source)
+
+        # Compute executable SCCs with iterative Kosaraju traversal. Summary scheduling and
+        # structural recursion then use the stable component ids instead of re-running a full
+        # transitive reachability search for every pair of functions.
+        def proof_build_function_components(functions: mutable ProofFunctionTable&) -> void:
+            count: usize = functions.names.count
+            functions.recursive.clear()
+            functions.recursive_component_ids.clear()
+            return if count == 0
+            reverse_counts: mutable darray[usize] = []
+            reverse_counts.resize(count)
+            self_edges: mutable darray[bool] = []
+            self_edges.resize(count)
+            for source in 0..<count |source, functions, reverse_counts, self_edges|:
+                start: usize = functions.call_starts[source] if source < functions.call_starts.count else functions.all_calls.count
+                edge_count: usize = functions.call_counts[source] if source < functions.call_counts.count else 0
+                valid_range: bool = start <= functions.all_calls.count and edge_count <= functions.all_calls.count - start
+                continue if not valid_range
+                for offset in 0..<edge_count |offset, source, start, functions, reverse_counts, self_edges|:
+                    called: sview = functions.all_calls[start + offset]
+                    next: usize = proof_function_index(functions, called)
+                    continue if next >= count
+                    reverse_counts[next] <- reverse_counts[next] + 1
+                    self_edges[source] <- true if next == source
+            reverse_starts: mutable darray[usize] = []
+            reverse_cursor: mutable usize = 0
+            for incoming in reverse_counts |reverse_starts, reverse_cursor|:
+                reverse_starts.push(reverse_cursor)
+                reverse_cursor <- reverse_cursor + incoming
+            reverse_edges: mutable darray[usize] = []
+            reverse_edges.resize(reverse_cursor)
+            reverse_write: mutable darray[usize] = []
+            reverse_write.extend(reverse_starts)
+            for source in 0..<count |source, functions, reverse_write, reverse_edges|:
+                start: usize = functions.call_starts[source] if source < functions.call_starts.count else functions.all_calls.count
+                edge_count: usize = functions.call_counts[source] if source < functions.call_counts.count else 0
+                valid_range: bool = start <= functions.all_calls.count and edge_count <= functions.all_calls.count - start
+                continue if not valid_range
+                for offset in 0..<edge_count |offset, source, start, functions, reverse_write, reverse_edges|:
+                    next: usize = proof_function_index(functions, functions.all_calls[start + offset])
+                    continue if next >= count
+                    slot: usize = reverse_write[next]
+                    reverse_edges[slot] <- source
+                    reverse_write[next] <- slot + 1
+            visited: mutable darray[bool] = []
+            visited.resize(count)
+            order: mutable darray[usize] = []
+            for source in 0..<count |source, visited, order, functions|:
+                continue if visited[source]
+                stack_nodes: mutable darray[usize] = [source]
+                stack_offsets: mutable darray[usize] = [0]
+                visited[source] <- true
+                while stack_nodes.count > 0 |stack_nodes, stack_offsets, visited, order, functions|:
+                    top: usize = stack_nodes.count - 1
+                    current: usize = stack_nodes[top]
+                    start: usize = functions.call_starts[current] if current < functions.call_starts.count else functions.all_calls.count
+                    edge_count: usize = functions.call_counts[current] if current < functions.call_counts.count else 0
+                    valid_range: bool = start <= functions.all_calls.count and edge_count <= functions.all_calls.count - start
+                    if valid_range and stack_offsets[top] < edge_count:
+                        offset: usize = stack_offsets[top]
+                        stack_offsets[top] <- offset + 1
+                        next: usize = proof_function_index(functions, functions.all_calls[start + offset])
+                        if next < count and not visited[next]:
+                            visited[next] <- true
+                            stack_nodes.push(next)
+                            stack_offsets.push(0)
+                    else:
+                        order.push(current)
+                        stack_nodes <- stack_nodes.truncate(top)
+                        stack_offsets <- stack_offsets.truncate(top)
+            component_ids: mutable darray[usize] = []
+            component_ids.resize(count)
+            for index in 0..<count |index, component_ids|:
+                component_ids[index] <- count
+            for order_index in 0..<order.count |order_index, order, component_ids, reverse_starts, reverse_counts, reverse_edges, count|:
+                seed: usize = order[order.count - 1 - order_index]
+                continue if component_ids[seed] < count
+                component_ids[seed] <- seed
+                component_work: mutable darray[usize] = [seed]
+                while component_work.count > 0 |component_work, component_ids, reverse_starts, reverse_counts, reverse_edges, count|:
+                    current: usize = component_work[component_work.count - 1]
+                    component_work <- component_work.truncate(component_work.count - 1)
+                    start: usize = reverse_starts[current]
+                    edge_count: usize = reverse_counts[current]
+                    for offset in 0..<edge_count |offset, start, reverse_edges, component_ids, component_work, current|:
+                        predecessor: usize = reverse_edges[start + offset]
+                        if component_ids[predecessor] == count:
+                            component_ids[predecessor] <- seed
+                            component_work.push(predecessor)
+            component_sizes: mutable darray[usize] = []
+            component_sizes.resize(count)
+            for index in 0..<count |index, component_ids, component_sizes, count|:
+                component_sizes[component_ids[index]] <- component_sizes[component_ids[index]] + 1
+            for index in 0..<count |index, component_ids, component_sizes, self_edges, functions|:
+                functions.recursive_component_ids.push(component_ids[index])
+                functions.recursive.push(component_sizes[component_ids[index]] > 1 or self_edges[index])
+
+        # Syntactic purity is intentionally a small total-function tier. It admits straight-line
+        # value computation and pure conditionals, but no loops, assignments, hidden block scope,
+        # runtime assertions, or ownership/region effects. Calls are allowed only after the
+        # declaration-independent fixed point below proves every reachable callee pure.
+        def proof_pure_expression_shape(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent:
+                    return true
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.FloatLit(_, _):
+                    return true
+                Ast::Expr.StringLit(_, _):
+                    return true
+                Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_pure_expression_shape(callee)
+                    for argument in arguments:
+                        return false if not proof_pure_expression_shape(argument)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_pure_expression_shape(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_pure_expression_shape(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_pure_expression_shape(left) and proof_pure_expression_shape(right)
+                Ast::Expr.Field(object, _, _):
+                    return proof_pure_expression_shape(object)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_pure_expression_shape(base)
+                Ast::Expr.Index(object, index, _):
+                    return proof_pure_expression_shape(object) and proof_pure_expression_shape(index)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_pure_expression_shape(object) and proof_pure_expression_shape(low) and proof_pure_expression_shape(high)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_pure_expression_shape(object)
+                    for argument in arguments:
+                        return false if not proof_pure_expression_shape(argument)
+                    return true
+                Ast::Expr.Move(_, _):
+                    return false
+                Ast::Expr.RegionNew(_, _, _):
+                    return false
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return false if not proof_pure_expression_shape(element)
+                    return true
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return false if not proof_pure_expression_shape(element)
+                    return true
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return false if not proof_pure_expression_shape(element)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return false if not proof_pure_expression_shape(entry.key) or not proof_pure_expression_shape(entry.value)
+                    return true
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return false if not proof_pure_expression_shape(type_expression)
+                    for field in fields:
+                        return false if not proof_pure_expression_shape(field.value)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_pure_expression_shape(base)
+                    for field in fields:
+                        return false if not proof_pure_expression_shape(field.value)
+                    return true
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_pure_expression_shape(condition) and proof_pure_expression_shape(then_expr) and proof_pure_expression_shape(else_expr)
+                Ast::Expr.Match(_, _, _):
+                    # The proof-safe value-match subset is lowered to a pure decision tree by
+                    # proof_expr_supported; using that same gate here keeps pure-summary
+                    # discovery aligned with the expression certificate boundary.
+                    return proof_expr_supported(expression)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_pure_expression_shape(iterable) and proof_pure_expression_shape(condition) and proof_pure_expression_shape(body)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_pure_expression_shape(base) and proof_pure_expression_shape(predicate)
+                Ast::Expr.Block(_, _, _, _):
+                    # Even a currently supported value block has a separate local scope and
+                    # can acquire hidden write-back semantics as the language evolves.
+                    return false
+                _:
+                    return false
+
+        # The parser stores canonical `x: mutable T` in the type expression; the separate
+        # ParamDecl bit is only populated for the legacy leading `mutable x: T` spelling.
+        # Mirror the compiler's recursive type mutability rule so both spellings affect purity.

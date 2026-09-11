@@ -1,0 +1,441 @@
+extend ElisaProof:
+    private:
+        def proof_apply_function(expression: Ast::Expr, result_value: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, caller_names: darray[sview]&, caller_parameters: darray[sview]&, caller_changes: darray[ProofFramePlace]&, caller_preserves: darray[ProofFramePlace]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    function_name: sview = proof_callable_name(callee)
+                    function_index: usize = proof_function_index(functions, function_name)
+                    return false if function_name == "" or function_index >= functions.names.count
+                    if function_index >= functions.verified.count or not functions.verified[function_index]:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "function-summary-unverified", position.line, name, "callee body has not established a verified executable summary")
+                        return false
+                    return false if function_index >= functions.param_counts.count or arguments.count > functions.param_counts[function_index]
+                    parameter_names: mutable darray[sview] = []
+                    argument_values: mutable darray[Ast::Expr] = []
+                    param_start: usize = functions.param_starts[function_index]
+                    for argument_index in 0..<functions.param_counts[function_index] |parameter_names, functions, param_start|:
+                        parameter_names.push(functions.all_params[param_start + argument_index])
+                    mapped_arguments: mutable darray[Ast::Expr] = []
+                    default_start: usize = functions.param_starts[function_index]
+                    default_flags: mutable darray[bool] = []
+                    default_values: mutable darray[Ast::Expr] = []
+                    for parameter_index in 0..<functions.param_counts[function_index] |default_flags, default_values, functions, default_start|:
+                        default_flags.push(functions.all_has_defaults[default_start + parameter_index])
+                        default_values.push(functions.all_defaults[default_start + parameter_index])
+                    return false if not proof_map_runtime_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions)
+                    argument_values.extend(mapped_arguments)
+                    requires_ok: mutable bool = true
+                    require_goal_ids: mutable darray[usize] = []
+                    requires_start: usize = functions.requires_starts[function_index]
+                    requires_count: usize = functions.requires_counts[function_index]
+                    for requires_index in 0..<requires_count |requires_ok, require_goal_ids, facts, parameter_names, argument_values, functions, requires_start, report, position, name, annotations|:
+                        required: Ast::Expr = proof_substitute(functions.all_requires[requires_start + requires_index], parameter_names, argument_values)
+                        required_proven: bool = proof_certify_goal(facts, required, report, position.line, name, annotations)
+                        require_goal_ids.push(report.goal_attempts.count - 1) if report.goal_attempts.count > 0
+                        report.proof_obligation(required_proven)
+                        requires_ok <- false if not required_proven
+                        proof_add_latest_goal_finding(report, "call-requires-unproven", position.line, name, "callee precondition is not established at the call") if not required_proven
+                    return false if not requires_ok
+                    caller_index: usize = proof_function_index(functions, name)
+                    if function_index < functions.recursive.count and functions.recursive[function_index] and proof_functions_same_recursive_component(functions, caller_index, function_index):
+                        # A structural shape in the function table is only a candidate. The
+                        # structural walker must have independently certified both declarations
+                        # before an executable recursive summary can skip arithmetic measure
+                        # obligations. This also covers the inferred product ranking for multiple
+                        # enum parameters; it never trusts metadata alone.
+                        structural_summary: bool = proof_structural_name_in(report.structural_verified_names, name) and proof_structural_name_in(report.structural_verified_names, function_name) and caller_index < functions.decreases_unbounded.count and function_index < functions.decreases_unbounded.count and not functions.decreases_unbounded[caller_index] and not functions.decreases_unbounded[function_index] and proof_functions_same_recursive_component(functions, caller_index, function_index)
+                        structural_failure: bool = proof_structural_report_failed(report, name) or proof_structural_report_failed(report, function_name)
+                        if structural_failure:
+                            return false
+                        if not structural_summary:
+                            has_caller_measure: bool = caller_index < functions.decreases_counts.count and caller_index < functions.decreases_unbounded.count and caller_index < functions.decreases_starts.count and functions.decreases_counts[caller_index] > 0 and not functions.decreases_unbounded[caller_index] and proof_decreases_range_valid(functions.decreases_starts[caller_index], functions.decreases_counts[caller_index], functions.all_decreases.count)
+                            has_callee_measure: bool = function_index < functions.decreases_counts.count and function_index < functions.decreases_unbounded.count and function_index < functions.decreases_starts.count and functions.decreases_counts[function_index] > 0 and not functions.decreases_unbounded[function_index] and proof_decreases_range_valid(functions.decreases_starts[function_index], functions.decreases_counts[function_index], functions.all_decreases.count)
+                            same_measure_arity: bool = has_caller_measure and has_callee_measure and functions.decreases_counts[caller_index] == functions.decreases_counts[function_index]
+                            recursive_ok: bool = same_measure_arity
+                            if not recursive_ok:
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "recursive-summary-unsupported", position.line, name, "recursive executable summaries require matching checked lexicographic termination measures")
+                                return false
+                            caller_measure_start: usize = functions.decreases_starts[caller_index]
+                            callee_measure_start: usize = functions.decreases_starts[function_index]
+                            caller_measure_values: mutable darray[Ast::Expr] = []
+                            for parameter_name in caller_parameters |caller_measure_values, position|:
+                                caller_measure_values.push(Ast::Expr.Ident(parameter_name, position))
+                            current_components: mutable darray[Ast::Expr] = []
+                            recursive_components: mutable darray[Ast::Expr] = []
+                            for component_index in 0..<functions.decreases_counts[caller_index] |component_index, current_components, functions, caller_measure_start, caller_parameters, caller_measure_values|:
+                                current_components.push(proof_substitute(functions.all_decreases[caller_measure_start + component_index], caller_parameters, caller_measure_values))
+                            for component_index in 0..<functions.decreases_counts[function_index] |component_index, recursive_components, functions, callee_measure_start, parameter_names, argument_values|:
+                                recursive_components.push(proof_substitute(functions.all_decreases[callee_measure_start + component_index], parameter_names, argument_values))
+                            nonnegative_proven: mutable bool = true
+                            recursive_nonnegative_proven: mutable bool = true
+                            for component in current_components |facts, annotations, report, name, position, nonnegative_proven|:
+                                current_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0, position), position)
+                                component_proven: bool = proof_certify_goal(facts, current_nonnegative, report, position.line, name, annotations)
+                                report.proof_obligation(component_proven)
+                                nonnegative_proven <- false if not component_proven
+                                proof_add_latest_goal_finding(report, "recursive-decreases-unproven", position.line, name, "recursive decreases component is not proven nonnegative") if not component_proven
+                            for component in recursive_components |facts, annotations, report, name, position, recursive_nonnegative_proven|:
+                                recursive_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0, position), position)
+                                component_proven: bool = proof_certify_goal(facts, recursive_nonnegative, report, position.line, name, annotations)
+                                report.proof_obligation(component_proven)
+                                recursive_nonnegative_proven <- false if not component_proven
+                                proof_add_latest_goal_finding(report, "recursive-decreases-unproven", position.line, name, "callee decreases component is not proven nonnegative") if not component_proven
+                            smaller_proven: bool = proof_lexicographic_smaller(current_components, recursive_components, facts, annotations, position, report, name)
+                            report.proof_obligation(smaller_proven)
+                            proof_add_latest_goal_finding(report, "recursive-decreases-unproven", position.line, name, "recursive lexicographic measure is not proven to strictly decrease") if not smaller_proven
+                            return false if not nonnegative_proven or not recursive_nonnegative_proven or not smaller_proven
+                    changes_start: usize = functions.changes_starts[function_index] if function_index < functions.changes_starts.count else functions.all_changes.count
+                    changes_count: usize = functions.changes_counts[function_index] if function_index < functions.changes_counts.count else 0
+                    preserves_start: usize = functions.preserves_starts[function_index] if function_index < functions.preserves_starts.count else functions.all_preserves.count
+                    preserves_count: usize = functions.preserves_counts[function_index] if function_index < functions.preserves_counts.count else 0
+                    mapped_changes: mutable darray[ProofFramePlace] = []
+                    mapping_known: mutable bool = true
+                    for changed_index in 0..<changes_count |mapped_changes, mapping_known, functions, changes_start, parameter_names, argument_values|:
+                        original: ProofFramePlace = functions.all_changes[changes_start + changed_index]
+                        mapped: ProofFramePlace = proof_frame_place_from_call(original, parameter_names, argument_values)
+                        mapped_known: bool = mapped.root != ""
+                        mapping_known <- false if not mapped_known
+                        mapped_changes.push(mapped) if mapped_known
+                    if changes_count > 0 and mapping_known:
+                        for changed in mapped_changes |caller_changes, caller_preserves, report, name, position|:
+                            aliases_current_parameter: bool = proof_current_parameter(caller_names, caller_parameters, changed.root)
+                            if caller_changes.count > 0 and aliases_current_parameter:
+                                allowed: bool = proof_frame_allows_write(caller_changes, changed)
+                                report.proof_obligation(allowed)
+                                proof_add_finding(report, "frame-call-outside", position.line, name, "callee changes a place outside the caller's changes frame") if not allowed
+                            if caller_preserves.count > 0 and aliases_current_parameter:
+                                for preserved in caller_preserves |report, name, position|:
+                                    preserved_ok: bool = not proof_frame_places_overlap(preserved, changed)
+                                    report.proof_obligation(preserved_ok)
+                                    proof_add_finding(report, "frame-preserve-violated", position.line, name, "callee changes a place declared preserved by the caller") if not preserved_ok
+                    if changes_count == 0 or not mapping_known:
+                        if not mapping_known and caller_changes.count > 0:
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "frame-call-opaque", position.line, name, "callee frame argument is not a directly tracked caller place")
+                        if not mapping_known and caller_preserves.count > 0:
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "frame-preserve-opaque", position.line, name, "callee frame argument is not a directly tracked caller place")
+                        if changes_count == 0 and caller_changes.count > 0 and proof_call_may_alias_places(arguments, caller_changes, caller_names, caller_parameters):
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "frame-call-opaque", position.line, name, "unframed or opaque callee may write through a caller frame argument")
+                        if changes_count == 0 and caller_preserves.count > 0 and proof_call_may_alias_places(arguments, caller_preserves, caller_names, caller_parameters):
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "frame-preserve-opaque", position.line, name, "unframed or opaque callee may write a preserved caller place")
+                    old_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
+                    facts.clear()
+                    # A verified total-pure callee cannot mutate or observe ambient mutable
+                    # state, so all caller facts remain valid across the call. Every other call
+                    # keeps the existing havoc/frame rules; an ensure alone is not permission to
+                    # preserve unrelated facts.
+                    if function_index < functions.pure.count and functions.pure[function_index]:
+                        facts.extend(old_facts)
+                    elif changes_count > 0 and mapping_known:
+                        for old_fact in old_facts |facts, mapped_changes|:
+                            invalidated: mutable bool = false
+                            for changed in mapped_changes |invalidated, old_fact|:
+                                invalidated <- true if proof_expr_mentions_frame_place(old_fact, changed)
+                            facts.push(old_fact) if not invalidated
+                    # An unsigned binding's lower bound comes from compiler typing rather than
+                    # mutable state. Restore only that explicitly traced fact after the summary's
+                    # normal havoc/frame handling; enclosing move invalidation still removes it.
+                    proof_restore_type_bound_facts(old_facts, facts, caller_names, report, name)
+                    # A verified callee without a `changes` frame is havoced exactly like an
+                    # opaque one, and the same argument bounds that havoc: a callee reaches the
+                    # caller only through references and globals, so a fact over a by-value
+                    # scalar the caller's body never references survives this call too.
+                    proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_statement_lend_roots(expression, functions))
+                    ensures_start: usize = functions.ensure_starts[function_index]
+                    ensures_count: usize = functions.ensure_counts[function_index]
+                    result_names: mutable darray[sview] = ["result"]
+                    result_values: mutable darray[Ast::Expr] = [result_value]
+                    for ensure_index in 0..<ensures_count |facts, parameter_names, argument_values, functions, ensures_start, result_value, result_names, result_values, report, name, position|:
+                        ensured: mutable Ast::Expr = proof_substitute(functions.all_ensures[ensures_start + ensure_index], parameter_names, argument_values)
+                        if proof_expr_has_old(ensured):
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "call-old-opaque", position.line, name, "callee ensure depends on a pre-state that is not tracked across calls")
+                            return false
+                        match result_value:
+                            Ast::Expr.Absent:
+                                if proof_expr_mentions_name(ensured, "result"):
+                                    report.proof_obligation(false)
+                                    proof_add_finding(report, "call-result-unbound", position.line, name, "returning callee ensure cannot be used by a statement call")
+                                    return false
+                            _:
+                                ensured <- proof_substitute(ensured, result_names, result_values)
+                        proof_add_function_summary_fact(facts, report, ensured, position.line, name, function_name, parameter_names, argument_values, result_value, require_goal_ids, ensure_index)
+                        proof_add_pure_call_witnesses(result_value, facts, functions, report, position.line, name, 0)
+                    return true
+                _:
+                    return false
+
+        # Whether a statement can change a value that appears in a caller fact. We use this
+        # only to decide whether facts may survive a join point; false positives are acceptable,
+        # stale facts are not. Proof blocks are erased and therefore do not modify runtime state.
+        def proof_body_may_modify(body: darray[Ast::Stmt]&) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.Assign(_, _, _, _):
+                        return true
+                    Ast::Stmt.VarDecl(_, _, _, _):
+                        return true
+                    Ast::Stmt.Expr(expression, _):
+                        # Calls nested in constructors, indexing, conditionals, and other
+                        # expression forms are runtime effects too. Proof blocks are handled
+                        # separately and are not present here.
+                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition) or proof_body_may_modify(then_body) or proof_body_may_modify(else_body)
+                    Ast::Stmt.While(condition, while_body, _):
+                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition) or proof_body_may_modify(while_body)
+                    Ast::Stmt.For(bind, _, iterable, for_body, _):
+                        # A parallel loop is a proof-state barrier even when its worker body is
+                        # empty. Propagate that barrier through enclosing if/block joins; otherwise
+                        # the cloned branch state would be discarded while the outer state kept
+                        # facts that were not proven to survive the concurrent join.
+                        return true if bind == "parallel"
+                        return true if proof_expr_has_call(iterable) or proof_expr_has_move(iterable) or proof_body_may_modify(for_body)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee)
+                        for arm in arms:
+                            return true if proof_body_may_modify(arm.body)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        return true if kind == "assert" and (proof_expr_has_call(expression) or proof_expr_has_move(expression))
+                    Ast::Stmt.Break(_, _):
+                        pass
+                    Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        return true
+                    Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                        if block_kind == "assert_by" and block_body.count > 0:
+                            match block_body[0]:
+                                Ast::Stmt.Contract(_, runtime_goal, _):
+                                    return true if proof_expr_has_call(runtime_goal) or proof_expr_has_move(runtime_goal)
+                                _:
+                                    pass
+                        return true if block_kind != "assert_by" and proof_body_may_modify(block_body)
+                    _:
+                        pass
+            return false
+
+        # A sequence can complete normally unless a definitely reached statement returns. A
+        # conditional, loop, and match are conservatively fallthrough-capable because their
+        # runtime coverage is not yet proved by this kernel. A match with an unguarded
+        # irrefutable final arm is the one safe exception: every runtime value reaches an arm,
+        # and if every arm returns, the match itself cannot complete normally.
+        def proof_body_may_fallthrough(body: darray[Ast::Stmt]&) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.Return(_, _):
+                        return false
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        # If either branch can continue, the surrounding sequence continues
+                        # with its next statement; only two definitely-returning branches stop
+                        # the sequence here.
+                        return false if not proof_body_may_fallthrough(then_body) and not proof_body_may_fallthrough(else_body)
+                    Ast::Stmt.While(_, _, _):
+                        pass
+                    Ast::Stmt.For(_, _, _, _, _):
+                        pass
+                    Ast::Stmt.Match(_, arms, _):
+                        all_arms_return: mutable bool = arms.count > 0
+                        for arm in arms |all_arms_return|:
+                            match arm.guard:
+                                Ast::Expr.Absent:
+                                    pass
+                                _:
+                                    all_arms_return <- false
+                            all_arms_return <- false if proof_body_may_fallthrough(arm.body)
+                        if all_arms_return:
+                            last_pattern: Ast::Pattern = arms[arms.count - 1].pattern
+                            match last_pattern:
+                                Ast::Pattern.Wildcard:
+                                    return false
+                                Ast::Pattern.Binding(_):
+                                    return false
+                                Ast::Pattern.TypeBind(_, _):
+                                    return false
+                                Ast::Pattern.As(_, inner):
+                                    if inner.count == 1:
+                                        match inner[0]:
+                                            Ast::Pattern.Wildcard:
+                                                return false
+                                            Ast::Pattern.Binding(_):
+                                                return false
+                                            Ast::Pattern.TypeBind(_, _):
+                                                return false
+                                            _:
+                                                pass
+                                _:
+                                    pass
+                    Ast::Stmt.Break(_, _):
+                        return false
+                    Ast::Stmt.Continue(_, _):
+                        return false
+                    Ast::Stmt.Invalid:
+                        return false
+                    Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                        return false if block_kind != "assert_by" and not proof_body_may_fallthrough(block_body)
+                    _:
+                        pass
+            return true
+
+        # A break or continue is safe only when the nearest loop's invariant holds on that
+        # transfer path. For loops without an imported invariant there is no post-state claim to
+        # preserve, so the caller will discard symbolic state after the loop instead.
+        def proof_check_loop_control_invariants(loop_invariants: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, loop_scope_count: usize, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, line: u32) -> bool:
+            result: mutable bool = true
+            for invariant in loop_invariants |names, values, facts, loop_scope_count, frame_parameters, old_values, report, name, annotations, line, result|:
+                goal: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
+                proven: bool = proof_certify_goal(facts, goal, report, line, name, annotations)
+                report.proof_obligation(proven)
+                result <- false if not proven
+                proof_add_latest_goal_finding(report, "invariant-not-preserved", line, name, "loop control path does not re-establish the loop invariant") if not proven
+            return result
+
+        # A `for` binder is live only inside the body scope. It cannot occur in invariant facts
+        # exported after the loop, where the binder no longer exists. Reject that shape explicitly
+        # instead of leaving a free identifier in a replay certificate; callers can still use the
+        # loop's range facts for obligations about the binder itself.
+        def proof_loop_invariant_mentions_binder(invariant: Ast::Expr, variables: darray[sview]&) -> bool:
+            for variable in variables:
+                return true if variable != "" and proof_expr_mentions_name(invariant, variable)
+            return false
+
+        # A proof block is erased by the backend. Reject executable statements rather than
+        # accidentally accepting an effectful proof that will not run at runtime.
+        def proof_check_purity(body: darray[Ast::Stmt]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview) -> void:
+            for statement in body |report, name, lemmas|:
+                match statement:
+                    Ast::Stmt.Expr(expression, position):
+                        match expression:
+                            Ast::Expr.Call(callee, arguments, _, _):
+                                called: sview = proof_callable_name(callee)
+                                if called != "assert" and proof_lemma_index(lemmas, called) >= lemmas.names.count:
+                                    proof_add_finding(report, "proof-unknown", position.line, name, "proof blocks may contain only assert facts")
+                                proof_add_finding(report, "proof-malformed", position.line, name, "assert requires exactly one proposition") if called == "assert" and arguments.count != 1
+                            _:
+                                proof_add_finding(report, "proof-impure", position.line, name, "proof blocks may contain only assert facts")
+                    Ast::Stmt.Contract(kind, expression, position):
+                        proof_add_finding(report, "proof-unknown", position.line, name, "unsupported contract in proof block") if kind != "assert"
+                        proof_add_finding(report, "proof-impure", position.line, name, "proof assertions may not evaluate executable calls or ownership transfers") if kind == "assert" and (proof_expr_has_call(expression) or proof_expr_has_move(expression))
+                    Ast::Stmt.Block(block_kind, _, _, nested, _):
+                        proof_check_purity(nested, lemmas, report, name) if block_kind == "assert_by"
+                    _:
+                        proof_add_finding(report, "proof-impure", 0, name, "proof blocks may not mutate or return")
+
+        # Lemmas are erased proof declarations too. Their body may contain contracts, checked
+        # assertions, lemma applications, and nested assert-by blocks, but no executable state
+        # change or return. Otherwise an assignment could manufacture a postcondition in the
+        # symbolic evaluator even though the erased lemma never executes at runtime.
+        def proof_check_lemma_purity(body: darray[Ast::Stmt]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview) -> void:
+            for statement in body |lemmas, report, name|:
+                match statement:
+                    Ast::Stmt.Contract(kind, _, position):
+                        if kind != "requires" and kind != "ensure" and kind != "assert" and kind != "decreases" and kind != "decreases*":
+                            proof_add_finding(report, "lemma-impure", position.line, name, "lemmas may contain only requires, ensure, decreases, and checked assertions")
+                        if kind == "assert":
+                            match statement:
+                                Ast::Stmt.Contract(_, assertion_expression, _):
+                                    proof_add_finding(report, "lemma-impure", position.line, name, "lemma assertions may not evaluate executable calls") if proof_expr_has_call(assertion_expression)
+                                _:
+                                    pass
+                    Ast::Stmt.Expr(expression, position):
+                        match expression:
+                            Ast::Expr.Call(callee, arguments, _, _):
+                                called: sview = proof_callable_name(callee)
+                                if called != "assert" and proof_lemma_index(lemmas, called) >= lemmas.names.count:
+                                    proof_add_finding(report, "lemma-impure", position.line, name, "lemma bodies may call only assert or another lemma")
+                                proof_add_finding(report, "lemma-malformed", position.line, name, "assert requires exactly one proposition") if called == "assert" and arguments.count != 1
+                            _:
+                                proof_add_finding(report, "lemma-impure", position.line, name, "lemma bodies may contain only proof calls")
+                    Ast::Stmt.Block(block_kind, _, _, nested, _):
+                        proof_check_purity(nested, lemmas, report, name) if block_kind == "assert_by"
+                        proof_add_finding(report, "lemma-impure", 0, name, "lemma bodies may contain only proof blocks") if block_kind != "assert_by"
+                    Ast::Stmt.If(condition, then_body, else_body, position):
+                        proof_add_finding(report, "lemma-impure", position.line, name, "lemma branch conditions may not evaluate executable calls") if proof_expr_has_call(condition)
+                        proof_check_lemma_purity(then_body, lemmas, report, name)
+                        proof_check_lemma_purity(else_body, lemmas, report, name)
+                    _:
+                        proof_add_finding(report, "lemma-impure", 0, name, "lemma bodies may not mutate or return")
+
+        def proof_check_frame_specs(body: darray[Ast::Stmt]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, parameter_names: darray[sview]&, report: mutable ProofReport&, name: sview) -> void:
+            for statement in body |changes, preserves, parameter_names, report, name|:
+                match statement:
+                    Ast::Stmt.Contract(kind, expression, position):
+                        if kind == "changes" or kind == "preserves":
+                            decoded: (known: bool, place: ProofFramePlace) = proof_frame_place(expression)
+                            valid: bool = decoded.known and proof_current_parameter(parameter_names, parameter_names, decoded.place.root)
+                            report.proof_obligation(valid)
+                            proof_add_finding(report, "frame-spec-invalid", position.line, name, "frame clauses must name a function parameter or parameter field") if not valid
+                    _:
+                        pass
+            for place in changes |report, name|:
+                if place.root == "":
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "frame-spec-opaque", 0, name, "frame metadata does not retain the changed place root")
+            for place in preserves |report, name|:
+                if place.root == "":
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "frame-spec-opaque", 0, name, "frame metadata does not retain the preserved place root")
+
+        # Header frame metadata is imported from a compiler side table rather than a body
+        # contract, so it does not pass through the body-clause validation above. Validate it
+        # against the actual formal parameters before it can authorize a write or preserve a
+        # caller fact. A compiler marker with a stale/foreign root must never become authority.
+        def proof_check_header_frame_specs(changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, parameter_names: darray[sview]&, report: mutable ProofReport&, name: sview) -> void:
+            for place in changes |parameter_names, report, name|:
+                valid: bool = place.root != "" and proof_current_parameter(parameter_names, parameter_names, place.root)
+                report.proof_obligation(valid)
+                proof_add_finding(report, "frame-spec-invalid", 0, name, "header changes metadata names a non-parameter root") if not valid
+            for place in preserves |parameter_names, report, name|:
+                valid: bool = place.root != "" and proof_current_parameter(parameter_names, parameter_names, place.root)
+                report.proof_obligation(valid)
+                proof_add_finding(report, "frame-spec-invalid", 0, name, "header preserves metadata names a non-parameter root") if not valid
+
+        def proof_check_direct_frame_write(target: Ast::Expr, names: darray[sview]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, report: mutable ProofReport&, name: sview, line: u32) -> void:
+            decoded: (known: bool, place: ProofFramePlace) = proof_frame_place(target)
+            if decoded.known and proof_current_parameter(names, parameter_names, decoded.place.root):
+                if changes.count > 0:
+                    allowed: bool = proof_frame_allows_write(changes, decoded.place)
+                    report.proof_obligation(allowed)
+                    proof_add_finding(report, "frame-write-outside", line, name, "write is outside the function's changes frame") if not allowed
+                for preserved in preserves |report, name, line|:
+                    preserved_ok: bool = not proof_frame_places_overlap(preserved, decoded.place)
+                    report.proof_obligation(preserved_ok)
+                    proof_add_finding(report, "frame-preserve-write", line, name, "write violates a preserved function place") if not preserved_ok
+                return
+            return if changes.count == 0 and preserves.count == 0
+            # Dynamic selectors are opaque at the element level, but their statically known
+            # container prefix still participates in subtree framing. Permit only a declared
+            # ancestor change; preservation remains conservative over any overlapping prefix.
+            dynamic_prefix: (known: bool, place: ProofFramePlace) = proof_frame_target_place_prefix(target)
+            if proof_frame_target_has_dynamic_selector(target) and dynamic_prefix.known:
+                if changes.count > 0:
+                    dynamic_allowed: mutable bool = false
+                    for changed in changes |dynamic_allowed, dynamic_prefix|:
+                        dynamic_allowed <- true if proof_frame_place_is_prefix(changed, dynamic_prefix.place)
+                    report.proof_obligation(dynamic_allowed)
+                    proof_add_finding(report, "frame-write-outside", line, name, "indexed write is outside the function's changes frame") if not dynamic_allowed
+                for preserved in preserves |report, name, line, dynamic_prefix|:
+                    preserved_ok: bool = not proof_frame_places_overlap(preserved, dynamic_prefix.place)
+                    report.proof_obligation(preserved_ok)
+                    proof_add_finding(report, "frame-preserve-write", line, name, "indexed write violates a preserved function place") if not preserved_ok
+                return
+            # A non-direct target can still be a local reference alias. Resolve its root as far
+            # as the symbolic state permits; if it depends on a framed parameter, reject the
+            # write instead of treating the unknown alias as harmless.
+            root_expression: Ast::Expr = proof_frame_target_root(target)
+            root_value: Ast::Expr = root_expression
+            opaque_reference: bool = proof_expr_may_be_opaque_reference(root_value)
+            for changed in changes |report, name, line, root_value|:
+                if opaque_reference or proof_expr_mentions_frame_place(root_value, changed):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "frame-write-opaque", line, name, "write target may alias a framed parameter but its root is not tracked")
+            for preserved in preserves |report, name, line, root_value|:
+                if opaque_reference or proof_expr_mentions_frame_place(root_value, preserved):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "frame-preserve-opaque", line, name, "write target may alias a preserved parameter but its root is not tracked")
+

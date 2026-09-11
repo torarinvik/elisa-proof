@@ -1,0 +1,404 @@
+extend ElisaProof:
+    public:
+        def proof_unsigned_expression_safe_with_bounds(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_expression_safe_with_bounds(inner, facts, bounds)
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if not proof_unsigned_expression_safe_with_bounds(operand, facts, bounds)
+                    if operator == TokenKind.Minus:
+                        width: i64 = proof_unsigned_width_in_expression(operand, facts)
+                        if width != 0:
+                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+                            return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
+                    return true
+                Ast::Expr.Binary(left, operator, right, _):
+                    # `or` and `and` short-circuit, so an operand the left one settles is never
+                    # evaluated and its arithmetic never happens. Requiring it to be in range
+                    # refuses goals whose own structure makes it unreachable -- `ensure not result
+                    # or count <= total - start` on the path that returns false, where the guard
+                    # the subtraction needs is exactly what failed.
+                    if operator == TokenKind.Or or operator == TokenKind.And:
+                        return false if not proof_unsigned_expression_safe_with_bounds(left, facts, bounds)
+                        settled: (known: bool, value: bool) = proof_constant_bool(left)
+                        return true if settled.known and settled.value and operator == TokenKind.Or
+                        return true if settled.known and not settled.value and operator == TokenKind.And
+                        return proof_unsigned_expression_safe_with_bounds(right, facts, bounds)
+                    return false if not proof_unsigned_expression_safe_with_bounds(left, facts, bounds)
+                    return false if not proof_unsigned_expression_safe_with_bounds(right, facts, bounds)
+                    arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.LShift or operator == TokenKind.RShift
+                    width: i64 = proof_unsigned_width_in_expression(expression, facts)
+                    return true if not arithmetic or width == 0
+                    # Unsigned subtraction is defined for every nonnegative pair when the
+                    # minuend is at least the subtrahend, even when the values are wider than
+                    # this prover's i64 interval domain. Preserve useful range proofs such as
+                    # `count <= total - start` under the explicit `start <= total` precondition.
+                    if operator == TokenKind.Plus:
+                        unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base(left, right)
+                        if unit.known:
+                            return true if proof_unsigned_increment_has_strict_peer(unit.base, width, facts)
+                        # A sum of two non-constant terms has no interval here, and for a 64-bit
+                        # unsigned value it never can. What it can have is a bound: the same search
+                        # that discharges `a + b <= C` also names the `C`, and a sum bounded by a
+                        # term of its own width is in range without any magnitude being known.
+                        sum_witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(left, right, facts)
+                        if sum_witness.known and proof_peer_is_nameable(sum_witness.bound):
+                            return true if proof_peer_unsigned_width(sum_witness.bound, facts) == width
+                    if operator == TokenKind.Minus:
+                        orders: mutable darray[Ast::Expr] = []
+                        # Read the facts the same way the structural rules do: conjuncts
+                        # flattened, and a disjunction one side of which an existing fact denies
+                        # contributing the other. A callee's postcondition arrives as
+                        # `not result or ...` and the caller has already guarded on the result, so
+                        # without this the order the subtraction needs is stated and unreadable.
+                        readable: darray[Ast::Expr] = proof_conjunct_facts(facts)
+                        for fact in readable |orders|:
+                            proof_collect_unsigned_order_facts(fact, &orders)
+                        # The order tier is gated on its operands' primitive type witness, which
+                        # is a type statement rather than an order fact. Carry the markers across
+                        # with the orders; they are inert for every bound and alias collector.
+                        for fact in facts |orders|:
+                            orders.push(fact) if proof_type_marker_root_name(fact) != "" or proof_unsigned_marker_name(fact) != ""
+                        # The order the subtraction needs may be stated between two places, and
+                        # the affine tiers below name one bare identifier, so they cannot read it.
+                        # A collected order is a comparison between two atoms and contains no
+                        # arithmetic, so matching one directly imports nothing this guard would
+                        # then be deciding about itself.
+                        return true if proof_has_order_fact(right, left, false, orders)
+                        return true if proof_linear_goal(right, TokenKind.LtEq, left, orders)
+                    interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+                    return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_unsigned_expression_safe_with_bounds(condition, facts, bounds) and proof_unsigned_expression_safe_with_bounds(then_expression, facts, bounds) and proof_unsigned_expression_safe_with_bounds(else_expression, facts, bounds)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_unsigned_expression_safe_with_bounds(callee, facts, bounds)
+                    for argument in arguments |argument, facts, bounds|:
+                        return false if not proof_unsigned_expression_safe_with_bounds(argument, facts, bounds)
+                    return true
+                _:
+                    return true
+
+        def proof_unsigned_expression_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            # Deliberately no bound propagation here. A difference constraint is read off a fact
+            # such as `y == x + 1`, which for an unsigned type is a *modular* equality: it is true
+            # at `x == 255, y == 0` for a `u8` and says nothing about the integers. Propagating it
+            # would hand this guard an interval that only holds if the term does not wrap, which is
+            # the very question the guard is deciding, and `examples/rejected_unsigned_fact_explosion.elisa`
+            # then proves `x == 0` from `x == 255`. The goal tier may propagate because it runs
+            # after every affine term in the goal has been certified non-wrapping.
+            return proof_unsigned_expression_safe_with_bounds(expression, facts, bounds)
+
+        # Reflexivity, symmetry, and coherence with arithmetic are not universal in Elisa. `==`,
+        # `!=` and the four ordering operators dispatch to a user `__eq__`/`__cmp__` whenever an
+        # operand's type is a struct, and neither protocol method is required to have any of those
+        # properties, so `p == p`, `p <= p`, and `q == p` from `p == q` are not theorems for an
+        # arbitrary type. Every rule that concludes a comparison because its operands denote the
+        # same value therefore needs the operand's primitive type witness. A bare identifier is
+        # the shape whose declared type the producer records; a richer operand shape is left to
+        # the numeric tiers, which cannot construct an interval for a struct anyway.
+        def proof_scalar_witnessed(facts: darray[Ast::Expr]&, name: sview) -> bool:
+            return false if name == ""
+            for fact in facts:
+                return true if proof_scalar_marker_name(fact) == name
+                return true if proof_unsigned_marker_name(fact) == name
+            return false
+
+        # Ground congruence and the identity tiers admit only the language's own operators; a
+        # struct operand would dispatch to a user protocol method instead. This mirrors the
+        # kernel's list exactly, including the deliberate exclusion of unary `&`: an address is
+        # not a function of the value stored at it.
+        def proof_congruent_binary_operator(operator: TokenKind) -> bool:
+            return true if operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent
+            return true if operator == TokenKind.EqEq or operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+            return true if operator == TokenKind.And or operator == TokenKind.Or or operator == TokenKind.FatArrow
+            return true if operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret or operator == TokenKind.LShift or operator == TokenKind.RShift
+            return false
+
+        def proof_congruent_unary_operator(operator: TokenKind) -> bool:
+            return operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Not
+
+        # How many further subscripts this term needs to reach a primitive scalar: the marker's
+        # depth for a witnessed container, one less per subscript over a witnessed index term,
+        # and -1 when nothing is known. A term is a scalar element exactly when this reaches 0.
+        def proof_scalar_element_remaining(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> i64:
+            return -1 if depth >= 64
+            for fact in facts |expression|:
+                marker: (known: bool, term: Ast::Expr, depth: i64) = proof_element_marker_info(fact)
+                return marker.depth if marker.known and proof_expr_equal(marker.term, expression)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_element_remaining(inner, facts, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    remaining: i64 = proof_scalar_element_remaining(object, facts, depth + 1)
+                    return -1 if remaining < 1 or not proof_scalar_term_witnessed(index, facts, depth + 1)
+                    return remaining - 1
+                Ast::Expr.IndexN(object, arguments, _):
+                    remaining: i64 = proof_scalar_element_remaining(object, facts, depth + 1)
+                    return -1 if remaining < arguments.count.i64()
+                    for argument in arguments |facts, depth|:
+                        return -1 if not proof_scalar_term_witnessed(argument, facts, depth + 1)
+                    return remaining - arguments.count.i64()
+                _:
+                    return -1
+
+        # Whether this term is known to denote a primitive scalar value. The producer mirror of
+        # `proof_kernel_replay_scalar_term_witnessed`; the kernel re-derives the same judgement
+        # from the certificate and owns the decision.
+        #
+        # A witness is a scalar literal, a term whose declared primitive scalar type the producer
+        # resolved and recorded, an element of a container whose element type it resolved indexed
+        # by a witnessed term, or a former built from the language's own operators over witnessed
+        # operands. A call result is deliberately not witnessed: its return type is not resolved
+        # here, and a function need not be deterministic, so two occurrences of the same call text
+        # need not denote one value.
+        def proof_scalar_term_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.ShorthandMember(parts, _):
+                    # A one-segment leading-dot value is a `const enum` member: an integer.
+                    return parts.count == 1 and parts[0] != ""
+                _:
+                    pass
+            for fact in facts |expression|:
+                argument: (known: bool, term: Ast::Expr) = proof_marker_argument(fact, "__elisa_primitive_scalar_type")
+                return true if argument.known and proof_expr_equal(argument.term, expression)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_term_witnessed(inner, facts, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    return proof_scalar_witnessed(facts, name)
+                Ast::Expr.Index(_, _, _):
+                    return proof_scalar_element_remaining(expression, facts, depth + 1) == 0
+                Ast::Expr.IndexN(_, _, _):
+                    return proof_scalar_element_remaining(expression, facts, depth + 1) == 0
+                Ast::Expr.Unary(operator, operand, _):
+                    return proof_congruent_unary_operator(operator) and proof_scalar_term_witnessed(operand, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_congruent_binary_operator(operator) and proof_scalar_term_witnessed(left, facts, depth + 1) and proof_scalar_term_witnessed(right, facts, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_scalar_term_witnessed(condition, facts, depth + 1) and proof_scalar_term_witnessed(then_expression, facts, depth + 1) and proof_scalar_term_witnessed(else_expression, facts, depth + 1)
+                _:
+                    return false
+
+        def proof_primitive_comparison(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return proof_scalar_term_witnessed(left, facts, 0) and proof_scalar_term_witnessed(right, facts, 0)
+
+        def proof_unsigned_goal_identity(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_goal_identity(inner, facts)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_primitive_comparison(left, right, facts) and proof_definitionally_equal(left, right) and proof_is_true_comparison(operator)
+                _:
+                    return false
+
+        # Collect only explicit identifier equalities. This is deliberately narrower than
+        # general expression rewriting: a positive `x == y` fact is safe to use as an alias,
+        # while inventing a canonical form for calls, references, or arithmetic could cross
+        # effects and fixed-width overflow boundaries.
+        def proof_collect_name_equalities(expression: Ast::Expr, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_name_equalities(inner, left_names, right_names)
+                Ast::Expr.Binary(left, operator, right, position):
+                    if operator == TokenKind.And:
+                        proof_collect_name_equalities(left, left_names, right_names)
+                        proof_collect_name_equalities(right, left_names, right_names)
+                    if operator == TokenKind.EqEq:
+                        left_name: sview = proof_ident_name(left)
+                        right_name: sview = proof_ident_name(right)
+                        if left_name != "" and right_name != "":
+                            left_names.push(left_name)
+                            right_names.push(right_name)
+                _:
+                    pass
+
+        # Equality aliases also transport interval bounds. Iterate by relation count so a
+        # chain such as x == y, y == z reaches every member without relying on a host solver.
+        def proof_close_equalities(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            left_names: mutable darray[sview] = []
+            right_names: mutable darray[sview] = []
+            for fact in facts |left_names, right_names|:
+                proof_collect_name_equalities(fact, &left_names, &right_names)
+            rounds: mutable usize = 0
+            max_rounds: usize = facts.count * 2 + 2
+            while rounds < max_rounds |rounds, left_names, right_names, bounds|:
+                for index in 0..<left_names.count |index, left_names, right_names, bounds|:
+                    left_bound: ProofBound = proof_bound_for(bounds, left_names[index])
+                    right_bound: ProofBound = proof_bound_for(bounds, right_names[index])
+                    proof_add_lower(bounds, right_names[index], left_bound.lower) if left_bound.has_lower
+                    proof_add_upper(bounds, right_names[index], left_bound.upper) if left_bound.has_upper
+                    proof_add_lower(bounds, left_names[index], right_bound.lower) if right_bound.has_lower
+                    proof_add_upper(bounds, left_names[index], right_bound.upper) if right_bound.has_upper
+                rounds <- rounds + 1
+
+        def proof_names_equal_from_facts(left_name: sview, right_name: sview, facts: darray[Ast::Expr]&) -> bool:
+            return false if left_name == "" or right_name == ""
+            return true if left_name == right_name
+            relation_left: mutable darray[sview] = []
+            relation_right: mutable darray[sview] = []
+            for fact in facts |relation_left, relation_right|:
+                proof_collect_name_equalities(fact, &relation_left, &relation_right)
+            reachable: mutable darray[sview] = [left_name]
+            cursor: mutable usize = 0
+            while cursor < reachable.count |cursor, reachable, relation_left, relation_right|:
+                current: sview = reachable[cursor]
+                for index in 0..<relation_left.count |index, relation_left, relation_right, reachable, current, right_name|:
+                    next_name: mutable sview = ""
+                    next_name <- relation_right[index] if relation_left[index] == current
+                    next_name <- relation_left[index] if relation_right[index] == current
+                    if next_name != "":
+                        return true if next_name == right_name
+                        already_seen: bool = any existing in reachable where existing == next_name
+                        reachable.push(next_name) if not already_seen
+                cursor <- cursor + 1
+            return false
+
+        # An inconsistent set of explicit interval facts has no reachable state. Applying
+        # ex-falso here is sound Hoare reasoning (a function with impossible preconditions has
+        # no executions), and it also makes contradictory branch complements useful without
+        # teaching the kernel a general-purpose theorem prover.
+        # The part of inconsistency that needs no arithmetic: a false literal, or a proposition
+        # beside its own negation. Nothing is evaluated and no interval is consulted, so this may
+        # run before the fixed-width guard -- it cannot be misled by a modular premise, because it
+        # never reads one as a number. That ordering is what closes the branch a disjunctive
+        # premise refutes: a callee's `not result or p` beside the caller's own `result` leaves
+        # `p` in the only branch that survives, and the branch that assumed `not result` is shut
+        # without its facts ever having to be range-safe.
+        def proof_facts_propositionally_inconsistent(facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts:
+                match fact:
+                    Ast::Expr.BoolLit(value, _):
+                        return true if not value
+                    Ast::Expr.Unary(TokenKind.Not, operand, _):
+                        match operand:
+                            Ast::Expr.BoolLit(value, _):
+                                return true if value
+                            _:
+                                pass
+                    _:
+                        pass
+            for fact in facts |facts|:
+                return true if proof_fact_denies(fact, facts)
+            return false
+
+        def proof_facts_inconsistent(facts: darray[Ast::Expr]&) -> bool:
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, &bounds)
+            proof_close_equalities(facts, &bounds)
+            for bound in bounds:
+                return true if bound.has_lower and bound.has_upper and bound.lower > bound.upper
+            return proof_facts_propositionally_inconsistent(facts)
+
+        # Return a conservative interval for affine expressions. Lower and upper knowledge are
+        # tracked independently: a fact such as x >= 0 is enough for a later lower-bound goal,
+        # but never gets mistaken for a finite interval or used to justify an unsafe operation.
+        def proof_interval(expression: Ast::Expr, bounds: darray[ProofBound]&) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
+            constant: (known: bool, value: i64) = proof_constant_int(expression)
+            return (true, constant.value, constant.value, true, true) if constant.known
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_interval(inner, bounds)
+                Ast::Expr.Ident(name, _):
+                    found: ProofBound = proof_bound_for(bounds, name)
+                    return (found.has_lower and found.has_upper, found.lower, found.upper, found.has_lower, found.has_upper)
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(operand, bounds)
+                    if operator == TokenKind.Minus:
+                        negated_lower: mutable i64 = 0
+                        negated_upper: mutable i64 = 0
+                        has_negated_lower: mutable bool = inner.has_upper and inner.upper != proof_i64_min()
+                        has_negated_upper: mutable bool = inner.has_lower and inner.lower != proof_i64_min()
+                        negated_lower <- 0 - inner.upper if has_negated_lower
+                        negated_upper <- 0 - inner.lower if has_negated_upper
+                        return (has_negated_lower and has_negated_upper, negated_lower, negated_upper, has_negated_lower, has_negated_upper)
+                    if operator == TokenKind.Plus:
+                        return inner
+                Ast::Expr.Binary(left, operator, right, position):
+                    a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(left, bounds)
+                    b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
+                    if operator == TokenKind.Plus:
+                        lower: mutable i64 = 0
+                        upper: mutable i64 = 0
+                        has_lower: mutable bool = false
+                        has_upper: mutable bool = false
+                        if a.has_lower and b.has_lower:
+                            low: (known: bool, value: i64) = proof_add_safe(a.lower, b.lower)
+                            lower <- low.value if low.known
+                            has_lower <- low.known
+                        if a.has_upper and b.has_upper:
+                            high: (known: bool, value: i64) = proof_add_safe(a.upper, b.upper)
+                            upper <- high.value if high.known
+                            has_upper <- high.known
+                        return (has_lower and has_upper, lower, upper, has_lower, has_upper)
+                    if operator == TokenKind.Minus:
+                        lower: mutable i64 = 0
+                        upper: mutable i64 = 0
+                        has_lower: mutable bool = false
+                        has_upper: mutable bool = false
+                        if a.has_lower and b.has_upper:
+                            low_sub: (known: bool, value: i64) = proof_sub_safe(a.lower, b.upper)
+                            lower <- low_sub.value if low_sub.known
+                            has_lower <- low_sub.known
+                        if a.has_upper and b.has_lower:
+                            high_sub: (known: bool, value: i64) = proof_sub_safe(a.upper, b.lower)
+                            upper <- high_sub.value if high_sub.known
+                            has_upper <- high_sub.known
+                        return (has_lower and has_upper, lower, upper, has_lower, has_upper)
+                    if operator == TokenKind.Star and a.known and b.known:
+                        p1_result: (known: bool, value: i64) = proof_mul_safe(a.lower, b.lower)
+                        p2_result: (known: bool, value: i64) = proof_mul_safe(a.lower, b.upper)
+                        p3_result: (known: bool, value: i64) = proof_mul_safe(a.upper, b.lower)
+                        p4_result: (known: bool, value: i64) = proof_mul_safe(a.upper, b.upper)
+                        return (false, 0, 0, false, false) if not p1_result.known or not p2_result.known or not p3_result.known or not p4_result.known
+                        p1: i64 = p1_result.value
+                        p2: i64 = p2_result.value
+                        p3: i64 = p3_result.value
+                        p4: i64 = p4_result.value
+                        low: mutable i64 = p1
+                        high: mutable i64 = p1
+                        low <- p2 if p2 < low
+                        low <- p3 if p3 < low
+                        low <- p4 if p4 < low
+                        high <- p2 if p2 > high
+                        high <- p3 if p3 > high
+                        high <- p4 if p4 > high
+                        return (true, low, high, true, true)
+                    if operator == TokenKind.Slash and b.known and b.lower == b.upper and a.has_lower and a.has_upper:
+                        lower_quotient: (known: bool, value: i64) = proof_div_safe(a.lower, b.lower)
+                        upper_quotient: (known: bool, value: i64) = proof_div_safe(a.upper, b.lower)
+                        return (false, 0, 0, false, false) if not lower_quotient.known or not upper_quotient.known
+                        return (true, lower_quotient.value, upper_quotient.value, true, true) if b.lower > 0
+                        return (true, upper_quotient.value, lower_quotient.value, true, true)
+                    if operator == TokenKind.Percent:
+                        divisor: (known: bool, value: i64) = proof_constant_int(right)
+                        # `MIN_I64 % -1` is the fixed-width overflow edge. The interval
+                        # tier does not retain enough information to prove that the dividend
+                        # excludes MIN_I64, so reject divisor -1 instead of treating this as a
+                        # universally safe machine-integer remainder.
+                        return (false, 0, 0, false, false) if not divisor.known or divisor.value == 0 or divisor.value == -1
+                        magnitude: mutable i64 = divisor.value
+                        if magnitude < 0:
+                            absolute: (known: bool, value: i64) = proof_sub_safe(0, magnitude)
+                            return (false, 0, 0, false, false) if not absolute.known
+                            magnitude <- absolute.value
+                        remainder_limit: (known: bool, value: i64) = proof_sub_safe(magnitude, 1)
+                        return (false, 0, 0, false, false) if not remainder_limit.known
+                        negative_limit: (known: bool, value: i64) = proof_sub_safe(0, remainder_limit.value)
+                        return (false, 0, 0, false, false) if not negative_limit.known
+                        return (true, negative_limit.value, remainder_limit.value, true, true)
+                _:
+                    pass
+            return (false, 0, 0, false, false)
+

@@ -1,0 +1,423 @@
+extend ElisaProof:
+    private:
+        def proof_container_element_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> (known: bool, element: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_container_element_type(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_container_element_type(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_container_element_type(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return proof_container_element_type(alias.target, declarations, depth + 1) if alias.count == 1
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Index(head, argument, _):
+                    head_name: sview = proof_ident_name(head)
+                    return (true, argument) if head_name == "darray" or head_name == "view"
+                    match argument:
+                        Ast::Expr.IntLit(_, _):
+                            return (true, head)
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                Ast::Expr.IndexN(head, arguments, _):
+                    return (false, Ast::Expr.Invalid) if proof_ident_name(head) != "array" or arguments.count != 2
+                    match arguments[1]:
+                        Ast::Expr.IntLit(_, _):
+                            return (true, arguments[0])
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        # How many subscripts separate a container from a primitive scalar element: 1 for
+        # `darray[i64]`, 2 for `array[array[i64, 4], 4]`, and 0 when the innermost element is not
+        # a scalar or the spelling is not a built-in container.
+        def proof_scalar_element_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
+            return 0 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            element: (known: bool, element: Ast::Expr) = proof_container_element_type(expression, declarations, depth)
+            return 0 if not element.known
+            return 1 if proof_scalar_type_kind(element.element, declarations, 0) == 1
+            inner: i64 = proof_scalar_element_depth(element.element, declarations, depth + 1)
+            return inner + 1 if inner > 0
+            return 0
+
+        const PROOF_SCALAR_WITNESS_BUDGET: usize = 12
+        const PROOF_SCALAR_WITNESS_FUNCTION_BUDGET: usize = 32
+        const PROOF_SCALAR_WITNESS_DEPTH: usize = 3
+
+        # String views are compiler-provided value types, but unlike integers they are still
+        # eligible for a user `impl Eq for sview`. Keep their operator admission separate from
+        # the arithmetic scalar witness relation: a marker here means only that this particular
+        # protocol dispatch is absent from the imported source, not that a string is an integer
+        # term the arithmetic kernel may evaluate.
+        def proof_builtin_operator_type_name(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name if name == "sview" or name == "cstr" or name == "dstr"
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return proof_builtin_operator_type_name(alias.target, declarations, depth + 1) if alias.count == 1
+                    return ""
+                Ast::Expr.Index(head, _, _):
+                    return "cstr" if proof_ident_name(head) == "cstr"
+                    return ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_builtin_operator_type_name(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_builtin_operator_type_name(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_builtin_operator_type_name(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return ""
+                _:
+                    return ""
+
+        def proof_builtin_operator_protocol(operator: TokenKind) -> sview:
+            return "Eq" if operator == TokenKind.EqEq or operator == TokenKind.BangEq
+            return "Ord" if operator == TokenKind.Lt or operator == TokenKind.Gt or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+            return "Add" if operator == TokenKind.Plus
+            return "Sub" if operator == TokenKind.Minus
+            return "Mul" if operator == TokenKind.Star
+            return "Div" if operator == TokenKind.Slash
+            return ""
+
+        def proof_builtin_unary_operator_protocol(operator: TokenKind) -> sview:
+            return "Neg" if operator == TokenKind.Minus
+            return ""
+
+        def proof_index_operator_protocol(protocol: sview) -> sview:
+            return "Index.Eq" if protocol == "Eq"
+            return "Index.Ord" if protocol == "Ord"
+            return "Index.Add" if protocol == "Add"
+            return "Index.Sub" if protocol == "Sub"
+            return "Index.Mul" if protocol == "Mul"
+            return "Index.Div" if protocol == "Div"
+            return "Index.Neg" if protocol == "Neg"
+            return ""
+
+        def proof_builtin_operator_marker(term: Ast::Expr, protocol: sview, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term, Ast::Expr.StringLit(protocol, position)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_builtin_operator_type", position), arguments, [], position)
+
+        def proof_untrusted_operator_marker(term: Ast::Expr, protocol: sview, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term, Ast::Expr.StringLit(protocol, position)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_untrusted_operator_type", position), arguments, [], position)
+
+        def proof_builtin_index_marker(term: Ast::Expr, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_builtin_index_type", position), arguments, [], position)
+
+        def proof_index_operator_marker(term: Ast::Expr, protocol: sview, position: Ast::Pos, trusted: bool) -> Ast::Expr:
+            indexed_protocol: sview = proof_index_operator_protocol(protocol)
+            return proof_builtin_operator_marker(term, indexed_protocol, position) if trusted
+            return proof_untrusted_operator_marker(term, indexed_protocol, position)
+
+        def proof_builtin_operator_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, protocol: sview):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, Ast::Expr.Invalid, "") if proof_ident_name(callee) != "__elisa_builtin_operator_type" or arguments.count != 2
+                    return (false, Ast::Expr.Invalid, "") if argument_names.count != 0 and argument_names.count != arguments.count
+                    match arguments[1]:
+                        Ast::Expr.StringLit(protocol, _):
+                            return (true, arguments[0], protocol) if protocol != ""
+                        _:
+                            pass
+                    return (false, Ast::Expr.Invalid, "")
+                _:
+                    return (false, Ast::Expr.Invalid, "")
+
+        def proof_untrusted_operator_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, protocol: sview):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, Ast::Expr.Invalid, "") if proof_ident_name(callee) != "__elisa_untrusted_operator_type" or arguments.count != 2
+                    return (false, Ast::Expr.Invalid, "") if argument_names.count != 0 and argument_names.count != arguments.count
+                    match arguments[1]:
+                        Ast::Expr.StringLit(protocol, _):
+                            return (true, arguments[0], protocol) if protocol != ""
+                        _:
+                            pass
+                    return (false, Ast::Expr.Invalid, "")
+                _:
+                    return (false, Ast::Expr.Invalid, "")
+
+        def proof_builtin_index_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, Ast::Expr.Invalid) if proof_ident_name(callee) != "__elisa_builtin_index_type" or arguments.count != 1
+                    return (false, Ast::Expr.Invalid) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (true, arguments[0])
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        # Impl metadata is preserved by the compiler parser as paired annotations keyed by the
+        # impl header line. An extension can also define an operator-like member, so it disables
+        # the built-in witness for that concrete type conservatively.
+        def proof_builtin_operator_impl_exists(annotations: darray[Ast::EnumAnnotation]&, concrete: sview, protocol: sview) -> bool:
+            return false if concrete == "" or protocol == ""
+            for annotation in annotations |concrete, protocol|:
+                if annotation.owner == "__ext_concrete" and annotation.name == concrete:
+                    return true
+                if annotation.owner == "__impl_concrete" and annotation.name == concrete:
+                    for scope in annotations |annotation, protocol|:
+                        return true if scope.owner == "__impl_scope" and scope.line == annotation.line and scope.name == protocol
+            return false
+
+        def proof_add_operator_witness_for_concrete(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, concrete: sview, protocol: sview, position: Ast::Pos) -> void:
+            marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position) if proof_builtin_operator_impl_exists(report.source_annotations, concrete, protocol) else proof_builtin_operator_marker(root, protocol, position)
+            proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bound_owner)
+
+        def proof_add_untrusted_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, position: Ast::Pos) -> void:
+            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+            for protocol in protocols |facts, report, root, position|:
+                marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position)
+                proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bound_owner)
+
+        def proof_add_builtin_index_witness(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, position: Ast::Pos) -> void:
+            marker: Ast::Expr = proof_builtin_index_marker(root, position)
+            proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bound_owner)
+
+        def proof_add_index_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, element: Ast::Expr, position: Ast::Pos) -> void:
+            element_is_builtin: bool = proof_scalar_type_kind(element, report.source_declarations, 0) == 1 or proof_builtin_operator_type_name(element, report.source_declarations, 0) != ""
+            element_is_container: bool = proof_container_element_type(element, report.source_declarations, 0).known
+            element_is_named: bool = proof_type_head_name(element, report.source_declarations, 0) != ""
+            return if not element_is_builtin and not element_is_container and not element_is_named
+            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+            for protocol in protocols |facts, report, root, protocol, position, element_is_builtin|:
+                marker: Ast::Expr = proof_index_operator_marker(root, protocol, position, element_is_builtin)
+                proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bound_owner)
+
+        def proof_add_builtin_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos) -> void:
+            concrete: sview = proof_builtin_operator_type_name(type_expression, report.source_declarations, 0)
+            return if concrete == ""
+            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+            for protocol in protocols |facts, report, root, concrete, position|:
+                proof_add_operator_witness_for_concrete(facts, report, root, concrete, protocol, position)
+            proof_add_builtin_index_witness(facts, report, root, position)
+
+        def proof_builtin_operator_term_witnessed(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&) -> bool:
+            match expression:
+                Ast::Expr.StringLit(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_builtin_operator_term_witnessed(inner, protocol, facts)
+                _:
+                    pass
+            for fact in facts:
+                marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_builtin_operator_marker_info(fact)
+                return true if marker.known and marker.protocol == protocol and proof_expr_equal(marker.term, expression)
+            return false
+
+        def proof_index_operator_term_witnessed(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&, trusted: bool) -> bool:
+            object: mutable Ast::Expr = Ast::Expr.Invalid
+            match expression:
+                Ast::Expr.Index(indexed_object, _, _):
+                    object <- indexed_object
+                Ast::Expr.IndexN(indexed_object, _, _):
+                    object <- indexed_object
+                Ast::Expr.Paren(inner, _):
+                    return proof_index_operator_term_witnessed(inner, protocol, facts, trusted)
+                _:
+                    return false
+            wanted_protocol: sview = proof_index_operator_protocol(protocol)
+            for fact in facts:
+                marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_builtin_operator_marker_info(fact) if trusted else proof_untrusted_operator_marker_info(fact)
+                return true if marker.known and marker.protocol == wanted_protocol and proof_expr_equal(marker.term, object)
+            return false
+
+        def proof_builtin_index_expression_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_builtin_index_expression_witnessed(inner, facts)
+                Ast::Expr.Index(object, _, _):
+                    for fact in facts:
+                        marker: (known: bool, term: Ast::Expr) = proof_builtin_index_marker_info(fact)
+                        return true if marker.known and proof_expr_equal(marker.term, object)
+                    return false
+                Ast::Expr.IndexN(object, _, _):
+                    for fact in facts:
+                        marker: (known: bool, term: Ast::Expr) = proof_builtin_index_marker_info(fact)
+                        return true if marker.known and proof_expr_equal(marker.term, object)
+                    return false
+                _:
+                    return false
+
+        def proof_runtime_operator_operand_untrusted(expression: Ast::Expr, protocol: sview, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, depth: usize) -> bool:
+            return false if proof_scalar_runtime_term_witnessed(expression, facts, functions, depth)
+            return false if proof_builtin_operator_term_witnessed(expression, protocol, facts)
+            return false if proof_index_operator_term_witnessed(expression, protocol, facts, true)
+            for fact in facts:
+                marker: (known: bool, term: Ast::Expr, protocol: sview) = proof_untrusted_operator_marker_info(fact)
+                return true if marker.known and marker.protocol == protocol and proof_expr_equal(marker.term, expression)
+            return true if proof_index_operator_term_witnessed(expression, protocol, facts, false)
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_runtime_operator_operand_untrusted(inner, protocol, facts, functions, depth + 1)
+                Ast::Expr.StringLit(_, _):
+                    return false
+                Ast::Expr.Call(callee, _, _, _):
+                    called: sview = proof_callable_name(callee)
+                    called_index: usize = proof_function_index(functions, called)
+                    # The call's effects are handled by the explicit call-state traversal. For
+                    # overload admission we only need its result shape: a scalar-returning call
+                    # cannot itself be a struct protocol receiver. Purity remains required by the
+                    # separate scalar-congruence witness relation, where repeated calls must also
+                    # denote the same value.
+                    return false if called_index < functions.return_scalar.count and functions.return_scalar[called_index]
+                    return true
+                Ast::Expr.Index(_, _, _):
+                    return true
+                Ast::Expr.IndexN(_, _, _):
+                    return true
+                # Built-in aggregate expressions do not dispatch the scalar operator protocols.
+                # Their equality is intentionally left to the ordinary kernel expression gate so
+                # unsupported slice/collection goals are still encoded and independently replayed.
+                Ast::Expr.Slice(_, _, _):
+                    return false
+                Ast::Expr.Array(_, _):
+                    return false
+                Ast::Expr.Tuple(_, _):
+                    return false
+                Ast::Expr.SetLit(_, _):
+                    return false
+                Ast::Expr.DictLit(_, _):
+                    return false
+                Ast::Expr.Move(_, _):
+                    return true
+                Ast::Expr.RegionNew(_, _, _):
+                    return true
+                Ast::Expr.Construct(_, _, _):
+                    return true
+                Ast::Expr.RecordUpdate(_, _, _):
+                    return true
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_expr_has_unmodeled_operator(guarded, facts, functions, depth + 1)
+                    for arm in arms |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(arm.guard, facts, functions, depth + 1)
+                        for arm_statement in arm.body |facts, functions|:
+                            return true if proof_statement_has_unmodeled_operator(arm_statement, facts, functions)
+                    return false
+                Ast::Expr.Lambda(_, _, _):
+                    return true
+                Ast::Expr.Match(_, _, _):
+                    return true
+                Ast::Expr.Unary(_, _, _):
+                    return false
+                Ast::Expr.Binary(_, _, _, _):
+                    return false
+                Ast::Expr.If(_, _, _, _):
+                    return false
+                Ast::Expr.Ident(_, _):
+                    return false
+                Ast::Expr.Field(_, _, _):
+                    return false
+                Ast::Expr.Scope(_, _, _):
+                    return false
+                _:
+                    return true
+
+        def proof_runtime_operator_expression_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, depth: usize) -> bool:
+            return true if proof_scalar_runtime_term_witnessed(expression, facts, functions, depth)
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.Unary(operator, operand, _):
+                    protocol: sview = proof_builtin_unary_operator_protocol(operator)
+                    return not proof_runtime_operator_operand_untrusted(operand, protocol, facts, functions, depth + 1) if operator == TokenKind.Plus or operator == TokenKind.Not
+                    return protocol != "" and not proof_runtime_operator_operand_untrusted(operand, protocol, facts, functions, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    protocol: sview = proof_builtin_operator_protocol(operator)
+                    return not proof_runtime_operator_operand_untrusted(left, protocol, facts, functions, depth + 1) and not proof_runtime_operator_operand_untrusted(right, protocol, facts, functions, depth + 1) if protocol == "" and proof_congruent_binary_operator(operator)
+                    return protocol != "" and not proof_runtime_operator_operand_untrusted(left, protocol, facts, functions, depth + 1) and not proof_runtime_operator_operand_untrusted(right, protocol, facts, functions, depth + 1)
+                _:
+                    return false
+
+        # Expression witnesses are optional completeness data for the congruence fragment. Keep
+        # their number bounded per checked function: every witness is copied through branch and
+        # call state, so an unbounded set would turn a finite proof into quadratic or worse fact
+        # churn. Spending this budget only removes a witness and can therefore only make a goal
+        # decline; it never changes an accepted theorem into an unsound one.
+        def proof_add_scalar_type_witness(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
+            return if report.scalar_witness_facts >= PROOF_SCALAR_WITNESS_FUNCTION_BUDGET
+            report.scalar_witness_facts <- report.scalar_witness_facts + 1
+            proof_add_type_bound_fact(facts, report, expression, line, owner)
+
+        # Expression-level type witnesses for a binding. The bare name of a scalar binding is
+        # witnessed by the caller; this records what the declared type says about the places
+        # reachable from the binding: each scalar field of a struct, recursively through
+        # struct-typed fields to a fixed depth, the `count` of a built-in container, and the
+        # container itself when its elements are scalars. Every witness is a type statement about
+        # a place and is retained and invalidated with the binding's root symbol.
+        def proof_add_scalar_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos, budget: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_SCALAR_WITNESS_DEPTH or budget == 0 or report.scalar_witness_facts >= PROOF_SCALAR_WITNESS_FUNCTION_BUDGET
+            builtin_type: sview = proof_builtin_operator_type_name(type_expression, report.source_declarations, 0)
+            if builtin_type != "":
+                proof_add_builtin_operator_witnesses(facts, report, root, type_expression, position)
+                return
+            named_type: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
+            proof_add_untrusted_operator_witnesses(facts, report, root, position) if named_type != ""
+            element_depth: i64 = proof_scalar_element_depth(type_expression, report.source_declarations, 0)
+            container: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, report.source_declarations, 0)
+            if container.known:
+                proof_add_builtin_index_witness(facts, report, root, position)
+                proof_add_index_operator_witnesses(facts, report, root, container.element, position)
+                budget <- budget - 1
+                proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(Ast::Expr.Field(root, "count", position), position), line, owner)
+                if element_depth > 0 and budget > 0:
+                    budget <- budget - 1
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_element_marker(root, element_depth, position), line, owner)
+                return
+            struct_name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
+            return if struct_name == ""
+            field_names: mutable darray[sview] = []
+            return if proof_struct_field_names(report.source_declarations, struct_name, 0, &field_names) != 1
+            for field_name in field_names |facts, report, root, struct_name, line, owner, position, budget, depth|:
+                return if budget == 0
+                field: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(report.source_declarations, struct_name, field_name, 0)
+                continue if field.count != 1
+                place: Ast::Expr = Ast::Expr.Field(root, field_name, position)
+                if proof_scalar_type_kind(field.type_expression, report.source_declarations, 0) == 1:
+                    budget <- budget - 1
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(place, position), line, owner)
+                    # A field of an unsigned type is nonnegative whatever its value, which is the
+                    # lower bound on every index written as `node.start + i`. The marker is over
+                    # the place, so it stays out of the general width function.
+                    field_width: i64 = proof_unsigned_type_width(field.type_expression, report.source_declarations, 0)
+                    proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(place, field_width, position), line, owner) if field_width > 0
+                else:
+                    proof_add_scalar_witnesses(facts, report, place, field.type_expression, line, owner, position, budget, depth + 1)
+
+        # A call to a verified total-pure function with a primitive scalar return type denotes
+        # one value: the classification proves it reads nothing but its arguments and always
+        # returns, so two occurrences of the same call text over witnessed arguments are the same
+        # value. Record that witness for each such call in the goal before it is decided. Any
+        # other call stays unwitnessed.
+        def proof_add_pure_call_witnesses(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize) -> void:
+            return if depth >= 32
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_add_pure_call_witnesses(inner, facts, functions, report, line, owner, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_add_pure_call_witnesses(operand, facts, functions, report, line, owner, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_add_pure_call_witnesses(left, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses(right, facts, functions, report, line, owner, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    proof_add_pure_call_witnesses(condition, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses(then_expression, facts, functions, report, line, owner, depth + 1)
+                    proof_add_pure_call_witnesses(else_expression, facts, functions, report, line, owner, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, position):
+                    for argument in arguments |facts, functions, report, line, owner, depth|:
+                        proof_add_pure_call_witnesses(argument, facts, functions, report, line, owner, depth + 1)
+                    return if not proof_contract_calls_are_pure(expression, functions)
+                    called: usize = proof_function_index(functions, proof_callable_name(callee))
+                    return if called >= functions.return_scalar.count or not functions.return_scalar[called]
+                    for argument in arguments |facts|:
+                        return if not proof_scalar_term_witnessed(argument, facts, 0)
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
+                _:
+                    pass
+
+        # Zero means a non-unsigned type; -1 means alias resolution is ambiguous or too
+        # deep. Never silently treat a failed resolution as ordinary signed arithmetic.

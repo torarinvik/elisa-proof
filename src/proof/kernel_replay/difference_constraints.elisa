@@ -1,0 +1,422 @@
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_interval_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize]) -> bool:
+            return false if operator != "==" and operator != "!=" and operator != "<" and operator != "<=" and operator != ">" and operator != ">="
+            bounds: mutable darray[ProofKernelReplayBound] = []
+            for fact in facts |fact, nodes, bounds|:
+                proof_kernel_replay_collect_bounds(nodes, fact, &bounds, 0)
+            proof_kernel_replay_close_equalities(nodes, facts, &bounds)
+            a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, left_root, bounds, 0)
+            b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, right_root, bounds, 0)
+            return a.has_lower and b.has_upper and a.lower > b.upper if operator == ">"
+            return a.has_lower and b.has_upper and a.lower >= b.upper if operator == ">="
+            return a.has_upper and b.has_lower and a.upper < b.lower if operator == "<"
+            return a.has_upper and b.has_lower and a.upper <= b.lower if operator == "<="
+            return a.known and b.known and a.lower == a.upper and b.lower == b.upper and a.lower == b.lower if operator == "=="
+            return (a.has_upper and b.has_lower and a.upper < b.lower) or (a.has_lower and b.has_upper and a.lower > b.upper) if operator == "!="
+            return false
+
+        def proof_kernel_replay_difference_push(left: ProofKernelReplayAffine, right: ProofKernelReplayAffine, reverse: bool, strict: bool, constraints: mutable darray[ProofKernelReplayDifference]&) -> void:
+            first: ProofKernelReplayAffine = left if not reverse else right
+            second: ProofKernelReplayAffine = right if not reverse else left
+            difference: ProofKernelReplayInt = proof_kernel_replay_sub_safe(second.offset, first.offset)
+            return if not difference.known
+            bound: mutable i64 = difference.value
+            if strict:
+                decremented: ProofKernelReplayInt = proof_kernel_replay_sub_safe(bound, 1)
+                return if not decremented.known
+                bound <- decremented.value
+            # Encode `sign * base + offset` as a difference constraint only when the resulting
+            # relation is representable by the graph. A negative affine term reverses the graph
+            # edge; dropping that sign would turn `0 - x <= 0` into the false bound `x <= 0`.
+            if first.base == "" and second.base == "":
+                constraints.push(ProofKernelReplayDifference{left: "", right: "", bound: bound})
+                return
+            if first.base == "":
+                constraints.push(ProofKernelReplayDifference{left: second.base, right: "", bound: bound}) if second.negative
+                constraints.push(ProofKernelReplayDifference{left: "", right: second.base, bound: bound}) if not second.negative
+                return
+            if second.base == "":
+                constraints.push(ProofKernelReplayDifference{left: "", right: first.base, bound: bound}) if first.negative
+                constraints.push(ProofKernelReplayDifference{left: first.base, right: "", bound: bound}) if not first.negative
+                return
+            return if first.negative != second.negative
+            constraints.push(ProofKernelReplayDifference{left: second.base, right: first.base, bound: bound}) if first.negative
+            constraints.push(ProofKernelReplayDifference{left: first.base, right: second.base, bound: bound}) if not first.negative
+
+        # Mirror of the producer's fact-side increment guard. The peer argument is asked of the
+        # facts rather than of the constraint graph, because a fact is being imported into that
+        # graph and there is not one yet. The base is taken from the operand's own node, so the
+        # comparison against a peer fact is the same structural one the goal side performs.
+        def proof_kernel_replay_affine_peer_safe_from_facts(affine: ProofKernelReplayAffine, root: usize, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize]) -> bool:
+            return false if not affine.known or affine.negative or affine.offset != 1 or affine.base == ""
+            width: i64 = proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, affine.base)
+            return false if width == 0
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return false if node.kind != "binary" or node.operator != "+"
+            unit: (known: bool, base: usize) = proof_kernel_replay_unsigned_unit_increment_base(nodes, node.left, node.right)
+            return false if not unit.known
+            return proof_kernel_replay_unsigned_increment_has_strict_peer(nodes, children, unit.base, width, facts)
+
+        def proof_kernel_replay_collect_differences(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, bounds: darray[ProofKernelReplayBound]&, children: darray[usize]&, facts: darray[usize], constraints: mutable darray[ProofKernelReplayDifference]&, depth: usize) -> void:
+            requires depth <= 127
+            decreases 127 - depth
+            return if not ElisaProofKernelCore::depth_valid(depth)
+            return if depth >= 127
+            return if root >= nodes.count
+            return if not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "unary" and node.operator == "not":
+                inner_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+                if inner_located.known and inner_located.node.kind == "binary":
+                    inner: ElisaProofKernelCore::ProofKernelNode = inner_located.node
+                    negated: sview = proof_kernel_replay_negation(inner.operator)
+                    if negated != "":
+                        # A negated comparison is represented by its complemented operator.
+                        left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, inner.left, depth + 1)
+                        right: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, inner.right, depth + 1)
+                        left_admissible: bool = proof_kernel_replay_affine_safe(left, bounds) or proof_kernel_replay_affine_peer_safe_from_facts(left, inner.left, nodes, children, facts)
+                        right_admissible: bool = proof_kernel_replay_affine_safe(right, bounds) or proof_kernel_replay_affine_peer_safe_from_facts(right, inner.right, nodes, children, facts)
+                        if left.known and right.known and left_admissible and right_admissible:
+                            proof_kernel_replay_difference_push(left, right, false, false, constraints) if negated == "<="
+                            proof_kernel_replay_difference_push(left, right, false, true, constraints) if negated == "<"
+                            proof_kernel_replay_difference_push(left, right, true, false, constraints) if negated == ">="
+                            proof_kernel_replay_difference_push(left, right, true, true, constraints) if negated == ">"
+                            if negated == "==":
+                                proof_kernel_replay_difference_push(left, right, false, false, constraints)
+                                proof_kernel_replay_difference_push(left, right, true, false, constraints)
+                return
+            if node.kind == "binary" and node.operator == "and":
+                proof_kernel_replay_collect_differences(nodes, node.left, bounds, children, facts, constraints, depth + 1)
+                proof_kernel_replay_collect_differences(nodes, node.right, bounds, children, facts, constraints, depth + 1)
+                return
+            return if node.kind != "binary" or node.operator != "==" and node.operator != "<" and node.operator != "<=" and node.operator != ">" and node.operator != ">="
+            left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, node.left, depth + 1)
+            right: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, node.right, depth + 1)
+            return if not left.known or not right.known
+            return if not (proof_kernel_replay_affine_safe(left, bounds) or proof_kernel_replay_affine_peer_safe_from_facts(left, node.left, nodes, children, facts))
+            return if not (proof_kernel_replay_affine_safe(right, bounds) or proof_kernel_replay_affine_peer_safe_from_facts(right, node.right, nodes, children, facts))
+            proof_kernel_replay_difference_push(left, right, false, false, constraints) if node.operator == "<="
+            proof_kernel_replay_difference_push(left, right, false, true, constraints) if node.operator == "<"
+            proof_kernel_replay_difference_push(left, right, true, false, constraints) if node.operator == ">="
+            proof_kernel_replay_difference_push(left, right, true, true, constraints) if node.operator == ">"
+            if node.operator == "==":
+                proof_kernel_replay_difference_push(left, right, false, false, constraints)
+                proof_kernel_replay_difference_push(left, right, true, false, constraints)
+
+        def proof_kernel_replay_difference_node_index(nodes: darray[sview]&, name: sview) -> usize:
+            for index in 0..<nodes.count:
+                if nodes[index] == name:
+                    return index
+            return nodes.count
+
+        def proof_kernel_replay_difference_query(nodes: darray[sview]&, matrix: darray[i64]&, known: darray[bool]&, left: sview, right: sview, bound: i64) -> bool:
+            left_index: usize = proof_kernel_replay_difference_node_index(nodes, left)
+            right_index: usize = proof_kernel_replay_difference_node_index(nodes, right)
+            return false if left_index >= nodes.count or right_index >= nodes.count
+            slot: usize = left_index * nodes.count + right_index
+            known_entry: (known: bool, value: bool) = proof_kernel_replay_bool_at(known, slot)
+            matrix_entry: (known: bool, value: i64) = proof_kernel_replay_model_value_at(matrix, slot)
+            return false if not known_entry.known or not matrix_entry.known
+            return known_entry.value and matrix_entry.value <= bound
+
+        # Query the graph representation of `first OP second` after offsets have been moved
+        # into `bound`. Preserve the affine sign when choosing the edge orientation; mixed signs
+        # with two symbolic bases are outside the difference-logic fragment and must fail closed.
+        def proof_kernel_replay_difference_affine_query(nodes: darray[sview]&, matrix: darray[i64]&, known: darray[bool]&, first: ProofKernelReplayAffine, second: ProofKernelReplayAffine, bound: i64) -> bool:
+            return proof_kernel_replay_difference_query(nodes, matrix, known, "", "", bound) if first.base == "" and second.base == ""
+            if first.base == "":
+                return proof_kernel_replay_difference_query(nodes, matrix, known, second.base, "", bound) if second.negative
+                return proof_kernel_replay_difference_query(nodes, matrix, known, "", second.base, bound)
+            if second.base == "":
+                return proof_kernel_replay_difference_query(nodes, matrix, known, "", first.base, bound) if first.negative
+                return proof_kernel_replay_difference_query(nodes, matrix, known, first.base, "", bound)
+            return false if first.negative != second.negative
+            return proof_kernel_replay_difference_query(nodes, matrix, known, second.base, first.base, bound) if first.negative
+            return proof_kernel_replay_difference_query(nodes, matrix, known, first.base, second.base, bound)
+
+        def proof_kernel_replay_difference_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize]) -> bool:
+            return false if operator != "==" and operator != "<" and operator != "<=" and operator != ">" and operator != ">="
+            bounds: mutable darray[ProofKernelReplayBound] = []
+            for fact in facts |fact, nodes, bounds|:
+                proof_kernel_replay_collect_bounds(nodes, fact, &bounds, 0)
+            proof_kernel_replay_close_equalities(nodes, facts, &bounds)
+            left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, left_root, 0)
+            right: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, right_root, 0)
+            return false if not left.known or not right.known
+            constraints: mutable darray[ProofKernelReplayDifference] = []
+            for fact in facts |fact, nodes, bounds, constraints|:
+                proof_kernel_replay_collect_differences(nodes, fact, bounds, children, facts, &constraints, 0)
+            return false if constraints.count > 4096
+            # Collected before the overflow guard runs, because they are what gives a name an
+            # interval when no fact states one about it directly.
+            proof_kernel_replay_close_bounds_through_differences(constraints, &bounds)
+            left_safe: bool = proof_kernel_replay_affine_safe(left, bounds) or proof_kernel_replay_affine_unsigned_peer_safe(left, constraints, nodes, children, facts)
+            right_safe: bool = proof_kernel_replay_affine_safe(right, bounds) or proof_kernel_replay_affine_unsigned_peer_safe(right, constraints, nodes, children, facts)
+            return false if not left_safe or not right_safe
+            names: mutable darray[sview] = [""]
+            for constraint in constraints |constraint, names|:
+                names.push(constraint.left) if constraint.left != "" and proof_kernel_replay_difference_node_index(names, constraint.left) == names.count
+                names.push(constraint.right) if constraint.right != "" and proof_kernel_replay_difference_node_index(names, constraint.right) == names.count
+            return false if names.count > 128
+            matrix: mutable darray[i64] = []
+            known: mutable darray[bool] = []
+            matrix.resize(names.count * names.count)
+            known.resize(names.count * names.count)
+            for index in 0..<matrix.count |index, matrix, known|:
+                matrix[index] <- 0
+                known[index] <- false
+            for index in 0..<names.count |index, names, matrix, known|:
+                slot: usize = index * names.count + index
+                matrix[slot] <- 0
+                known[slot] <- true
+            for constraint in constraints |constraint, names, matrix, known|:
+                left_index: usize = proof_kernel_replay_difference_node_index(names, constraint.left)
+                right_index: usize = proof_kernel_replay_difference_node_index(names, constraint.right)
+                slot: usize = left_index * names.count + right_index
+                matrix[slot] <- constraint.bound if not known[slot] or constraint.bound < matrix[slot]
+                known[slot] <- true
+            for pivot in 0..<names.count |pivot, names, matrix, known|:
+                for source in 0..<names.count |source, pivot, names, matrix, known|:
+                    first_slot: usize = source * names.count + pivot
+                    continue if not known[first_slot]
+                    for target in 0..<names.count |target, source, pivot, names, matrix, known|:
+                        second_slot: usize = pivot * names.count + target
+                        continue if not known[second_slot]
+                        combined: ProofKernelReplayInt = proof_kernel_replay_add_safe(matrix[first_slot], matrix[second_slot])
+                        continue if not combined.known
+                        result_slot: usize = source * names.count + target
+                        matrix[result_slot] <- combined.value if not known[result_slot] or combined.value < matrix[result_slot]
+                        known[result_slot] <- true
+            if operator == "==":
+                forward: ProofKernelReplayInt = proof_kernel_replay_sub_safe(right.offset, left.offset)
+                reverse: ProofKernelReplayInt = proof_kernel_replay_sub_safe(left.offset, right.offset)
+                return false if not forward.known or not reverse.known
+                return proof_kernel_replay_difference_affine_query(names, matrix, known, left, right, forward.value) and proof_kernel_replay_difference_affine_query(names, matrix, known, right, left, reverse.value)
+            if operator == "<=" or operator == "<":
+                target: mutable ProofKernelReplayInt = proof_kernel_replay_sub_safe(right.offset, left.offset)
+                return false if not target.known
+                if operator == "<":
+                    decremented: ProofKernelReplayInt = proof_kernel_replay_sub_safe(target.value, 1)
+                    return false if not decremented.known
+                    target <- decremented
+                return proof_kernel_replay_difference_affine_query(names, matrix, known, left, right, target.value)
+            target: mutable ProofKernelReplayInt = proof_kernel_replay_sub_safe(left.offset, right.offset)
+            return false if not target.known
+            if operator == ">":
+                decremented: ProofKernelReplayInt = proof_kernel_replay_sub_safe(target.value, 1)
+                return false if not decremented.known
+                target <- decremented
+            return proof_kernel_replay_difference_affine_query(names, matrix, known, right, left, target.value)
+
+        def proof_kernel_replay_negation(operator: sview) -> sview:
+            return "!=" if operator == "=="
+            return "==" if operator == "!="
+            return ">=" if operator == "<"
+            return "<" if operator == ">="
+            return ">" if operator == "<="
+            return "<=" if operator == ">"
+            return ""
+
+        def proof_kernel_replay_expr_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
+            # The recursive descent is bounded by the same depth contract used by the arena
+            # validator. Keeping an explicit ranking here lets the verifier audit this helper's
+            # recursive edges instead of classifying them as opaque implementation recursion.
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth)
+            return false if depth >= 127
+            return false if not proof_kernel_replay_valid(nodes, left_root) or not proof_kernel_replay_valid(nodes, right_root)
+            left_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, left_root)
+            right_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, right_root)
+            return false if not left_located.known or not right_located.known
+            left: ElisaProofKernelCore::ProofKernelNode = left_located.node
+            right: ElisaProofKernelCore::ProofKernelNode = right_located.node
+            # Structural equality is also used at the public provenance boundary. Validate the
+            # two nodes as they are visited so ignored payload fields cannot make malformed terms
+            # compare equal. Descendant edges are checked by the recursive cases below; the
+            # explicit depth budget rejects cycles without requiring a second whole-arena pass.
+            return false if not proof_kernel_replay_arena_shape_valid(left) or not proof_kernel_replay_arena_shape_valid(right)
+            return false if left.kind != right.kind or left.operator != right.operator
+            return false if left.kind == "unsupported"
+            return true if left.kind == "absent"
+            return left.value == right.value if left.kind == "int" or left.kind == "bool"
+            return left.name == right.name if left.kind == "float" or left.kind == "string" or left.kind == "char"
+            return left.name == right.name if left.kind == "ident"
+            return left.name == right.name if left.kind == "shorthand"
+            if left.kind == "field" or left.kind == "scope":
+                return left.name == right.name and proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
+            if left.kind == "unary" or left.kind == "move":
+                return proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
+            if left.kind == "call_arg":
+                return left.name == right.name and proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
+            if left.kind == "field-init":
+                return left.name == right.name and proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
+            if left.kind == "binary" or left.kind == "index" or left.kind == "dict_entry":
+                return proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.right, right.right, depth + 1)
+            if left.kind == "slice":
+                return proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.right, right.right, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.auxiliary, right.auxiliary, depth + 1)
+            if left.kind == "index-n":
+                return false if left.children_count == 0 or left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
+                return false if not proof_kernel_replay_child_range_valid(left.children_start, left.children_count, children.count) or not proof_kernel_replay_child_range_valid(right.children_start, right.children_count, children.count)
+                return false if not proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
+                for index in 0..<left.children_count |index, left, right, children, nodes, depth|:
+                    return false if not proof_kernel_replay_expr_equal(nodes, children, children[left.children_start + index], children[right.children_start + index], depth + 1)
+                return true
+            if left.kind == "if":
+                return proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.right, right.right, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.auxiliary, right.auxiliary, depth + 1)
+            if left.kind == "call":
+                return false if left.auxiliary != right.auxiliary or left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
+                return false if not proof_kernel_replay_child_range_valid(left.children_start, left.children_count, children.count) or not proof_kernel_replay_child_range_valid(right.children_start, right.children_count, children.count)
+                return false if not proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
+                for index in 0..<left.children_count |index, left, right, children, nodes, depth|:
+                    left_argument: usize = children[left.children_start + index]
+                    right_argument: usize = children[right.children_start + index]
+                    return false if not proof_kernel_replay_expr_equal(nodes, children, left_argument, right_argument, depth + 1)
+                    left_argument_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, left_argument)
+                    right_argument_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, right_argument)
+                    return false if not left_argument_located.known or not right_argument_located.known or left_argument_located.node.kind != "call_arg" or right_argument_located.node.kind != "call_arg" or left_argument_located.node.name != right_argument_located.node.name
+                return true
+            if left.kind == "array" or left.kind == "tuple" or left.kind == "set" or left.kind == "dict":
+                return false if left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
+                return false if not proof_kernel_replay_child_range_valid(left.children_start, left.children_count, children.count) or not proof_kernel_replay_child_range_valid(right.children_start, right.children_count, children.count)
+                for index in 0..<left.children_count |index, left, right, children, nodes, depth|:
+                    return false if not proof_kernel_replay_expr_equal(nodes, children, children[left.children_start + index], children[right.children_start + index], depth + 1)
+                return true
+            if left.kind == "construct" or left.kind == "record-update":
+                return false if left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
+                return false if not proof_kernel_replay_child_range_valid(left.children_start, left.children_count, children.count) or not proof_kernel_replay_child_range_valid(right.children_start, right.children_count, children.count)
+                return false if not proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
+                for index in 0..<left.children_count |index, left, right, children, nodes, depth|:
+                    return false if not proof_kernel_replay_expr_equal(nodes, children, children[left.children_start + index], children[right.children_start + index], depth + 1)
+                return true
+            if left.kind == "quantifier":
+                return left.name == right.name and left.secondary_name == right.secondary_name and proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.right, right.right, depth + 1)
+            return false
+
+        def proof_kernel_replay_definitionally_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
+            # This normalization follows only a finite chain of explicit identity rewrites. The
+            # same depth budget as structural equality prevents a malformed arena from turning
+            # definitional comparison into unbounded host recursion.
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth)
+            return false if depth >= 127
+            return true if proof_kernel_replay_expr_equal(nodes, children, left_root, right_root, depth + 1)
+            return false if not proof_kernel_replay_valid(nodes, left_root)
+            left_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, left_root)
+            return false if not left_located.known
+            left: ElisaProofKernelCore::ProofKernelNode = left_located.node
+            if left.kind == "unary" and left.operator == "+":
+                return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1)
+            if left.kind == "binary":
+                amount: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left.right, depth + 1)
+                if left.operator == "+" or left.operator == "-":
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1) if amount.known and amount.value == 0
+                if left.operator == "*":
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1) if amount.known and amount.value == 1
+                    target: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right_root, depth + 1)
+                    return target.known and target.value == 0 if amount.known and amount.value == 0
+                    base: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left.left, depth + 1)
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.right, right_root, depth + 1) if base.known and base.value == 1
+                    return target.known and target.value == 0 if base.known and base.value == 0
+                if left.operator == "/":
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1) if amount.known and amount.value == 1
+                if left.operator == "%":
+                    target: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right_root, depth + 1)
+                    return target.known and target.value == 0 if amount.known and amount.value == 1
+                if left.operator == "&":
+                    base: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left.left, depth + 1)
+                    target: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right_root, depth + 1)
+                    return target.known and target.value == 0 if amount.known and amount.value == 0
+                    return target.known and target.value == 0 if base.known and base.value == 0
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1) if proof_kernel_replay_expr_equal(nodes, children, left.left, left.right, depth + 1)
+                if left.operator == "|":
+                    base: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left.left, depth + 1)
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1) if amount.known and amount.value == 0
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.right, right_root, depth + 1) if base.known and base.value == 0
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1) if proof_kernel_replay_expr_equal(nodes, children, left.left, left.right, depth + 1)
+                if left.operator == "^":
+                    base: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left.left, depth + 1)
+                    target: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right_root, depth + 1)
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1) if amount.known and amount.value == 0
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.right, right_root, depth + 1) if base.known and base.value == 0
+                    return target.known and target.value == 0 if proof_kernel_replay_expr_equal(nodes, children, left.left, left.right, depth + 1)
+                if left.operator == "<<" or left.operator == ">>":
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left.left, right_root, depth + 1) if amount.known and amount.value == 0
+            if not proof_kernel_replay_valid(nodes, right_root):
+                return false
+            right_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, right_root)
+            return false if not right_located.known
+            right: ElisaProofKernelCore::ProofKernelNode = right_located.node
+            if right.kind == "unary" and right.operator == "+":
+                return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1)
+            if right.kind == "binary":
+                amount: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right.right, depth + 1)
+                if right.operator == "+" or right.operator == "-":
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1) if amount.known and amount.value == 0
+                if right.operator == "*":
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1) if amount.known and amount.value == 1
+                    left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left_root, depth + 1)
+                    return left_constant.known and left_constant.value == 0 if amount.known and amount.value == 0
+                    base: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right.left, depth + 1)
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.right, depth + 1) if base.known and base.value == 1
+                    return left_constant.known and left_constant.value == 0 if base.known and base.value == 0
+                if right.operator == "/":
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1) if amount.known and amount.value == 1
+                if right.operator == "%":
+                    left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left_root, depth + 1)
+                    return left_constant.known and left_constant.value == 0 if amount.known and amount.value == 1
+                if right.operator == "&":
+                    base: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right.left, depth + 1)
+                    target: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left_root, depth + 1)
+                    return target.known and target.value == 0 if amount.known and amount.value == 0
+                    return target.known and target.value == 0 if base.known and base.value == 0
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1) if proof_kernel_replay_expr_equal(nodes, children, right.left, right.right, depth + 1)
+                if right.operator == "|":
+                    base: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right.left, depth + 1)
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1) if amount.known and amount.value == 0
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.right, depth + 1) if base.known and base.value == 0
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1) if proof_kernel_replay_expr_equal(nodes, children, right.left, right.right, depth + 1)
+                if right.operator == "^":
+                    base: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right.left, depth + 1)
+                    target: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left_root, depth + 1)
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1) if amount.known and amount.value == 0
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.right, depth + 1) if base.known and base.value == 0
+                    return target.known and target.value == 0 if proof_kernel_replay_expr_equal(nodes, children, right.left, right.right, depth + 1)
+                if right.operator == "<<" or right.operator == ">>":
+                    return proof_kernel_replay_definitionally_equal(nodes, children, left_root, right.left, depth + 1) if amount.known and amount.value == 0
+            return false
+
+        # Projection out of a fact, in a single signed walk. With `negated` false the question is
+        # whether `root` entails the goal; with it true, whether `not root` does. A conjunction
+        # entails each conjunct, a negated disjunction entails each negated disjunct, and a
+        # negation flips the sign. All three are classical and hold for any propositions; the
+        # proposition shape of every fact and goal is checked before this runs.
+        def proof_kernel_replay_fact_contains_signed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, goal_root: usize, negated: bool, depth: usize) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth)
+            return false if depth >= 127
+            return false if root >= nodes.count
+            return false if not proof_kernel_replay_valid(nodes, root)
+            if not negated:
+                return true if proof_kernel_replay_expr_equal(nodes, children, root, goal_root, 0)
+            else:
+                goal_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
+                if goal_located.known and goal_located.node.kind == "unary" and goal_located.node.operator == "not":
+                    return true if proof_kernel_replay_expr_equal(nodes, children, goal_located.node.left, root, 0)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "unary" and node.operator == "not":
+                return proof_kernel_replay_fact_contains_signed(nodes, children, node.left, goal_root, not negated, depth + 1)
+            if node.kind == "binary" and node.operator == "and" and not negated:
+                return proof_kernel_replay_fact_contains_signed(nodes, children, node.left, goal_root, false, depth + 1) or proof_kernel_replay_fact_contains_signed(nodes, children, node.right, goal_root, false, depth + 1)
+            if node.kind == "binary" and node.operator == "or" and negated:
+                return proof_kernel_replay_fact_contains_signed(nodes, children, node.left, goal_root, true, depth + 1) or proof_kernel_replay_fact_contains_signed(nodes, children, node.right, goal_root, true, depth + 1)
+            return false

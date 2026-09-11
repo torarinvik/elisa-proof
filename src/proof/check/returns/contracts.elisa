@@ -1,0 +1,225 @@
+extend ElisaProof:
+    private:
+        def proof_check_return_contracts(statement: Ast::Stmt, moved_roots: darray[sview]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
+            match statement:
+                Ast::Stmt.Contract(kind, expression, position):
+                    if kind == "assert":
+                        assertion: mutable Ast::Expr = proof_substitute(expression, names, values)
+                        assertion_has_call: bool = proof_expr_has_call(expression)
+                        # The assertion expression is evaluated at runtime before its
+                        # proposition becomes a fact. Any nested call can invalidate prior
+                        # state, so check its frame/precondition boundary and discard all
+                        # pre-call facts before publishing the assertion itself.
+                        proof_check_frame_calls_in_expression(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if assertion_has_call
+                        proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if assertion_has_call
+                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if assertion_has_call
+                        if lemma_steps:
+                            assertion_proven: bool = proof_certify_goal(facts, assertion, report, position.line, name, annotations)
+                            report.proof_obligation(assertion_proven)
+                            proof_add_derived_fact(facts, report, assertion, "lemma-step", position.line, name) if assertion_proven
+                            proof_add_goal_failure(report, "lemma-step-unproven", position.line, name, "lemma proof step is not entailed by earlier facts", facts, assertion) if not assertion_proven
+                        else:
+                            proof_add_traced_fact(facts, report, assertion, "runtime-assert", position.line, name) if proof_runtime_fact_is_stable(assertion, functions)
+                Ast::Stmt.Expr(expression, position):
+                    substituted_expression: mutable Ast::Expr = proof_substitute(expression, names, values)
+                    terminal_expression: bool = proof_expression_is_terminal(expression)
+                    match expression:
+                        Ast::Expr.Call(callee, arguments, _, _):
+                            proof_check_frame_call_children(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
+                            if proof_callable_name(callee) == "assert" and arguments.count == 1:
+                                assertion_call: Ast::Expr = proof_substitute(arguments[0], names, values)
+                                assertion_has_call: bool = proof_expr_has_call(arguments[0])
+                                # `assert(expr)` evaluates expr before publishing it. Do not
+                                # retain facts that a nested executable call may have
+                                # invalidated, even when the outer builtin is pure.
+                                proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if assertion_has_call
+                                proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if assertion_has_call
+                                if lemma_steps:
+                                    call_assertion_proven: bool = proof_certify_goal(facts, assertion_call, report, position.line, name, annotations)
+                                    report.proof_obligation(call_assertion_proven)
+                                    proof_add_derived_fact(facts, report, assertion_call, "lemma-step", position.line, name) if call_assertion_proven
+                                    proof_add_goal_failure(report, "lemma-step-unproven", position.line, name, "lemma proof step is not entailed by earlier facts", facts, assertion_call) if not call_assertion_proven
+                                else:
+                                    proof_add_traced_fact(facts, report, assertion_call, "runtime-assert", position.line, name) if proof_runtime_fact_is_stable(assertion_call, functions)
+                            if proof_callable_name(callee) != "assert":
+                                # Lemma calls are valid only in proof blocks (which are
+                                # checked by proof_check_block). A normal executable body
+                                # cannot gain ghost facts from an erased declaration.
+                                applied_lemma: mutable bool = false
+                                applied_lemma <- proof_apply_lemma(substituted_expression, facts, lemmas, names, values, report, name, annotations) if lemma_steps
+                                if not applied_lemma:
+                                    applied_function: bool = proof_apply_function(substituted_expression, Ast::Expr.Absent, facts, functions, names, frame_parameters, changes, preserves, report, name, annotations)
+                                    proof_check_opaque_call_frame(substituted_expression, names, frame_parameters, changes, preserves, functions, report, name) if not applied_function
+                                    # A statement call has no result binding to carry forward;
+                                    # even a framed summary may have changed an untracked local
+                                    # alias, so forget symbolic values at the call boundary.
+                                    # The values are settled against the pre-call facts, whose
+                                    # witnesses the clear below would keep anyway.
+                                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position)
+                                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if not applied_function
+                        _:
+                            proof_check_frame_calls_in_expression(expression, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(expression)
+                            substituted_expression <- proof_substitute(expression, names, values) if proof_expr_has_call(expression)
+                            proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if proof_expr_has_call(expression)
+                            proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
+                    flow.normal <- false if terminal_expression
+                Ast::Stmt.Return(value, position):
+                    if value is returned:
+                        match returned:
+                            Ast::Expr.Catch(guarded, arms, _):
+                                # Expression catches are checked arm-by-arm. The supported
+                                # shape is guaranteed by the statement admission gate above;
+                                # each arm receives its own post-state and the catch itself
+                                # is terminal at this return boundary.
+                                proof_check_catch_return(guarded, arms, names, values, facts, ensures, functions, frame_parameters, old_values, changes, preserves, report, name, annotations, position)
+                                flow.normal <- false
+                                return true
+                            Ast::Expr.Match(scrutinee, arms, _):
+                                # A value match has one return value per arm. Checking the
+                                # lowered conditional as one expression would let a summary
+                                # fact from one arm justify another, so preserve the source
+                                # branch states and check each arm through a synthetic return.
+                                proof_check_value_match_return(scrutinee, arms, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, position)
+                                flow.normal <- false
+                                return true
+                            _:
+                                pass
+                        return_value: mutable Ast::Expr = proof_substitute(returned, names, values)
+                        return_call_applied: mutable bool = false
+                        # Only a syntactic call at the return site is evaluated here. If a
+                        # local already contains a summarized call result, substituting it
+                        # produces a Call-shaped value but must not execute/apply that call a
+                        # second time; the declaration or assignment already established its
+                        # postcondition and may have consumed the caller's pre-call facts.
+                        match returned:
+                            Ast::Expr.Call(_, _, _, _):
+                                proof_check_frame_call_children(returned, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
+                                return_call_applied <- proof_apply_function(return_value, return_value, facts, functions, names, frame_parameters, changes, preserves, report, name, annotations)
+                                proof_check_opaque_call_frame(return_value, names, frame_parameters, changes, preserves, functions, report, name) if not return_call_applied
+                                return_value <- Ast::Expr.Invalid if not return_call_applied
+                            Ast::Expr.GetElse(guarded, _, _):
+                                # A GetElse is transparent only after its recovery has been
+                                # checked. If its successful value is a syntactic call, apply
+                                # that summary exactly once here, just as for `return call()`.
+                                # This is distinct from a substituted local whose value merely
+                                # happens to have Call shape.
+                                match guarded:
+                                    Ast::Expr.Call(_, _, _, _):
+                                        proof_check_frame_call_children(guarded, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
+                                        return_call_applied <- proof_apply_function(return_value, return_value, facts, functions, names, frame_parameters, changes, preserves, report, name, annotations)
+                                        proof_check_opaque_call_frame(return_value, names, frame_parameters, changes, preserves, functions, report, name) if not return_call_applied
+                                        return_value <- Ast::Expr.Invalid if not return_call_applied
+                                    _:
+                                        pass
+                            _:
+                                proof_check_frame_calls_in_expression(returned, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(returned)
+                                return_value <- proof_substitute(returned, names, values) if proof_expr_has_call(returned)
+                        return_value <- proof_rewrite_pure_call_summaries(return_value, facts, functions, 0) if proof_expr_has_call(return_value)
+                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if proof_expr_has_call(return_value) and not return_call_applied
+                        proof_invalidate_moved_roots(moved_roots, names, values, facts, report, name, position)
+                        result_name: mutable darray[sview] = ["result"]
+                        result_value: mutable darray[Ast::Expr] = [return_value]
+                        for ensure in ensures |report, name, facts, result_name, result_value, position|:
+                            current_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
+                            goal: mutable Ast::Expr = proof_substitute(current_goal, result_name, result_value)
+                            goal <- proof_rewrite_pure_call_summaries(goal, facts, functions, 0) if proof_expr_has_call(goal)
+                            proof_add_pure_call_witnesses(goal, facts, functions, report, position.line, name, 0) if proof_expr_has_call(goal)
+                            proven: bool = proof_certify_goal_with_rule(facts, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
+                            report.proof_obligation(proven)
+                            proof_add_goal_failure(report, "ensure-unproven", position.line, name, "return value does not establish ensure", facts, goal) if not proven
+                    else:
+                        # A void return still completes normally and must establish its
+                        # postconditions. There is no result binding to substitute, so a
+                        # result-dependent ensure fails closed rather than disappearing.
+                        for ensure in ensures |report, name, facts, names, values, frame_parameters, old_values, annotations, position|:
+                            goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
+                            proven: mutable bool = false
+                            if proof_expr_mentions_name(goal, "result"):
+                                failed_rule: mutable sview = proof_quantifier_rule(ensure, annotations)
+                                failed_rule <- "goal" if failed_rule == ""
+                                proof_add_goal_attempt(report, facts, goal, position.line, name, failed_rule, false)
+                            else:
+                                proven <- proof_certify_goal_with_rule(facts, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
+                            report.proof_obligation(proven)
+                            proof_add_goal_failure(report, "ensure-unproven", position.line, name, "void return does not establish ensure", facts, goal) if not proven
+                        proof_invalidate_moved_roots(moved_roots, names, values, facts, report, name, position)
+                    flow.normal <- false
+                Ast::Stmt.If(condition, then_body, else_body, position):
+                    condition_value: mutable Ast::Expr = proof_substitute(condition, names, values)
+                    condition_has_call: bool = proof_expr_has_call(condition)
+                    condition_facts_stable: bool = not condition_has_call or proof_contract_calls_are_pure(condition, functions)
+                    proof_check_frame_calls_in_expression(condition, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if condition_has_call
+                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if condition_has_call
+                    branch_value_count: usize = values.count
+                    then_names: mutable darray[sview] = proof_copy_names(names)
+                    then_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                    then_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                    then_flow: mutable ProofFlow = proof_empty_flow()
+                    proof_clear_facts_after_call(then_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
+                    proof_add_branch_condition_facts(then_facts, report, condition_value, position.line, name)
+                    proof_check_returns(then_body, &then_names, &then_values, &then_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &then_flow)
+                    else_names: mutable darray[sview] = proof_copy_names(names)
+                    else_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                    else_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                    else_flow: mutable ProofFlow = proof_empty_flow()
+                    negated: Ast::Expr = proof_branch_negation(condition_value, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0})
+                    proof_clear_facts_after_call(else_facts, names, frame_parameters, report, name) if condition_has_call and not condition_facts_stable
+                    proof_add_branch_condition_facts(else_facts, report, negated, position.line, name)
+                    proof_check_returns(else_body, &else_names, &else_values, &else_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &else_flow)
+                    then_falls_through: bool = then_flow.normal
+                    else_falls_through: bool = else_flow.normal
+                    flow.breaks <- then_flow.breaks or else_flow.breaks
+                    flow.continues <- then_flow.continues or else_flow.continues
+                    flow.valid <- then_flow.valid and else_flow.valid
+                    proof_append_continue_states(flow, then_flow)
+                    proof_append_continue_states(flow, else_flow)
+                    # If one branch definitely terminates, the other branch is the complete
+                    # state at the following statement. Merge only the surviving branch and
+                    # only when it did not introduce a branch-local binding; leaking a local
+                    # name or a fact mentioning it would be unsound. When both branches can
+                    # continue, retain the pre-branch state as a conservative intersection.
+                    if not then_falls_through and else_falls_through:
+                        if condition_facts_stable and else_names.count == names.count and else_values.count >= branch_value_count:
+                            for index in 0..<branch_value_count |index, values, else_values|:
+                                values[index] <- else_values[index]
+                            facts.clear()
+                            facts.extend(else_facts)
+                        else:
+                            proof_forget_values(names, values, position)
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                            # Control reaches the next statement only through the surviving
+                            # branch, so its end state holds here. The opaque condition call
+                            # forbids importing that state wholesale, but a call-stable fact
+                            # is over by-value scalars of this frame that nothing references:
+                            # true at the end of the branch means true at this point.
+                            proof_restore_call_stable_facts(else_facts, facts, names, frame_parameters, report, name, report.aliased_names) if else_names.count == names.count
+                    elif then_falls_through and not else_falls_through:
+                        if condition_facts_stable and then_names.count == names.count and then_values.count >= branch_value_count:
+                            for index in 0..<branch_value_count |index, values, then_values|:
+                                values[index] <- then_values[index]
+                            facts.clear()
+                            facts.extend(then_facts)
+                        else:
+                            proof_forget_values(names, values, position)
+                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                            proof_restore_call_stable_facts(then_facts, facts, names, frame_parameters, report, name, report.aliased_names) if then_names.count == names.count
+                    elif not then_falls_through and not else_falls_through:
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                        flow.normal <- false
+                    if not lemma_steps and (proof_body_may_modify(then_body) or proof_body_may_modify(else_body)):
+                        proof_forget_values(names, values, position)
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                        # The arms were executed symbolically, so a fact still standing at a
+                        # surviving arm's exit is true on that path. Import the call-stable
+                        # ones from the paths that actually reach this statement, and the
+                        # recorded values those paths agree on.
+                        proof_restore_branch_values(values, names, then_values, else_values, then_falls_through and then_names.count == names.count, else_falls_through and else_names.count == names.count, branch_value_count, facts, frame_parameters, report, name)
+                        if then_falls_through and else_falls_through:
+                            proof_restore_branch_stable_facts(then_facts, else_facts, facts, names, frame_parameters, report, name)
+                        elif then_falls_through:
+                            proof_restore_call_stable_facts(then_facts, facts, names, frame_parameters, report, name, report.aliased_names)
+                        elif else_falls_through:
+                            proof_restore_call_stable_facts(else_facts, facts, names, frame_parameters, report, name, report.aliased_names)
+                _:
+                    return false
+            return true

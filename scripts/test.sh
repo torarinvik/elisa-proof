@@ -2928,4 +2928,15 @@ if [[ "$rejected_operator_effect_status" -ne 0 ]]; then
     exit 1
 fi
 
+# Keep the proof assistant reviewable and preserve the private/public module boundaries. This
+# guard covers implementation source only; examples and long-form audit documentation are test
+# fixtures and are intentionally allowed to be larger.
+while IFS= read -r proof_source; do
+    proof_lines=$(wc -l < "$proof_source")
+    if [[ "$proof_lines" -gt 600 ]]; then
+        printf 'proof source exceeds 600 lines: %s (%s)\n' "$proof_source" "$proof_lines" >&2
+        exit 1
+    fi
+done < <(find "$ROOT_DIR/src" -type f -name '*.elisa' -print | sort)
+
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

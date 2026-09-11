@@ -1,0 +1,467 @@
+extend ElisaProof:
+    private:
+        def proof_statement_position(statement: Ast::Stmt) -> Ast::Pos:
+            match statement:
+                Ast::Stmt.Expr(_, position):
+                    return position
+                Ast::Stmt.Block(_, _, _, _, position):
+                    return position
+                Ast::Stmt.VarDecl(_, _, _, position):
+                    return position
+                Ast::Stmt.Assign(_, _, _, position):
+                    return position
+                Ast::Stmt.If(_, _, _, position):
+                    return position
+                Ast::Stmt.While(_, _, position):
+                    return position
+                Ast::Stmt.For(_, _, _, _, position):
+                    return position
+                Ast::Stmt.Return(_, position):
+                    return position
+                Ast::Stmt.Break(_, position):
+                    return position
+                Ast::Stmt.Continue(_, position):
+                    return position
+                Ast::Stmt.Match(_, _, position):
+                    return position
+                Ast::Stmt.Contract(_, _, position):
+                    return position
+                _:
+                    return Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+
+        def proof_runtime_calls_are_pure(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    called: sview = proof_callable_name(callee)
+                    called_index: usize = proof_function_index(functions, called)
+                    return false if called == "" or called_index >= functions.pure.count or not functions.pure[called_index]
+                    return false if not proof_runtime_calls_are_pure(callee, functions)
+                    for argument in arguments |functions|:
+                        return false if not proof_runtime_calls_are_pure(argument, functions)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_runtime_calls_are_pure(inner, functions)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_runtime_calls_are_pure(operand, functions)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_runtime_calls_are_pure(left, functions) and proof_runtime_calls_are_pure(right, functions)
+                Ast::Expr.Field(object, _, _):
+                    return proof_runtime_calls_are_pure(object, functions)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_runtime_calls_are_pure(base, functions)
+                Ast::Expr.Index(object, index, _):
+                    return proof_runtime_calls_are_pure(object, functions) and proof_runtime_calls_are_pure(index, functions)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_runtime_calls_are_pure(object, functions) and proof_runtime_calls_are_pure(low, functions) and proof_runtime_calls_are_pure(high, functions)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_runtime_calls_are_pure(object, functions)
+                    for argument in arguments |functions|:
+                        return false if not proof_runtime_calls_are_pure(argument, functions)
+                    return true
+                Ast::Expr.Move(operand, _):
+                    return proof_runtime_calls_are_pure(operand, functions)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_runtime_calls_are_pure(element, functions)
+                    return true
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_runtime_calls_are_pure(element, functions)
+                    return true
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_runtime_calls_are_pure(element, functions)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |functions|:
+                        return false if not proof_runtime_calls_are_pure(entry.key, functions) or not proof_runtime_calls_are_pure(entry.value, functions)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |functions|:
+                        return false if not proof_runtime_calls_are_pure(field.value, functions)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_runtime_calls_are_pure(base, functions)
+                    for field in fields |functions|:
+                        return false if not proof_runtime_calls_are_pure(field.value, functions)
+                    return true
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_runtime_calls_are_pure(condition, functions) and proof_runtime_calls_are_pure(then_expr, functions) and proof_runtime_calls_are_pure(else_expr, functions)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return false if not proof_runtime_calls_are_pure(scrutinee, functions)
+                    for arm in arms |functions|:
+                        return false if not proof_runtime_calls_are_pure(arm.guard, functions)
+                        return false if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return false if not proof_runtime_calls_are_pure(value, functions)
+                            _:
+                                return false
+                    return true
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_runtime_calls_are_pure(iterable, functions) and proof_runtime_calls_are_pure(condition, functions) and proof_runtime_calls_are_pure(body, functions)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_runtime_calls_are_pure(base, functions) and proof_runtime_calls_are_pure(predicate, functions)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return false if not proof_runtime_calls_are_pure(initializer, functions)
+                            _:
+                                return false
+                    return proof_runtime_calls_are_pure(value, functions)
+                _:
+                    return true
+
+        def proof_runtime_expression_calls_allowed(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            return not proof_expr_has_call(expression) or proof_expr_is_call_rooted(expression) or proof_runtime_calls_are_pure(expression, functions)
+
+        # A branch condition may carry an executable call anywhere the call runs whenever the
+        # condition is evaluated at all. The `if` machinery frames every call in the condition,
+        # forgets symbolic values, and clears unstable facts on both arms before recording the
+        # branch fact, which is exactly the model of a call that certainly happened — so the older
+        # restriction to a call at the root was conservatism, not a requirement.
+        #
+        # This is deliberately narrower than `proof_runtime_expression_calls_allowed`, which still
+        # governs `while`, `for`, `match`, `catch` and `assert`. An assertion in particular
+        # publishes its expression as a fact through a different path that would hand back the
+        # pre-call symbolic value; `examples/rejected_assert_nested_call.elisa` pins that.
+        # A return, statement, declaration or assignment value. Its handler walks every call in
+        # evaluation order and substitutes the value only afterwards, so the same admission as a
+        # branch condition applies: a call is modelled wherever its evaluation is unconditional,
+        # and on the right of a short-circuit only under the conditional walk. The loop, match
+        # and assertion forms keep the root-only rule; each publishes its expression through a
+        # path that has not been audited for a nested call.
+        def proof_runtime_value_calls_allowed(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            return proof_runtime_expression_calls_allowed(expression, functions) or proof_runtime_calls_evaluate_unconditionally(expression, functions, 0)
+
+        def proof_runtime_branch_calls_allowed(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            return not proof_expr_has_call(expression) or proof_runtime_calls_evaluate_unconditionally(expression, functions, 0) or proof_runtime_calls_are_pure(expression, functions)
+
+        # A call hidden behind a short-circuit, a ternary or a recovery arm may not happen, so
+        # only a pure one is admitted there. Every shape this does not reason about explicitly
+        # falls through to the no-executable-call case rather than being assumed unconditional.
+        def proof_runtime_calls_evaluate_unconditionally(expression: Ast::Expr, functions: ProofFunctionTable&, depth: usize) -> bool:
+            requires depth <= 63
+            decreases 63 - depth
+            return false if depth >= 63
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    # Arguments and the callee term are evaluated before the call itself.
+                    return false if not proof_runtime_calls_evaluate_unconditionally(callee, functions, depth + 1)
+                    for argument in arguments |functions, depth|:
+                        return false if not proof_runtime_calls_evaluate_unconditionally(argument, functions, depth + 1)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_runtime_calls_evaluate_unconditionally(inner, functions, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_runtime_calls_evaluate_unconditionally(operand, functions, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_runtime_calls_evaluate_unconditionally(object, functions, depth + 1)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_runtime_calls_evaluate_unconditionally(base, functions, depth + 1)
+                Ast::Expr.Move(operand, _):
+                    return proof_runtime_calls_evaluate_unconditionally(operand, functions, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_runtime_calls_evaluate_unconditionally(left, functions, depth + 1)
+                    # `and` and `or` evaluate their right operand only for one value of the left.
+                    # A pure call there has no effect to skip. An impure one is admitted when it
+                    # would be admitted unconditionally: the expression walk checks it as if it
+                    # ran and keeps nothing only the run could establish.
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        return not proof_expr_has_executable_call(right) or proof_runtime_calls_are_pure(right, functions) or proof_runtime_calls_evaluate_unconditionally(right, functions, depth + 1)
+                    return proof_runtime_calls_evaluate_unconditionally(right, functions, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_runtime_calls_evaluate_unconditionally(object, functions, depth + 1) and proof_runtime_calls_evaluate_unconditionally(index, functions, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_runtime_calls_evaluate_unconditionally(object, functions, depth + 1)
+                    return proof_runtime_calls_evaluate_unconditionally(low, functions, depth + 1) and proof_runtime_calls_evaluate_unconditionally(high, functions, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_runtime_calls_evaluate_unconditionally(object, functions, depth + 1)
+                    for argument in arguments |functions, depth|:
+                        return false if not proof_runtime_calls_evaluate_unconditionally(argument, functions, depth + 1)
+                    return true
+                _:
+                    return not proof_expr_has_executable_call(expression)
+
+        # Expression-position catch is admitted only for a closed, value-producing arm shape.
+        # The first arm is the successful payload binding; subsequent arms handle errors and the
+        # final arm must be an explicit catch-all. This keeps the branch relation finite and
+        # prevents an unmodeled error variant from disappearing between the success summary and
+        # the returned value.
+        def proof_catch_arm_value(arm: Ast::MatchArm) -> (known: bool, value: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if arm.body.count != 1
+            match arm.body[0]:
+                Ast::Stmt.Expr(value, _):
+                    return (true, value)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_catch_error_pattern_supported(pattern: Ast::Pattern) -> bool:
+            match pattern:
+                Ast::Pattern.Wildcard:
+                    return true
+                Ast::Pattern.TypeBind(type_name, _):
+                    return type_name == "error"
+                Ast::Pattern.Variant(_, fields):
+                    # Payload projections are not part of the error-state model yet. A
+                    # payload-free named variant is still an exact dispatch label.
+                    return fields.count == 0
+                _:
+                    return false
+
+        def proof_catch_value_supported(guarded: Ast::Expr, arms: darray[Ast::MatchArm], functions: ProofFunctionTable&) -> bool:
+            return false if arms.count < 2
+            return false if not proof_expr_supported(guarded) or not proof_runtime_expression_calls_allowed(guarded, functions)
+            match arms[0].pattern:
+                Ast::Pattern.Binding(binding):
+                    return false if binding == ""
+                Ast::Pattern.Wildcard:
+                    pass
+                _:
+                    return false
+            for arm_index in 0..<arms.count |arm_index, arms, functions|:
+                arm: Ast::MatchArm = arms[arm_index]
+                match arm.guard:
+                    Ast::Expr.Absent:
+                        pass
+                    _:
+                        return false
+                arm_value: (known: bool, value: Ast::Expr) = proof_catch_arm_value(arm)
+                return false if not arm_value.known or proof_expr_has_move(arm_value.value)
+                # Catch arm values run after the guarded call has selected a branch. A pure
+                # executable value call has no additional error/frame state to split here and is
+                # safe to evaluate in the arm-local state; effectful or unresolved calls remain
+                # outside this expression evaluator.
+                return false if proof_expr_has_call(arm_value.value) and not proof_runtime_calls_are_pure(arm_value.value, functions)
+                return false if not proof_expr_supported(arm_value.value) or not proof_runtime_expression_calls_allowed(arm_value.value, functions)
+                if arm_index > 0:
+                    return false if not proof_catch_error_pattern_supported(arm.pattern)
+            return proof_catch_error_pattern_supported(arms[arms.count - 1].pattern)
+
+        # `proof_expr_supported` intentionally excludes executable `new[r]` terms. At a call
+        # value boundary, however, a direct region allocation is a legal temporary argument. The
+        # resource checker gives it an explicit allocation/call transition; this gate admits only
+        # that narrow shape and still requires every non-allocation argument to be an ordinary
+        # replayable runtime expression.
+        def proof_statement_region_new_call_argument_supported(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            match expression:
+                Ast::Expr.RegionNew(operand, region, _):
+                    return region != "" and proof_expr_supported(operand) and proof_runtime_expression_calls_allowed(operand, functions)
+                Ast::Expr.Paren(inner, _):
+                    match inner:
+                        Ast::Expr.RegionNew(_, _, _):
+                            return proof_statement_region_new_call_argument_supported(inner, functions)
+                        _:
+                            pass
+                _:
+                    pass
+            return proof_expr_supported(expression) and proof_runtime_expression_calls_allowed(expression, functions)
+
+        def proof_statement_region_new_call_supported(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_expr_supported(callee) or not proof_runtime_expression_calls_allowed(callee, functions)
+                    for argument in arguments |arguments, functions|:
+                        return false if not proof_statement_region_new_call_argument_supported(argument, functions)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_statement_region_new_call_supported(inner, functions)
+                _:
+                    return false
+
+        # `get EXPR else <control-flow>` is an executable value form, but only at a statement
+        # value boundary. The recovery path is checked separately by proof_check_returns; a
+        # nested GetElse would require expression-level control-flow joins and remains opaque.
+        def proof_statement_value_supported(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            match expression:
+                Ast::Expr.RegionNew(operand, _, _):
+                    # `new[r] value` is an executable resource transition, not a logical term.
+                    # Its lifetime is checked by the resource pass; only the allocated operand
+                    # enters this runtime-expression shape gate.
+                    return proof_expr_supported(operand) and proof_runtime_expression_calls_allowed(operand, functions)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return false if recovery.count == 0
+                    return proof_expr_supported(guarded) and proof_runtime_expression_calls_allowed(guarded, functions)
+                Ast::Expr.Catch(guarded, arms, _):
+                    return proof_catch_value_supported(guarded, arms, functions)
+                Ast::Expr.Call(_, _, _, _):
+                    return proof_statement_region_new_call_supported(expression, functions)
+                Ast::Expr.Paren(inner, _):
+                    match inner:
+                        Ast::Expr.Call(_, _, _, _):
+                            return proof_statement_region_new_call_supported(expression, functions)
+                        _:
+                            pass
+                    return proof_expr_supported(expression) and proof_runtime_value_calls_allowed(expression, functions)
+                _:
+                    return proof_expr_supported(expression) and proof_runtime_value_calls_allowed(expression, functions)
+
+        # The compiler represents `raise E.Tag` as a call-shaped expression, but its operational
+        # meaning is a terminating exceptional transfer rather than an ordinary statement call.
+        # Treat only the reserved terminal heads as such; arbitrary user calls remain normal and
+        # must not accidentally discharge a get/try recovery path.
+        def proof_expression_is_terminal(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, _, _, _):
+                    called: sview = proof_callable_name(callee)
+                    return called == "raise" or called == "panic"
+                Ast::Expr.Paren(inner, _):
+                    return proof_expression_is_terminal(inner)
+                _:
+                    return false
+
+        # A primitive operator may contain a call to a pure scalar function, such as a checked
+        # numeric bound helper. The ordinary scalar witness relation intentionally does not treat
+        # calls as values; runtime admission can do so only after the function table proves both
+        # scalar return shape and transitive purity. This keeps explicit call state handling in
+        # force while avoiding a false rejection of `x < pure_bound() - y`.
+        def proof_scalar_runtime_term_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, depth: usize) -> bool:
+            return true if proof_scalar_term_witnessed(expression, facts, depth)
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_runtime_term_witnessed(inner, facts, functions, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    called: sview = proof_callable_name(callee)
+                    called_index: usize = proof_function_index(functions, called)
+                    return false if called == "" or called_index >= functions.pure.count or not functions.pure[called_index]
+                    return false if called_index >= functions.return_scalar.count or not functions.return_scalar[called_index]
+                    return false if not proof_runtime_calls_are_pure(expression, functions)
+                    for argument in arguments |facts, functions, depth|:
+                        return false if not proof_scalar_runtime_term_witnessed(argument, facts, functions, depth + 1)
+                    return true
+                Ast::Expr.Unary(operator, operand, _):
+                    return proof_congruent_unary_operator(operator) and proof_scalar_runtime_term_witnessed(operand, facts, functions, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_congruent_binary_operator(operator) and proof_scalar_runtime_term_witnessed(left, facts, functions, depth + 1) and proof_scalar_runtime_term_witnessed(right, facts, functions, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_scalar_runtime_term_witnessed(condition, facts, functions, depth + 1) and proof_scalar_runtime_term_witnessed(then_expression, facts, functions, depth + 1) and proof_scalar_runtime_term_witnessed(else_expression, facts, functions, depth + 1)
+                _:
+                    return false
+
+        # Binary and unary syntax is not automatically a primitive operation in Elisa: the
+        # compiler may lower it to a user protocol method. Let it cross a proof-state boundary
+        # only when the complete term is witnessed as a primitive scalar by the compiler-derived
+        # fact set. Indexing is treated the same way because a non-builtin receiver may dispatch
+        # to a user `__index__` implementation. Explicit calls, moves, and region allocations
+        # have separate state/resource models; this walk only prevents an unmodeled operator from
+        # masquerading as a pure expression inside one of them.
+        def proof_expr_has_unmodeled_operator(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, depth: usize) -> bool:
+            return true if depth >= 64
+            match expression:
+                Ast::Expr.Invalid:
+                    return true
+                Ast::Expr.IntLit(_, _):
+                    return false
+                Ast::Expr.FloatLit(_, _):
+                    return false
+                Ast::Expr.StringLit(_, _):
+                    return false
+                Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.BoolLit(_, _):
+                    return false
+                Ast::Expr.Absent:
+                    return false
+                Ast::Expr.Ident(_, _):
+                    return false
+                Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_unmodeled_operator(inner, facts, functions, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    protocol: sview = proof_builtin_unary_operator_protocol(operator)
+                    return true if protocol != "" and not proof_runtime_operator_expression_witnessed(expression, facts, functions, 0)
+                    return proof_expr_has_unmodeled_operator(operand, facts, functions, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    protocol: sview = proof_builtin_operator_protocol(operator)
+                    return true if protocol != "" and not proof_runtime_operator_expression_witnessed(expression, facts, functions, 0)
+                    return proof_expr_has_unmodeled_operator(left, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(right, facts, functions, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_expr_has_unmodeled_operator(callee, facts, functions, depth + 1)
+                    for argument in arguments |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(argument, facts, functions, depth + 1)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_unmodeled_operator(object, facts, functions, depth + 1)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_unmodeled_operator(base, facts, functions, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    # `value.cast[Type]` uses the Index AST shape for a type application. The
+                    # bracket is compile-time type syntax, so it is neither a runtime index nor
+                    # an overloaded `__index__` dispatch.
+                    return proof_expr_has_unmodeled_operator(object, facts, functions, depth + 1) if proof_is_type_cast_index(object)
+                    return true if not proof_builtin_index_expression_witnessed(expression, facts)
+                    return proof_expr_has_unmodeled_operator(object, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(index, facts, functions, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_unmodeled_operator(object, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(low, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(high, facts, functions, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return proof_expr_has_unmodeled_operator(object, facts, functions, depth + 1) if proof_is_type_cast_index(object)
+                    return true if not proof_builtin_index_expression_witnessed(expression, facts)
+                    return true if proof_expr_has_unmodeled_operator(object, facts, functions, depth + 1)
+                    for argument in arguments |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(argument, facts, functions, depth + 1)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_has_unmodeled_operator(operand, facts, functions, depth + 1)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_unmodeled_operator(operand, facts, functions, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(element, facts, functions, depth + 1)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(element, facts, functions, depth + 1)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(element, facts, functions, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(entry.key, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(entry.value, facts, functions, depth + 1)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(field.value, facts, functions, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_unmodeled_operator(base, facts, functions, depth + 1)
+                    for field in fields |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(field.value, facts, functions, depth + 1)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_unmodeled_operator(condition, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(then_expr, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(else_expr, facts, functions, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_unmodeled_operator(iterable, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(condition, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(body, facts, functions, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_unmodeled_operator(base, facts, functions, depth + 1) or proof_expr_has_unmodeled_operator(predicate, facts, functions, depth + 1)
+                Ast::Expr.Match(_, _, _):
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
+                    return true if not lowered.known
+                    return proof_expr_has_unmodeled_operator(lowered.value, facts, functions, depth + 1)
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_expr_has_unmodeled_operator(guarded, facts, functions, depth + 1)
+                    for arm in arms |facts, functions, depth|:
+                        return true if proof_expr_has_unmodeled_operator(arm.guard, facts, functions, depth + 1)
+                        for arm_statement in arm.body |facts, functions|:
+                            return true if proof_statement_has_unmodeled_operator(arm_statement, facts, functions)
+                    return false
+                Ast::Expr.GetElse(guarded, _, _):
+                    return proof_expr_has_unmodeled_operator(guarded, facts, functions, depth + 1)
+                Ast::Expr.Lambda(_, _, _):
+                    return true
+                Ast::Expr.Block(statements, value, captures, _):
+                    return true if captures.count > 0
+                    for statement in statements |facts, depth|:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return true if proof_expr_has_unmodeled_operator(initializer, facts, functions, depth + 1)
+                            _:
+                                return true
+                    return proof_expr_has_unmodeled_operator(value, facts, functions, depth + 1)
+                _:
+                    return true
+

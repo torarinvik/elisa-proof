@@ -1,0 +1,497 @@
+def proof_cstr_equals(left: cstr, right: sview) -> bool:
+    index: mutable usize = 0
+    right_length: usize = sview_len(right)
+    while index < right_length |index, left, right|:
+        return false if left[index] == 0 or left[index] != sview_at(right, index)
+        index <- index + 1
+    return left[index] == 0
+
+def proof_cstr_u32(value: cstr) -> (valid: bool, parsed: u32):
+    return (false, 0) if value[0] == 0
+    result: mutable u32 = 0
+    index: mutable usize = 0
+    while value[index] != 0 |value, result, index|:
+        byte: u8 = value[index]
+        return (false, 0) if byte < '0'.u8() or byte > '9'.u8()
+        digit: u32 = (byte - '0'.u8()).u32()
+        return (false, 0) if result > 429496729 or result == 429496729 and digit > 5
+        result <- result * 10 + digit
+        index <- index + 1
+    return (true, result)
+
+def proof_push_json_string(buffer: mutable darray[u8]&, value: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    buffer.push('"'.u8())
+    for index in 0..<sview_len(value) |index, buffer, value|:
+        byte: u8 = sview_at(value, index)
+        if byte == '"'.u8() or byte == '\\'.u8():
+            buffer.push('\\'.u8())
+            buffer.push(byte)
+        elif byte == '\n'.u8():
+            proof_push(buffer, "\\n")
+        elif byte == '\r'.u8():
+            proof_push(buffer, "\\r")
+        elif byte == '\t'.u8():
+            proof_push(buffer, "\\t")
+        elif byte < 32:
+            proof_push(buffer, "?")
+        else:
+            buffer.push(byte)
+    buffer.push('"'.u8())
+
+def proof_push_json_bytes(buffer: mutable darray[u8]&, value: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    # `Semantic::diagnostic_message` returns owned bytes rather than an sview. Keep the JSON
+    # encoder's escaping rules identical for compiler diagnostics without manufacturing a view
+    # whose lifetime would outlive the temporary message.
+    buffer.push('"'.u8())
+    for index in 0..<value.count |index, value, buffer|:
+        byte: u8 = value[index]
+        if byte == '"'.u8() or byte == '\\'.u8():
+            buffer.push('\\'.u8())
+            buffer.push(byte)
+        elif byte == '\n'.u8():
+            proof_push(buffer, "\\n")
+        elif byte == '\r'.u8():
+            proof_push(buffer, "\\r")
+        elif byte == '\t'.u8():
+            proof_push(buffer, "\\t")
+        elif byte < 32:
+            proof_push(buffer, "?")
+        else:
+            buffer.push(byte)
+    buffer.push('"'.u8())
+
+def proof_push_json_i64(buffer: mutable darray[u8]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    if value == 0 - 9223372036854775807 - 1:
+        proof_push(buffer, "-9223372036854775808")
+        return
+    working: mutable i64 = value
+    if working < 0:
+        buffer.push('-'.u8())
+        working <- 0 - working
+    digits: mutable darray[u8] = []
+    remaining: mutable i64 = working
+    if remaining == 0:
+        buffer.push('0'.u8())
+        return
+    while remaining > 0 |digits, remaining|:
+        digits.push(('0'.u8()) + (remaining % 10).u8())
+        remaining <- remaining / 10
+    index: mutable usize = digits.count
+    while index > 0 |buffer, digits, index|:
+        index <- index - 1
+        buffer.push(digits[index])
+
+def proof_push_json_operator(buffer: mutable darray[u8]&, operator: TokenKind) -> void can[Memory.Allocate, Abort.Panic]:
+    value: mutable sview = "unknown"
+    value <- "+" if operator == TokenKind.Plus
+    value <- "-" if operator == TokenKind.Minus
+    value <- "*" if operator == TokenKind.Star
+    value <- "/" if operator == TokenKind.Slash
+    value <- "%" if operator == TokenKind.Percent
+    value <- "==" if operator == TokenKind.EqEq
+    value <- "!=" if operator == TokenKind.BangEq
+    value <- "<" if operator == TokenKind.Lt
+    value <- ">" if operator == TokenKind.Gt
+    value <- "<=" if operator == TokenKind.LtEq
+    value <- ">=" if operator == TokenKind.GtEq
+    value <- "and" if operator == TokenKind.And
+    value <- "or" if operator == TokenKind.Or
+    value <- "=>" if operator == TokenKind.FatArrow
+    value <- "not" if operator == TokenKind.Not
+    value <- "in" if operator == TokenKind.In
+    value <- "is" if operator == TokenKind.Is
+    value <- "as" if operator == TokenKind.As
+    value <- "|" if operator == TokenKind.Pipe
+    value <- "^" if operator == TokenKind.Caret
+    value <- "&" if operator == TokenKind.Ampersand
+    value <- "<<" if operator == TokenKind.LShift
+    value <- ">>" if operator == TokenKind.RShift
+    value <- "range_lt" if operator == TokenKind.RangeLt
+    value <- "range_le" if operator == TokenKind.RangeLe
+    proof_push_json_string(buffer, value)
+
+# Render an expression back into Elisa source syntax for a human reader. This is presentation
+# only: it never decides anything and is never read back as evidence, so a form it does not know
+# how to spell is printed as an explicit `<kind ...>` marker rather than as plausible-looking
+# source. A nested binary is always parenthesized, so the printed form is unambiguous without a
+# precedence table that could drift from the parser's.
+def proof_push_elisa_expr(buffer: mutable darray[u8]&, expression: Ast::Expr, grouped: bool, depth: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    requires depth <= 63
+    decreases 63 - depth
+    if depth >= 63:
+        proof_push(buffer, "<depth>")
+        return
+    # An operand position groups a nested binary or ternary, so the printed form is unambiguous
+    # without a precedence table that could drift from the parser's.
+    needs_group: mutable bool = false
+    match expression:
+        Ast::Expr.Binary(_, _, _, _):
+            needs_group <- grouped
+        Ast::Expr.If(_, _, _, _):
+            needs_group <- grouped
+        _:
+            pass
+    proof_push(buffer, "(") if needs_group
+    match expression:
+        Ast::Expr.Invalid:
+            proof_push(buffer, "<invalid>")
+        Ast::Expr.Absent:
+            proof_push(buffer, "absent")
+        Ast::Expr.IntLit(value, _):
+            proof_push_json_i64(buffer, value)
+        Ast::Expr.FloatLit(value, _):
+            proof_push(buffer, value)
+        Ast::Expr.StringLit(value, _):
+            proof_push_json_string(buffer, value)
+        Ast::Expr.CharLit(value, _):
+            proof_push(buffer, "'")
+            proof_push(buffer, value)
+            proof_push(buffer, "'")
+        Ast::Expr.BoolLit(value, _):
+            proof_push(buffer, "true" if value else "false")
+        Ast::Expr.Ident(name, _):
+            proof_push(buffer, name)
+        Ast::Expr.Paren(inner, _):
+            proof_push(buffer, "(")
+            proof_push_elisa_expr(buffer, inner, false, depth + 1)
+            proof_push(buffer, ")")
+        Ast::Expr.Unary(operator, operand, _):
+            if operator == TokenKind.Not:
+                proof_push(buffer, "not ")
+            else:
+                proof_push_elisa_operator(buffer, operator)
+            proof_push_elisa_expr(buffer, operand, true, depth + 1)
+        Ast::Expr.Binary(left, operator, right, _):
+            proof_push_elisa_expr(buffer, left, true, depth + 1)
+            proof_push(buffer, " ")
+            proof_push_elisa_operator(buffer, operator)
+            proof_push(buffer, " ")
+            proof_push_elisa_expr(buffer, right, true, depth + 1)
+        Ast::Expr.Call(callee, arguments, argument_names, _):
+            proof_push_elisa_expr(buffer, callee, true, depth + 1)
+            proof_push(buffer, "(")
+            for index in 0..<arguments.count |index, arguments, argument_names, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                if index < argument_names.count and argument_names[index] != "":
+                    proof_push(buffer, argument_names[index])
+                    proof_push(buffer, ": ")
+                proof_push_elisa_expr(buffer, arguments[index], false, depth + 1)
+            proof_push(buffer, ")")
+        Ast::Expr.Field(object, field, _):
+            proof_push_elisa_expr(buffer, object, true, depth + 1)
+            proof_push(buffer, ".")
+            proof_push(buffer, field)
+        Ast::Expr.Scope(base, field, _):
+            proof_push_elisa_expr(buffer, base, true, depth + 1)
+            proof_push(buffer, "::")
+            proof_push(buffer, field)
+        Ast::Expr.ShorthandMember(parts, _):
+            for index in 0..<parts.count |index, parts, buffer|:
+                proof_push(buffer, ".")
+                proof_push(buffer, parts[index])
+        Ast::Expr.Index(object, index_expression, _):
+            proof_push_elisa_expr(buffer, object, true, depth + 1)
+            proof_push(buffer, "[")
+            proof_push_elisa_expr(buffer, index_expression, true, depth + 1)
+            proof_push(buffer, "]")
+        Ast::Expr.Slice(object, low, high, _):
+            proof_push_elisa_expr(buffer, object, true, depth + 1)
+            proof_push(buffer, "[")
+            proof_push_elisa_expr(buffer, low, true, depth + 1)
+            proof_push(buffer, "..")
+            proof_push_elisa_expr(buffer, high, true, depth + 1)
+            proof_push(buffer, "]")
+        Ast::Expr.IndexN(object, arguments, _):
+            proof_push_elisa_expr(buffer, object, true, depth + 1)
+            proof_push(buffer, "[")
+            for index in 0..<arguments.count |index, arguments, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push_elisa_expr(buffer, arguments[index], false, depth + 1)
+            proof_push(buffer, "]")
+        Ast::Expr.Move(operand, _):
+            proof_push(buffer, "move ")
+            proof_push_elisa_expr(buffer, operand, true, depth + 1)
+        Ast::Expr.Array(elements, _):
+            proof_push(buffer, "[")
+            for index in 0..<elements.count |index, elements, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push_elisa_expr(buffer, elements[index], false, depth + 1)
+            proof_push(buffer, "]")
+        Ast::Expr.Tuple(elements, _):
+            proof_push(buffer, "(")
+            for index in 0..<elements.count |index, elements, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push_elisa_expr(buffer, elements[index], false, depth + 1)
+            proof_push(buffer, ")")
+        Ast::Expr.Construct(type_expression, fields, _):
+            proof_push_elisa_expr(buffer, type_expression, true, depth + 1)
+            proof_push(buffer, "{")
+            for index in 0..<fields.count |index, fields, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push(buffer, fields[index].name)
+                proof_push(buffer, ": ")
+                proof_push_elisa_expr(buffer, fields[index].value, false, depth + 1)
+            proof_push(buffer, "}")
+        Ast::Expr.RecordUpdate(base, fields, _):
+            proof_push_elisa_expr(buffer, base, true, depth + 1)
+            proof_push(buffer, "{")
+            for index in 0..<fields.count |index, fields, buffer, depth|:
+                proof_push(buffer, ", ") if index > 0
+                proof_push(buffer, fields[index].name)
+                proof_push(buffer, " = ")
+                proof_push_elisa_expr(buffer, fields[index].value, false, depth + 1)
+            proof_push(buffer, "}")
+        Ast::Expr.If(condition, then_expression, else_expression, _):
+            proof_push_elisa_expr(buffer, then_expression, true, depth + 1)
+            proof_push(buffer, " if ")
+            proof_push_elisa_expr(buffer, condition, true, depth + 1)
+            proof_push(buffer, " else ")
+            proof_push_elisa_expr(buffer, else_expression, true, depth + 1)
+        _:
+            # Deliberately not spelled out. A reader must not mistake a form this printer does
+            # not model for source that says what the proof state actually holds.
+            proof_push(buffer, "<unprinted expression>")
+    proof_push(buffer, ")") if needs_group
+
+def proof_push_elisa_operator(buffer: mutable darray[u8]&, operator: TokenKind) -> void can[Memory.Allocate, Abort.Panic]:
+    value: mutable sview = "<operator>"
+    value <- "+" if operator == TokenKind.Plus
+    value <- "-" if operator == TokenKind.Minus
+    value <- "*" if operator == TokenKind.Star
+    value <- "/" if operator == TokenKind.Slash
+    value <- "%" if operator == TokenKind.Percent
+    value <- "==" if operator == TokenKind.EqEq
+    value <- "!=" if operator == TokenKind.BangEq
+    value <- "<" if operator == TokenKind.Lt
+    value <- ">" if operator == TokenKind.Gt
+    value <- "<=" if operator == TokenKind.LtEq
+    value <- ">=" if operator == TokenKind.GtEq
+    value <- "and" if operator == TokenKind.And
+    value <- "or" if operator == TokenKind.Or
+    value <- "=>" if operator == TokenKind.FatArrow
+    value <- "not" if operator == TokenKind.Not
+    value <- "in" if operator == TokenKind.In
+    value <- "is" if operator == TokenKind.Is
+    value <- "as" if operator == TokenKind.As
+    value <- "|" if operator == TokenKind.Pipe
+    value <- "^" if operator == TokenKind.Caret
+    value <- "&" if operator == TokenKind.Ampersand
+    value <- "<<" if operator == TokenKind.LShift
+    value <- ">>" if operator == TokenKind.RShift
+    proof_push(buffer, value)
+
+def proof_push_json_expr(buffer: mutable darray[u8]&, expression: Ast::Expr) -> void can[Memory.Allocate, Abort.Panic]:
+    match expression:
+        Ast::Expr.Invalid:
+            proof_push(buffer, "{\"kind\":\"invalid\"}")
+        Ast::Expr.Absent:
+            proof_push(buffer, "{\"kind\":\"absent\"}")
+        Ast::Expr.IntLit(value, _):
+            proof_push(buffer, "{\"kind\":\"int\",\"value\":")
+            proof_push_json_i64(buffer, value)
+            proof_push(buffer, "}")
+        Ast::Expr.FloatLit(value, _):
+            proof_push(buffer, "{\"kind\":\"float\",\"text\":")
+            proof_push_json_string(buffer, value)
+            proof_push(buffer, "}")
+        Ast::Expr.StringLit(value, _):
+            proof_push(buffer, "{\"kind\":\"string\",\"text\":")
+            proof_push_json_string(buffer, value)
+            proof_push(buffer, "}")
+        Ast::Expr.CharLit(value, _):
+            proof_push(buffer, "{\"kind\":\"char\",\"text\":")
+            proof_push_json_string(buffer, value)
+            proof_push(buffer, "}")
+        Ast::Expr.BoolLit(value, _):
+            proof_push(buffer, "{\"kind\":\"bool\",\"value\":")
+            proof_push(buffer, "true" if value else "false")
+            proof_push(buffer, "}")
+        Ast::Expr.Ident(name, position):
+            proof_push(buffer, "{\"kind\":\"ident\",\"name\":")
+            proof_push_json_string(buffer, name)
+            proof_push(buffer, ",\"line\":")
+            proof_push_number(buffer, position.line)
+            proof_push(buffer, "}")
+
+        Ast::Expr.Paren(inner, _):
+            proof_push(buffer, "{\"kind\":\"paren\",\"inner\":")
+            proof_push_json_expr(buffer, inner)
+            proof_push(buffer, "}")
+        Ast::Expr.Unary(operator, operand, _):
+            proof_push(buffer, "{\"kind\":\"unary\",\"operator\":")
+            proof_push_json_operator(buffer, operator)
+            proof_push(buffer, ",\"operand\":")
+            proof_push_json_expr(buffer, operand)
+            proof_push(buffer, "}")
+        Ast::Expr.Binary(left, operator, right, _):
+            proof_push(buffer, "{\"kind\":\"binary\",\"operator\":")
+            proof_push_json_operator(buffer, operator)
+            proof_push(buffer, ",\"left\":")
+            proof_push_json_expr(buffer, left)
+            proof_push(buffer, ",\"right\":")
+            proof_push_json_expr(buffer, right)
+            proof_push(buffer, "}")
+        Ast::Expr.Call(callee, arguments, argument_names, _):
+            proof_push(buffer, "{\"kind\":\"call\",\"callee\":")
+            proof_push_json_expr(buffer, callee)
+            proof_push(buffer, ",\"arguments\":[")
+            for index in 0..<arguments.count |index, arguments, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, arguments[index])
+            proof_push(buffer, "],\"argument_names\":[")
+            for index in 0..<argument_names.count |index, argument_names, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_string(buffer, argument_names[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.Field(object, field, _):
+            proof_push(buffer, "{\"kind\":\"field\",\"object\":")
+            proof_push_json_expr(buffer, object)
+            proof_push(buffer, ",\"field\":")
+            proof_push_json_string(buffer, field)
+            proof_push(buffer, "}")
+        Ast::Expr.Scope(base, field, _):
+            proof_push(buffer, "{\"kind\":\"scope\",\"base\":")
+            proof_push_json_expr(buffer, base)
+            proof_push(buffer, ",\"name\":")
+            proof_push_json_string(buffer, field)
+            proof_push(buffer, "}")
+        Ast::Expr.ShorthandMember(parts, _):
+            proof_push(buffer, "{\"kind\":\"shorthand_member\",\"parts\":[")
+            for index in 0..<parts.count |index, parts, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_string(buffer, parts[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.Index(object, index, _):
+            proof_push(buffer, "{\"kind\":\"index\",\"object\":")
+            proof_push_json_expr(buffer, object)
+            proof_push(buffer, ",\"index\":")
+            proof_push_json_expr(buffer, index)
+            proof_push(buffer, "}")
+        Ast::Expr.Slice(object, low, high, _):
+            proof_push(buffer, "{\"kind\":\"slice\",\"object\":")
+            proof_push_json_expr(buffer, object)
+            proof_push(buffer, ",\"low\":")
+            proof_push_json_expr(buffer, low)
+            proof_push(buffer, ",\"high\":")
+            proof_push_json_expr(buffer, high)
+            proof_push(buffer, "}")
+        Ast::Expr.IndexN(object, arguments, _):
+            proof_push(buffer, "{\"kind\":\"index_n\",\"object\":")
+            proof_push_json_expr(buffer, object)
+            proof_push(buffer, ",\"arguments\":[")
+            for index in 0..<arguments.count |index, arguments, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, arguments[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.Move(operand, _):
+            proof_push(buffer, "{\"kind\":\"move\",\"operand\":")
+            proof_push_json_expr(buffer, operand)
+            proof_push(buffer, "}")
+        Ast::Expr.RegionNew(operand, region, _):
+            proof_push(buffer, "{\"kind\":\"region_new\",\"region\":")
+            proof_push_json_string(buffer, region)
+            proof_push(buffer, ",\"operand\":")
+            proof_push_json_expr(buffer, operand)
+            proof_push(buffer, "}")
+        Ast::Expr.Array(elements, _):
+            proof_push(buffer, "{\"kind\":\"array\",\"elements\":[")
+            for index in 0..<elements.count |index, elements, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, elements[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.Tuple(elements, _):
+            proof_push(buffer, "{\"kind\":\"tuple\",\"elements\":[")
+            for index in 0..<elements.count |index, elements, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, elements[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.SetLit(elements, _):
+            proof_push(buffer, "{\"kind\":\"set\",\"elements\":[")
+            for index in 0..<elements.count |index, elements, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push_json_expr(buffer, elements[index])
+            proof_push(buffer, "]}")
+        Ast::Expr.DictLit(entries, _):
+            proof_push(buffer, "{\"kind\":\"dict\",\"entries\":[")
+            for index in 0..<entries.count |index, entries, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push(buffer, "{\"key\":")
+                proof_push_json_expr(buffer, entries[index].key)
+                proof_push(buffer, ",\"value\":")
+                proof_push_json_expr(buffer, entries[index].value)
+                proof_push(buffer, "}")
+            proof_push(buffer, "]}")
+        Ast::Expr.Construct(type_expression, fields, _):
+            proof_push(buffer, "{\"kind\":\"construct\",\"type\":")
+            proof_push_json_expr(buffer, type_expression)
+            proof_push(buffer, ",\"fields\":[")
+            for index in 0..<fields.count |index, fields, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push(buffer, "{\"name\":")
+                proof_push_json_string(buffer, fields[index].name)
+                proof_push(buffer, ",\"value\":")
+                proof_push_json_expr(buffer, fields[index].value)
+                proof_push(buffer, "}")
+            proof_push(buffer, "]}")
+        Ast::Expr.RecordUpdate(base, fields, _):
+            proof_push(buffer, "{\"kind\":\"record_update\",\"base\":")
+            proof_push_json_expr(buffer, base)
+            proof_push(buffer, ",\"fields\":[")
+            for index in 0..<fields.count |index, fields, buffer|:
+                proof_push(buffer, ",") if index > 0
+                proof_push(buffer, "{\"name\":")
+                proof_push_json_string(buffer, fields[index].name)
+                proof_push(buffer, ",\"value\":")
+                proof_push_json_expr(buffer, fields[index].value)
+                proof_push(buffer, "}")
+            proof_push(buffer, "]}")
+        Ast::Expr.If(condition, then_expr, else_expr, _):
+            proof_push(buffer, "{\"kind\":\"if\",\"condition\":")
+            proof_push_json_expr(buffer, condition)
+            proof_push(buffer, ",\"then\":")
+            proof_push_json_expr(buffer, then_expr)
+            proof_push(buffer, ",\"else\":")
+            proof_push_json_expr(buffer, else_expr)
+            proof_push(buffer, "}")
+        Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+            proof_push(buffer, "{\"kind\":\"comprehension\",\"variable\":")
+            proof_push_json_string(buffer, variable)
+            proof_push(buffer, ",\"iterable\":")
+            proof_push_json_expr(buffer, iterable)
+            proof_push(buffer, ",\"condition\":")
+            proof_push_json_expr(buffer, condition)
+            proof_push(buffer, ",\"body\":")
+            proof_push_json_expr(buffer, body)
+            proof_push(buffer, "}")
+        Ast::Expr.Refinement(base, predicate, _):
+            proof_push(buffer, "{\"kind\":\"refinement\",\"base\":")
+            proof_push_json_expr(buffer, base)
+            proof_push(buffer, ",\"predicate\":")
+            proof_push_json_expr(buffer, predicate)
+            proof_push(buffer, "}")
+        Ast::Expr.Block(statements, value, _, position):
+            proof_push(buffer, "{\"kind\":\"block\",\"line\":")
+            proof_push_number(buffer, position.line)
+            proof_push(buffer, ",\"statements\":[")
+            for index in 0..<statements.count |index, statements, buffer|:
+                proof_push(buffer, ",") if index > 0
+                match statements[index]:
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                        proof_push(buffer, "{\"kind\":\"var_decl\",\"name\":")
+                        proof_push_json_string(buffer, name)
+                        proof_push(buffer, ",\"type\":")
+                        proof_push_json_expr(buffer, type_expression)
+                        proof_push(buffer, ",\"initializer\":")
+                        proof_push_json_expr(buffer, initializer)
+                        proof_push(buffer, "}")
+                    _:
+                        proof_push(buffer, "{\"kind\":\"unsupported_statement\"}")
+            proof_push(buffer, "],\"value\":")
+            proof_push_json_expr(buffer, value)
+            proof_push(buffer, "}")
+        _:
+            position: Ast::Pos = Ast::expr_pos(expression)
+            proof_push(buffer, "{\"kind\":\"unsupported\",\"line\":")
+            proof_push_number(buffer, position.line)
+            proof_push(buffer, "}")
+

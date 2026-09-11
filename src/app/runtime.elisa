@@ -1,0 +1,217 @@
+def proof_read_file_checked(path: cstr) -> (ok: bool, contents: darray[u8]) can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    contents: mutable darray[u8] = []
+    descriptor: i64 = open(path, 0, 0)
+    return (false, contents) if descriptor < 0
+    chunk: mutable darray[u8] = []
+    chunk.resize(65536)
+    while true |contents, chunk, descriptor|:
+        amount: i64 = read(descriptor, &chunk[0], 65536)
+        if amount < 0:
+            _ = close(descriptor)
+            return (false, [])
+        break if amount == 0
+        for index in 0..<amount.usize() |contents, chunk|:
+            contents.push(chunk[index])
+    _ = close(descriptor)
+    return (true, contents)
+
+def proof_read_file(path: cstr) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    result: (ok: bool, contents: darray[u8]) = proof_read_file_checked(path)
+    return result.contents if result.ok
+    return []
+
+def proof_write(text: darray[u8]&) -> void can[Console, Unsafe.PointerCast]:
+    return if text.count == 0
+    raw: void& = (&text[0]).cast[void&] can Unsafe.PointerCast
+    _ = write(1, raw, text.count)
+
+def proof_push(buffer: mutable darray[u8]&, text: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    for index in 0..<sview_len(text) |buffer|:
+        buffer.push(sview_at(text, index))
+
+def proof_push_number(buffer: mutable darray[u8]&, value: u32) -> void can[Memory.Allocate, Abort.Panic]:
+    digits: mutable darray[u8] = []
+    remaining: mutable u32 = value
+    if remaining == 0:
+        buffer.push('0'.u8())
+        return
+    while remaining > 0 |digits, remaining|:
+        digits.push(('0'.u8()) + (remaining % 10).u8())
+        remaining <- remaining / 10
+    index: mutable usize = digits.count
+    while index > 0 |buffer, digits, index|:
+        index <- index - 1
+        buffer.push(digits[index])
+
+def proof_source_fingerprint(source: darray[u8]&) -> u32:
+    # FNV-1a over the exact expanded bytes handed to the parser. This is an identity hint for
+    # proof caches and AI clients, not a cryptographic digest or a kernel acceptance condition.
+    hash: mutable i64 = 2166136261
+    for byte in source |hash|:
+        hash <- ((hash ^ byte.i64()) * 16777619) % 4294967296
+    return hash.u32()
+
+# Canonical identity encoding for one source-neutral kernel term. Arena indices and unrelated
+# source positions are deliberately excluded, so inserting an unrelated declaration does not
+# invalidate a cached target proof. This fingerprint is an incremental cache/binding guard, not a
+# cryptographic proof; the independently replayed term remains the admission authority.
+def proof_push_kernel_identity(buffer: mutable darray[u8]&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+    requires depth <= 128
+    decreases 128 - depth
+    return false if depth >= 128 or root >= nodes.count
+    node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+    proof_push(buffer, "(")
+    proof_push(buffer, node.kind)
+    proof_push(buffer, ":")
+    proof_push(buffer, node.operator)
+    proof_push(buffer, ":")
+    proof_push_json_i64(buffer, node.value)
+    proof_push(buffer, ":")
+    proof_push_json_string(buffer, node.name)
+    proof_push(buffer, ":")
+    proof_push_json_string(buffer, node.secondary_name)
+    valid: mutable bool = true
+    match node.kind:
+        "unary":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "move":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "field":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "scope":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "call_arg":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "checked-get":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "binary":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "index":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "checked-index":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "dict_entry":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "if":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.auxiliary, depth + 1) and valid
+        "slice":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.auxiliary, depth + 1) and valid
+        "call":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "index-n":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "construct":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "record-update":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "array":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "tuple":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "set":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "dict":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "quantifier":
+            proof_push(buffer, ":")
+            proof_push_json_i64(buffer, node.auxiliary.i64())
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        _:
+            pass
+    proof_push(buffer, ")")
+    return valid
+
+def proof_goal_fingerprint(report: ProofReport&, attempt: ProofGoalAttempt) -> (valid: bool, value: u32) can[Memory.Allocate, Abort.Panic]:
+    return (false, 0) if attempt.kernel_facts_start > report.kernel_certificate_facts.count or attempt.kernel_facts_count > report.kernel_certificate_facts.count - attempt.kernel_facts_start
+    identity: mutable darray[u8] = []
+    proof_push(&identity, "elisa-proof-goal-v1:")
+    valid: mutable bool = true
+    for index in 0..<attempt.kernel_facts_count |index, attempt, report, identity, valid|:
+        proof_push(&identity, "F")
+        root: usize = report.kernel_certificate_facts[attempt.kernel_facts_start + index]
+        valid <- proof_push_kernel_identity(&identity, report.kernel_nodes, report.kernel_children, root, 0) and valid
+    proof_push(&identity, "G")
+    valid <- proof_push_kernel_identity(&identity, report.kernel_nodes, report.kernel_children, attempt.kernel_goal, 0) and valid
+    return (false, 0) if not valid
+    return (true, proof_source_fingerprint(identity))
+
+def proof_push_theorem_expression_identity(buffer: mutable darray[u8]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, expression: Ast::Expr) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if not proof_kernel_expression_supported(expression)
+    root: usize = proof_kernel_encode_expression(expression, nodes, children)
+    return proof_push_kernel_identity(buffer, nodes, children, root, 0)
+
+# Canonical identity of a theorem statement and invocation signature. Source positions, report
+# indices, proof scripts, and certificate arena offsets are excluded: changing the proof without
+# changing the checked theorem does not invalidate consumers. Verification and replay remain
+# separate admission gates and are never implied by this observational FNV identity.
+def proof_theorem_fingerprint(report: ProofReport&, theorem: ProofTheoremSummary) -> (valid: bool, value: u32) can[Memory.Allocate, Abort.Panic]:
+    valid_parameters: bool = theorem.parameters_start <= report.theorem_parameters.count and theorem.parameters_count <= report.theorem_parameters.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_types.count and theorem.parameters_count <= report.theorem_parameter_types.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_has_defaults.count and theorem.parameters_count <= report.theorem_parameter_has_defaults.count - theorem.parameters_start and theorem.parameters_start <= report.theorem_parameter_defaults.count and theorem.parameters_count <= report.theorem_parameter_defaults.count - theorem.parameters_start
+    valid_requires: bool = theorem.requires_start <= report.theorem_requires.count and theorem.requires_count <= report.theorem_requires.count - theorem.requires_start
+    valid_ensures: bool = theorem.ensures_start <= report.theorem_ensures.count and theorem.ensures_count <= report.theorem_ensures.count - theorem.ensures_start
+    valid_decreases: bool = theorem.decreases_start <= report.theorem_decreases.count and theorem.decreases_count <= report.theorem_decreases.count - theorem.decreases_start
+    return (false, 0) if not valid_parameters or not valid_requires or not valid_ensures or not valid_decreases
+    identity: mutable darray[u8] = []
+    nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+    children: mutable darray[usize] = []
+    proof_push(&identity, "elisa-proof-theorem-v1:")
+    proof_push_json_string(&identity, theorem.name)
+    proof_push(&identity, ":recursive:" if theorem.recursive else ":nonrecursive:")
+    valid: mutable bool = true
+    for index in 0..<theorem.parameters_count |index, theorem, report, identity, nodes, children, valid|:
+        parameter_index: usize = theorem.parameters_start + index
+        proof_push(&identity, "P")
+        proof_push_json_string(&identity, report.theorem_parameters[parameter_index])
+        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_parameter_types[parameter_index]) and valid
+        if report.theorem_parameter_has_defaults[parameter_index]:
+            proof_push(&identity, "D")
+            valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_parameter_defaults[parameter_index]) and valid
+        else:
+            proof_push(&identity, "N")
+    for index in 0..<theorem.requires_count |index, theorem, report, identity, nodes, children, valid|:
+        proof_push(&identity, "R")
+        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_requires[theorem.requires_start + index]) and valid
+    for index in 0..<theorem.ensures_count |index, theorem, report, identity, nodes, children, valid|:
+        proof_push(&identity, "E")
+        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_ensures[theorem.ensures_start + index]) and valid
+    for index in 0..<theorem.decreases_count |index, theorem, report, identity, nodes, children, valid|:
+        proof_push(&identity, "M")
+        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.theorem_decreases[theorem.decreases_start + index]) and valid
+    return (false, 0) if not valid
+    return (true, proof_source_fingerprint(identity))

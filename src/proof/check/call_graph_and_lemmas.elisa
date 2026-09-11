@@ -1,0 +1,473 @@
+extend ElisaProof:
+    private:
+        def proof_expr_may_be_opaque_reference(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                Ast::Expr.Index(_, _, _):
+                    return true
+                Ast::Expr.Slice(_, _, _, _):
+                    return true
+                Ast::Expr.IndexN(_, _, _):
+                    return true
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_may_be_opaque_reference(operand)
+                Ast::Expr.RegionNew(_, _, _):
+                    return true
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_may_be_opaque_reference(object)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return proof_expr_may_be_opaque_reference(base)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_may_be_opaque_reference(condition) or proof_expr_may_be_opaque_reference(then_expr) or proof_expr_may_be_opaque_reference(else_expr)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_may_be_opaque_reference(iterable) or proof_expr_may_be_opaque_reference(condition) or proof_expr_may_be_opaque_reference(body)
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_may_be_opaque_reference(inner)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_may_be_opaque_reference(operand)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_may_be_opaque_reference(left) or proof_expr_may_be_opaque_reference(right)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_expr_may_be_opaque_reference(field.value)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_expr_may_be_opaque_reference(element)
+                    return false
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_expr_may_be_opaque_reference(element)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_expr_may_be_opaque_reference(element)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_expr_may_be_opaque_reference(entry.key) or proof_expr_may_be_opaque_reference(entry.value)
+                    return false
+                _:
+                    return false
+
+        # A call argument aliases a frame place only for the direct forms this kernel can
+        # justify. Passing a whole root may expose every descendant; passing &root.field exposes
+        # that subtree. Unknown aliases cause the caller's facts to be discarded but do not
+        # silently establish frame preservation.
+        def proof_argument_may_alias_place(argument: Ast::Expr, place: ProofFramePlace) -> bool:
+            root: sview = proof_ident_name(argument)
+            return true if root != "" and root == place.root
+            match argument:
+                Ast::Expr.Unary(operator, operand, _):
+                    if operator == TokenKind.Ampersand:
+                        addressed: (known: bool, place: ProofFramePlace) = proof_frame_target_place_prefix(operand)
+                        return true if addressed.known and proof_frame_places_overlap(addressed.place, place)
+                    return proof_argument_may_alias_place(operand, place)
+                Ast::Expr.Paren(inner, _):
+                    return proof_argument_may_alias_place(inner, place)
+                Ast::Expr.Field(_, _, _):
+                    addressed: (known: bool, place: ProofFramePlace) = proof_frame_target_place_prefix(argument)
+                    return addressed.known and proof_frame_places_overlap(addressed.place, place)
+                Ast::Expr.Index(_, _, _):
+                    addressed: (known: bool, place: ProofFramePlace) = proof_frame_target_place_prefix(argument)
+                    return addressed.known and proof_frame_places_overlap(addressed.place, place)
+                Ast::Expr.Slice(_, _, _, _):
+                    addressed: (known: bool, place: ProofFramePlace) = proof_frame_target_place_prefix(argument)
+                    return addressed.known and proof_frame_places_overlap(addressed.place, place)
+                Ast::Expr.IndexN(_, _, _):
+                    addressed: (known: bool, place: ProofFramePlace) = proof_frame_target_place_prefix(argument)
+                    return addressed.known and proof_frame_places_overlap(addressed.place, place)
+                _:
+                    return false
+
+        # Extract the storage root from an assignment target. The returned expression is kept
+        # structured so symbolic substitution can resolve a local reference alias to a parameter
+        # before the frame decision is made.
+        def proof_frame_target_root(expression: Ast::Expr) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_frame_target_root(inner)
+                Ast::Expr.Field(object, _, _):
+                    return proof_frame_target_root(object)
+                Ast::Expr.Index(object, _, _):
+                    return proof_frame_target_root(object)
+                Ast::Expr.Slice(object, _, _, _):
+                    return proof_frame_target_root(object)
+                Ast::Expr.IndexN(object, _, _):
+                    return proof_frame_target_root(object)
+                _:
+                    return expression
+
+        def proof_call_may_alias_places(arguments: darray[Ast::Expr]&, places: darray[ProofFramePlace]&, names: darray[sview]&, parameter_names: darray[sview]&) -> bool:
+            for argument in arguments:
+                for place in places:
+                    return true if proof_argument_may_alias_place(argument, place) and proof_current_parameter(names, parameter_names, place.root)
+            return false
+
+        def proof_frame_collect_annotations(file: Ast::File&, function_name: sview, changes: mutable darray[ProofFramePlace]&, preserves: mutable darray[ProofFramePlace]&) -> void:
+            header_change_roots: mutable darray[sview] = []
+            header_change_fields: mutable darray[sview] = []
+            preserved_roots: mutable darray[sview] = []
+            preserved_fields: mutable darray[sview] = []
+            for annotation in file.enum_annotations |header_change_roots, header_change_fields, preserved_roots, preserved_fields|:
+                if annotation.owner == function_name and annotation.line == 3900000010:
+                    changes.push(ProofFramePlace{root: annotation.name, field: "", field2: "", field3: "", depth: 0, whole: true})
+                if annotation.owner == function_name and annotation.line == 3900000006:
+                    header_change_roots.push(annotation.name)
+                if annotation.owner == function_name and annotation.line == 3900000003:
+                    header_change_fields.push(annotation.name)
+                if annotation.owner == function_name and annotation.line == 3900000011:
+                    preserved_roots.push(annotation.name)
+                if annotation.owner == function_name and annotation.line == 3900000012:
+                    preserved_fields.push(annotation.name)
+                # This marker is emitted by the parser's conflict scanner for dotted changes
+                # targets. It is useful only as a field fallback when the paired capture is
+                # absent; the paired 0006/0003 rows above retain the exact root.
+                if annotation.owner == function_name and annotation.line == 3900000077 and header_change_fields.count == 0:
+                    header_change_fields.push(annotation.name)
+            for index in 0..<header_change_fields.count |changes, header_change_roots, header_change_fields, index|:
+                root: sview = header_change_roots[index] if index < header_change_roots.count else ""
+                changes.push(ProofFramePlace{root: root, field: header_change_fields[index], field2: "", field3: "", depth: 1, whole: false})
+            index: mutable usize = 0
+            while index < preserved_roots.count and index < preserved_fields.count |index, preserved_roots, preserved_fields, preserves|:
+                preserves.push(ProofFramePlace{root: preserved_roots[index], field: preserved_fields[index], field2: "", field3: "", depth: 1, whole: false})
+                index <- index + 1
+
+        def proof_function_is_lemma(file: Ast::File&, name: sview) -> bool:
+            for annotation in file.enum_annotations:
+                return true if annotation.owner == "__lemma" and annotation.name == name
+            return false
+
+        # Name lookup is on a hot path during call-graph construction and SCC analysis. The
+        # hash is only a collision-safe prefilter; the exact sview comparison below remains the
+        # authority, so this optimization cannot turn a collision into a resolved call.
+        def proof_name_hash(value: sview) -> u32:
+            hash: mutable i64 = 2166136261
+            for index in 0..<sview_len(value) |index, hash, value|:
+                hash <- ((hash ^ sview_at(value, index).i64()) * 16777619) % 4294967296
+            return hash.u32()
+
+        # Keep graph traversal termination explicit. This avoids depending on a higher-order
+        # membership expression inside a mutable worklist, and makes the finite exploration
+        # invariant directly auditable in the self-hosted checker.
+        def proof_usize_seen(values: darray[usize]&, wanted: usize) -> bool:
+            for value in values:
+                return true if value == wanted
+            return false
+
+        # Build an open-addressed name index after collection is complete. Exact name equality
+        # remains the authority; stored hashes only choose a probe path, and duplicate names are
+        # represented by an ambiguity sentinel so malformed overload-free tables fail closed.
+        def proof_index_capacity(count: usize) -> usize:
+            return 0 if count == 0
+            capacity: mutable usize = 1
+            while capacity < count |capacity, count|:
+                capacity <- capacity * 2
+            return capacity
+
+        def proof_build_lemma_index(lemmas: mutable ProofLemmaTable&) -> void:
+            lemmas.index_hashes.clear()
+            lemmas.index_values.clear()
+            capacity: usize = proof_index_capacity(lemmas.names.count)
+            return if capacity == 0
+            lemmas.index_hashes.resize(capacity)
+            lemmas.index_values.resize(capacity)
+            for slot in 0..<capacity |slot, lemmas|:
+                lemmas.index_values[slot] <- lemmas.names.count
+            for name_index in 0..<lemmas.names.count |name_index, lemmas, capacity|:
+                hash: u32 = lemmas.name_hashes[name_index]
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, hash, name_index, lemmas, capacity|:
+                    current: usize = lemmas.index_values[slot]
+                    if current == lemmas.names.count:
+                        lemmas.index_hashes[slot] <- hash
+                        lemmas.index_values[slot] <- name_index
+                        break
+                    if current <= lemmas.names.count and lemmas.index_hashes[slot] == hash and lemmas.names[current] == lemmas.names[name_index]:
+                        lemmas.index_values[slot] <- lemmas.names.count + 1
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+
+        def proof_build_function_index(functions: mutable ProofFunctionTable&) -> void:
+            functions.index_hashes.clear()
+            functions.index_values.clear()
+            capacity: usize = proof_index_capacity(functions.names.count)
+            return if capacity == 0
+            functions.index_hashes.resize(capacity)
+            functions.index_values.resize(capacity)
+            for slot in 0..<capacity |slot, functions|:
+                functions.index_values[slot] <- functions.names.count
+            for name_index in 0..<functions.names.count |name_index, functions, capacity|:
+                hash: u32 = functions.name_hashes[name_index]
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, hash, name_index, functions, capacity|:
+                    current: usize = functions.index_values[slot]
+                    if current == functions.names.count:
+                        functions.index_hashes[slot] <- hash
+                        functions.index_values[slot] <- name_index
+                        break
+                    if current <= functions.names.count and functions.index_hashes[slot] == hash and functions.names[current] == functions.names[name_index]:
+                        functions.index_values[slot] <- functions.names.count + 1
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+
+        # Build the same kind of flat lemma summary used by the compiler's assert-by checker.
+        # A call can contribute only a postcondition from a lemma whose preconditions are
+        # established at the call site; opaque ordinary functions never contribute facts.
+        def proof_collect_lemmas(file: Ast::File&, declarations: darray[Ast::Decl], lemmas: mutable ProofLemmaTable&) -> void:
+            for declaration in declarations |file, lemmas|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
+                        if proof_function_is_lemma(file, name):
+                            lemmas.names <- lemmas.names.push(name)
+                            lemmas.name_hashes <- lemmas.name_hashes.push(proof_name_hash(name))
+                            lemmas.param_starts <- lemmas.param_starts.push(lemmas.all_params.count)
+                            lemmas.param_counts <- lemmas.param_counts.push(parameters.count)
+                            for parameter in parameters |lemmas|:
+                                lemmas.all_params <- lemmas.all_params.push(parameter.name)
+                                lemmas.all_has_defaults <- lemmas.all_has_defaults.push(parameter.has_default)
+                                lemmas.all_defaults <- lemmas.all_defaults.push(parameter.default_value)
+                            lemmas.call_starts <- lemmas.call_starts.push(lemmas.all_calls.count)
+                            lemma_call_names: mutable darray[sview] = []
+                            proof_collect_lemma_body_call_names(body, &lemma_call_names)
+                            for called in lemma_call_names |lemmas|:
+                                lemmas.all_calls <- lemmas.all_calls.push(called)
+                            lemmas.call_counts <- lemmas.call_counts.push(lemma_call_names.count)
+                            lemmas.decreases_starts <- lemmas.decreases_starts.push(lemmas.all_decreases.count)
+                            decreases_components: mutable darray[Ast::Expr] = []
+                            has_unbounded_decreases: mutable bool = false
+                            for statement in body |decreases_components, has_unbounded_decreases|:
+                                match statement:
+                                    Ast::Stmt.Contract(kind, expression, _):
+                                        proof_decreases_components(expression, &decreases_components) if kind == "decreases"
+                                        has_unbounded_decreases <- true if kind == "decreases*"
+                                    _:
+                                        pass
+                            lemmas.all_decreases.extend(decreases_components)
+                            lemmas.decreases_counts <- lemmas.decreases_counts.push(decreases_components.count)
+                            lemmas.decreases_unbounded <- lemmas.decreases_unbounded.push(has_unbounded_decreases)
+                            lemmas.requires_starts <- lemmas.requires_starts.push(lemmas.all_requires.count)
+                            lemmas.ensure_starts <- lemmas.ensure_starts.push(lemmas.all_ensures.count)
+                            requires_count: mutable usize = 0
+                            ensures_count: mutable usize = 0
+                            for statement in body |lemmas, requires_count, ensures_count|:
+                                match statement:
+                                    Ast::Stmt.Contract(kind, expression, _):
+                                        if kind == "requires":
+                                            lemmas.all_requires <- lemmas.all_requires.push(expression)
+                                            requires_count <- requires_count + 1
+                                        if kind == "ensure":
+                                            lemmas.all_ensures <- lemmas.all_ensures.push(expression)
+                                            ensures_count <- ensures_count + 1
+                                    _:
+                                        pass
+                            signature_requires: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "requires")
+                            signature_ensures: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "ensure")
+                            lemmas.all_requires.extend(signature_requires)
+                            lemmas.all_ensures.extend(signature_ensures)
+                            requires_count <- requires_count + signature_requires.count
+                            ensures_count <- ensures_count + signature_ensures.count
+                            lemmas.requires_counts <- lemmas.requires_counts.push(requires_count)
+                            lemmas.ensure_counts <- lemmas.ensure_counts.push(ensures_count)
+                    Ast::Decl.Module(_, module_body, _):
+                        proof_collect_lemmas(file, module_body, lemmas)
+                    Ast::Decl.Scoped(scoped_body, _):
+                        proof_collect_lemmas(file, scoped_body, lemmas)
+                    _:
+                        pass
+
+        def proof_lemma_index(lemmas: ProofLemmaTable&, name: sview) -> usize:
+            if lemmas.index_values.count > 0:
+                wanted_hash: u32 = proof_name_hash(name)
+                capacity: usize = lemmas.index_values.count
+                slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, wanted_hash, name, lemmas, capacity|:
+                    current: usize = lemmas.index_values[slot]
+                    return lemmas.names.count if current == lemmas.names.count
+                    return lemmas.names.count if current > lemmas.names.count
+                    if lemmas.index_hashes[slot] == wanted_hash and lemmas.names[current] == name:
+                        return current
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return lemmas.names.count
+            index: mutable usize = 0
+            found: mutable usize = lemmas.names.count
+            wanted_hash: u32 = proof_name_hash(name)
+            while index < lemmas.names.count |index, lemmas, name|:
+                if index >= lemmas.name_hashes.count or lemmas.name_hashes[index] == wanted_hash:
+                    if lemmas.names[index] == name:
+                        return lemmas.names.count if found < lemmas.names.count
+                        found <- index
+                index <- index + 1
+            return found
+
+        # Lemma calls in erased proof steps still participate in induction. The executable call
+        # graph deliberately ignores those steps, so recursive lemma summaries need this separate
+        # collector that descends through every assert-by body instead of only its runtime guard.
+        def proof_collect_lemma_body_call_names(body: darray[Ast::Stmt]&, names: mutable darray[sview]&) -> void:
+            for statement in body |names|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        proof_collect_call_names(returned, names) if value is returned
+                    Ast::Stmt.Expr(expression, _):
+                        proof_collect_call_names(expression, names)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        proof_collect_call_names(initializer, names)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        proof_collect_call_names(target, names)
+                        proof_collect_call_names(initializer, names)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_collect_call_names(condition, names)
+                        proof_collect_lemma_body_call_names(then_body, names)
+                        proof_collect_lemma_body_call_names(else_body, names)
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_collect_call_names(condition, names)
+                        proof_collect_lemma_body_call_names(while_body, names)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        proof_collect_call_names(iterable, names)
+                        proof_collect_lemma_body_call_names(for_body, names)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_collect_call_names(scrutinee, names)
+                        for arm in arms |names|:
+                            proof_collect_call_names(arm.guard, names)
+                            proof_collect_lemma_body_call_names(arm.body, names)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        proof_collect_lemma_body_call_names(block_body, names)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        proof_collect_call_names(expression, names) if kind == "assert"
+                    _:
+                        names.push("__opaque_call__") if not (any existing in names where existing == "__opaque_call__")
+
+        # Lemmas are theorem declarations, not executable summaries. A recursive lemma cannot
+        # use its own postcondition as an induction hypothesis unless the kernel also checks a
+        # well-founded proof. Keep the graph conservative: unknown/opaque proof-body calls are
+        # treated as a possible hidden edge for the queried node, so a future AST form cannot
+        # smuggle a recursive lemma back into the summary table.
+        def proof_lemma_reaches(lemmas: ProofLemmaTable&, source: usize, target: usize) -> bool:
+            return false if source >= lemmas.names.count or target >= lemmas.names.count
+            reachable: mutable darray[usize] = [source]
+            cursor: mutable usize = 0
+            while cursor < reachable.count |cursor, reachable, lemmas, target|:
+                current: usize = reachable[cursor]
+                return true if current == target and (current >= lemmas.call_starts.count or current >= lemmas.call_counts.count)
+                return false if current >= lemmas.call_starts.count or current >= lemmas.call_counts.count
+                start: usize = lemmas.call_starts[current]
+                count: usize = lemmas.call_counts[current]
+                for offset in 0..<count |offset, start, lemmas, reachable, target|:
+                    return true if current == target and start + offset >= lemmas.all_calls.count
+                    continue if start + offset >= lemmas.all_calls.count
+                    called: sview = lemmas.all_calls[start + offset]
+                    if called == "__opaque_call__":
+                        return true if current == target
+                    else:
+                        next: usize = proof_lemma_index(lemmas, called)
+                        if next < lemmas.names.count:
+                            return true if next == target
+                            already_seen: bool = proof_usize_seen(reachable, next)
+                            reachable.push(next) if not already_seen
+                cursor <- cursor + 1
+            return false
+
+        # Compute lemma SCCs with iterative Kosaraju traversal. The older per-node reachability
+        # test was easy to read but quadratic over large imported compiler modules and could make
+        # self-hosted-scale checking impractical. The explicit stacks keep traversal bounded by
+        # the collected graph and avoid recursive host-stack assumptions.
+        def proof_build_lemma_components(lemmas: mutable ProofLemmaTable&) -> void:
+            count: usize = lemmas.names.count
+            lemmas.recursive.clear()
+            lemmas.recursive_component_ids.clear()
+            return if count == 0
+            reverse_counts: mutable darray[usize] = []
+            reverse_counts.resize(count)
+            self_edges: mutable darray[bool] = []
+            self_edges.resize(count)
+            for source in 0..<count |source, lemmas, reverse_counts, self_edges|:
+                start: usize = lemmas.call_starts[source] if source < lemmas.call_starts.count else lemmas.all_calls.count
+                edge_count: usize = lemmas.call_counts[source] if source < lemmas.call_counts.count else 0
+                valid_range: bool = start <= lemmas.all_calls.count and edge_count <= lemmas.all_calls.count - start
+                continue if not valid_range
+                for offset in 0..<edge_count |offset, source, start, lemmas, reverse_counts, self_edges|:
+                    called: sview = lemmas.all_calls[start + offset]
+                    next: usize = proof_lemma_index(lemmas, called)
+                    continue if next >= count
+                    reverse_counts[next] <- reverse_counts[next] + 1
+                    self_edges[source] <- true if next == source
+            reverse_starts: mutable darray[usize] = []
+            reverse_cursor: mutable usize = 0
+            for incoming in reverse_counts |reverse_starts, reverse_cursor|:
+                reverse_starts.push(reverse_cursor)
+                reverse_cursor <- reverse_cursor + incoming
+            reverse_edges: mutable darray[usize] = []
+            reverse_edges.resize(reverse_cursor)
+            reverse_write: mutable darray[usize] = []
+            reverse_write.extend(reverse_starts)
+            for source in 0..<count |source, lemmas, reverse_starts, reverse_write, reverse_edges|:
+                start: usize = lemmas.call_starts[source] if source < lemmas.call_starts.count else lemmas.all_calls.count
+                edge_count: usize = lemmas.call_counts[source] if source < lemmas.call_counts.count else 0
+                valid_range: bool = start <= lemmas.all_calls.count and edge_count <= lemmas.all_calls.count - start
+                continue if not valid_range
+                for offset in 0..<edge_count |offset, source, start, lemmas, reverse_write, reverse_edges|:
+                    next: usize = proof_lemma_index(lemmas, lemmas.all_calls[start + offset])
+                    continue if next >= count
+                    slot: usize = reverse_write[next]
+                    reverse_edges[slot] <- source
+                    reverse_write[next] <- slot + 1
+            visited: mutable darray[bool] = []
+            visited.resize(count)
+            order: mutable darray[usize] = []
+            for source in 0..<count |source, visited, order, lemmas|:
+                continue if visited[source]
+                stack_nodes: mutable darray[usize] = [source]
+                stack_offsets: mutable darray[usize] = [0]
+                visited[source] <- true
+                while stack_nodes.count > 0 |stack_nodes, stack_offsets, visited, order, lemmas|:
+                    top: usize = stack_nodes.count - 1
+                    current: usize = stack_nodes[top]
+                    start: usize = lemmas.call_starts[current] if current < lemmas.call_starts.count else lemmas.all_calls.count
+                    edge_count: usize = lemmas.call_counts[current] if current < lemmas.call_counts.count else 0
+                    valid_range: bool = start <= lemmas.all_calls.count and edge_count <= lemmas.all_calls.count - start
+                    if valid_range and stack_offsets[top] < edge_count:
+                        offset: usize = stack_offsets[top]
+                        stack_offsets[top] <- offset + 1
+                        next: usize = proof_lemma_index(lemmas, lemmas.all_calls[start + offset])
+                        if next < count and not visited[next]:
+                            visited[next] <- true
+                            stack_nodes.push(next)
+                            stack_offsets.push(0)
+                    else:
+                        order.push(current)
+                        stack_nodes <- stack_nodes.truncate(top)
+                        stack_offsets <- stack_offsets.truncate(top)
+            component_ids: mutable darray[usize] = []
+            component_ids.resize(count)
+            for index in 0..<count |index, component_ids|:
+                component_ids[index] <- count
+            for order_index in 0..<order.count |order_index, order, component_ids, reverse_starts, reverse_counts, reverse_edges, count|:
+                seed: usize = order[order.count - 1 - order_index]
+                continue if component_ids[seed] < count
+                component_ids[seed] <- seed
+                component_work: mutable darray[usize] = [seed]
+                while component_work.count > 0 |component_work, component_ids, reverse_starts, reverse_counts, reverse_edges, count|:
+                    current: usize = component_work[component_work.count - 1]
+                    component_work <- component_work.truncate(component_work.count - 1)
+                    start: usize = reverse_starts[current]
+                    edge_count: usize = reverse_counts[current]
+                    for offset in 0..<edge_count |offset, start, reverse_edges, component_ids, component_work, current|:
+                        predecessor: usize = reverse_edges[start + offset]
+                        if component_ids[predecessor] == count:
+                            component_ids[predecessor] <- seed
+                            component_work.push(predecessor)
+            component_sizes: mutable darray[usize] = []
+            component_sizes.resize(count)
+            for index in 0..<count |index, component_ids, component_sizes, count|:
+                component_sizes[component_ids[index]] <- component_sizes[component_ids[index]] + 1
+            for index in 0..<count |index, component_ids, component_sizes, self_edges, lemmas|:
+                lemmas.recursive_component_ids.push(component_ids[index])
+                lemmas.recursive.push(component_sizes[component_ids[index]] > 1 or self_edges[index])
+

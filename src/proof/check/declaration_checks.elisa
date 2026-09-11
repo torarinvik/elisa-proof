@@ -1,0 +1,406 @@
+extend ElisaProof:
+    private:
+        const PROOF_TYPE_AUDIT_DEPTH_LIMIT: usize = 64
+
+        # Alias spelling must not hide a floating parameter from the proof-language gate.
+        # Search nested declaration scopes too; ambiguous names are handled conservatively.
+        # Cyclic or excessively deep aliases remain unsupported rather than being guessed safe.
+        def proof_type_may_contain_float_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, depth: usize, visited: darray[sview]&) -> bool:
+            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return true if proof_expr_mentions_name(expression, "f32") or proof_expr_mentions_name(expression, "f64")
+            for declaration in declarations |expression, all_declarations, depth, visited|:
+                match declaration:
+                    Ast::Decl.Alias(name, target, _):
+                        if proof_expr_mentions_name(expression, name) or proof_callable_name(expression) == name:
+                            return true if proof_type_may_contain_float_depth(target, all_declarations, all_declarations, depth + 1, visited)
+                    Ast::Decl.Struct(name, fields, _, _, _, _, _):
+                        if proof_expr_mentions_name(expression, name) or proof_callable_name(expression) == name:
+                            continue if any seen in visited where seen == name
+                            nested_visited: mutable darray[sview] = []
+                            nested_visited.extend(visited)
+                            nested_visited.push(name)
+                            for field in fields |all_declarations, depth, nested_visited|:
+                                return true if proof_type_may_contain_float_depth(field.type_expression, all_declarations, all_declarations, depth + 1, nested_visited)
+                    Ast::Decl.Module(_, body, _):
+                        return true if proof_type_may_contain_float_depth(expression, body, all_declarations, depth + 1, visited)
+                    Ast::Decl.Scoped(body, _):
+                        return true if proof_type_may_contain_float_depth(expression, body, all_declarations, depth + 1, visited)
+                    _:
+                        pass
+            return false
+
+        def proof_type_may_contain_float(expression: Ast::Expr, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            visited: darray[sview] = []
+            return proof_type_may_contain_float_depth(expression, declarations, all_declarations, depth, visited)
+
+        def proof_check_function(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, position: Ast::Pos, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
+            # The logical kernel currently models ordinary equality and integer arithmetic,
+            # not IEEE NaN or rounding. Erasing a floating parameter to an untyped identifier
+            # would make even x == x an unsound theorem. Stop before publishing obligations
+            # that a source-bound tactic could otherwise repair under the wrong semantics.
+            function_index: usize = proof_function_index(functions, function_name)
+            parameter_start: usize = functions.param_starts[function_index] if function_index < functions.param_starts.count else functions.all_parameter_may_contain_float.count
+            parameter_slot: mutable usize = 0
+            for parameter in parameters |report, function_index, functions, parameter_start, parameter_slot, function_name, position|:
+                if proof_unsigned_type_width(parameter.type_expression, file.top_decls, 0) < 0:
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "parameter numeric type alias cannot be resolved uniquely")
+                    return
+                contains_float: mutable bool = false
+                if function_index < functions.param_starts.count and parameter_start + parameter_slot < functions.all_parameter_may_contain_float.count:
+                    contains_float <- functions.all_parameter_may_contain_float[parameter_start + parameter_slot]
+                else:
+                    contains_float <- proof_type_may_contain_float(parameter.type_expression, file.top_decls, file.top_decls, 0)
+                if contains_float:
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "floating-point parameter verification requires IEEE floating-point semantics")
+                    return
+                parameter_slot <- parameter_slot + 1
+            preconditions: mutable darray[Ast::Expr] = proof_contracts(body, "requires")
+            signature_requires: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "requires")
+            preconditions.extend(signature_requires)
+            postconditions: mutable darray[Ast::Expr] = proof_contracts(body, "ensure")
+            signature_ensures: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "ensure")
+            postconditions.extend(signature_ensures)
+            proof_check_logical_contract_calls(body, functions, report, function_name)
+            for signature_requirement in signature_requires |report, function_name, position|:
+                if proof_expr_has_move(signature_requirement):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-resource-unsupported", position.line, function_name, "logical contracts may not perform ownership transfers")
+                elif not proof_expr_supported(signature_requirement):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "logical contract uses an unsupported expression form")
+                elif proof_expr_has_executable_call(signature_requirement) and not proof_contract_calls_are_pure(signature_requirement, functions):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-call-unsupported", position.line, function_name, "logical contracts may use old(...) or calls to verified total pure functions")
+            for signature_ensure in signature_ensures |report, function_name, position|:
+                if proof_expr_has_move(signature_ensure):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-resource-unsupported", position.line, function_name, "logical contracts may not perform ownership transfers")
+                elif not proof_expr_supported(signature_ensure):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "logical contract uses an unsupported expression form")
+                elif proof_expr_has_executable_call(signature_ensure) and not proof_contract_calls_are_pure(signature_ensure, functions):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-call-unsupported", position.line, function_name, "logical contracts may use old(...) or calls to verified total pure functions")
+            names: mutable darray[sview] = []
+            values: mutable darray[Ast::Expr] = []
+            frame_parameters: mutable darray[sview] = []
+            fixed_names: mutable darray[sview] = []
+            fixed_extents: mutable darray[i64] = []
+            for parameter in parameters |names, values, fixed_names, fixed_extents|:
+                names.push(parameter.name)
+                values.push(Ast::Expr.Ident(parameter.name, position))
+                frame_parameters.push(parameter.name)
+                shape: mutable darray[i64] = []
+                if proof_fixed_array_shape(parameter.type_expression, &shape):
+                    for extent in shape |fixed_names, fixed_extents, parameter|:
+                        fixed_names.push(parameter.name)
+                        fixed_extents.push(extent)
+                else:
+                    extent: i64 = proof_fixed_array_extent(parameter.type_expression)
+                    if extent >= 0:
+                        fixed_names.push(parameter.name)
+                        fixed_extents.push(extent)
+            old_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+            changes: mutable darray[ProofFramePlace] = proof_frame_body_places(body, "changes")
+            preserves: mutable darray[ProofFramePlace] = proof_frame_body_places(body, "preserves")
+            header_changes: mutable darray[ProofFramePlace] = []
+            header_preserves: mutable darray[ProofFramePlace] = []
+            proof_frame_collect_annotations(file, function_name, &header_changes, &header_preserves)
+            changes.extend(header_changes)
+            preserves.extend(header_preserves)
+            proof_check_frame_specs(body, changes, preserves, frame_parameters, report, function_name)
+            proof_check_header_frame_specs(header_changes, header_preserves, frame_parameters, report, function_name)
+            facts: mutable darray[Ast::Expr] = []
+            report.aliased_names.clear()
+            report.aliased_owner <- function_name
+            report.type_bound_seen.clear()
+            report.type_bound_owner <- function_name
+            report.rebind_symbols <- 0
+            report.scalar_witness_facts <- 0
+            # A mutable global is a place any callee can reach without being handed anything, so a
+            # lend could be stored there and outlive its call. The confinement rule is withdrawn
+            # from the whole program as soon as one is declared, the same way the shared-extent
+            # rule below is.
+            frame_has_mutable_global: mutable bool = false
+            for annotation in file.enum_annotations |frame_has_mutable_global|:
+                frame_has_mutable_global <- true if annotation.name == "__global_mutable"
+            # This is the frame-wide question -- can a callee reach this binding *later* -- so a
+            # lend that cannot outlive its own call does not belong in the answer. The loop-entry
+            # and captured-block walks ask a different question, whether the body can change the
+            # binding while it runs, and a confined lend still writes during its call, so they
+            # collect without the refinement.
+            proof_collect_aliased_names(body, functions, &report.aliased_names, false)
+            report.escaping_names.clear()
+            proof_collect_aliased_names(body, functions, &report.escaping_names, not frame_has_mutable_global)
+            # A shared borrow excludes every *borrowed* mutable path to the same object, but not a
+            # mutable global: a caller may lend one shared into this frame while a callee writes
+            # it directly, and the compiler accepts that. So the rule is withdrawn from the whole
+            # program as soon as one mutable global is declared, rather than trying to decide per
+            # call which globals a callee can reach.
+            report.shared_extent_names.clear()
+            report.local_extent_names.clear()
+            # A parameter passed by value is this frame's own storage, so a callee has no path to
+            # it and its fields are as stable across a call as a by-value scalar is.
+            for parameter in parameters |report|:
+                report.local_extent_names.push(parameter.name) if not proof_resource_is_reference_type(parameter.type_expression)
+            program_has_mutable_global: mutable bool = false
+            for annotation in file.enum_annotations |program_has_mutable_global|:
+                program_has_mutable_global <- true if annotation.name == "__global_mutable"
+            if not program_has_mutable_global:
+                for parameter in parameters |report|:
+                    reference: bool = proof_resource_is_reference_type(parameter.type_expression)
+                    continue if not reference
+                    continue if proof_resource_is_mutable_reference_type(parameter.type_expression)
+                    continue if proof_resource_type_has_marker(parameter.type_expression, TokenKind.Mutable)
+                    report.shared_extent_names.push(parameter.name)
+            for parameter in parameters |facts, report, function_name, position|:
+                unsigned_width: i64 = proof_unsigned_type_width(parameter.type_expression, report.source_declarations, 0)
+                proof_add_unsigned_binding_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position) if unsigned_width > 0
+                # An unsigned width marker already witnesses a primitive scalar type, so only the
+                # remaining scalar parameters need the narrower marker. Congruence consumes it to
+                # establish that this name's operators cannot be a user protocol implementation.
+                scalar_kind: i64 = proof_scalar_type_kind(parameter.type_expression, report.source_declarations, 0)
+                proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(parameter.name, position), position.line, function_name) if scalar_kind == 1 and unsigned_width <= 0
+                witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
+                proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position.line, function_name, position, &witness_budget, 0) if scalar_kind != 1
+            for requirement in preconditions |facts, names, values, report, function_name, position|:
+                proof_add_traced_fact(facts, report, proof_substitute(requirement, names, values), "precondition", position.line, function_name)
+            # Resource transitions are checked after entry facts are established so the source
+            # pass may justify explicit symbolic-index separation. The resource state clears
+            # this snapshot across mutations and calls; replay checks each emitted separation
+            # certificate independently.
+            proof_check_resource_safety(parameters, body, facts, report, function_name, position.line, functions)
+            proof_check_effect_containment(functions, report, function_name, position.line)
+            lemma_steps: bool = proof_lemma_index(lemmas, function_name) < lemmas.names.count
+            proof_check_lemma_purity(body, lemmas, report, function_name) if lemma_steps
+            empty_loop_invariants: mutable darray[Ast::Expr] = []
+            function_flow: mutable ProofFlow = proof_empty_flow()
+            proof_check_returns(body, &names, &values, &facts, postconditions, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, function_name, lemma_steps, file.enum_annotations, 0, "", empty_loop_invariants, 0, &function_flow)
+            if function_flow.normal:
+                for ensure in postconditions |facts, report, function_name, names, values|:
+                    normal_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
+                    proof_add_pure_call_witnesses(normal_goal, facts, functions, report, position.line, function_name, 0) if proof_expr_has_call(normal_goal)
+                    proven: bool = proof_certify_goal_with_rule(facts, normal_goal, report, position.line, function_name, file.enum_annotations, proof_quantifier_rule(ensure, file.enum_annotations))
+                    report.proof_obligation(proven)
+                    proof_add_goal_failure(report, "ensure-unproven", position.line, function_name, "normal completion does not establish ensure", facts, normal_goal) if not proven
+
+        def proof_declaration_summary(kind: sview, name: sview, line: u32) -> ProofDeclarationSummary:
+            return ProofDeclarationSummary{kind: kind, name: name, line: line, parameters_start: 0, parameters_count: 0, requires_count: 0, ensures_count: 0, changes_count: 0, preserves_count: 0, decreases_count: 0, lemma: false, recursive: false, pure: false, verified: false, verification_reason: "not-checked", structural: false, effects_start: 0, effects_count: 0, effects_declared: false}
+
+        # A declared `can[...]` row is source-declared metadata, exactly like a parameter list.
+        # An abstract row — one naming an effect variable rather than a concrete effect — is
+        # recorded as declared but is refused by the containment obligation, which cannot compare
+        # a row it does not know the members of.
+        def proof_effect_row_is_abstract(effects: darray[sview]&) -> bool:
+            for effect in effects:
+                return true if effect == ""
+                # A concrete effect is written `Group.Operation`; a bare lowercase name is an
+                # effect variable introduced by the signature.
+                return true if not proof_effect_name_is_concrete(effect)
+            return false
+
+        def proof_effect_name_is_concrete(effect: sview) -> bool:
+            return false if effect == ""
+            dotted: mutable bool = false
+            offset: mutable usize = 0
+            while offset < sview_len(effect) |offset, effect, dotted|:
+                dotted <- true if sview_at(effect, offset) == 46
+                offset <- offset + 1
+            return dotted
+
+        # Emit the declared-effect containment obligation for one function. The claim is exactly
+        # what is checked: every direct call in the body resolves to a declared function whose
+        # `can[...]` row is contained in this function's row. It is not a claim that the body
+        # performs no other effect — a body can allocate or panic without calling anything, and
+        # that remains the compiler effect checker's obligation. An unresolved callee or an
+        # abstract row is reported and no certificate is emitted.
+        def proof_check_effect_containment(functions: ProofFunctionTable&, report: mutable ProofReport&, function_name: sview, line: u32) -> void:
+            caller: usize = proof_function_index(functions, function_name)
+            return if caller >= functions.names.count
+            return if caller >= functions.effects_declared.count or not functions.effects_declared[caller]
+            declared_start: usize = functions.effect_starts[caller]
+            declared_count: usize = functions.effect_counts[caller]
+            return if declared_start > functions.all_effects.count or declared_count > functions.all_effects.count - declared_start
+            declared: mutable darray[sview] = []
+            for offset in 0..<declared_count |offset, functions, declared, declared_start|:
+                declared.push(functions.all_effects[declared_start + offset])
+            if proof_effect_row_is_abstract(declared):
+                proof_add_finding(report, "effect-row-abstract", line, function_name, "an abstract effect row has no comparable members")
+                return
+            call_start: usize = functions.call_starts[caller]
+            call_count: usize = functions.call_counts[caller]
+            return if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start
+            callee_indexes: mutable darray[usize] = []
+            for offset in 0..<call_count |offset, functions, call_start, callee_indexes, report, function_name, line|:
+                callee_name: sview = functions.all_calls[call_start + offset]
+                callee: usize = proof_function_index(functions, callee_name)
+                if callee >= functions.names.count:
+                    proof_add_finding(report, "effect-call-opaque", line, function_name, "a called function has no imported effect row")
+                    callee_indexes.clear()
+                    callee_indexes.push(functions.names.count)
+                    return
+                already: bool = any existing in callee_indexes where existing == callee
+                callee_indexes.push(callee) if not already
+            # Compare the rows before emitting anything: a certificate is only produced for a
+            # containment that holds, so a failing function has a diagnostic and no evidence.
+            for callee in callee_indexes |callee, functions, declared, report, function_name, line|:
+                continue if callee >= functions.effect_counts.count
+                callee_start: usize = functions.effect_starts[callee]
+                callee_count: usize = functions.effect_counts[callee]
+                continue if callee_start > functions.all_effects.count or callee_count > functions.all_effects.count - callee_start
+                for offset in 0..<callee_count |offset, functions, declared, callee_start, report, function_name, line|:
+                    effect: sview = functions.all_effects[callee_start + offset]
+                    covered: bool = any member in declared where member == effect
+                    if not covered:
+                        proof_add_finding(report, "effect-row-exceeded", line, function_name, "a called function declares an effect outside this function's row")
+                        return
+            declared_roots: mutable darray[usize] = []
+            for effect in declared |effect, report, declared_roots|:
+                declared_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect", "", 0, 0, 0, 0, 0, 0, effect, ""))
+            declared_children_start: usize = report.kernel_children.count
+            report.kernel_children.extend(declared_roots)
+            declared_row: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-row", "", 0, 0, 0, declared_children_start, declared_roots.count, 0, "", "")
+            call_roots: mutable darray[usize] = []
+            for callee in callee_indexes |callee, functions, report, call_roots|:
+                continue if callee >= functions.effect_counts.count
+                callee_start: usize = functions.effect_starts[callee]
+                callee_count: usize = functions.effect_counts[callee]
+                continue if callee_start > functions.all_effects.count or callee_count > functions.all_effects.count - callee_start
+                callee_effect_roots: mutable darray[usize] = []
+                for offset in 0..<callee_count |offset, functions, callee_start, report, callee_effect_roots|:
+                    callee_effect_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect", "", 0, 0, 0, 0, 0, 0, functions.all_effects[callee_start + offset], ""))
+                callee_children_start: usize = report.kernel_children.count
+                report.kernel_children.extend(callee_effect_roots)
+                callee_row: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-row", "", 0, 0, 0, callee_children_start, callee_effect_roots.count, 0, "", "")
+                call_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect-call", "", callee_row, 0, 0, 0, 0, 0, functions.names[callee], ""))
+            containment_children_start: usize = report.kernel_children.count
+            report.kernel_children.extend(call_roots)
+            containment: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-containment", "", declared_row, 0, 0, containment_children_start, call_roots.count, 0, function_name, "")
+            proof_add_effect_goal_attempt(report, containment, line, function_name)
+            report.proof_obligation(true)
+
+        def proof_record_declaration(declaration: Ast::Decl, file: Ast::File&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
+            summary: mutable ProofDeclarationSummary = proof_declaration_summary("declaration", "", 0)
+            match declaration:
+                Ast::Decl.Func(name, parameters, _, _, declared_effects, _, position):
+                    summary <- proof_declaration_summary("function", name, position.line)
+                    summary.lemma <- proof_lemma_index(lemmas, name) < lemmas.names.count
+                    summary.kind <- "lemma" if summary.lemma
+                    summary.parameters_start <- report.declaration_parameters.count
+                    summary.parameters_count <- parameters.count
+                    for parameter in parameters |report, summary|:
+                        report.declaration_parameters.push(parameter.name)
+                    summary.effects_start <- report.declaration_effects.count
+                    summary.effects_count <- declared_effects.count
+                    summary.effects_declared <- declared_effects.count > 0
+                    for effect in declared_effects |report|:
+                        report.declaration_effects.push(effect)
+                    if summary.lemma:
+                        lemma_index: usize = proof_lemma_index(lemmas, name)
+                        if lemma_index < lemmas.names.count:
+                            summary.requires_count <- lemmas.requires_counts[lemma_index]
+                            summary.ensures_count <- lemmas.ensure_counts[lemma_index]
+                            summary.decreases_count <- lemmas.decreases_counts[lemma_index]
+                            summary.recursive <- lemmas.recursive[lemma_index]
+                            summary.verified <- lemma_index < lemmas.verified.count and lemmas.verified[lemma_index]
+                            summary.verification_reason <- lemmas.verification_reasons[lemma_index] if lemma_index < lemmas.verification_reasons.count else "not-checked"
+                            proof_goals_start: usize = report.theorem_proof_goal_ids.count
+                            proof_goals_count: mutable usize = 0
+                            for goal_id in 0..<report.goal_attempts.count |goal_id, report, name, proof_goals_count|:
+                                if report.goal_attempts[goal_id].name == name:
+                                    report.theorem_proof_goal_ids.push(goal_id)
+                                    proof_goals_count <- proof_goals_count + 1
+                            theorem: ProofTheoremSummary = ProofTheoremSummary{name: name, line: position.line, parameters_start: report.theorem_parameters.count, parameters_count: lemmas.param_counts[lemma_index], requires_start: report.theorem_requires.count, requires_count: lemmas.requires_counts[lemma_index], ensures_start: report.theorem_ensures.count, ensures_count: lemmas.ensure_counts[lemma_index], decreases_start: report.theorem_decreases.count, decreases_count: lemmas.decreases_counts[lemma_index], proof_goals_start: proof_goals_start, proof_goals_count: proof_goals_count, recursive: summary.recursive, verified: summary.verified, verification_reason: summary.verification_reason}
+                            parameter_start: usize = lemmas.param_starts[lemma_index]
+                            for index in 0..<theorem.parameters_count |index, parameter_start, lemmas, report|:
+                                report.theorem_parameters.push(lemmas.all_params[parameter_start + index])
+                                report.theorem_parameter_types.push(parameters[index].type_expression if index < parameters.count else Ast::Expr.Invalid)
+                                report.theorem_parameter_has_defaults.push(lemmas.all_has_defaults[parameter_start + index])
+                                report.theorem_parameter_defaults.push(lemmas.all_defaults[parameter_start + index])
+                            requires_start: usize = lemmas.requires_starts[lemma_index]
+                            for index in 0..<theorem.requires_count |index, requires_start, lemmas, report|:
+                                report.theorem_requires.push(lemmas.all_requires[requires_start + index])
+                            ensures_start: usize = lemmas.ensure_starts[lemma_index]
+                            for index in 0..<theorem.ensures_count |index, ensures_start, lemmas, report|:
+                                report.theorem_ensures.push(lemmas.all_ensures[ensures_start + index])
+                            decreases_start: usize = lemmas.decreases_starts[lemma_index]
+                            for index in 0..<theorem.decreases_count |index, decreases_start, lemmas, report|:
+                                report.theorem_decreases.push(lemmas.all_decreases[decreases_start + index])
+                            report.theorem_summaries.push(theorem)
+                    else:
+                        function_index: usize = proof_function_index(functions, name)
+                        if function_index < functions.names.count:
+                            summary.requires_count <- functions.requires_counts[function_index]
+                            summary.ensures_count <- functions.ensure_counts[function_index]
+                            summary.changes_count <- functions.changes_counts[function_index]
+                            summary.preserves_count <- functions.preserves_counts[function_index]
+                            summary.decreases_count <- functions.decreases_counts[function_index]
+                            summary.recursive <- functions.recursive[function_index]
+                            summary.pure <- functions.pure[function_index]
+                            summary.verified <- function_index < functions.verified.count and functions.verified[function_index]
+                            summary.verification_reason <- functions.verification_reasons[function_index] if function_index < functions.verification_reasons.count else "not-checked"
+                            summary.structural <- functions.structural[function_index]
+                            executable: ProofExecutableSummary = ProofExecutableSummary{name: name, line: position.line, parameters_start: report.executable_parameters.count, parameters_count: functions.param_counts[function_index], requires_start: report.executable_requires.count, requires_count: functions.requires_counts[function_index], ensures_start: report.executable_ensures.count, ensures_count: functions.ensure_counts[function_index], verified: summary.verified, verification_reason: summary.verification_reason}
+                            parameter_start: usize = functions.param_starts[function_index]
+                            for index in 0..<executable.parameters_count |index, parameter_start, functions, report|:
+                                report.executable_parameters.push(functions.all_params[parameter_start + index])
+                            requires_start: usize = functions.requires_starts[function_index]
+                            for index in 0..<executable.requires_count |index, requires_start, functions, report|:
+                                report.executable_requires.push(functions.all_requires[requires_start + index])
+                            ensures_start: usize = functions.ensure_starts[function_index]
+                            for index in 0..<executable.ensures_count |index, ensures_start, functions, report|:
+                                report.executable_ensures.push(functions.all_ensures[ensures_start + index])
+                            report.executable_summaries.push(executable)
+                Ast::Decl.Struct(name, _, _, _, _, _, position):
+                    summary <- proof_declaration_summary("struct", name, position.line)
+                Ast::Decl.Enum(name, _, _, _, position):
+                    summary <- proof_declaration_summary("enum", name, position.line)
+                Ast::Decl.Alias(name, _, position):
+                    summary <- proof_declaration_summary("alias", name, position.line)
+                Ast::Decl.Law(name, _, position):
+                    summary <- proof_declaration_summary("law", name, position.line)
+                Ast::Decl.Import(module, position):
+                    summary <- proof_declaration_summary("import", module, position.line)
+                Ast::Decl.Scoped(_, position):
+                    summary <- proof_declaration_summary("scope", "", position.line)
+                Ast::Decl.Extern(name, _, _, _, _, _, _, position):
+                    summary <- proof_declaration_summary("extern", name, position.line)
+                Ast::Decl.Const(name, _, _, _, position):
+                    summary <- proof_declaration_summary("const", name, position.line)
+                Ast::Decl.Module(name, _, position):
+                    summary <- proof_declaration_summary("module", name, position.line)
+                Ast::Decl.Invalid:
+                    summary <- proof_declaration_summary("invalid", "", 0)
+            report.declaration_details.push(summary)
+
+        def proof_record_declarations(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
+            for declaration in declarations |file, lemmas, functions, report|:
+                report.declarations <- report.declarations + 1
+                proof_record_declaration(declaration, file, lemmas, functions, report)
+                match declaration:
+                    Ast::Decl.Module(_, module_body, _):
+                        proof_record_declarations(file, module_body, lemmas, functions, report)
+                    Ast::Decl.Scoped(scoped_body, _):
+                        proof_record_declarations(file, scoped_body, lemmas, functions, report)
+                    Ast::Decl.Invalid:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "declaration-unsupported", 0, "", "invalid declaration cannot enter a verified proof state")
+                    _:
+                        pass
+
+        # A contract is not a usable executable summary merely because it was collected from
+        # source. Establish summary availability from the callee body itself. The scheduler
+        # checks dependency-ready functions once, checks recursive SCCs with provisional
+        # intra-component summaries, and permanently withholds the whole component on failure.
+        # A finding that only records a construct whose effect was over-approximated is not a
+        # gap in the function's own contract derivation: the checker went on to reason from the
+        # havocked state, which is weaker than any real execution. A summary resting on such a
+        # derivation is therefore as sound as one from a function with no findings at all, and
+        # suppressing it costs every caller its own summary in turn -- the single largest
+        # amplifier in this corpus.
+        #
+        # Everything else stays disqualifying, including `expression-unsupported`, which marks the
+        # path itself unusable rather than merely widened, and every unproven obligation of this
+        # function -- an unproven `ensure` above all, since that *is* the summary.

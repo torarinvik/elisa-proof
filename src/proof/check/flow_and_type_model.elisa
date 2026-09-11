@@ -1,0 +1,409 @@
+extend ElisaProof:
+    private:
+        # Flow is tracked separately from the symbolic state. A loop-control statement does not
+        # have a normal successor, but it can still carry a proof obligation for the nearest
+        # loop's invariant. Keeping these exits explicit prevents a `break` path from being
+        # mistaken for the loop's ordinary fallthrough state. Continue states are retained per
+        # path so termination can check each back edge independently. The snapshots are flattened
+        # into parallel arrays because nested dynamic arrays would violate Elisa region lifetimes
+        # when a state is stored in a flow collection.
+        struct ProofFlow:
+            normal: mutable bool
+            breaks: mutable bool
+            continues: mutable bool
+            valid: mutable bool
+            continue_name_starts: mutable darray[usize]
+            continue_name_counts: mutable darray[usize]
+            continue_names: mutable darray[sview]
+            continue_value_starts: mutable darray[usize]
+            continue_value_counts: mutable darray[usize]
+            continue_values: mutable darray[Ast::Expr]
+            continue_fact_starts: mutable darray[usize]
+            continue_fact_counts: mutable darray[usize]
+            continue_facts: mutable darray[Ast::Expr]
+
+        # Structural subterms are tracked with their origin subject, not only their binder name.
+        # This distinction is essential for inferred product rankings: a subterm of `left` may
+        # not be silently passed as the decreasing argument for `right`.
+        struct ProofStructuralSmaller:
+            name: sview
+            subject: sview
+
+        # One source-neutral witness for a recursive edge. `same` records the unchanged
+        # component of an inferred product ranking; `strict` records the component that came
+        # from a matched strict subterm. The kernel checks the relation shape independently of
+        # the AST walker that discovered it.
+        struct ProofStructuralWitness:
+            subject: sview
+            argument: sview
+            strict: bool
+
+        def proof_add_structural_edge_attempt(report: mutable ProofReport&, caller: sview, callee: sview, witnesses: darray[ProofStructuralWitness]&, line: u32) -> void:
+            return if caller == "" or callee == "" or witnesses.count == 0
+            for witness in witnesses |witness|:
+                return if witness.subject == "" or witness.argument == ""
+                return if not witness.strict and witness.subject != witness.argument
+            witness_start: usize = report.kernel_children.count
+            witness_nodes: mutable darray[usize] = []
+            for witness in witnesses |witness, report, witness_nodes|:
+                witness_nodes.push(proof_kernel_add_node(&report.kernel_nodes, "structural-argument", "strict" if witness.strict else "same", 0, 0, 0, 0, 0, 0, witness.subject, witness.argument))
+            report.kernel_children.extend(witness_nodes)
+            edge_start: usize = report.kernel_children.count
+            edge: usize = proof_kernel_add_node(&report.kernel_nodes, "structural-edge", "", 0, 0, witnesses.count, witness_start, witnesses.count, 0, caller, callee)
+            report.kernel_children.push(edge)
+            root: usize = proof_kernel_add_node(&report.kernel_nodes, "structural-safety", "", 0, 0, 0, edge_start, 1, 0, caller, "structural-v1")
+            proof_add_structural_goal_attempt(report, root, line, caller)
+
+        def proof_empty_flow() -> ProofFlow:
+            return ProofFlow{normal: true, breaks: false, continues: false, valid: true, continue_name_starts: [], continue_name_counts: [], continue_names: [], continue_value_starts: [], continue_value_counts: [], continue_values: [], continue_fact_starts: [], continue_fact_counts: [], continue_facts: []}
+
+        def proof_copy_names(source: darray[sview]&) -> darray[sview]:
+            result: mutable darray[sview] = []
+            result.extend(source)
+            return result
+
+        def proof_copy_structural_smaller(source: darray[ProofStructuralSmaller]&) -> darray[ProofStructuralSmaller]:
+            result: mutable darray[ProofStructuralSmaller] = []
+            result.extend(source)
+            return result
+
+        def proof_copy_exprs(source: darray[Ast::Expr]&) -> darray[Ast::Expr]:
+            result: mutable darray[Ast::Expr] = []
+            result.extend(source)
+            return result
+
+        def proof_clear_continue_states(flow: mutable ProofFlow&) -> void:
+            flow.continue_name_starts.clear()
+            flow.continue_name_counts.clear()
+            flow.continue_names.clear()
+            flow.continue_value_starts.clear()
+            flow.continue_value_counts.clear()
+            flow.continue_values.clear()
+            flow.continue_fact_starts.clear()
+            flow.continue_fact_counts.clear()
+            flow.continue_facts.clear()
+
+        # Copy path snapshots with fresh offsets. The source and target arrays remain flat, so no
+        # nested container crosses the region boundary of a branch-local flow value.
+        def proof_append_continue_states(target: mutable ProofFlow&, source: ProofFlow&) -> void:
+            for state_index in 0..<source.continue_name_starts.count |state_index, target, source|:
+                name_start: usize = source.continue_name_starts[state_index]
+                name_count: usize = source.continue_name_counts[state_index]
+                value_start: usize = source.continue_value_starts[state_index]
+                value_count: usize = source.continue_value_counts[state_index]
+                fact_start: usize = source.continue_fact_starts[state_index]
+                fact_count: usize = source.continue_fact_counts[state_index]
+                target.continue_name_starts.push(target.continue_names.count)
+                target.continue_name_counts.push(name_count)
+                for offset in 0..<name_count |offset, target, source, name_start|:
+                    target.continue_names.push(source.continue_names[name_start + offset])
+                target.continue_value_starts.push(target.continue_values.count)
+                target.continue_value_counts.push(value_count)
+                for offset in 0..<value_count |offset, target, source, value_start|:
+                    target.continue_values.push(source.continue_values[value_start + offset])
+                target.continue_fact_starts.push(target.continue_facts.count)
+                target.continue_fact_counts.push(fact_count)
+                for offset in 0..<fact_count |offset, target, source, fact_start|:
+                    target.continue_facts.push(source.continue_facts[fact_start + offset])
+
+        def proof_record_continue_state(flow: mutable ProofFlow&, names: darray[sview]&, values: darray[Ast::Expr]&, facts: darray[Ast::Expr]&) -> void:
+            flow.continue_name_starts.push(flow.continue_names.count)
+            flow.continue_name_counts.push(names.count)
+            flow.continue_names.extend(names)
+            flow.continue_value_starts.push(flow.continue_values.count)
+            flow.continue_value_counts.push(values.count)
+            flow.continue_values.extend(values)
+            flow.continue_fact_starts.push(flow.continue_facts.count)
+            flow.continue_fact_counts.push(facts.count)
+            flow.continue_facts.extend(facts)
+
+        # Elisa's unsigned primitive types carry a compiler-level lower bound of zero. Keep
+        # this import deliberately narrow: only bare primitive spellings are recognized here;
+        # aliases, refinements, and opaque wrappers must provide an explicit proof instead of
+        # being guessed from a name. This is a source-semantic fact, not an axiom supplied by a
+        # proof author, and is recorded as `type-bound` provenance for replay.
+        def proof_unsigned_primitive_type(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uint"
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_primitive_type(inner)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_unsigned_primitive_type(inner) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return false
+                _:
+                    return false
+
+        def proof_unsigned_primitive_width(expression: Ast::Expr) -> i64:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return 8 if name == "u8"
+                    return 16 if name == "u16"
+                    return 32 if name == "u32"
+                    return 64 if name == "u64" or name == "usize" or name == "uint"
+                    return 0
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_primitive_width(inner)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_unsigned_primitive_width(inner) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                _:
+                    return 0
+
+        # The primitive scalar types. Equality, arithmetic, and ordering on these are the
+        # language's own operators; only a struct operand dispatches to a user protocol method.
+        # Floating point is deliberately absent: it is excluded from the certificate term
+        # language entirely because arithmetic can produce NaN, which is not reflexive.
+        def proof_scalar_primitive_type_name(name: sview) -> bool:
+            return true if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "int"
+            return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uint"
+            return true if name == "bool" or name == "char"
+            return false
+
+        # 1 means a primitive scalar type, 0 means it is not one, and -1 means alias resolution
+        # is ambiguous or too deep. A failed resolution is never reported as scalar. References
+        # are excluded rather than followed: `&T` compares by address, and reading that as the
+        # pointee's equality would need a separate argument.
+        def proof_scalar_type_kind(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return 1 if proof_scalar_primitive_type_name(name)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return -1 if alias.count > 1
+                    return proof_scalar_type_kind(alias.target, declarations, depth + 1) if alias.count == 1
+                    # A `const enum` is an integer-backed value; its `==` is the integer compare.
+                    # A plain enum is a tagged union and is deliberately not a scalar here.
+                    const_enums: usize = proof_count_const_enums(declarations, name, 0)
+                    return -1 if const_enums > 1
+                    return 1 if const_enums == 1
+                    return 0
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_type_kind(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    # A predicate restricts inhabitants; the underlying operators are unchanged.
+                    return proof_scalar_type_kind(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_scalar_type_kind(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                Ast::Expr.Scope(_, name, _):
+                    # A bare-name search cannot establish a qualified alias's owner.
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return -1 if alias.count > 0
+                    return 0
+                _:
+                    return 0
+
+        def proof_find_type_alias(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> (count: usize, target: Ast::Expr):
+            return (2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            target: mutable Ast::Expr = Ast::Expr.Absent
+            for declaration in declarations |name, depth, count, target|:
+                match declaration:
+                    Ast::Decl.Alias(alias_name, alias_target, _):
+                        if alias_name == name:
+                            count <- count + 1
+                            target <- alias_target
+                    Ast::Decl.Module(_, body, _):
+                        nested: (count: usize, target: Ast::Expr) = proof_find_type_alias(body, name, depth + 1)
+                        count <- count + nested.count
+                        target <- nested.target if nested.count > 0
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, target: Ast::Expr) = proof_find_type_alias(body, name, depth + 1)
+                        count <- count + nested.count
+                        target <- nested.target if nested.count > 0
+                    _:
+                        pass
+                return (2, Ast::Expr.Invalid) if count > 1
+            return (count, target)
+
+        def proof_count_const_enums(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
+            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |name, depth, count|:
+                match declaration:
+                    Ast::Decl.Enum(enum_name, _, is_const, _, _):
+                        count <- count + 1 if enum_name == name and is_const
+                    Ast::Decl.Module(_, body, _):
+                        count <- count + proof_count_const_enums(body, name, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_count_const_enums(body, name, depth + 1)
+                    _:
+                        pass
+            return count
+
+        # The declared type of one field of a named struct. The count reports how many struct
+        # declarations answer to the name; anything but exactly one is refused by the caller.
+        def proof_struct_field_type(declarations: darray[Ast::Decl]&, struct_name: sview, field_name: sview, depth: usize) -> (count: usize, type_expression: Ast::Expr):
+            return (2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            found: mutable Ast::Expr = Ast::Expr.Invalid
+            for declaration in declarations |struct_name, field_name, depth, count, found|:
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        if name == struct_name:
+                            count <- count + 1
+                            for member in members |field_name, found|:
+                                found <- member.type_expression if member.name == field_name
+                    Ast::Decl.Module(_, body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(body, struct_name, field_name, depth + 1)
+                        count <- count + nested.count
+                        found <- nested.type_expression if nested.count > 0
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(body, struct_name, field_name, depth + 1)
+                        count <- count + nested.count
+                        found <- nested.type_expression if nested.count > 0
+                    _:
+                        pass
+            return (count, found)
+
+        def proof_struct_field_names(declarations: darray[Ast::Decl]&, struct_name: sview, depth: usize, names: mutable darray[sview]&) -> usize:
+            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |struct_name, depth, count, names|:
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        if name == struct_name:
+                            count <- count + 1
+                            for member in members |names|:
+                                names.push(member.name)
+                    Ast::Decl.Module(_, body, _):
+                        count <- count + proof_struct_field_names(body, struct_name, depth + 1, names)
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_struct_field_names(body, struct_name, depth + 1, names)
+                    _:
+                        pass
+            return count
+
+        # The struct a declared type names, after stripping storage qualifiers, references,
+        # parentheses, refinements, and a unique alias. A reference is followed here because a
+        # field read through `p: Pair&` still has the field's declared type; what is refused for
+        # a scalar (`&T` compares by address) does not arise for a projection out of it.
+        def proof_type_head_name(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return "" if proof_scalar_primitive_type_name(name)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return "" if alias.count > 1
+                    return proof_type_head_name(alias.target, declarations, depth + 1) if alias.count == 1
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_type_head_name(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_type_head_name(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_type_head_name(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return ""
+                Ast::Expr.Scope(_, name, _):
+                    # A qualified struct spelling resolves to its leaf, the same convention the
+                    # proof tables use for a qualified call. The leaf is not assumed unique here:
+                    # every reader of this name searches the declarations by it and refuses a
+                    # count other than one, so an ambiguous leaf loses the witness rather than
+                    # picking a struct. An alias is resolved only when the leaf names exactly one.
+                    return "" if proof_scalar_primitive_type_name(name)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return "" if alias.count > 1
+                    return proof_type_head_name(alias.target, declarations, depth + 1) if alias.count == 1
+                    return name
+                _:
+                    return ""
+
+        # The element type of a built-in container spelling: `darray[T]`, `view[T]`,
+        # `array[T, N]`, or `T[N]`. Only built-in containers are recognized, because a subscript
+        # on a struct is an `__index__` protocol call whose result is whatever the author chose.
+        # Whether a declared type can hold a reference anywhere inside it. Conservative in both
+        # directions a mistake could go: a form this does not recognize, an ambiguous name, and a
+        # type that is too deep all count as able to hold one.
+        #
+        # This is what decides whether a lend can outlive the call it was passed to. A reference
+        # can only be stored into a place whose type can hold one, and the places a callee can
+        # reach that its caller still sees are exactly its other parameters and its return. Three
+        # compiled probes fix the boundary: a callee with a second parameter of type
+        # `mutable darray[darray[usize]&]&` does store the lend into it and the compiler accepts
+        # that; so does one that returns a by-value `darray[darray[usize]&]` holding it; while
+        # storing into a plain field is refused by the region checker. So neither "returns no
+        # reference" nor "has one reference parameter" is enough on its own, and the type test is.
+        def proof_type_is_reference_free(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_type_is_reference_free(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_type_is_reference_free(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    # `&` and `lmut` are references. `mutable` and the storage qualifiers are modes
+                    # on a by-value binding and change nothing about what the type can hold.
+                    return false if operator != TokenKind.Mutable and operator != TokenKind.Static and operator != TokenKind.Heap and operator != TokenKind.Stack and operator != TokenKind.Tail
+                    return proof_type_is_reference_free(inner, declarations, depth + 1)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |declarations, depth|:
+                        return false if not proof_type_is_reference_free(element, declarations, depth + 1)
+                    return true
+                Ast::Expr.Index(head, argument, _):
+                    head_name: sview = proof_ident_name(head)
+                    return proof_type_is_reference_free(argument, declarations, depth + 1) if head_name == "darray" or head_name == "view" or head_name == "set"
+                    match argument:
+                        Ast::Expr.IntLit(_, _):
+                            return proof_type_is_reference_free(head, declarations, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.IndexN(head, arguments, _):
+                    return false if proof_ident_name(head) != "array" or arguments.count != 2
+                    match arguments[1]:
+                        Ast::Expr.IntLit(_, _):
+                            return proof_type_is_reference_free(arguments[0], declarations, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Ident(name, _):
+                    return true if proof_scalar_primitive_type_name(name)
+                    return true if name == "sview" or name == "void" or name == "f32" or name == "f64"
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return false if alias.count > 1
+                    return proof_type_is_reference_free(alias.target, declarations, depth + 1) if alias.count == 1
+                    const_enums: usize = proof_count_const_enums(declarations, name, 0)
+                    return false if const_enums > 1
+                    return true if const_enums == 1
+                    return proof_struct_is_reference_free(name, declarations, depth + 1)
+                Ast::Expr.Scope(_, name, _):
+                    # A qualified name is resolved by its last segment, the way every other type
+                    # helper here resolves one. A bare-name search cannot establish a qualified
+                    # alias's owner, so any alias match at all makes the answer unknown.
+                    scoped_alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return false if scoped_alias.count > 0
+                    scoped_enums: usize = proof_count_const_enums(declarations, name, 0)
+                    return false if scoped_enums > 1
+                    return true if scoped_enums == 1
+                    return proof_struct_is_reference_free(name, declarations, depth + 1)
+                _:
+                    return false
+
+        # The storage a declared type names: the type with one outer reference removed, seen
+        # through parentheses, refinements and the storage qualifiers. A by-value type is returned
+        # unchanged. This is what a callee can store *into* through that parameter.
+        def proof_type_strip_reference(expression: Ast::Expr, depth: usize) -> Ast::Expr:
+            return expression if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_type_strip_reference(inner, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_type_strip_reference(base, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_type_strip_reference(inner, depth + 1) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return expression
+                _:
+                    return expression
+
+        # A struct holds no reference when every field's declared type holds none. A name that
+        # resolves to no struct, or to more than one, holds one as far as this is concerned.
+        def proof_struct_is_reference_free(struct_name: sview, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return false if struct_name == ""
+            field_names: mutable darray[sview] = []
+            return false if proof_struct_field_names(declarations, struct_name, 0, &field_names) != 1
+            for field_name in field_names |struct_name, declarations, depth|:
+                field: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(declarations, struct_name, field_name, 0)
+                return false if field.count != 1
+                return false if not proof_type_is_reference_free(field.type_expression, declarations, depth + 1)
+            return true
+

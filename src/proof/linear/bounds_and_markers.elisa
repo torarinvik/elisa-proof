@@ -1,0 +1,409 @@
+extend ElisaProof:
+    public:
+        const PROOF_CONGRUENCE_SCAN_DEPTH: usize = 127
+
+        struct ProofBound:
+            name: sview
+            lower: mutable i64
+            upper: mutable i64
+            has_lower: mutable bool
+            has_upper: mutable bool
+
+        # A normalized signed-integer difference constraint `left - right <= bound`. Empty
+        # names denote the mathematical zero node, so the same representation covers ordinary
+        # bounds (`x >= 0`) and relations between two symbolic values.
+        struct ProofDifference:
+            left: sview
+            right: sview
+            bound: i64
+
+        # A deliberately small affine form. The base is one bare identifier, the coefficient is
+        # either +1 or -1, and the offset is a fixed i64 constant. This is still far from a
+        # general Presburger solver, but it covers both `x + k` and well-founded ranks such as
+        # `127 - depth` without treating arithmetic normalization as an axiom.
+        struct ProofAffine:
+            known: bool
+            base: sview
+            offset: i64
+            negative: bool
+
+        def proof_bound_index(bounds: darray[ProofBound]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < bounds.count |index, bounds, name|:
+                return index if bounds[index].name == name
+                index <- index + 1
+            return bounds.count
+
+        def proof_bound_for(bounds: darray[ProofBound]&, name: sview) -> ProofBound:
+            index: usize = proof_bound_index(bounds, name)
+            return bounds[index] if index < bounds.count
+            return ProofBound{name: name, has_lower: false, lower: 0, has_upper: false, upper: 0}
+
+        def proof_add_lower(bounds: mutable darray[ProofBound]&, name: sview, value: i64) -> void:
+            return if name == ""
+            index: usize = proof_bound_index(bounds, name)
+            if index == bounds.count:
+                bounds <- bounds.push(ProofBound{name: name, has_lower: true, lower: value, has_upper: false, upper: 0})
+                return
+            old_has: bool = bounds[index].has_lower
+            old_value: i64 = bounds[index].lower
+            bounds[index].has_lower <- true
+            bounds[index].lower <- value if not old_has or value > old_value
+
+        def proof_add_upper(bounds: mutable darray[ProofBound]&, name: sview, value: i64) -> void:
+            return if name == ""
+            index: usize = proof_bound_index(bounds, name)
+            if index == bounds.count:
+                bounds <- bounds.push(ProofBound{name: name, has_lower: false, lower: 0, has_upper: true, upper: value})
+                return
+            old_has: bool = bounds[index].has_upper
+            old_value: i64 = bounds[index].upper
+            bounds[index].has_upper <- true
+            bounds[index].upper <- value if not old_has or value < old_value
+
+        def proof_comparison_negation(operator: TokenKind) -> TokenKind:
+            return TokenKind.BangEq if operator == TokenKind.EqEq
+            return TokenKind.EqEq if operator == TokenKind.BangEq
+            return TokenKind.GtEq if operator == TokenKind.Lt
+            return TokenKind.Lt if operator == TokenKind.GtEq
+            return TokenKind.Gt if operator == TokenKind.LtEq
+            return TokenKind.LtEq if operator == TokenKind.Gt
+            # Eof is outside the comparison-token set and serves as the impossible result.
+            return TokenKind.Eof
+
+        def proof_collect_comparison_bounds(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, bounds: mutable darray[ProofBound]&) -> void:
+            return if not proof_is_comparison(operator)
+            left_name: sview = proof_ident_name(left)
+            right_name: sview = proof_ident_name(right)
+            right_constant: (known: bool, value: i64) = proof_constant_int(right)
+            left_constant: (known: bool, value: i64) = proof_constant_int(left)
+            if left_name != "" and right_constant.known:
+                incremented: (known: bool, value: i64) = proof_add_safe(right_constant.value, 1)
+                proof_add_lower(bounds, left_name, incremented.value) if operator == TokenKind.Gt and incremented.known
+                proof_add_lower(bounds, left_name, right_constant.value) if operator == TokenKind.GtEq
+                decremented: (known: bool, value: i64) = proof_sub_safe(right_constant.value, 1)
+                proof_add_upper(bounds, left_name, decremented.value) if operator == TokenKind.Lt and decremented.known
+                proof_add_upper(bounds, left_name, right_constant.value) if operator == TokenKind.LtEq
+                proof_add_lower(bounds, left_name, right_constant.value) if operator == TokenKind.EqEq
+                proof_add_upper(bounds, left_name, right_constant.value) if operator == TokenKind.EqEq
+            if right_name != "" and left_constant.known:
+                decremented_left: (known: bool, value: i64) = proof_sub_safe(left_constant.value, 1)
+                proof_add_upper(bounds, right_name, decremented_left.value) if operator == TokenKind.Gt and decremented_left.known
+                proof_add_upper(bounds, right_name, left_constant.value) if operator == TokenKind.GtEq
+                incremented_left: (known: bool, value: i64) = proof_add_safe(left_constant.value, 1)
+                proof_add_lower(bounds, right_name, incremented_left.value) if operator == TokenKind.Lt and incremented_left.known
+                proof_add_lower(bounds, right_name, left_constant.value) if operator == TokenKind.LtEq
+                proof_add_lower(bounds, right_name, left_constant.value) if operator == TokenKind.EqEq
+                proof_add_upper(bounds, right_name, left_constant.value) if operator == TokenKind.EqEq
+
+        # Extract facts of the form x OP constant or constant OP x, including conjunctions.
+        def proof_collect_bounds(expression: Ast::Expr, bounds: mutable darray[ProofBound]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_bounds(inner, bounds)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated_operator: TokenKind = proof_comparison_negation(operator)
+                            proof_collect_comparison_bounds(left, negated_operator, right, bounds) if negated_operator != TokenKind.Eof
+                        _:
+                            pass
+                Ast::Expr.Binary(left, operator, right, position):
+                    if operator == TokenKind.And:
+                        proof_collect_bounds(left, bounds)
+                        proof_collect_bounds(right, bounds)
+                        return
+                    proof_collect_comparison_bounds(left, operator, right, bounds)
+                _:
+                    pass
+
+        # The proof AST does not carry compiler type metadata. Unsigned widths therefore travel
+        # through the same traced-fact channel as compiler-derived bounds. This marker is opaque
+        # to the arithmetic fragment, but it is encoded in the kernel arena and independently
+        # recognized by kernel replay. A proof author can manufacture the marker only to lose
+        # completeness: it never proves a proposition by itself, and the source trace still has
+        # to identify it as a type-bound fact.
+        def proof_unsigned_type_marker(name: sview, width: i64, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [Ast::Expr.Ident(name, position), Ast::Expr.IntLit(width, position)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
+
+        # The same marker over a place rather than a bare name. It is deliberately invisible to
+        # `proof_unsigned_marker_info`, which reads only the bare-name form, so a place width never
+        # reaches `proof_unsigned_width_in_expression` and never subjects an arithmetic term
+        # containing a field to the unsigned wrap guard. Reporting `.count` from the general width
+        # function once cost 39 proofs by exactly that contagion. Only the nonnegativity rule
+        # consults this form, and only to answer whether a term has an unsigned type at all.
+        def proof_unsigned_place_marker(term: Ast::Expr, width: i64, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term, Ast::Expr.IntLit(width, position)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
+
+        # The place form read as a marker rather than as a width. This is deliberately separate
+        # from `proof_unsigned_marker_info`, which stays bare-name-only so a term containing a
+        # field never falls under the wrap guard. Retention is the other question, and it has to
+        # recognize the place form: a witness whose subject is a place lives and dies with that
+        # place's root binding, exactly as the scalar-type witness beside it does. Without this
+        # the width witness was dropped at the first call while the scalar witness survived, and
+        # `0 <= node.children_start + index` became unprovable for the rest of the body.
+        def proof_unsigned_place_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, width: i64) can[Memory.Allocate, Abort.Panic]:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, Ast::Expr.Invalid, 0) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, Ast::Expr.Invalid, 0) if proof_ident_name(callee) != "__elisa_unsigned_type_bound" or arguments.count != 2
+                    marked: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    return (false, Ast::Expr.Invalid, 0) if not marked.known or marked.value < 8 or marked.value > 64
+                    return (proof_place_root_name(arguments[0], 0) != "", arguments[0], marked.value)
+                _:
+                    return (false, Ast::Expr.Invalid, 0)
+
+        def proof_unsigned_place_marker_width(facts: darray[Ast::Expr]&, term: Ast::Expr) -> i64 can[Memory.Allocate, Abort.Panic]:
+            width: mutable i64 = 0
+            for fact in facts |fact, term, width|:
+                match fact:
+                    Ast::Expr.Call(callee, arguments, argument_names, _):
+                        continue if argument_names.count != 0 and argument_names.count != arguments.count
+                        continue if proof_ident_name(callee) != "__elisa_unsigned_type_bound" or arguments.count != 2
+                        continue if not proof_expr_equal(arguments[0], term)
+                        marked: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                        continue if not marked.known or marked.value < 8 or marked.value > 64
+                        width <- marked.value if width == 0 or marked.value < width
+                    _:
+                        pass
+            return width
+
+        # Whether a term has an unsigned type. Arithmetic between an unsigned operand and anything
+        # else does not typecheck, so one unsigned atom settles the whole term. This answers a
+        # narrower question than the width function: it is used only where the answer alone is the
+        # argument, never to decide whether a term stays in range.
+        def proof_term_is_unsigned(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 32
+            return true if proof_unsigned_width_in_expression(expression, facts) != 0
+            stripped: Ast::Expr = proof_strip_parens(expression)
+            match stripped:
+                Ast::Expr.Binary(left, operator, right, _):
+                    arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.LShift or operator == TokenKind.RShift
+                    return false if not arithmetic
+                    return proof_term_is_unsigned(left, facts, depth + 1) or proof_term_is_unsigned(right, facts, depth + 1)
+                _:
+                    return proof_unsigned_place_marker_width(facts, stripped) != 0
+
+        # Elisa dispatches `==`, `+`, `-`, `*`, `/` and the ordering operators to a user
+        # `__eq__`/`__add__`/`__cmp__` implementation whenever an operand's type is a struct, and
+        # a user `__eq__` need not be Leibniz equality. Ground congruence is therefore admitted
+        # only over terms whose operators are the language's primitive ones. The proof AST carries
+        # no compiler type metadata, so the producer records the declared primitive scalar types
+        # it resolved through the same traced-fact channel used for unsigned widths. The marker is
+        # opaque to every arithmetic tier and proves no proposition by itself; manufacturing one
+        # can only lose completeness, because the source trace still has to identify it as a
+        # type-bound fact of the owning declaration.
+        def proof_scalar_type_marker(name: sview, position: Ast::Pos) -> Ast::Expr:
+            return proof_scalar_term_marker(Ast::Expr.Ident(name, position), position)
+
+        # The declared type of a term, not only of a name. The producer resolves a field
+        # selection's declared type through the owning struct declaration, so the witness has to
+        # be keyed by the exact term rather than by a symbol.
+        def proof_scalar_term_marker(term: Ast::Expr, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_primitive_scalar_type", position), arguments, [], position)
+
+        # A container whose declared element type is a primitive scalar. The index set is not
+        # enumerable, so the witness is recorded once against the container term and says only
+        # that every element of it is a primitive scalar.
+        # The depth is how many subscripts reach the scalar: 1 for `darray[i64]`, 2 for
+        # `array[array[i64, 4], 4]`, so a nested or multi-argument subscript is witnessed only
+        # when it goes exactly that deep.
+        def proof_scalar_element_marker(term: Ast::Expr, depth: i64, position: Ast::Pos) -> Ast::Expr:
+            arguments: darray[Ast::Expr] = [term, Ast::Expr.IntLit(depth, position)]
+            return Ast::Expr.Call(Ast::Expr.Ident("__elisa_primitive_scalar_element", position), arguments, [], position)
+
+        def proof_element_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, depth: i64):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, Ast::Expr.Invalid, 0) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, Ast::Expr.Invalid, 0) if proof_ident_name(callee) != "__elisa_primitive_scalar_element" or arguments.count != 2
+                    depth: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    return (false, Ast::Expr.Invalid, 0) if not depth.known or depth.value < 1 or depth.value > 8
+                    return (true, arguments[0], depth.value)
+                _:
+                    return (false, Ast::Expr.Invalid, 0)
+
+        def proof_marker_argument(expression: Ast::Expr, callee_name: sview) -> (known: bool, term: Ast::Expr):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, Ast::Expr.Invalid) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, Ast::Expr.Invalid) if proof_ident_name(callee) != callee_name or arguments.count != 1
+                    return (true, arguments[0])
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        # True for either compiler type marker, whatever its payload looks like. A marker states a
+        # declared type; it constrains no model and proves no proposition on its own.
+        def proof_type_marker_callee(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, _, _, _):
+                    name: sview = proof_ident_name(callee)
+                    return name == "__elisa_unsigned_type_bound" or name == "__elisa_primitive_scalar_type" or name == "__elisa_primitive_scalar_element"
+                _:
+                    return false
+
+        # The bare-name form of the scalar witness. A term-shaped witness answers "" here and is
+        # matched structurally by `proof_scalar_term_witnessed` instead.
+        def proof_scalar_marker_name(expression: Ast::Expr) -> sview:
+            argument: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+            return "" if not argument.known
+            return proof_ident_name(argument.term)
+
+        # The symbol a type witness hangs off: the root of its argument place. Retention and
+        # invalidation follow that symbol, so a field or element witness dies exactly when the
+        # binding it was resolved against does.
+        def proof_type_marker_root_name(expression: Ast::Expr) -> sview:
+            scalar: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+            return proof_place_root_name(scalar.term, 0) if scalar.known
+            element: (known: bool, term: Ast::Expr, depth: i64) = proof_element_marker_info(expression)
+            return proof_place_root_name(element.term, 0) if element.known
+            place: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_place_marker_info(expression)
+            return proof_place_root_name(place.term, 0) if place.known
+            return ""
+
+        def proof_place_root_name(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= 64
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_place_root_name(inner, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_place_root_name(object, depth + 1)
+                Ast::Expr.Index(object, _, _):
+                    return proof_place_root_name(object, depth + 1)
+                Ast::Expr.Tuple(elements, _):
+                    # A loop binder's proof atom is `(name, offset)`; it belongs to that name.
+                    return "" if elements.count != 2
+                    offset: (known: bool, value: i64) = proof_constant_int(elements[1])
+                    return proof_ident_name(elements[0]) if offset.known
+                    return ""
+                _:
+                    return ""
+
+        def proof_unsigned_marker_info(expression: Ast::Expr) -> (known: bool, name: sview, width: i64):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, "", 0) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, "", 0) if proof_ident_name(callee) != "__elisa_unsigned_type_bound" or arguments.count != 2
+                    name: sview = proof_ident_name(arguments[0])
+                    width: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    return (width.known and name != "" and width.value >= 8 and width.value <= 64, name, width.value)
+                _:
+                    return (false, "", 0)
+
+        def proof_unsigned_marker_name(expression: Ast::Expr) -> sview:
+            marker: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(expression)
+            return marker.name if marker.known
+            return ""
+
+        def proof_unsigned_marker_width_for_name(facts: darray[Ast::Expr]&, name: sview) -> i64:
+            width: mutable i64 = 0
+            for fact in facts |fact, name, width|:
+                marker: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(fact)
+                continue if not marker.known or marker.name != name
+                width <- marker.width if width == 0 or marker.width < width
+            return width
+
+        def proof_unsigned_width_max(width: i64) -> i64:
+            return 255 if width == 8
+            return 65535 if width == 16
+            return 4294967295 if width == 32
+            # i64 is the largest signed value representable by this proof AST. For u64/usize,
+            # a finite proof interval must establish this conservative representable ceiling;
+            # an unbounded unsigned value consequently cannot enter an arithmetic proof.
+            return 9223372036854775807 if width == 64
+            return 0
+
+        def proof_unsigned_width_in_expression(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> i64:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return proof_unsigned_marker_width_for_name(facts, name)
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_width_in_expression(inner, facts)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_unsigned_width_in_expression(operand, facts)
+                Ast::Expr.Binary(left, _, right, _):
+                    left_width: i64 = proof_unsigned_width_in_expression(left, facts)
+                    right_width: i64 = proof_unsigned_width_in_expression(right, facts)
+                    return right_width if left_width == 0
+                    return left_width if right_width == 0 or left_width < right_width
+                    return right_width
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    condition_width: i64 = proof_unsigned_width_in_expression(condition, facts)
+                    then_width: i64 = proof_unsigned_width_in_expression(then_expression, facts)
+                    else_width: i64 = proof_unsigned_width_in_expression(else_expression, facts)
+                    return condition_width if condition_width != 0 and (then_width == 0 or condition_width < then_width) and (else_width == 0 or condition_width < else_width)
+                    return then_width if then_width != 0 and (else_width == 0 or then_width < else_width)
+                    return else_width
+                Ast::Expr.Call(callee, arguments, _, _):
+                    width: mutable i64 = proof_unsigned_width_in_expression(callee, facts)
+                    for argument in arguments |argument, facts, width|:
+                        candidate: i64 = proof_unsigned_width_in_expression(argument, facts)
+                        width <- candidate if width == 0 or (candidate != 0 and candidate < width)
+                    return width
+                _:
+                    return 0
+
+        def proof_unsigned_order_atom(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Field(object, field_name, _):
+                    # A field of a bare name is a place, not arithmetic, so it carries the same
+                    # guarantee an identifier does: reading it twice in one fact set reads the
+                    # same value, because any write to it, and any call that is not stable for
+                    # it, discards these facts first. `values.count` is the term this admits in
+                    # practice, and it is the bound every loop over a collection is written
+                    # against. The peer rule already names exactly this shape.
+                    return field_name != "" and proof_ident_name(proof_strip_parens(object)) != ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_order_atom(inner)
+                _:
+                    return false
+
+        # Range safety must not be justified by reinterpreting the very modular
+        # arithmetic whose safety is in question. Only plain scalar orders enter
+        # the subtraction-order solver; split conjunctions without importing their
+        # arithmetic siblings.
+        def proof_collect_unsigned_order_facts(expression: Ast::Expr, orders: mutable darray[Ast::Expr]&) -> void:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_unsigned_order_facts(inner, orders)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    # An early return leaves its condition negated, which is the ordinary way a
+                    # guard reaches the statements after it. The negation of a comparison between
+                    # two atoms is a comparison between the same two atoms, so it imports no
+                    # arithmetic; the bound and difference collectors already complement it.
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            orders.push(expression) if proof_is_comparison(operator) and proof_unsigned_order_atom(left) and proof_unsigned_order_atom(right)
+                        _:
+                            pass
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        proof_collect_unsigned_order_facts(left, orders)
+                        proof_collect_unsigned_order_facts(right, orders)
+                    elif proof_is_comparison(operator) and proof_unsigned_order_atom(left) and proof_unsigned_order_atom(right):
+                        orders.push(expression)
+                _:
+                    pass
+
+        # A boolean constant, seeing through the negation the contract substitution leaves behind.
+        # `ensure not result or X` becomes `not false or X` on a path that returns false.
+        def proof_constant_bool(expression: Ast::Expr) -> (known: bool, value: bool):
+            match proof_strip_parens(expression):
+                Ast::Expr.BoolLit(value, _):
+                    return (true, value)
+                Ast::Expr.Unary(operator, operand, _):
+                    return (false, false) if operator != TokenKind.Not
+                    inner: (known: bool, value: bool) = proof_constant_bool(operand)
+                    return (inner.known, not inner.value)
+                _:
+                    return (false, false)
+

@@ -1,0 +1,431 @@
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_unsigned_width_max(width: i64) -> i64:
+            return 255 if width == 8
+            return 65535 if width == 16
+            return 4294967295 if width == 32
+            return 9223372036854775807 if width == 64
+            return 0
+
+        # Mirror of the producer's order atom: an integer, a bare name, or a field of a bare
+        # name. A place is not arithmetic, so admitting it imports none.
+        def proof_kernel_replay_order_atom(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return true if node.kind == "int" or node.kind == "ident"
+            return false if node.kind != "field" or node.name == ""
+            object: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return object.known and object.node.kind == "ident"
+
+        def proof_kernel_replay_collect_unsigned_orders(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, orders: mutable darray[usize]&, depth: usize) -> void:
+            requires depth <= 127
+            decreases 127 - depth
+            return if not ElisaProofKernelCore::depth_valid(depth) or depth >= 127
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "unary" and node.operator == "not":
+                # Mirror of the producer: a negated comparison between two atoms is a comparison
+                # between the same two atoms, and the collectors downstream complement it.
+                negated_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+                return if not negated_located.known
+                inner: ElisaProofKernelCore::ProofKernelNode = negated_located.node
+                return if inner.kind != "binary"
+                return if proof_kernel_replay_negation(inner.operator) == ""
+                return if not proof_kernel_replay_order_atom(nodes, inner.left)
+                return if not proof_kernel_replay_order_atom(nodes, inner.right)
+                orders.push(root)
+                return
+            return if node.kind != "binary"
+            if node.operator == "and":
+                proof_kernel_replay_collect_unsigned_orders(nodes, node.left, orders, depth + 1)
+                proof_kernel_replay_collect_unsigned_orders(nodes, node.right, orders, depth + 1)
+                return
+            return if proof_kernel_replay_negation(node.operator) == ""
+            return if not proof_kernel_replay_order_atom(nodes, node.left)
+            return if not proof_kernel_replay_order_atom(nodes, node.right)
+            orders.push(root)
+
+        # Mirror of the producer's relational range argument for an increment: `a + 1` is in range
+        # when a fact says `a < Y` for a `Y` of the same unsigned width, because `Y` is at most the
+        # type's maximum by typing. No interval is involved, which is what makes it usable for a
+        # 64-bit unsigned value, whose maximum this arena's i64 intervals cannot represent.
+        def proof_kernel_replay_unsigned_unit_increment_base(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left: usize, right: usize) -> (known: bool, base: usize):
+            right_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right, 0)
+            return (true, left) if right_constant.known and right_constant.value == 1
+            left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left, 0)
+            return (true, right) if left_constant.known and left_constant.value == 1
+            return (false, 0)
+
+        # Mirror: a bare name, or a field of one. Neither can spell the base's own increment.
+        def proof_kernel_replay_peer_is_nameable(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return node.name != "" if node.kind == "ident"
+            return false if node.kind != "field" or node.name == ""
+            base: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return base.known and base.node.kind == "ident" and base.node.name != ""
+
+        # Mirror of the producer's peer-only width: a collection's element count is a `usize`, and
+        # no width marker is recorded for a field place. Reporting the platform width here, and
+        # nowhere else, is safe in the direction the peer rule uses it and keeps it out of the
+        # arithmetic guard.
+        def proof_kernel_replay_peer_unsigned_width(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize]) -> i64:
+            declared: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, 0)
+            return declared if declared != 0
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return 0 if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return 0 if node.kind != "field" or node.name != "count"
+            base: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return 64 if base.known and base.node.kind == "ident" and base.node.name != ""
+            return 0
+
+        def proof_kernel_replay_unsigned_increment_has_strict_peer(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, base: usize, width: i64, facts: darray[usize]) -> bool:
+            return false if width == 0
+            for fact in facts |fact, nodes, children, base, width, facts|:
+                located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+                continue if not located.known
+                node: ElisaProofKernelCore::ProofKernelNode = located.node
+                continue if node.kind != "binary"
+                # The peer must be a bare name: one that mentioned the base could justify itself,
+                # since `a < a + 1` is the very claim whose range this decides.
+                if node.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, node.left, base, 0) and proof_kernel_replay_peer_is_nameable(nodes, node.right):
+                    return true if proof_kernel_replay_peer_unsigned_width(nodes, children, node.right, facts) == width
+                if node.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, node.right, base, 0) and proof_kernel_replay_peer_is_nameable(nodes, node.left):
+                    return true if proof_kernel_replay_peer_unsigned_width(nodes, children, node.left, facts) == width
+            return false
+
+        # Mirror of the producer's boolean fold: a constant, seen through the negation that a
+        # contract substitution leaves behind on a path returning `false`.
+        def proof_kernel_replay_constant_bool(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> (known: bool, value: bool):
+            requires depth <= 8
+            decreases 8 - depth
+            return (false, false) if depth >= 8
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, false) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (true, node.value != 0) if node.kind == "bool"
+            return (false, false) if node.kind != "unary" or node.operator != "not"
+            inner: (known: bool, value: bool) = proof_kernel_replay_constant_bool(nodes, node.left, depth + 1)
+            return (inner.known, not inner.value)
+
+        def proof_kernel_replay_unsigned_expression_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, depth: usize) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if depth >= 127 or not ElisaProofKernelCore::depth_valid(depth)
+            return false if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "unary":
+                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
+                if node.operator == "-":
+                    width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, depth + 1)
+                    if width != 0:
+                        interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, root, bounds, depth + 1)
+                        return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_kernel_replay_unsigned_width_max(width)
+                return true
+            if node.kind == "binary":
+                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
+                # `or` and `and` short-circuit, so an operand the left one settles is never
+                # evaluated and its arithmetic never happens.
+                if node.operator == "or" or node.operator == "and":
+                    settled: (known: bool, value: bool) = proof_kernel_replay_constant_bool(nodes, node.left, 0)
+                    return true if settled.known and settled.value and node.operator == "or"
+                    return true if settled.known and not settled.value and node.operator == "and"
+                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.right, facts, bounds, depth + 1)
+                arithmetic: bool = node.operator == "+" or node.operator == "-" or node.operator == "*" or node.operator == "/" or node.operator == "%" or node.operator == "<<" or node.operator == ">>"
+                width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, depth + 1)
+                return true if not arithmetic or width == 0
+                # A guarded unsigned subtraction is range-safe even when its operands are
+                # wider than the kernel's i64 interval representation.
+                if node.operator == "+":
+                    unit: (known: bool, base: usize) = proof_kernel_replay_unsigned_unit_increment_base(nodes, node.left, node.right)
+                    if unit.known:
+                        return true if proof_kernel_replay_unsigned_increment_has_strict_peer(nodes, children, unit.base, width, facts)
+                    # A sum of two non-constant terms has no interval here and never can for a
+                    # 64-bit unsigned value. What it can have is a bound, and the same search that
+                    # discharges `a + b <= C` names the `C`.
+                    sum_witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness(nodes, children, node.left, node.right, facts)
+                    if sum_witness.known and proof_kernel_replay_peer_is_nameable(nodes, sum_witness.bound):
+                        return true if proof_kernel_replay_peer_unsigned_width(nodes, children, sum_witness.bound, facts) == width
+                if node.operator == "-":
+                    orders: mutable darray[usize] = []
+                    # Mirror: read the facts the way the structural rules do.
+                    readable: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
+                    for fact in readable |nodes, orders|:
+                        proof_kernel_replay_collect_unsigned_orders(nodes, fact, &orders, 0)
+                    # Mirror: the order tier is gated on its operands' primitive type witness,
+                    # which is a type statement rather than an order fact. Carry the markers
+                    # across with the orders; they are inert for every bound collector.
+                    for fact in facts |nodes, orders|:
+                        orders.push(fact) if proof_kernel_replay_type_marker_callee(nodes, fact)
+                    # Mirror: the order may be stated between two places, which the affine
+                    # tiers cannot name. A collected order contains no arithmetic.
+                    return true if proof_kernel_replay_has_order_fact(nodes, children, node.right, node.left, false, orders)
+                    return true if proof_kernel_replay_difference_comparison(nodes, children, node.left, ">=", node.right, orders)
+                interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, root, bounds, depth + 1)
+                return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_kernel_replay_unsigned_width_max(width)
+            if node.kind == "if":
+                return proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1) and proof_kernel_replay_unsigned_expression_safe(nodes, children, node.right, facts, bounds, depth + 1) and proof_kernel_replay_unsigned_expression_safe(nodes, children, node.auxiliary, facts, bounds, depth + 1)
+            if node.kind == "call":
+                return false if node.children_start > children.count or node.children_count > children.count - node.children_start
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
+                for index in 0..<node.children_count |index, node, children, nodes, facts, bounds, depth|:
+                    argument: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
+                    return false if not argument.known
+                    argument_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, argument.value)
+                    return false if not argument_node.known or argument_node.node.kind != "call_arg"
+                    return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, argument_node.node.left, facts, bounds, depth + 1)
+                return true
+            return true
+
+        def proof_kernel_replay_unsigned_goal_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> bool:
+            bounds: mutable darray[ProofKernelReplayBound] = []
+            for fact in facts |fact, nodes, bounds|:
+                proof_kernel_replay_collect_bounds(nodes, fact, &bounds, 0)
+            proof_kernel_replay_close_equalities(nodes, facts, &bounds)
+            # Deliberately no bound propagation here: a difference constraint read off `y == x + 1`
+            # is a modular equality for an unsigned type and says nothing about the integers, so
+            # propagating it would justify this guard with the very assumption it is deciding.
+            return proof_kernel_replay_unsigned_expression_safe(nodes, children, root, facts, bounds, 0)
+
+        def proof_kernel_replay_collect_name_equalities(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, depth: usize) -> void:
+            requires depth <= 127
+            decreases 127 - depth
+            return if not ElisaProofKernelCore::depth_valid(depth)
+            return if depth >= 127
+            return if root >= nodes.count
+            return if not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "binary" and node.operator == "and":
+                proof_kernel_replay_collect_name_equalities(nodes, node.left, left_names, right_names, depth + 1)
+                proof_kernel_replay_collect_name_equalities(nodes, node.right, left_names, right_names, depth + 1)
+                return
+            if node.kind == "binary" and node.operator == "==":
+                left: sview = proof_kernel_replay_ident_name(nodes, node.left)
+                right: sview = proof_kernel_replay_ident_name(nodes, node.right)
+                if left != "" and right != "":
+                    left_names.push(left)
+                    right_names.push(right)
+
+        def proof_kernel_replay_close_equalities(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+            left_names: mutable darray[sview] = []
+            right_names: mutable darray[sview] = []
+            for fact in facts |fact, nodes, left_names, right_names|:
+                proof_kernel_replay_collect_name_equalities(nodes, fact, &left_names, &right_names, 0)
+            rounds: mutable usize = 0
+            max_rounds: usize = facts.count * 2 + 2
+            while rounds < max_rounds |rounds, left_names, right_names, bounds|:
+                for index in 0..<left_names.count |index, left_names, right_names, bounds|:
+                    left_bound: ProofKernelReplayBound = proof_kernel_replay_bound_for(bounds, left_names[index])
+                    right_bound: ProofKernelReplayBound = proof_kernel_replay_bound_for(bounds, right_names[index])
+                    proof_kernel_replay_add_lower(bounds, right_names[index], left_bound.lower) if left_bound.has_lower
+                    proof_kernel_replay_add_upper(bounds, right_names[index], left_bound.upper) if left_bound.has_upper
+                    proof_kernel_replay_add_lower(bounds, left_names[index], right_bound.lower) if right_bound.has_lower
+                    proof_kernel_replay_add_upper(bounds, left_names[index], right_bound.upper) if right_bound.has_upper
+                rounds <- rounds + 1
+
+        def proof_kernel_replay_names_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_name: sview, right_name: sview, facts: darray[usize]) -> bool:
+            return false if left_name == "" or right_name == ""
+            return true if left_name == right_name
+            left_names: mutable darray[sview] = []
+            right_names: mutable darray[sview] = []
+            for fact in facts |fact, nodes, left_names, right_names|:
+                proof_kernel_replay_collect_name_equalities(nodes, fact, &left_names, &right_names, 0)
+            reachable: mutable darray[sview] = [left_name]
+            cursor: mutable usize = 0
+            while cursor < reachable.count |cursor, reachable, left_names, right_names, right_name|:
+                current: sview = reachable[cursor]
+                for index in 0..<left_names.count |index, left_names, right_names, reachable, current, right_name|:
+                    next_name: mutable sview = ""
+                    next_name <- right_names[index] if left_names[index] == current
+                    next_name <- left_names[index] if right_names[index] == current
+                    if next_name != "":
+                        return true if next_name == right_name
+                        reachable.push(next_name) if not any existing in reachable where existing == next_name
+                cursor <- cursor + 1
+            return false
+
+        def proof_kernel_replay_affine_expression(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> ProofKernelReplayAffine:
+            requires depth <= 127
+            decreases 127 - depth
+            empty: ProofKernelReplayAffine = ProofKernelReplayAffine{known: false, base: "", offset: 0, negative: false}
+            return empty if not ElisaProofKernelCore::depth_valid(depth)
+            return empty if depth >= 127
+            return empty if root >= nodes.count
+            constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, root, depth + 1)
+            return ProofKernelReplayAffine{known: true, base: "", offset: constant.value, negative: false} if constant.known
+            return empty if not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return empty if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return ProofKernelReplayAffine{known: true, base: node.name, offset: 0, negative: false} if node.kind == "ident" and node.name != ""
+            return proof_kernel_replay_affine_expression(nodes, node.left, depth + 1) if node.kind == "unary" and node.operator == "+"
+            if node.kind == "binary":
+                left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, node.left, depth + 1)
+                right_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, node.right, depth + 1)
+                if left.known and left.base != "" and right_constant.known:
+                    if node.operator == "+":
+                        combined: ProofKernelReplayInt = proof_kernel_replay_add_safe(left.offset, right_constant.value)
+                        return ProofKernelReplayAffine{known: true, base: left.base, offset: combined.value, negative: left.negative} if combined.known
+                    if node.operator == "-":
+                        negated: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, right_constant.value)
+                        return empty if not negated.known
+                        combined: ProofKernelReplayInt = proof_kernel_replay_add_safe(left.offset, negated.value)
+                        return ProofKernelReplayAffine{known: true, base: left.base, offset: combined.value, negative: left.negative} if combined.known
+                left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, node.left, depth + 1)
+                right_affine: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, node.right, depth + 1)
+                if left_constant.known and right_affine.known and right_affine.base != "" and node.operator == "+":
+                    combined: ProofKernelReplayInt = proof_kernel_replay_add_safe(left_constant.value, right_affine.offset)
+                    return ProofKernelReplayAffine{known: true, base: right_affine.base, offset: combined.value, negative: right_affine.negative} if combined.known
+                if left_constant.known and right_affine.known and right_affine.base != "" and node.operator == "-":
+                    # Both affine forms are `sign * base + offset`. Subtracting either form
+                    # always subtracts its offset; the sign only flips the base. Using addition
+                    # for a negative right-hand form made `c - (-x + k)` look like `x + c + k`
+                    # instead of the correct `x + c - k`, which could certify a false equality.
+                    combined: ProofKernelReplayInt = proof_kernel_replay_sub_safe(left_constant.value, right_affine.offset)
+                    return ProofKernelReplayAffine{known: true, base: right_affine.base, offset: combined.value, negative: not right_affine.negative} if combined.known
+            return empty
+
+        # Mirror of the producer's bound propagation: `x - y <= c` with `y <= U` gives `x <= U + c`,
+        # and with `x >= L` gives `y >= L - c`. Each step is an ordinary interval inference and can
+        # only narrow an interval that already held; the round cap keeps it linear and a bound that
+        # needs more rounds is simply not derived.
+        const PROOF_KERNEL_REPLAY_BOUND_PROPAGATION_ROUNDS: usize = 4
+
+        # Mirror of the producer's affine peer rule: `base + 1` is in range when a constraint says
+        # `base < peer` and both carry the same unsigned width. Relational, so it needs no
+        # representable interval.
+        def proof_kernel_replay_affine_unsigned_peer_safe(affine: ProofKernelReplayAffine, constraints: darray[ProofKernelReplayDifference]&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize]) -> bool:
+            return false if not affine.known or affine.negative or affine.offset != 1 or affine.base == ""
+            width: i64 = proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, affine.base)
+            return false if width == 0
+            for constraint in constraints |constraint, affine, width, nodes, children, facts|:
+                continue if constraint.left != affine.base or constraint.right == ""
+                continue if constraint.bound > -1
+                return true if proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, constraint.right) == width
+            return false
+
+        def proof_kernel_replay_close_bounds_through_differences(constraints: darray[ProofKernelReplayDifference]&, bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+            return if constraints.count == 0
+            for round in 0..<PROOF_KERNEL_REPLAY_BOUND_PROPAGATION_ROUNDS |round, constraints, bounds|:
+                for constraint in constraints |constraint, bounds|:
+                    continue if constraint.left == "" or constraint.right == ""
+                    right_bound: ProofKernelReplayBound = proof_kernel_replay_bound_for(bounds, constraint.right)
+                    if right_bound.has_upper:
+                        derived_upper: ProofKernelReplayInt = proof_kernel_replay_add_safe(right_bound.upper, constraint.bound)
+                        proof_kernel_replay_add_upper(bounds, constraint.left, derived_upper.value) if derived_upper.known
+                    left_bound: ProofKernelReplayBound = proof_kernel_replay_bound_for(bounds, constraint.left)
+                    if left_bound.has_lower:
+                        derived_lower: ProofKernelReplayInt = proof_kernel_replay_sub_safe(left_bound.lower, constraint.bound)
+                        proof_kernel_replay_add_lower(bounds, constraint.right, derived_lower.value) if derived_lower.known
+
+        def proof_kernel_replay_affine_safe(affine: ProofKernelReplayAffine, bounds: darray[ProofKernelReplayBound]&) -> bool:
+            return false if not affine.known
+            return true if affine.base == ""
+            return true if not affine.negative and affine.offset == 0
+            bound: ProofKernelReplayBound = proof_kernel_replay_bound_for(bounds, affine.base)
+            if affine.negative:
+                return false if not bound.has_lower or not bound.has_upper
+                negated_upper: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, bound.upper)
+                negated_lower: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, bound.lower)
+                return false if not negated_upper.known or not negated_lower.known
+                lower: ProofKernelReplayInt = proof_kernel_replay_add_safe(negated_upper.value, affine.offset)
+                upper: ProofKernelReplayInt = proof_kernel_replay_add_safe(negated_lower.value, affine.offset)
+                return lower.known and upper.known
+            if affine.offset > 0:
+                limit: ProofKernelReplayInt = proof_kernel_replay_sub_safe(proof_kernel_replay_i64_max(), affine.offset)
+                return limit.known and bound.has_upper and bound.upper <= limit.value
+            limit: ProofKernelReplayInt = proof_kernel_replay_sub_safe(proof_kernel_replay_i64_min(), affine.offset)
+            return limit.known and bound.has_lower and bound.lower >= limit.value
+
+        def proof_kernel_replay_affine_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize]) -> bool:
+            left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, left_root, 0)
+            right: ProofKernelReplayAffine = proof_kernel_replay_affine_expression(nodes, right_root, 0)
+            return false if not left.known or not right.known
+            return false if left.base == "" or right.base == ""
+            return false if left.base != right.base and not proof_kernel_replay_names_equal(nodes, left.base, right.base, facts)
+            return false if left.negative != right.negative
+            bounds: mutable darray[ProofKernelReplayBound] = []
+            for fact in facts |fact, nodes, bounds|:
+                proof_kernel_replay_collect_bounds(nodes, fact, &bounds, 0)
+            proof_kernel_replay_close_equalities(nodes, facts, &bounds)
+            return false if not proof_kernel_replay_affine_safe(left, bounds) or not proof_kernel_replay_affine_safe(right, bounds)
+            difference: ProofKernelReplayInt = proof_kernel_replay_sub_safe(left.offset, right.offset)
+            return false if not difference.known
+            return difference.value > 0 if operator == ">"
+            return difference.value >= 0 if operator == ">="
+            return difference.value < 0 if operator == "<"
+            return difference.value <= 0 if operator == "<="
+            return difference.value != 0 if operator == "!="
+            return difference.value == 0 if operator == "=="
+            return false
+
+        def proof_kernel_replay_interval(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, bounds: darray[ProofKernelReplayBound]&, depth: usize) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
+            requires depth <= 127
+            decreases 127 - depth
+            return (false, 0, 0, false, false) if not ElisaProofKernelCore::depth_valid(depth) or depth >= 127
+            return (false, 0, 0, false, false) if root >= nodes.count
+            constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, root, depth + 1)
+            return (true, constant.value, constant.value, true, true) if constant.known
+            return (false, 0, 0, false, false) if not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0, 0, false, false) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "ident":
+                bound: ProofKernelReplayBound = proof_kernel_replay_bound_for(bounds, node.name)
+                return (bound.has_lower and bound.has_upper, bound.lower, bound.upper, bound.has_lower, bound.has_upper)
+            if node.kind == "unary" and node.operator == "-":
+                inner: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, node.left, bounds, depth + 1)
+                negated_lower: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, inner.upper)
+                negated_upper: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, inner.lower)
+                return (false, 0, 0, false, false) if not negated_lower.known or not negated_upper.known
+                return (inner.has_lower and inner.has_upper, negated_lower.value, negated_upper.value, inner.has_upper, inner.has_lower)
+            if node.kind == "binary" and node.operator == "+":
+                a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, node.left, bounds, depth + 1)
+                b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, node.right, bounds, depth + 1)
+                lower_sum: ProofKernelReplayInt = proof_kernel_replay_add_safe(a.lower, b.lower)
+                upper_sum: ProofKernelReplayInt = proof_kernel_replay_add_safe(a.upper, b.upper)
+                has_lower: bool = a.has_lower and b.has_lower and lower_sum.known
+                has_upper: bool = a.has_upper and b.has_upper and upper_sum.known
+                return (has_lower and has_upper, lower_sum.value, upper_sum.value, has_lower, has_upper)
+            if node.kind == "binary" and node.operator == "-":
+                a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, node.left, bounds, depth + 1)
+                b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, node.right, bounds, depth + 1)
+                lower_difference: ProofKernelReplayInt = proof_kernel_replay_sub_safe(a.lower, b.upper)
+                upper_difference: ProofKernelReplayInt = proof_kernel_replay_sub_safe(a.upper, b.lower)
+                has_lower: bool = a.has_lower and b.has_upper and lower_difference.known
+                has_upper: bool = a.has_upper and b.has_lower and upper_difference.known
+                return (has_lower and has_upper, lower_difference.value, upper_difference.value, has_lower, has_upper)
+            if node.kind == "binary" and node.operator == "/":
+                divisor: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, node.right, 0)
+                dividend: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, node.left, bounds, depth + 1)
+                return (false, 0, 0, false, false) if not divisor.known or divisor.value == 0 or not dividend.has_lower or not dividend.has_upper
+                lower_quotient: ProofKernelReplayInt = proof_kernel_replay_div_safe(dividend.lower, divisor.value)
+                upper_quotient: ProofKernelReplayInt = proof_kernel_replay_div_safe(dividend.upper, divisor.value)
+                return (false, 0, 0, false, false) if not lower_quotient.known or not upper_quotient.known
+                return (true, lower_quotient.value, upper_quotient.value, true, true) if divisor.value > 0
+                return (true, upper_quotient.value, lower_quotient.value, true, true)
+            if node.kind == "binary" and node.operator == "%":
+                divisor: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, node.right, 0)
+                # A bounded interval does not prove that the dividend excludes MIN_I64.
+                # Reject divisor -1 because MIN_I64 % -1 is a fixed-width overflow edge.
+                return (false, 0, 0, false, false) if not divisor.known or divisor.value == 0 or divisor.value == -1
+                magnitude: mutable i64 = divisor.value
+                if magnitude < 0:
+                    absolute: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, magnitude)
+                    return (false, 0, 0, false, false) if not absolute.known
+                    magnitude <- absolute.value
+                limit: ProofKernelReplayInt = proof_kernel_replay_sub_safe(magnitude, 1)
+                return (false, 0, 0, false, false) if not limit.known
+                negative_limit: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, limit.value)
+                return (false, 0, 0, false, false) if not negative_limit.known
+                return (true, negative_limit.value, limit.value, true, true)
+            return (false, 0, 0, false, false)

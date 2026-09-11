@@ -1,0 +1,416 @@
+extend ElisaProof:
+    public:
+        def proof_collect_body_call_names(body: darray[Ast::Stmt]&, names: mutable darray[sview]&) -> void:
+            for statement in body |names|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        proof_collect_call_names(returned, names) if value is returned
+                    Ast::Stmt.Expr(expression, _):
+                        proof_collect_call_names(expression, names)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        proof_collect_call_names(initializer, names)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        proof_collect_call_names(target, names)
+                        proof_collect_call_names(initializer, names)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_collect_call_names(condition, names)
+                        proof_collect_body_call_names(then_body, names)
+                        proof_collect_body_call_names(else_body, names)
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_collect_call_names(condition, names)
+                        proof_collect_body_call_names(while_body, names)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        proof_collect_call_names(iterable, names)
+                        proof_collect_body_call_names(for_body, names)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_collect_call_names(scrutinee, names)
+                        for arm in arms |names|:
+                            proof_collect_call_names(arm.guard, names)
+                            proof_collect_body_call_names(arm.body, names)
+                    Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                        if block_kind == "assert_by":
+                            # The first contract is the runtime guard; the remaining proof steps
+                            # are erased and must not create executable edges.
+                            if block_body.count > 0:
+                                match block_body[0]:
+                                    Ast::Stmt.Contract(_, goal, _):
+                                        proof_collect_call_names(goal, names)
+                                    _:
+                                        pass
+                        else:
+                            proof_collect_body_call_names(block_body, names)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        # `assert` is a runtime guard. The other contract forms are logical
+                        # declarations and must not create executable call edges.
+                        proof_collect_call_names(expression, names) if kind == "assert"
+                    _:
+                        names.push("__opaque_call__") if not (any existing in names where existing == "__opaque_call__")
+
+        # Substitution for the expression forms currently understood by the proof kernel. The
+        # compiler AST is immutable and region-backed, so rebuilt nodes share source spans.
+        # Names are searched from the innermost binding outward, which is required when a local
+        # shadows a parameter. Unsupported forms remain opaque and therefore cannot be used to
+        # manufacture a new arithmetic fact.
+        # A replacement is unsafe below a binder when it contains that binder's free name.
+        # Mappings whose name is the binder itself are shadowed and therefore do not participate
+        # in the capture check. Alpha-renaming is not available in the compiler AST, so callers
+        # must receive Invalid rather than a silently changed proposition.
+        def proof_substitution_would_capture(binder: sview, names: darray[sview]&, values: darray[Ast::Expr]&) -> bool:
+            index: mutable usize = values.count
+            while index > 0 |index, names, values, binder|:
+                index <- index - 1
+                return true if index < names.count and names[index] != binder and names[index] != "" and proof_expr_mentions_name(values[index], binder)
+            return false
+
+        def proof_substitute(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Invalid:
+                    return expression
+                Ast::Expr.Absent:
+                    return expression
+                Ast::Expr.IntLit(_, _):
+                    return expression
+                Ast::Expr.FloatLit(_, _):
+                    return expression
+                Ast::Expr.StringLit(_, _):
+                    return expression
+                Ast::Expr.CharLit(_, _):
+                    return expression
+                Ast::Expr.BoolLit(_, _):
+                    return expression
+                Ast::Expr.Ident(name, position):
+                    index: mutable usize = names.count
+                    while index > 0 |index, names, values|:
+                        index <- index - 1
+                        if index < values.count and names[index] == name:
+                            # An omitted/default or otherwise unavailable argument is not a
+                            # value. Preserve the identifier so the caller can fail closed on
+                            # an unresolved formal instead of silently turning it into `Absent`.
+                            match values[index]:
+                                Ast::Expr.Absent:
+                                    return expression
+                                _:
+                                    return values[index]
+                    return expression
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_substitute(inner, names, values), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_substitute(operand, names, values), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    substituted_left: Ast::Expr = proof_substitute(left, names, values)
+                    substituted_right: Ast::Expr = proof_substitute(right, names, values)
+                    return Ast::Expr.Binary(substituted_left, operator, substituted_right, position)
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    substituted: mutable darray[Ast::Expr] = []
+                    for argument in arguments |substituted, names, values|:
+                        substituted.push(proof_substitute(argument, names, values))
+                    return Ast::Expr.Call(proof_substitute(callee, names, values), substituted, argument_names, position)
+                Ast::Expr.Field(object, field, position):
+                    substituted_object: Ast::Expr = proof_substitute(object, names, values)
+                    match substituted_object:
+                        # Constructor projection is a definitional reduction, not a solver
+                        # guess: `Box{value: x}.value` is exactly `x`. Positional or unknown
+                        # fields remain opaque.
+                        Ast::Expr.Construct(_, fields, _):
+                            for initializer in fields |names, values|:
+                                return proof_substitute(initializer.value, names, values) if initializer.name == field
+                        Ast::Expr.RecordUpdate(base, fields, _):
+                            for initializer in fields |names, values|:
+                                return proof_substitute(initializer.value, names, values) if initializer.name == field
+                            return proof_substitute(Ast::Expr.Field(base, field, position), names, values)
+                        _:
+                            pass
+                    return Ast::Expr.Field(substituted_object, field, position)
+                Ast::Expr.Scope(base, name, position):
+                    return Ast::Expr.Scope(proof_substitute(base, names, values), name, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_substitute(object, names, values), proof_substitute(index, names, values), position)
+                Ast::Expr.Slice(object, low, high, position):
+                    return Ast::Expr.Slice(proof_substitute(object, names, values), proof_substitute(low, names, values), proof_substitute(high, names, values), position)
+                Ast::Expr.IndexN(object, arguments, position):
+                    substituted_arguments: mutable darray[Ast::Expr] = []
+                    for argument in arguments |substituted_arguments, names, values|:
+                        substituted_arguments.push(proof_substitute(argument, names, values))
+                    return Ast::Expr.IndexN(proof_substitute(object, names, values), substituted_arguments, position)
+                Ast::Expr.Move(operand, position):
+                    return Ast::Expr.Move(proof_substitute(operand, names, values), position)
+                Ast::Expr.RegionNew(operand, region, position):
+                    return Ast::Expr.RegionNew(proof_substitute(operand, names, values), region, position)
+                Ast::Expr.Array(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values|:
+                        substituted_elements.push(proof_substitute(element, names, values))
+                    return Ast::Expr.Array(substituted_elements, position)
+                Ast::Expr.Tuple(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values|:
+                        substituted_elements.push(proof_substitute(element, names, values))
+                    return Ast::Expr.Tuple(substituted_elements, position)
+                Ast::Expr.SetLit(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values|:
+                        substituted_elements.push(proof_substitute(element, names, values))
+                    return Ast::Expr.SetLit(substituted_elements, position)
+                Ast::Expr.DictLit(entries, position):
+                    substituted_entries: mutable darray[Ast::DictEntry] = []
+                    for entry in entries |substituted_entries, names, values|:
+                        substituted_entries.push(Ast::DictEntry{key: proof_substitute(entry.key, names, values), value: proof_substitute(entry.value, names, values)})
+                    return Ast::Expr.DictLit(substituted_entries, position)
+                Ast::Expr.Construct(type_expression, fields, position):
+                    substituted_fields: mutable darray[Ast::FieldInit] = []
+                    for field in fields |substituted_fields, names, values|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute(field.value, names, values)})
+                    # The constructor head is a type expression, not a value binding. Keep it
+                    # lexical so a local with the same spelling cannot rewrite the type head.
+                    return Ast::Expr.Construct(type_expression, substituted_fields, position)
+                Ast::Expr.RecordUpdate(base, fields, position):
+                    substituted_fields: mutable darray[Ast::FieldInit] = []
+                    for field in fields |substituted_fields, names, values|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute(field.value, names, values)})
+                    return Ast::Expr.RecordUpdate(proof_substitute(base, names, values), substituted_fields, position)
+                Ast::Expr.If(condition, then_expr, else_expr, position):
+                    substituted_condition: Ast::Expr = proof_substitute(condition, names, values)
+                    substituted_then: Ast::Expr = proof_substitute(then_expr, names, values)
+                    substituted_else: Ast::Expr = proof_substitute(else_expr, names, values)
+                    return Ast::Expr.If(substituted_condition, substituted_then, substituted_else, position)
+                Ast::Expr.Match(_, _, _):
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
+                    return proof_substitute(lowered.value, names, values) if lowered.known
+                    return Ast::Expr.Invalid
+                Ast::Expr.GetElse(guarded, _, _):
+                    # Control-flow recovery is checked separately on its failure path. On the
+                    # successful path the expression contributes the guarded value, which is the
+                    # exact value type exposed by Elisa's `get` construct.
+                    return proof_substitute(guarded, names, values)
+                Ast::Expr.Comprehension(variable, iterable, condition, body, position):
+                    return Ast::Expr.Invalid if proof_substitution_would_capture(variable, names, values)
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    shadow_names.push(variable)
+                    shadow_values.push(Ast::Expr.Ident(variable, position))
+                    return Ast::Expr.Comprehension(variable, proof_substitute(iterable, names, values), proof_substitute(condition, shadow_names, shadow_values), proof_substitute(body, shadow_names, shadow_values), position)
+                Ast::Expr.Refinement(base, predicate, position):
+                    return Ast::Expr.Refinement(proof_substitute(base, names, values), proof_substitute(predicate, names, values), position)
+                Ast::Expr.ShorthandMember(_, _):
+                    return expression
+                Ast::Expr.Block(statements, value, captures, position):
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    substituted_statements: mutable darray[Ast::Stmt] = []
+                    malformed: mutable bool = false
+                    for statement in statements |shadow_names, shadow_values, substituted_statements, names, values, malformed|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
+                                return Ast::Expr.Invalid if proof_substitution_would_capture(local_name, shadow_names, shadow_values)
+                                substituted_initializer: Ast::Expr = proof_substitute(initializer, shadow_names, shadow_values)
+                                substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
+                                shadow_names.push(local_name)
+                                shadow_values.push(Ast::Expr.Ident(local_name, statement_position))
+                            _:
+                                malformed <- true
+                    return Ast::Expr.Invalid if malformed
+                    return Ast::Expr.Block(substituted_statements, proof_substitute(value, shadow_names, shadow_values), captures, position)
+                _:
+                    # A future AST form must never leak an uninstantiated formal into a
+                    # caller's proof state. Keep the source node only for modeled leaves above;
+                    # every other form becomes an opaque failure value.
+                    return Ast::Expr.Invalid
+
+        # Contract-aware substitution handles Elisa's pre-state operator before current-state
+        # bindings are substituted. `old(x)` must see the entry value of x; substituting the
+        # mutable local first would incorrectly turn it into the post-state expression.
+        def proof_substitute_contract(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, old_names: darray[sview]&, old_values: darray[Ast::Expr]&) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    if proof_ident_name(callee) == "old" and arguments.count == 1:
+                        local_index: mutable usize = old_names.count
+                        while local_index < names.count |local_index, names, old_names, arguments|:
+                            return Ast::Expr.Invalid if proof_expr_mentions_name(arguments[0], names[local_index])
+                            local_index <- local_index + 1
+                        return proof_substitute(arguments[0], old_names, old_values)
+                    substituted: mutable darray[Ast::Expr] = []
+                    for argument in arguments |substituted, names, values, old_names, old_values|:
+                        substituted.push(proof_substitute_contract(argument, names, values, old_names, old_values))
+                    return Ast::Expr.Call(proof_substitute_contract(callee, names, values, old_names, old_values), substituted, argument_names, position)
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_substitute_contract(inner, names, values, old_names, old_values), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_substitute_contract(operand, names, values, old_names, old_values), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_substitute_contract(left, names, values, old_names, old_values), operator, proof_substitute_contract(right, names, values, old_names, old_values), position)
+                Ast::Expr.Field(object, field, position):
+                    substituted_object: Ast::Expr = proof_substitute_contract(object, names, values, old_names, old_values)
+                    match substituted_object:
+                        Ast::Expr.Construct(_, fields, _):
+                            for initializer in fields |names, values|:
+                                return proof_substitute_contract(initializer.value, names, values, old_names, old_values) if initializer.name == field
+                        Ast::Expr.RecordUpdate(base, fields, _):
+                            for initializer in fields |names, values|:
+                                return proof_substitute_contract(initializer.value, names, values, old_names, old_values) if initializer.name == field
+                            return proof_substitute_contract(Ast::Expr.Field(base, field, position), names, values, old_names, old_values)
+                        _:
+                            pass
+                    return Ast::Expr.Field(substituted_object, field, position)
+                Ast::Expr.Scope(base, name, position):
+                    return Ast::Expr.Scope(proof_substitute_contract(base, names, values, old_names, old_values), name, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_substitute_contract(object, names, values, old_names, old_values), proof_substitute_contract(index, names, values, old_names, old_values), position)
+                Ast::Expr.Slice(object, low, high, position):
+                    return Ast::Expr.Slice(proof_substitute_contract(object, names, values, old_names, old_values), proof_substitute_contract(low, names, values, old_names, old_values), proof_substitute_contract(high, names, values, old_names, old_values), position)
+                Ast::Expr.IndexN(object, arguments, position):
+                    substituted_arguments: mutable darray[Ast::Expr] = []
+                    for argument in arguments |substituted_arguments, names, values, old_names, old_values|:
+                        substituted_arguments.push(proof_substitute_contract(argument, names, values, old_names, old_values))
+                    return Ast::Expr.IndexN(proof_substitute_contract(object, names, values, old_names, old_values), substituted_arguments, position)
+                Ast::Expr.Move(operand, position):
+                    return Ast::Expr.Move(proof_substitute_contract(operand, names, values, old_names, old_values), position)
+                Ast::Expr.RegionNew(operand, region, position):
+                    return Ast::Expr.RegionNew(proof_substitute_contract(operand, names, values, old_names, old_values), region, position)
+                Ast::Expr.Array(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values, old_names, old_values|:
+                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    return Ast::Expr.Array(substituted_elements, position)
+                Ast::Expr.Tuple(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values, old_names, old_values|:
+                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    return Ast::Expr.Tuple(substituted_elements, position)
+                Ast::Expr.SetLit(elements, position):
+                    substituted_elements: mutable darray[Ast::Expr] = []
+                    for element in elements |substituted_elements, names, values, old_names, old_values|:
+                        substituted_elements.push(proof_substitute_contract(element, names, values, old_names, old_values))
+                    return Ast::Expr.SetLit(substituted_elements, position)
+                Ast::Expr.DictLit(entries, position):
+                    substituted_entries: mutable darray[Ast::DictEntry] = []
+                    for entry in entries |substituted_entries, names, values, old_names, old_values|:
+                        substituted_entries.push(Ast::DictEntry{key: proof_substitute_contract(entry.key, names, values, old_names, old_values), value: proof_substitute_contract(entry.value, names, values, old_names, old_values)})
+                    return Ast::Expr.DictLit(substituted_entries, position)
+                Ast::Expr.Construct(type_expression, fields, position):
+                    substituted_fields: mutable darray[Ast::FieldInit] = []
+                    for field in fields |substituted_fields, names, values, old_names, old_values|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_contract(field.value, names, values, old_names, old_values)})
+                    return Ast::Expr.Construct(type_expression, substituted_fields, position)
+                Ast::Expr.RecordUpdate(base, fields, position):
+                    substituted_fields: mutable darray[Ast::FieldInit] = []
+                    for field in fields |substituted_fields, names, values, old_names, old_values|:
+                        substituted_fields.push(Ast::FieldInit{name: field.name, value: proof_substitute_contract(field.value, names, values, old_names, old_values)})
+                    return Ast::Expr.RecordUpdate(proof_substitute_contract(base, names, values, old_names, old_values), substituted_fields, position)
+                Ast::Expr.If(condition, then_expr, else_expr, position):
+                    return Ast::Expr.If(proof_substitute_contract(condition, names, values, old_names, old_values), proof_substitute_contract(then_expr, names, values, old_names, old_values), proof_substitute_contract(else_expr, names, values, old_names, old_values), position)
+                Ast::Expr.Match(_, _, _):
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
+                    return proof_substitute_contract(lowered.value, names, values, old_names, old_values) if lowered.known
+                    return Ast::Expr.Invalid
+                Ast::Expr.Comprehension(variable, iterable, condition, body, position):
+                    return Ast::Expr.Invalid if proof_substitution_would_capture(variable, names, values)
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    shadow_names.push(variable)
+                    shadow_values.push(Ast::Expr.Ident(variable, position))
+                    return Ast::Expr.Comprehension(variable, proof_substitute_contract(iterable, names, values, old_names, old_values), proof_substitute_contract(condition, shadow_names, shadow_values, old_names, old_values), proof_substitute_contract(body, shadow_names, shadow_values, old_names, old_values), position)
+                Ast::Expr.Refinement(base, predicate, position):
+                    return Ast::Expr.Refinement(proof_substitute_contract(base, names, values, old_names, old_values), proof_substitute_contract(predicate, names, values, old_names, old_values), position)
+                Ast::Expr.ShorthandMember(_, _):
+                    return expression
+                Ast::Expr.Block(statements, value, captures, position):
+                    shadow_names: mutable darray[sview] = []
+                    shadow_values: mutable darray[Ast::Expr] = []
+                    shadow_names.extend(names)
+                    shadow_values.extend(values)
+                    substituted_statements: mutable darray[Ast::Stmt] = []
+                    malformed: mutable bool = false
+                    for statement in statements |shadow_names, shadow_values, substituted_statements, names, values, old_names, old_values, malformed|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
+                                return Ast::Expr.Invalid if proof_substitution_would_capture(local_name, shadow_names, shadow_values)
+                                substituted_initializer: Ast::Expr = proof_substitute_contract(initializer, shadow_names, shadow_values, old_names, old_values)
+                                substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
+                                shadow_names.push(local_name)
+                                shadow_values.push(Ast::Expr.Ident(local_name, statement_position))
+                            _:
+                                malformed <- true
+                    return Ast::Expr.Invalid if malformed
+                    return Ast::Expr.Block(substituted_statements, proof_substitute_contract(value, shadow_names, shadow_values, old_names, old_values), captures, position)
+                Ast::Expr.Invalid:
+                    return expression
+                Ast::Expr.Absent:
+                    return expression
+                Ast::Expr.IntLit(_, _):
+                    return expression
+                Ast::Expr.FloatLit(_, _):
+                    return expression
+                Ast::Expr.StringLit(_, _):
+                    return expression
+                Ast::Expr.CharLit(_, _):
+                    return expression
+                Ast::Expr.BoolLit(_, _):
+                    return expression
+                Ast::Expr.Ident(_, _):
+                    return proof_substitute(expression, names, values)
+                _:
+                    # Do not preserve an unmodeled contract expression: in particular, an
+                    # unsupported node may contain `old(...)` or a formal that was not bound.
+                    return Ast::Expr.Invalid
+
+        # Substitute a contract in a lexical scope whose live bindings occupy the first
+        # `scope_count` slots of the symbolic environment. Runtime bodies may append shadowing
+        # locals to the same arrays, but those locals are not in scope for a loop invariant or
+        # other header contract. Missing slots become Invalid so malformed state fails closed.
+        def proof_substitute_scoped_contract(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, scope_count: usize, old_names: darray[sview]&, old_values: darray[Ast::Expr]&) -> Ast::Expr:
+            scoped_names: mutable darray[sview] = []
+            scoped_values: mutable darray[Ast::Expr] = []
+            for index in 0..<scope_count |index, names, values, scoped_names, scoped_values|:
+                if index < names.count:
+                    scoped_names.push(names[index])
+                    scoped_values.push(values[index]) if index < values.count
+                    scoped_values.push(Ast::Expr.Invalid) if index >= values.count
+            return proof_substitute_contract(expression, scoped_names, scoped_values, old_names, old_values)
+
+        # Function-level contracts are lexically outside the function body. They may refer to
+        # formals and `result`, but a local declared later in the body must not shadow a formal
+        # name inside `ensure`/`old(...)`. Build a parameter-only current environment from the
+        # stable prefix of the symbolic state; missing slots become Invalid so malformed state
+        # cannot turn into a proof.
+        def proof_substitute_function_contract(expression: Ast::Expr, parameter_names: darray[sview]&, values: darray[Ast::Expr]&, old_values: darray[Ast::Expr]&) -> Ast::Expr:
+            return proof_substitute_scoped_contract(expression, parameter_names, values, parameter_names.count, parameter_names, old_values)
+
+        # `old(...)` can occur below expression-level match/catch/lambda/block nodes. Keep this
+        # traversal separate from call detection: an unsupported call is already conservative
+        # there, but missing an old-state reference would let a callee export a pre-state fact as
+        # if it were a post-state summary.
+        def proof_body_has_old(body: darray[Ast::Stmt]&) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_expr_has_old(expression)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        return true if proof_expr_has_old(type_expression) or proof_expr_has_old(initializer)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return true if proof_expr_has_old(target) or proof_expr_has_old(initializer)
+                    Ast::Stmt.Return(value, _):
+                        return true if value is returned and proof_expr_has_old(returned)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_expr_has_old(condition) or proof_body_has_old(then_body) or proof_body_has_old(else_body)
+                    Ast::Stmt.While(condition, while_body, _):
+                        return true if proof_expr_has_old(condition) or proof_body_has_old(while_body)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        return true if proof_expr_has_old(iterable) or proof_body_has_old(for_body)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_expr_has_old(scrutinee)
+                        for arm in arms:
+                            return true if proof_expr_has_old(arm.guard) or proof_body_has_old(arm.body)
+                    Ast::Stmt.Block(_, _, _, block_body, _):
+                        return true if proof_body_has_old(block_body)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_expr_has_old(expression)
+                    _:
+                        pass
+            return false
+

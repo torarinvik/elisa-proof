@@ -1,0 +1,512 @@
+extend ElisaProof:
+    public:
+        def proof_ident_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                _:
+                    return ""
+
+        # Callable references may be bare identifiers or qualified scopes. The proof
+        # tables are intentionally keyed by leaf name: their index functions reject
+        # duplicate names, so a qualified call is usable only when that leaf is
+        # unambiguous. Keep `proof_ident_name` bare-only because frame/alias analysis
+        # must not mistake a qualified value expression for a storage root.
+        def proof_callable_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Scope(_, name, _):
+                    return name
+                _:
+                    return ""
+
+        # Contract quantifiers are lowered by the compiler parser to an Expr.Block. The
+        # parser preserves the erased `forall`/`exists` kind in a line-keyed annotation; require
+        # exactly one matching marker so a collision cannot silently choose a quantifier.
+        def proof_quantifier_kind(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> sview:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_quantifier_kind(inner, annotations)
+                Ast::Expr.Block(_, _, _, position):
+                    found: mutable sview = ""
+                    count: mutable usize = 0
+                    for annotation in annotations |found, count|:
+                        if annotation.owner == "__contract_quantifier" and annotation.line == position.line:
+                            return "" if annotation.name != "forall" and annotation.name != "exists"
+                            found <- annotation.name
+                            count <- count + 1
+                    if count == 1:
+                        return found
+                    return ""
+                _:
+                    return ""
+
+        def proof_quantifier_equal(left: Ast::Expr, right: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            left_kind: sview = proof_quantifier_kind(left, annotations)
+            right_kind: sview = proof_quantifier_kind(right, annotations)
+            return false if left_kind == "" or left_kind != right_kind
+            # Equality is used as an early fact-membership shortcut. Validate both complete
+            # quantifier shapes before allowing that shortcut, otherwise a malformed duplicate
+            # binder could prove an equally malformed goal without passing quantifier replay.
+            return false if not proof_kernel_expression_supported(left) or not proof_kernel_expression_supported(right)
+            match left:
+                Ast::Expr.Block(left_statements, left_value, _, _):
+                    match right:
+                        Ast::Expr.Block(right_statements, right_value, _, _):
+                            return false if left_statements.count != right_statements.count
+                            for index in 0..<left_statements.count |left_statements, right_statements, index|:
+                                match left_statements[index]:
+                                    Ast::Stmt.VarDecl(left_name, left_type, left_initializer, _):
+                                        match right_statements[index]:
+                                            Ast::Stmt.VarDecl(right_name, right_type, right_initializer, _):
+                                                return false if left_name != right_name
+                                                return false if not proof_expr_equal(left_type, right_type)
+                                                return false if not proof_expr_equal(left_initializer, right_initializer)
+                                            _:
+                                                return false
+                                    _:
+                                        return false
+                            return proof_expr_equal(left_value, right_value)
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_expr_array_equal(left: darray[Ast::Expr]&, right: darray[Ast::Expr]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_expr_equal(left[index], right[index])
+            return true
+
+        def proof_sview_array_equal(left: darray[sview]&, right: darray[sview]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if left[index] != right[index]
+            return true
+
+        def proof_field_array_equal(left: darray[Ast::FieldInit]&, right: darray[Ast::FieldInit]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if left[index].name != right[index].name
+                return false if not proof_expr_equal(left[index].value, right[index].value)
+            return true
+
+        def proof_dict_array_equal(left: darray[Ast::DictEntry]&, right: darray[Ast::DictEntry]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_expr_equal(left[index].key, right[index].key)
+                return false if not proof_expr_equal(left[index].value, right[index].value)
+            return true
+
+        # Tactic traces compare AST values that may contain matcher/lambda/block children.
+        # Keep this structural and position-insensitive like `proof_expr_equal`; source spans
+        # are provenance, not proposition identity.
+        def proof_pattern_equal(left: Ast::Pattern, right: Ast::Pattern) -> bool:
+            match left:
+                Ast::Pattern.Wildcard:
+                    match right:
+                        Ast::Pattern.Wildcard:
+                            return true
+                        _:
+                            return false
+                Ast::Pattern.Literal(left_text):
+                    match right:
+                        Ast::Pattern.Literal(right_text):
+                            return left_text == right_text
+                        _:
+                            return false
+                Ast::Pattern.Binding(left_name):
+                    match right:
+                        Ast::Pattern.Binding(right_name):
+                            return left_name == right_name
+                        _:
+                            return false
+                Ast::Pattern.Pin(left_name):
+                    match right:
+                        Ast::Pattern.Pin(right_name):
+                            return left_name == right_name
+                        _:
+                            return false
+                Ast::Pattern.Variant(left_path, left_fields):
+                    match right:
+                        Ast::Pattern.Variant(right_path, right_fields):
+                            return left_path == right_path and proof_pattern_array_equal(left_fields, right_fields)
+                        _:
+                            return false
+                Ast::Pattern.Struct(left_path, left_fields):
+                    match right:
+                        Ast::Pattern.Struct(right_path, right_fields):
+                            return left_path == right_path and proof_pattern_array_equal(left_fields, right_fields)
+                        _:
+                            return false
+                Ast::Pattern.Field(left_selector, left_inner):
+                    match right:
+                        Ast::Pattern.Field(right_selector, right_inner):
+                            return left_selector == right_selector and proof_pattern_array_equal(left_inner, right_inner)
+                        _:
+                            return false
+                Ast::Pattern.Tuple(left_elements):
+                    match right:
+                        Ast::Pattern.Tuple(right_elements):
+                            return proof_pattern_array_equal(left_elements, right_elements)
+                        _:
+                            return false
+                Ast::Pattern.Rest(left_name):
+                    match right:
+                        Ast::Pattern.Rest(right_name):
+                            return left_name == right_name
+                        _:
+                            return false
+                Ast::Pattern.Or(left_options):
+                    match right:
+                        Ast::Pattern.Or(right_options):
+                            return proof_pattern_array_equal(left_options, right_options)
+                        _:
+                            return false
+                Ast::Pattern.TypeBind(left_type, left_binder):
+                    match right:
+                        Ast::Pattern.TypeBind(right_type, right_binder):
+                            return left_type == right_type and left_binder == right_binder
+                        _:
+                            return false
+                Ast::Pattern.Range(left_lo, left_hi, left_inclusive):
+                    match right:
+                        Ast::Pattern.Range(right_lo, right_hi, right_inclusive):
+                            return left_lo == right_lo and left_hi == right_hi and left_inclusive == right_inclusive
+                        _:
+                            return false
+                Ast::Pattern.As(left_name, left_inner):
+                    match right:
+                        Ast::Pattern.As(right_name, right_inner):
+                            return left_name == right_name and proof_pattern_array_equal(left_inner, right_inner)
+                        _:
+                            return false
+                Ast::Pattern.Other(left_text):
+                    match right:
+                        Ast::Pattern.Other(right_text):
+                            return left_text == right_text
+                        _:
+                            return false
+            return false
+
+        def proof_pattern_array_equal(left: darray[Ast::Pattern]&, right: darray[Ast::Pattern]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_pattern_equal(left[index], right[index])
+            return true
+
+        def proof_stmt_equal(left: Ast::Stmt, right: Ast::Stmt) -> bool:
+            match left:
+                Ast::Stmt.Invalid:
+                    match right:
+                        Ast::Stmt.Invalid:
+                            return true
+                        _:
+                            return false
+                Ast::Stmt.Expr(left_expression, _):
+                    match right:
+                        Ast::Stmt.Expr(right_expression, _):
+                            return proof_expr_equal(left_expression, right_expression)
+                        _:
+                            return false
+                Ast::Stmt.Block(left_kind, left_clause, left_binding, left_body, _):
+                    match right:
+                        Ast::Stmt.Block(right_kind, right_clause, right_binding, right_body, _):
+                            return left_kind == right_kind and left_binding == right_binding and proof_sview_array_equal(left_clause, right_clause) and proof_stmt_array_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Stmt.VarDecl(left_name, left_type, left_value, _):
+                    match right:
+                        Ast::Stmt.VarDecl(right_name, right_type, right_value, _):
+                            return left_name == right_name and proof_expr_equal(left_type, right_type) and proof_expr_equal(left_value, right_value)
+                        _:
+                            return false
+                Ast::Stmt.Assign(left_target, left_operator, left_value, _):
+                    match right:
+                        Ast::Stmt.Assign(right_target, right_operator, right_value, _):
+                            return left_operator == right_operator and proof_expr_equal(left_target, right_target) and proof_expr_equal(left_value, right_value)
+                        _:
+                            return false
+                Ast::Stmt.If(left_condition, left_then, left_else, _):
+                    match right:
+                        Ast::Stmt.If(right_condition, right_then, right_else, _):
+                            return proof_expr_equal(left_condition, right_condition) and proof_stmt_array_equal(left_then, right_then) and proof_stmt_array_equal(left_else, right_else)
+                        _:
+                            return false
+                Ast::Stmt.While(left_condition, left_body, _):
+                    match right:
+                        Ast::Stmt.While(right_condition, right_body, _):
+                            return proof_expr_equal(left_condition, right_condition) and proof_stmt_array_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Stmt.For(left_bind, left_variables, left_iterable, left_body, _):
+                    match right:
+                        Ast::Stmt.For(right_bind, right_variables, right_iterable, right_body, _):
+                            return left_bind == right_bind and proof_sview_array_equal(left_variables, right_variables) and proof_expr_equal(left_iterable, right_iterable) and proof_stmt_array_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Stmt.Return(left_value, _):
+                    match right:
+                        Ast::Stmt.Return(right_value, _):
+                            if left_value is left_expression:
+                                if right_value is right_expression:
+                                    return proof_expr_equal(left_expression, right_expression)
+                                return false
+                            return false if right_value is right_expression
+                            return true
+                        _:
+                            return false
+                Ast::Stmt.Break(left_label, _):
+                    match right:
+                        Ast::Stmt.Break(right_label, _):
+                            return left_label == right_label
+                        _:
+                            return false
+                Ast::Stmt.Continue(left_label, _):
+                    match right:
+                        Ast::Stmt.Continue(right_label, _):
+                            return left_label == right_label
+                        _:
+                            return false
+                Ast::Stmt.Match(left_scrutinee, left_arms, _):
+                    match right:
+                        Ast::Stmt.Match(right_scrutinee, right_arms, _):
+                            return proof_expr_equal(left_scrutinee, right_scrutinee) and proof_match_arm_array_equal(left_arms, right_arms)
+                        _:
+                            return false
+                Ast::Stmt.Contract(left_kind, left_expression, _):
+                    match right:
+                        Ast::Stmt.Contract(right_kind, right_expression, _):
+                            return left_kind == right_kind and proof_expr_equal(left_expression, right_expression)
+                        _:
+                            return false
+            return false
+
+        def proof_stmt_array_equal(left: darray[Ast::Stmt]&, right: darray[Ast::Stmt]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_stmt_equal(left[index], right[index])
+            return true
+
+        def proof_match_arm_equal(left: Ast::MatchArm, right: Ast::MatchArm) -> bool:
+            return proof_pattern_equal(left.pattern, right.pattern) and proof_stmt_array_equal(left.body, right.body) and proof_expr_equal(left.guard, right.guard)
+
+        def proof_match_arm_array_equal(left: darray[Ast::MatchArm]&, right: darray[Ast::MatchArm]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_match_arm_equal(left[index], right[index])
+            return true
+
+        def proof_expr_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
+            # Parentheses are syntax, not propositions. Strip them from either side so
+            # facts produced by contract parsing compare the same way as their normalized
+            # goals, regardless of which expression was parenthesized.
+            match right:
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_equal(left, inner)
+                _:
+                    pass
+            match left:
+                Ast::Expr.Absent:
+                    match right:
+                        Ast::Expr.Absent:
+                            return true
+                        _:
+                            return false
+                Ast::Expr.IntLit(value, _):
+                    match right:
+                        Ast::Expr.IntLit(other, _):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.BoolLit(value, _):
+                    match right:
+                        Ast::Expr.BoolLit(other, _):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.FloatLit(value, _):
+                    match right:
+                        Ast::Expr.FloatLit(other, _):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.StringLit(value, _):
+                    match right:
+                        Ast::Expr.StringLit(other, _):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.CharLit(value, _):
+                    match right:
+                        Ast::Expr.CharLit(other, _):
+                            return value == other
+                        _:
+                            return false
+                Ast::Expr.Ident(name, _):
+                    match right:
+                        Ast::Expr.Ident(other, _):
+                            return name == other
+                        _:
+                            return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_equal(inner, right)
+                Ast::Expr.Block(left_statements, left_value, left_captures, _):
+                    match right:
+                        Ast::Expr.Block(right_statements, right_value, right_captures, _):
+                            return proof_sview_array_equal(left_captures, right_captures) and proof_stmt_array_equal(left_statements, right_statements) and proof_expr_equal(left_value, right_value)
+                        _:
+                            return false
+                Ast::Expr.Match(left_scrutinee, left_arms, _):
+                    match right:
+                        Ast::Expr.Match(right_scrutinee, right_arms, _):
+                            return proof_expr_equal(left_scrutinee, right_scrutinee) and proof_match_arm_array_equal(left_arms, right_arms)
+                        _:
+                            return false
+                Ast::Expr.Catch(left_guarded, left_arms, _):
+                    match right:
+                        Ast::Expr.Catch(right_guarded, right_arms, _):
+                            return proof_expr_equal(left_guarded, right_guarded) and proof_match_arm_array_equal(left_arms, right_arms)
+                        _:
+                            return false
+                Ast::Expr.Comprehension(left_var, left_iterable, left_condition, left_body, _):
+                    match right:
+                        Ast::Expr.Comprehension(right_var, right_iterable, right_condition, right_body, _):
+                            return left_var == right_var and proof_expr_equal(left_iterable, right_iterable) and proof_expr_equal(left_condition, right_condition) and proof_expr_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Expr.Refinement(left_base, left_predicate, _):
+                    match right:
+                        Ast::Expr.Refinement(right_base, right_predicate, _):
+                            return proof_expr_equal(left_base, right_base) and proof_expr_equal(left_predicate, right_predicate)
+                        _:
+                            return false
+                Ast::Expr.GetElse(left_guarded, left_recovery, _):
+                    match right:
+                        Ast::Expr.GetElse(right_guarded, right_recovery, _):
+                            return proof_expr_equal(left_guarded, right_guarded) and proof_stmt_array_equal(left_recovery, right_recovery)
+                        _:
+                            return false
+                Ast::Expr.Lambda(left_params, left_body, _):
+                    match right:
+                        Ast::Expr.Lambda(right_params, right_body, _):
+                            return proof_sview_array_equal(left_params, right_params) and proof_stmt_array_equal(left_body, right_body)
+                        _:
+                            return false
+                Ast::Expr.Unary(op, operand, _):
+                    match right:
+                        Ast::Expr.Unary(other_op, other_operand, _):
+                            return op == other_op and proof_expr_equal(operand, other_operand)
+                        _:
+                            return false
+                Ast::Expr.Binary(left_operand, op, right_operand, _):
+                    match right:
+                        Ast::Expr.Binary(other_left, other_op, other_right, _):
+                            return op == other_op and proof_expr_equal(left_operand, other_left) and proof_expr_equal(right_operand, other_right)
+                        _:
+                            return false
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    match right:
+                        Ast::Expr.Call(other_callee, other_arguments, other_argument_names, _):
+                            return false if arguments.count != other_arguments.count
+                            return false if not proof_sview_array_equal(argument_names, other_argument_names)
+                            return false if not proof_expr_equal(callee, other_callee)
+                            for index in 0..<arguments.count |arguments, other_arguments, index|:
+                                return false if not proof_expr_equal(arguments[index], other_arguments[index])
+                            return true
+                        _:
+                            return false
+                Ast::Expr.Field(object, field, _):
+                    match right:
+                        Ast::Expr.Field(other_object, other_field, _):
+                            return field == other_field and proof_expr_equal(object, other_object)
+                        _:
+                            return false
+                Ast::Expr.Scope(base, name, _):
+                    match right:
+                        Ast::Expr.Scope(other_base, other_name, _):
+                            return name == other_name and proof_expr_equal(base, other_base)
+                        _:
+                            return false
+                Ast::Expr.ShorthandMember(parts, _):
+                    match right:
+                        Ast::Expr.ShorthandMember(other_parts, _):
+                            return proof_sview_array_equal(parts, other_parts)
+                        _:
+                            return false
+                Ast::Expr.Index(object, index, _):
+                    match right:
+                        Ast::Expr.Index(other_object, other_index, _):
+                            return proof_expr_equal(object, other_object) and proof_expr_equal(index, other_index)
+                        _:
+                            return false
+                Ast::Expr.Slice(object, low, high, _):
+                    match right:
+                        Ast::Expr.Slice(other_object, other_low, other_high, _):
+                            return proof_expr_equal(object, other_object) and proof_expr_equal(low, other_low) and proof_expr_equal(high, other_high)
+                        _:
+                            return false
+                Ast::Expr.IndexN(object, arguments, _):
+                    match right:
+                        Ast::Expr.IndexN(other_object, other_arguments, _):
+                            return proof_expr_equal(object, other_object) and proof_expr_array_equal(arguments, other_arguments)
+                        _:
+                            return false
+                Ast::Expr.Move(operand, _):
+                    match right:
+                        Ast::Expr.Move(other_operand, _):
+                            return proof_expr_equal(operand, other_operand)
+                        _:
+                            return false
+                Ast::Expr.RegionNew(operand, region, _):
+                    match right:
+                        Ast::Expr.RegionNew(other_operand, other_region, _):
+                            return region == other_region and proof_expr_equal(operand, other_operand)
+                        _:
+                            return false
+                Ast::Expr.Array(elements, _):
+                    match right:
+                        Ast::Expr.Array(other_elements, _):
+                            return proof_expr_array_equal(elements, other_elements)
+                        _:
+                            return false
+                Ast::Expr.Tuple(elements, _):
+                    match right:
+                        Ast::Expr.Tuple(other_elements, _):
+                            return proof_expr_array_equal(elements, other_elements)
+                        _:
+                            return false
+                Ast::Expr.SetLit(elements, _):
+                    match right:
+                        Ast::Expr.SetLit(other_elements, _):
+                            return proof_expr_array_equal(elements, other_elements)
+                        _:
+                            return false
+                Ast::Expr.DictLit(entries, _):
+                    match right:
+                        Ast::Expr.DictLit(other_entries, _):
+                            return proof_dict_array_equal(entries, other_entries)
+                        _:
+                            return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    match right:
+                        Ast::Expr.Construct(other_type, other_fields, _):
+                            return proof_expr_equal(type_expression, other_type) and proof_field_array_equal(fields, other_fields)
+                        _:
+                            return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    match right:
+                        Ast::Expr.RecordUpdate(other_base, other_fields, _):
+                            return proof_expr_equal(base, other_base) and proof_field_array_equal(fields, other_fields)
+                        _:
+                            return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    match right:
+                        Ast::Expr.If(other_condition, other_then, other_else, _):
+                            return proof_expr_equal(condition, other_condition) and proof_expr_equal(then_expr, other_then) and proof_expr_equal(else_expr, other_else)
+                        _:
+                            return false
+                _:
+                    return false
+
