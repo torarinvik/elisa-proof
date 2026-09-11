@@ -52,6 +52,22 @@ cd "$ROOT_DIR"
 # Compile against the pinned compiler export, never the live sibling checkout.
 # shellcheck source=scripts/compiler_snapshot.sh
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
+if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
+    stage1_root=""
+    if [[ -n "${driver:-}" ]]; then
+        stage1_root="${driver%/scripts/elisac_stage1.sh}"
+    elif [[ -f "${HOME}/.elisac/stage1/SNAPSHOT" ]]; then
+        stage1_root="${HOME}/.elisac/stage1"
+    fi
+    stage1_revision=""
+    if [[ -n "$stage1_root" && -f "$stage1_root/SNAPSHOT" ]]; then
+        stage1_revision="$(awk '$1 == "revision:" { print $2; exit }' "$stage1_root/SNAPSHOT")"
+    fi
+    if [[ -n "$stage1_revision" && "$ELISA_COMPILER_PINNED_REV" != "$stage1_revision"* ]]; then
+        printf 'stage1/frontend provenance mismatch: stage1=%s frontend=%s\n' "$stage1_revision" "$ELISA_COMPILER_PINNED_REV" >&2
+        exit 2
+    fi
+fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
 PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$ROOT_DIR/build/profile_hooks.o}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
