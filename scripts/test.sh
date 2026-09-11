@@ -2917,4 +2917,15 @@ if [[ "$rejected_loop_counter_invariant_status" -ne 0 ]]; then
     exit 1
 fi
 
+# Equality on a user-defined struct dispatches to the protocol method. The method below mutates
+# its receiver, so the caller cannot preserve the pre-comparison fact across either branch.
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_operator_effect.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "expression-unsupported" and "unmodeled user protocol" in f["message"] for f in report["findings"])'
+rejected_operator_effect_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_operator_effect_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an overloaded operator crossed a proof-state boundary\n' >&2
+    exit 1
+fi
+
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

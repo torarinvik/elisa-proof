@@ -4556,6 +4556,24 @@ before replaying each instantiated body. A direct runtime regression proves a sm
 quantifier and refuses a deliberately over-deep nest. The same harness compiles and runs under both
 stage1 and stage0, so the termination guarantee is checked by both compiler generations.
 
+## Repaired: overloaded operators crossed proof-state boundaries
+
+The checker previously treated every unary and binary AST operator as if it were a primitive,
+state-preserving operation. Elisa also dispatches operators such as `==` and `+` to user protocol
+methods for non-primitive operands. A method can mutate its receiver, so carrying facts from before
+the operator into the following branch or postcondition could certify a false theorem. A concrete
+`Counter.__eq__` regression incremented its receiver and still let the caller prove that the value
+remained zero.
+
+Expression admission now requires every operator and index operation that crosses a proof-state
+boundary to have an explicit source-backed witness: built-in scalar operations are admitted only
+when the imported declarations do not override them, while user-defined and opaque element
+operations remain unsupported. Unwitnessed operators are reported as unsupported and all facts are
+forgotten at that boundary. Witness insertion also records a provenance trace, so a fact restored
+into a later state cannot become an untraced replay premise. The method body remains checked by the
+existing resource and scalar rules. `examples/rejected_operator_effect.elisa` pins the regression;
+the stage1 build, independent replay, and full test matrix must all reject it without replay gaps.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
