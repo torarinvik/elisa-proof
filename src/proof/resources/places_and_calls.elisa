@@ -1,5 +1,8 @@
 extend ElisaProof:
     private:
+        def proof_resource_encode_expression(expression: Ast::Expr, report: mutable ProofReport&) -> (known: bool, root: usize):
+            return proof_kernel_encode_expression_checked(expression, report, "")
+
         def proof_resource_symbolic_index_supported(expression: Ast::Expr) -> bool:
             match expression:
                 Ast::Expr.Ident(name, _):
@@ -51,11 +54,24 @@ extend ElisaProof:
         # not need to trust this source-side call into the arithmetic prover.
         def proof_resource_record_disjoint[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, left_root: usize, right_root: usize) -> void:
             return if left_root >= report.kernel_nodes.count or right_root >= report.kernel_nodes.count
-            goal_root: usize = proof_kernel_add_node(&report.kernel_nodes, "binary", "!=", left_root, right_root, 0, 0, 0, 0, "", "")
+            node_start: usize = report.kernel_nodes.count
+            child_start: usize = report.kernel_children.count
             fact_roots: mutable darray[usize] = []
             for fact in state.facts |fact, report, fact_roots|:
                 if proof_kernel_expression_supported(fact):
-                    fact_roots.push(proof_kernel_encode_expression(fact, &report.kernel_nodes, &report.kernel_children))
+                    encoded: (known: bool, root: usize) = proof_resource_encode_expression(fact, report)
+                    if not encoded.known:
+                        report.kernel_nodes <- report.kernel_nodes.truncate(node_start)
+                        report.kernel_children <- report.kernel_children.truncate(child_start)
+                        return
+                    fact_roots.push(encoded.root)
+            needed_nodes: usize = fact_roots.count + 2
+            if not proof_resource_kernel_capacity(report, needed_nodes, fact_roots.count, ""):
+                report.kernel_nodes <- report.kernel_nodes.truncate(node_start)
+                report.kernel_children <- report.kernel_children.truncate(child_start)
+                proof_kernel_budget_note(report, "")
+                return
+            goal_root: usize = proof_kernel_add_node(&report.kernel_nodes, "binary", "!=", left_root, right_root, 0, 0, 0, 0, "", "")
             start: usize = report.kernel_children.count
             report.kernel_children.extend(fact_roots)
             event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-disjoint", "!=", left_root, right_root, goal_root, start, fact_roots.count, 0, "", "")
@@ -87,8 +103,9 @@ extend ElisaProof:
             empty: ProofResourcePlace = proof_resource_empty_place()
             match expression:
                 Ast::Expr.Ident(root, _):
-                    ident_root: usize = proof_kernel_add_node(&report.kernel_nodes, "ident", "", 0, 0, 0, 0, 0, 0, root, "")
-                    return (root != "", ProofResourcePlace{root: root, path_root: ident_root, depth: 0, whole: true})
+                    encoded: (known: bool, root: usize) = proof_resource_encode_expression(expression, report)
+                    return (false, empty) if root == "" or not encoded.known
+                    return (true, ProofResourcePlace{root: root, path_root: encoded.root, depth: 0, whole: true})
                 Ast::Expr.Field(object, field, _):
                     parent: (known: bool, place: ProofResourcePlace) = proof_resource_place(object, report)
                     return proof_resource_place_add_field(report, parent.place, field) if parent.known
@@ -98,12 +115,14 @@ extend ElisaProof:
                     return (false, empty) if not parent.known
                     match index:
                         Ast::Expr.IntLit(_, _):
-                            index_root: usize = proof_kernel_encode_expression(index, &report.kernel_nodes, &report.kernel_children)
-                            return proof_resource_place_add_index(report, parent.place, index_root)
+                            encoded: (known: bool, root: usize) = proof_resource_encode_expression(index, report)
+                            return (false, empty) if not encoded.known
+                            return proof_resource_place_add_index(report, parent.place, encoded.root)
                         _:
                             if proof_resource_symbolic_index_supported(index):
-                                index_root: usize = proof_kernel_encode_expression(index, &report.kernel_nodes, &report.kernel_children)
-                                return proof_resource_place_add_index(report, parent.place, index_root)
+                                encoded: (known: bool, root: usize) = proof_resource_encode_expression(index, report)
+                                return (false, empty) if not encoded.known
+                                return proof_resource_place_add_index(report, parent.place, encoded.root)
                             return (false, empty)
                 Ast::Expr.IndexN(object, arguments, _):
                     decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place(object, report)
@@ -112,14 +131,16 @@ extend ElisaProof:
                     for argument in arguments |argument, report, parent|:
                         match argument:
                             Ast::Expr.IntLit(_, _):
-                                index_root: usize = proof_kernel_encode_expression(argument, &report.kernel_nodes, &report.kernel_children)
-                                next: (known: bool, place: ProofResourcePlace) = proof_resource_place_add_index(report, parent, index_root)
+                                encoded: (known: bool, root: usize) = proof_resource_encode_expression(argument, report)
+                                return (false, empty) if not encoded.known
+                                next: (known: bool, place: ProofResourcePlace) = proof_resource_place_add_index(report, parent, encoded.root)
                                 return (false, empty) if not next.known
                                 parent <- next.place
                             _:
                                 if proof_resource_symbolic_index_supported(argument):
-                                    index_root: usize = proof_kernel_encode_expression(argument, &report.kernel_nodes, &report.kernel_children)
-                                    next: (known: bool, place: ProofResourcePlace) = proof_resource_place_add_index(report, parent, index_root)
+                                    encoded: (known: bool, root: usize) = proof_resource_encode_expression(argument, report)
+                                    return (false, empty) if not encoded.known
+                                    next: (known: bool, place: ProofResourcePlace) = proof_resource_place_add_index(report, parent, encoded.root)
                                     return (false, empty) if not next.known
                                     parent <- next.place
                                     continue
@@ -144,8 +165,9 @@ extend ElisaProof:
                         # of the root conflicts conservatively.
                         root: sview = proof_resource_place_root(operand)
                         return (false, empty) if root == ""
-                        root_node: usize = proof_kernel_add_node(&report.kernel_nodes, "ident", "", 0, 0, 0, 0, 0, 0, root, "")
-                        return (true, ProofResourcePlace{root: root, path_root: root_node, depth: 0, whole: true})
+                        encoded: (known: bool, root: usize) = proof_resource_encode_expression(Ast::Expr.Ident(root, proof_resource_default_position()), report)
+                        return (false, empty) if not encoded.known
+                        return (true, ProofResourcePlace{root: root, path_root: encoded.root, depth: 0, whole: true})
                     return (false, empty)
                 Ast::Expr.Paren(inner, _):
                     return proof_resource_borrow_place(inner, report)
@@ -237,15 +259,19 @@ extend ElisaProof:
             decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place(expression, report)
             return decoded if decoded.known
             root: sview = proof_resource_place_root(expression)
-            root_node: usize = proof_kernel_add_node(&report.kernel_nodes, "ident", "", 0, 0, 0, 0, 0, 0, root, "") if root != "" else 0
-            return (false, ProofResourcePlace{root: root, path_root: root_node, depth: 0, whole: true}) if root != ""
+            if root != "":
+                encoded: (known: bool, root: usize) = proof_resource_encode_expression(Ast::Expr.Ident(root, proof_resource_default_position()), report)
+                return (false, proof_resource_empty_place()) if not encoded.known
+                return (false, ProofResourcePlace{root: root, path_root: encoded.root, depth: 0, whole: true})
             return decoded
 
         def proof_resource_encode_access_place[@r](expression: Ast::Expr, report: mutable ProofReport& @r) -> usize:
             decoded: (known: bool, place: ProofResourcePlace) = proof_resource_place(expression, report)
             return decoded.place.path_root if decoded.known
             root: sview = proof_resource_place_root(expression)
-            return proof_kernel_add_node(&report.kernel_nodes, "ident", "", 0, 0, 0, 0, 0, 0, root, "") if root != ""
+            if root != "":
+                encoded: (known: bool, root: usize) = proof_resource_encode_expression(Ast::Expr.Ident(root, proof_resource_default_position()), report)
+                return encoded.root if encoded.known
             return 0
 
         def proof_resource_place_shape_known(expression: Ast::Expr) -> bool:

@@ -103,15 +103,37 @@ extend ElisaProof:
             target.borrow_present.extend(source.borrow_present)
             target.facts.extend(source.facts)
 
+        def proof_resource_kernel_capacity(report: mutable ProofReport&, node_count: usize, child_count: usize, name: sview) -> bool:
+            return false if report.kernel_budget_exhausted
+            return false if report.kernel_nodes.count > PROOF_KERNEL_NODE_BUDGET or report.kernel_children.count > PROOF_KERNEL_CHILD_BUDGET
+            return false if node_count > PROOF_KERNEL_NODE_BUDGET - report.kernel_nodes.count
+            return false if child_count > PROOF_KERNEL_CHILD_BUDGET - report.kernel_children.count
+            return true
+
         def proof_resource_record_event[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, kind: sview, operator: sview, left: usize, name: sview, secondary_name: sview, auxiliary: usize) -> void:
+            if not proof_resource_kernel_capacity(report, 1, 0, name):
+                proof_kernel_budget_note(report, name)
+                return
             event: usize = proof_kernel_add_node(&report.kernel_nodes, kind, operator, left, 0, auxiliary, 0, 0, 0, name, secondary_name)
+            if event >= report.kernel_nodes.count:
+                proof_kernel_budget_note(report, name)
+                return
             state.trace_events.push(event)
 
         def proof_resource_close_child[@parent, @child, @r](parent: mutable ProofResourceState& @parent, child: ProofResourceState& @child, report: mutable ProofReport& @r, join_moves: bool) -> void:
+            return if report.kernel_budget_exhausted
+            return if not proof_resource_kernel_capacity(report, 1, child.trace_events.count, "")
             start: usize = report.kernel_children.count
             for event in child.trace_events |event, report|:
-                report.kernel_children.push(event)
+                if event >= report.kernel_nodes.count:
+                    proof_kernel_budget_note(report, "")
+                    return
+            report.kernel_children.extend(child.trace_events)
             scope_root: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-scope", "", 0, 0, 0, start, child.trace_events.count, 0, "", "")
+            if scope_root >= report.kernel_nodes.count:
+                report.kernel_children <- report.kernel_children.truncate(start)
+                proof_kernel_budget_note(report, "")
+                return
             parent.trace_events.push(scope_root)
             if join_moves:
                 for index in 0..<parent.binding_moved.count |index, parent, child|:
@@ -120,6 +142,9 @@ extend ElisaProof:
                         # Carry the exact parent slot. Names can be shadowed, so replaying a join
                         # by name alone could mark the wrong binding as moved.
                         join_root: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-join-move", "", 0, 0, index, 0, 0, 0, parent.binding_names[index], "")
+                        if join_root >= report.kernel_nodes.count:
+                            proof_kernel_budget_note(report, "")
+                            return
                         parent.trace_events.push(join_root)
 
         def proof_resource_add_binding_traced[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, is_reference: bool, is_mutable_reference: bool, is_writable: bool, target_slot: usize, borrow_is_mutable: bool, source_name: sview, source_place: ProofResourcePlace, source_place_root: usize) -> void:
@@ -199,9 +224,13 @@ extend ElisaProof:
             is_reference: bool = proof_resource_is_reference_type(type_expression)
             is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(type_expression)
             writable: bool = is_mutable_reference or proof_resource_type_has_marker(type_expression, TokenKind.Mutable)
-            encoded: usize = proof_kernel_encode_expression(operand, &report.kernel_nodes, &report.kernel_children)
+            encoded_value: (known: bool, root: usize) = proof_resource_encode_expression(operand, report)
+            encoded: usize = encoded_value.root
             operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
-            valid: bool = proof_resource_region_is_active(state, region) and not operand_has_region and encoded < report.kernel_nodes.count and report.kernel_nodes[encoded].kind != "unsupported"
+            valid: mutable bool = encoded_value.known
+            valid <- proof_resource_region_is_active(state, region) if valid
+            valid <- not operand_has_region if valid
+            valid <- report.kernel_nodes[encoded].kind != "unsupported" if valid
             proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region allocation operand contains a value whose lifetime is not summarized") if operand_has_region
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "region allocation requires an active lexical region and a kernel-replayable operand") if not valid and not operand_has_region
             proof_resource_add_binding(state, name, is_reference, is_mutable_reference, writable, state.binding_names.count, false, proof_resource_empty_place())
@@ -215,17 +244,25 @@ extend ElisaProof:
         # operand and active region, then deliberately leaves no value available after the
         # expression statement.
         def proof_resource_add_region_discard[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            encoded: usize = proof_kernel_encode_expression(operand, &report.kernel_nodes, &report.kernel_children)
+            encoded_value: (known: bool, root: usize) = proof_resource_encode_expression(operand, report)
+            encoded: usize = encoded_value.root
             operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
-            valid: bool = proof_resource_region_is_active(state, region) and not operand_has_region and encoded < report.kernel_nodes.count and report.kernel_nodes[encoded].kind != "unsupported"
+            valid: mutable bool = encoded_value.known
+            valid <- proof_resource_region_is_active(state, region) if valid
+            valid <- not operand_has_region if valid
+            valid <- report.kernel_nodes[encoded].kind != "unsupported" if valid
             proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region allocation operand contains a value whose lifetime is not summarized") if operand_has_region
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "region allocation requires an active lexical region and a kernel-replayable operand") if not valid and not operand_has_region
             proof_resource_record_event(state, report, "resource-region-alloc-discard", "", encoded, "", region, 0) if valid
 
         def proof_resource_add_region_return_alloc[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> usize:
-            encoded: usize = proof_kernel_encode_expression(operand, &report.kernel_nodes, &report.kernel_children)
+            encoded_value: (known: bool, root: usize) = proof_resource_encode_expression(operand, report)
+            encoded: usize = encoded_value.root
             operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
-            valid: bool = proof_resource_region_is_active(state, region) and not operand_has_region and encoded < report.kernel_nodes.count and report.kernel_nodes[encoded].kind != "unsupported"
+            valid: mutable bool = encoded_value.known
+            valid <- proof_resource_region_is_active(state, region) if valid
+            valid <- not operand_has_region if valid
+            valid <- report.kernel_nodes[encoded].kind != "unsupported" if valid
             proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a returned region allocation operand contains a value whose lifetime is not summarized") if operand_has_region
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "a returned region allocation requires an active lifetime and a kernel-replayable operand") if not valid and not operand_has_region
             if valid:
@@ -238,10 +275,22 @@ extend ElisaProof:
         def proof_resource_rebind_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, target: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
             target_name: sview = proof_resource_direct_binding_name(target)
             target_slot: usize = proof_resource_lookup(state, target_name)
-            encoded: usize = proof_kernel_encode_expression(operand, &report.kernel_nodes, &report.kernel_children)
+            encoded_value: (known: bool, root: usize) = proof_resource_encode_expression(operand, report)
+            encoded: usize = encoded_value.root
             operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
             target_access: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(target, report)
-            valid: bool = target_name != "" and not proof_resource_is_discard_target(target) and not operand_has_region and target_access.known and target_slot < state.binding_names.count and proof_resource_binding_is_writable(state, target_slot) and target_slot < state.binding_moved.count and not state.binding_moved[target_slot] and target_slot < state.borrow_present.count and not state.borrow_present[target_slot] and not proof_resource_has_borrow_overlap(state, report, target_access.place, state.binding_names.count) and proof_resource_region_is_active(state, region) and encoded < report.kernel_nodes.count and report.kernel_nodes[encoded].kind != "unsupported"
+            valid: mutable bool = encoded_value.known
+            valid <- target_name != "" and not proof_resource_is_discard_target(target) and not operand_has_region if valid
+            valid <- target_access.known if valid
+            valid <- target_slot < state.binding_names.count if valid
+            valid <- proof_resource_binding_is_writable(state, target_slot) if valid
+            valid <- target_slot < state.binding_moved.count if valid
+            valid <- not state.binding_moved[target_slot] if valid
+            valid <- target_slot < state.borrow_present.count if valid
+            valid <- not state.borrow_present[target_slot] if valid
+            valid <- not proof_resource_has_borrow_overlap(state, report, target_access.place, state.binding_names.count) if valid
+            valid <- proof_resource_region_is_active(state, region) if valid
+            valid <- report.kernel_nodes[encoded].kind != "unsupported" if valid
             proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region allocation operand contains a value whose lifetime is not summarized") if operand_has_region
             proof_resource_add_failing_obligation(report, "region-store-escape", position, function_name, "a region allocation may be assigned only to a directly tracked live binding without an active borrow handle") if not valid and not operand_has_region
             if valid:
@@ -286,20 +335,30 @@ extend ElisaProof:
             # at function-scope exit by Elisa. Materialize that implicit lifetime boundary in
             # the certificate so replay never accepts an unbalanced open region. Explicit
             # `destroy r` has already removed its entry and therefore emits no duplicate close.
-            while state.active_regions.count > 0 |state, report, function_name, line|:
+            while state.active_regions.count > 0 and not report.kernel_budget_exhausted |state, report, function_name, line|:
                 region: sview = state.active_regions[state.active_regions.count - 1]
                 state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
                 if not proof_resource_region_is_external(state, region):
                     proof_resource_invalidate_region_bindings(state, region)
                     proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", 0)
+            return if report.kernel_budget_exhausted
+            if not proof_resource_kernel_capacity(report, 1, state.trace_events.count, function_name):
+                proof_kernel_budget_note(report, function_name)
+                return
             start: usize = report.kernel_children.count
             for event in state.trace_events |event, report|:
-                report.kernel_children.push(event)
+                if event >= report.kernel_nodes.count:
+                    proof_kernel_budget_note(report, function_name)
+                    return
+            report.kernel_children.extend(state.trace_events)
             # The parameter count is part of the certificate header. The replay kernel uses it
             # to distinguish formal external capabilities from body-local bindings when a caller
             # composes this trace into a resource-call transition.
             root: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-safety", "", 0, 0, parameter_count, start, state.trace_events.count, 0, function_name, "resource-v1")
-            report.proof_obligation(true)
+            if root >= report.kernel_nodes.count:
+                report.kernel_children <- report.kernel_children.truncate(start)
+                proof_kernel_budget_note(report, function_name)
+                return
             proof_add_resource_goal_attempt(report, root, line, function_name)
 
         # Type markers are nested unary AST nodes in the compiler AST. Keep this helper local to
