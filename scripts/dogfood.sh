@@ -45,6 +45,19 @@ source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 
 REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-dogfood.XXXXXX")"
 trap 'rm -rf "$REPORT_DIR"' EXIT
+PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
+PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$REPORT_DIR/profile-hooks.o}"
+if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
+    printf 'dogfood failed: profiler ABI hook source is missing: %s\n' "$PROFILE_HOOKS_SOURCE" >&2
+    exit 1
+fi
+clang -c -O2 -o "$PROFILE_HOOKS_OBJ" "$PROFILE_HOOKS_SOURCE"
+
+link_native() {
+    local output="$1"
+    shift
+    clang -Wl,-dead_strip -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
+}
 
 run_probe() {
     local label="$1"
@@ -2156,10 +2169,10 @@ if [[ ! -f "$runtime_source" ]]; then
 fi
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/program.o" "$ROOT_DIR/examples/kernel_arena_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
-    clang -Wl,-dead_strip -o "$runtime_dir/program" "$runtime_dir/program.o" "$RUNTIME_OBJ"
+    link_native "$runtime_dir/program" "$runtime_dir/program.o" "$RUNTIME_OBJ"
 else
     "$COMPILER" -emit obj -O0 -o "$runtime_dir/runtime-support.o" "$runtime_source" >/dev/null 2>&1
-    clang -Wl,-dead_strip -o "$runtime_dir/program" "$runtime_dir/program.o" "$runtime_dir/runtime-support.o"
+    link_native "$runtime_dir/program" "$runtime_dir/program.o" "$runtime_dir/runtime-support.o"
 fi
 set +e
 "$runtime_dir/program"
@@ -2173,9 +2186,9 @@ printf 'dogfood arena_runtime: malformed arenas/resource places rejected and val
 
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/comparison-runtime.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
-    clang -Wl,-dead_strip -o "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$RUNTIME_OBJ"
+    link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$RUNTIME_OBJ"
 else
-    clang -Wl,-dead_strip -o "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$runtime_dir/runtime-support.o"
+    link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$runtime_dir/runtime-support.o"
 fi
 "$runtime_dir/comparison-runtime"
 printf 'dogfood comparison_runtime: six witnessed comparisons checked, and unwitnessed reflexivity refused\n'
@@ -2185,9 +2198,9 @@ printf 'dogfood comparison_runtime: six witnessed comparisons checked, and unwit
 # access, quantifier) must refuse to, on both the dedicated rule and full goal replay.
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/congruence-runtime.o" "$ROOT_DIR/examples/kernel_congruence_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
-    clang -Wl,-dead_strip -o "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$RUNTIME_OBJ"
+    link_native "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$RUNTIME_OBJ"
 else
-    clang -Wl,-dead_strip -o "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$runtime_dir/runtime-support.o"
+    link_native "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$runtime_dir/runtime-support.o"
 fi
 "$runtime_dir/congruence-runtime"
 printf 'dogfood congruence_runtime: participating formers carried equalities and excluded formers refused\n'
@@ -2197,9 +2210,9 @@ printf 'dogfood congruence_runtime: participating formers carried equalities and
 # and the dual forms - a disjunction, a negated conjunction - must stay refused in both signs.
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/projection-runtime.o" "$ROOT_DIR/examples/kernel_projection_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
-    clang -Wl,-dead_strip -o "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$RUNTIME_OBJ"
+    link_native "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$RUNTIME_OBJ"
 else
-    clang -Wl,-dead_strip -o "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$runtime_dir/runtime-support.o"
+    link_native "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$runtime_dir/runtime-support.o"
 fi
 "$runtime_dir/projection-runtime"
 printf 'dogfood projection_runtime: conjunct and negated-disjunct projection admitted, duals refused\n'
@@ -2208,9 +2221,9 @@ printf 'dogfood projection_runtime: conjunct and negated-disjunct projection adm
 # uncontained rows refused, and every malformed effect graph rejected rather than interpreted.
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/effect-runtime.o" "$ROOT_DIR/examples/kernel_effect_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
-    clang -Wl,-dead_strip -o "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$RUNTIME_OBJ"
+    link_native "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$RUNTIME_OBJ"
 else
-    clang -Wl,-dead_strip -o "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$runtime_dir/runtime-support.o"
+    link_native "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$runtime_dir/runtime-support.o"
 fi
 "$runtime_dir/effect-runtime"
 printf 'dogfood effect_runtime: contained rows admitted and uncontained or malformed rows refused\n'
@@ -2226,15 +2239,9 @@ if [[ -n "$bootstrap_compiler" ]]; then
     # The raw runtime support object intentionally leaves the optional profiler
     # ABI unresolved.  Keep the stage0 bootstrap link honest by supplying the
     # same small hook implementation used by the compiler parity harness.
-    profile_hooks_source="$COMPILER_SRC/test/parity/profile_hooks.c"
-    if [[ ! -f "$profile_hooks_source" ]]; then
-        printf 'dogfood failed: profiler hooks source is missing for stage0 bootstrap harness\n' >&2
-        exit 1
-    fi
-    clang -c -O2 -o "$runtime_dir/bootstrap-profile-hooks.o" "$profile_hooks_source"
     for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
         "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
-        clang -Wl,-dead_strip -o "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o" "$runtime_dir/bootstrap-profile-hooks.o"
+        link_native "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o"
         set +e
         "$runtime_dir/bootstrap-$bootstrap_example"
         bootstrap_status=$?
@@ -2254,9 +2261,9 @@ fi
 # rewrite requires an explicit equality, and a rejected action must leave the state unsolved.
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/tactic-runtime.o" "$SNAPSHOT_ROOT/examples/tactic_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
-    clang -Wl,-dead_strip -o "$runtime_dir/tactic-runtime" "$runtime_dir/tactic-runtime.o" "$RUNTIME_OBJ"
+    link_native "$runtime_dir/tactic-runtime" "$runtime_dir/tactic-runtime.o" "$RUNTIME_OBJ"
 else
-    clang -Wl,-dead_strip -o "$runtime_dir/tactic-runtime" "$runtime_dir/tactic-runtime.o"
+    link_native "$runtime_dir/tactic-runtime" "$runtime_dir/tactic-runtime.o"
 fi
 set +e
 "$runtime_dir/tactic-runtime"
@@ -2272,9 +2279,9 @@ printf 'dogfood tactic_runtime: kernel-backed state actions and branch obligatio
 # caller certificate that tries to consume the now-mismatched instantiated postcondition.
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/lemma-summary-replay.o" "$SNAPSHOT_ROOT/examples/lemma_summary_replay_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
-    clang -Wl,-dead_strip -o "$runtime_dir/lemma-summary-replay" "$runtime_dir/lemma-summary-replay.o" "$RUNTIME_OBJ"
+    link_native "$runtime_dir/lemma-summary-replay" "$runtime_dir/lemma-summary-replay.o" "$RUNTIME_OBJ"
 else
-    clang -Wl,-dead_strip -o "$runtime_dir/lemma-summary-replay" "$runtime_dir/lemma-summary-replay.o"
+    link_native "$runtime_dir/lemma-summary-replay" "$runtime_dir/lemma-summary-replay.o"
 fi
 set +e
 "$runtime_dir/lemma-summary-replay"

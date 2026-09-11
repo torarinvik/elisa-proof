@@ -52,9 +52,16 @@ cd "$ROOT_DIR"
 # Compile against the pinned compiler export, never the live sibling checkout.
 # shellcheck source=scripts/compiler_snapshot.sh
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
-"$COMPILER" -emit obj -O0 -o "build/elisa-proof-stage.o" "$SNAPSHOT_ROOT/src/main.elisa"
-if [[ -n "$RUNTIME_OBJ" ]]; then
-    clang -Wl,-dead_strip -o "build/elisa-proof" "build/elisa-proof-stage.o" "$RUNTIME_OBJ"
-else
-    clang -Wl,-dead_strip -o "build/elisa-proof" "build/elisa-proof-stage.o"
+PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
+PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$ROOT_DIR/build/profile_hooks.o}"
+if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
+    printf 'missing profiler ABI hook source: %s\n' "$PROFILE_HOOKS_SOURCE" >&2
+    exit 2
 fi
+if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_OBJ" ]]; then
+    clang -c -O2 -o "$PROFILE_HOOKS_OBJ" "$PROFILE_HOOKS_SOURCE"
+fi
+"$COMPILER" -emit obj -O0 -o "build/elisa-proof-stage.o" "$SNAPSHOT_ROOT/src/main.elisa"
+LINK_INPUTS=("build/elisa-proof-stage.o" "$PROFILE_HOOKS_OBJ")
+[[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
+clang -Wl,-dead_strip -o "build/elisa-proof" "${LINK_INPUTS[@]}"

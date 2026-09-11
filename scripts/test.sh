@@ -15,90 +15,94 @@ if [[ -z "$SELF_HOST_COMPILER" ]]; then
         [[ -n "$SELF_HOST_COMPILER" ]] && break
     done
 fi
+# Proof fixtures intentionally include unproven and refuted contracts. Import them
+# in permissive compiler mode so the proof assistant, rather than the compiler's
+# strict contract gate, reports the verification result.
+PROOF_IMPORT_FLAGS=(-permissive)
 standalone_probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-test.XXXXXX")"
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/kernel-replay-standalone.o" "$ROOT_DIR/examples/kernel_replay_standalone.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-replay-standalone.o" "$ROOT_DIR/examples/kernel_replay_standalone.elisa" >/dev/null 2>&1
 kernel_replay_standalone_status=$?
 if [[ "$kernel_replay_standalone_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-neutral replay module is not standalone-compilable\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/region-allocation.o" "$ROOT_DIR/examples/region_allocation.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-allocation.o" "$ROOT_DIR/examples/region_allocation.elisa" >/dev/null 2>&1
 region_allocation_compiler_status=$?
 if [[ "$region_allocation_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected valid new[r] allocation\n' >&2
     exit 1
 fi
 if [[ "$(basename "$SELF_HOST_COMPILER")" == "elisac-stage1" ]]; then
-    "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/region-generic-allocation.o" "$ROOT_DIR/examples/region_generic_allocation.elisa" >/dev/null 2>&1
+    "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-generic-allocation.o" "$ROOT_DIR/examples/region_generic_allocation.elisa" >/dev/null 2>&1
     region_generic_compiler_status=$?
     if [[ "$region_generic_compiler_status" -ne 0 ]]; then
         printf 'proof test matrix failed: stage1 rejected region-polymorphic new[r] allocation\n' >&2
         exit 1
     fi
-    "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/region-new-call.o" "$ROOT_DIR/examples/region_new_call_argument.elisa" >/dev/null 2>&1
+    "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-new-call.o" "$ROOT_DIR/examples/region_new_call_argument.elisa" >/dev/null 2>&1
     region_new_call_compiler_status=$?
     if [[ "$region_new_call_compiler_status" -ne 0 ]]; then
         printf 'proof test matrix failed: stage1 rejected new[r] passed to a reference formal\n' >&2
         exit 1
     fi
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/region-statement.o" "$ROOT_DIR/examples/region_statement.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-statement.o" "$ROOT_DIR/examples/region_statement.elisa" >/dev/null 2>&1
 region_statement_compiler_status=$?
 if [[ "$region_statement_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected canonical region statement form\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-duplicate-alias.o" "$ROOT_DIR/examples/rejected_region_duplicate_mutable_alias.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-duplicate-alias.o" "$ROOT_DIR/examples/rejected_region_duplicate_mutable_alias.elisa" >/dev/null 2>&1
 rejected_region_duplicate_alias_compiler_status=$?
 if [[ "$rejected_region_duplicate_alias_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate-alias proof fixture\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-assign-duplicate-owner.o" "$ROOT_DIR/examples/rejected_region_assign_duplicate_owner.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-assign-duplicate-owner.o" "$ROOT_DIR/examples/rejected_region_assign_duplicate_owner.elisa" >/dev/null 2>&1
 rejected_region_assign_duplicate_owner_compiler_status=$?
 if [[ "$rejected_region_assign_duplicate_owner_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate-owner assignment fixture\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-bind-mutable-external.o" "$ROOT_DIR/examples/rejected_region_bind_mutable_external.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-bind-mutable-external.o" "$ROOT_DIR/examples/rejected_region_bind_mutable_external.elisa" >/dev/null 2>&1
 rejected_region_bind_mutable_external_compiler_status=$?
 if [[ "$rejected_region_bind_mutable_external_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid mutable region-bind fixture\n' >&2
     exit 1
 fi
 if [[ "$(basename "$SELF_HOST_COMPILER")" == "elisac-stage1" ]]; then
-    "$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-call-result-duplicate-owner.o" "$ROOT_DIR/examples/rejected_region_call_result_duplicate_owner.elisa" >/dev/null 2>&1
+    "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-region-call-result-duplicate-owner.o" "$ROOT_DIR/examples/rejected_region_call_result_duplicate_owner.elisa" >/dev/null 2>&1
     rejected_region_call_result_duplicate_owner_compiler_status=$?
     if [[ "$rejected_region_call_result_duplicate_owner_compiler_status" -ne 0 ]]; then
         printf 'proof test matrix failed: stage1 rejected the runtime-valid duplicate-owner call-result fixture\n' >&2
         exit 1
     fi
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-after-move.o" "$ROOT_DIR/examples/rejected_borrow_after_move.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-after-move.o" "$ROOT_DIR/examples/rejected_borrow_after_move.elisa" >/dev/null 2>&1
 rejected_borrow_after_move_compiler_status=$?
 if [[ "$rejected_borrow_after_move_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid borrow-after-move fixture\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-negative-affine-difference.o" "$ROOT_DIR/examples/rejected_negative_affine_difference.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-negative-affine-difference.o" "$ROOT_DIR/examples/rejected_negative_affine_difference.elisa" >/dev/null 2>&1
 rejected_negative_affine_difference_compiler_status=$?
 if [[ "$rejected_negative_affine_difference_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the signed-affine regression fixture\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-negative-affine-goal.o" "$ROOT_DIR/examples/rejected_negative_affine_goal.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-negative-affine-goal.o" "$ROOT_DIR/examples/rejected_negative_affine_goal.elisa" >/dev/null 2>&1
 rejected_negative_affine_goal_compiler_status=$?
 if [[ "$rejected_negative_affine_goal_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the signed-affine goal regression fixture\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >/dev/null 2>&1
 rejected_borrow_call_duplicate_alias_compiler_status=$?
 if [[ "$rejected_borrow_call_duplicate_alias_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate mutable call-alias fixture\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" -emit obj -O0 -o "$standalone_probe_dir/rejected-unsigned-overflow-goal.o" "$ROOT_DIR/examples/rejected_unsigned_overflow_goal.elisa" >/dev/null 2>&1
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-unsigned-overflow-goal.o" "$ROOT_DIR/examples/rejected_unsigned_overflow_goal.elisa" >/dev/null 2>&1
 rejected_unsigned_overflow_goal_compiler_status=$?
 if [[ "$rejected_unsigned_overflow_goal_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the runtime-valid unsigned overflow fixture\n' >&2

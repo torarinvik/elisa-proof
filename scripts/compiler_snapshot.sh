@@ -7,7 +7,10 @@
 # working tree meant that any half-finished edit there entered this build. The
 # snapshot copies this repository's src/ and examples/ beside a `git archive`
 # export of the commit recorded in ELISA_COMPILER_REV, so the relative includes
-# resolve to the pinned sources regardless of what the checkout contains.
+# resolve to the pinned sources regardless of what the checkout contains. The
+# exported profiler hook source is the link boundary for hand-built native
+# objects; keeping it in the same snapshot prevents ABI drift between the
+# compiler and the proof executable.
 #
 # Inputs (all optional):
 #   ELISA_COMPILER_SRC  compiler git repository (default: ../Elisa-compiler)
@@ -41,10 +44,10 @@ mkdir -p "$SNAPSHOT_DIR"
 
 # The compiler export is keyed by commit hash; a stale or partial export is
 # discarded rather than reused.
-if [[ ! -f "$SNAPSHOT_COMPILER/.rev" || "$(cat "$SNAPSHOT_COMPILER/.rev")" != "$RESOLVED_REV" ]]; then
+if [[ ! -f "$SNAPSHOT_COMPILER/.rev" || "$(cat "$SNAPSHOT_COMPILER/.rev")" != "$RESOLVED_REV" || ! -f "$SNAPSHOT_COMPILER/test/parity/profile_hooks.c" ]]; then
     rm -rf "$SNAPSHOT_COMPILER"
     mkdir -p "$SNAPSHOT_COMPILER"
-    git -C "$COMPILER_SRC" archive --format=tar "$RESOLVED_REV" src elisacore_std \
+    git -C "$COMPILER_SRC" archive --format=tar "$RESOLVED_REV" src elisacore_std test/parity/profile_hooks.c \
         | tar -x -C "$SNAPSHOT_COMPILER" \
         || { rm -rf "$SNAPSHOT_COMPILER"; snapshot_fail "git archive of $RESOLVED_REV failed"; }
     printf '%s\n' "$RESOLVED_REV" > "$SNAPSHOT_COMPILER/.rev"
