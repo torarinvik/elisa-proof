@@ -203,6 +203,7 @@ PY
 # A non-zero command verdict is expected, but every certificate it does emit must replay.
 run_probe replay_standalone examples/kernel_replay_standalone.elisa 1
 run_probe arena_cycle_rejected examples/rejected_kernel_arena_cycle.elisa 1
+run_probe structural_shadowed_subterm examples/structural_shadowed_subterm.elisa 0
 run_probe borrow_four_nested_fields examples/borrow_four_nested_fields.elisa 0
 run_probe rejected_borrow_four_nested_alias examples/rejected_borrow_four_nested_alias.elisa 1
 run_probe borrow_indexed_places examples/borrow_indexed_places.elisa 0

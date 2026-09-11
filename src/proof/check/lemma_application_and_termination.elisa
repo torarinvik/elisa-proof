@@ -234,7 +234,7 @@ extend ElisaProof:
         def proof_structural_smaller_intersect(left: darray[ProofStructuralSmaller]&, right: darray[ProofStructuralSmaller]&) -> darray[ProofStructuralSmaller]:
             result: mutable darray[ProofStructuralSmaller] = []
             for candidate in left |result, right|:
-                result.push(candidate) if any other in right where other.name == candidate.name and other.subject == candidate.subject
+                result.push(candidate) if any other in right where other.name == candidate.name and other.subject == candidate.subject and other.identity == candidate.identity and other.subject_identity == candidate.subject_identity
             return result
 
         # Pattern bindings that are in scope after a match. This list is used only to decide
@@ -274,25 +274,25 @@ extend ElisaProof:
         # category binder names the complete matched value and is therefore never accepted as a
         # structural decrease. Or-patterns are left opaque because a binder may exist in only one
         # alternative; rejecting them is safer than guessing which names are common.
-        def proof_structural_pattern_subterms(pattern: Ast::Pattern, subject: sview, subterms: mutable darray[ProofStructuralSmaller]&) -> void:
+        def proof_structural_pattern_subterms(pattern: Ast::Pattern, subject: sview, subject_identity: usize, subterms: mutable darray[ProofStructuralSmaller]&, report: mutable ProofReport&) -> void:
             match pattern:
                 Ast::Pattern.Variant(_, fields):
-                    for subpattern in fields |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                    for subpattern in fields |subterms, report|:
+                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
                 Ast::Pattern.Struct(_, fields):
-                    for subpattern in fields |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                    for subpattern in fields |subterms, report|:
+                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
                 Ast::Pattern.Field(_, inner):
-                    for subpattern in inner |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                    for subpattern in inner |subterms, report|:
+                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
                 Ast::Pattern.Tuple(elements):
-                    for subpattern in elements |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                    for subpattern in elements |subterms, report|:
+                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
                 Ast::Pattern.Binding(name):
-                    subterms.push(ProofStructuralSmaller{name: name, subject: subject}) if name != ""
+                    subterms.push(ProofStructuralSmaller{name: name, subject: subject, identity: proof_structural_fresh_identity(report), subject_identity: subject_identity}) if name != ""
                 Ast::Pattern.As(_, inner):
-                    for subpattern in inner |subterms|:
-                        proof_structural_pattern_subterms(subpattern, subject, subterms)
+                    for subpattern in inner |subterms, report|:
+                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
                 _:
                     pass
 
@@ -330,6 +330,23 @@ extend ElisaProof:
             for candidate in smaller |root|:
                 return candidate.subject if candidate.name == root
             return ""
+
+        def proof_structural_argument_identity(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> usize:
+            root: sview = proof_structural_argument_root(expression)
+            for candidate in smaller |root|:
+                return candidate.identity if candidate.name == root
+            return 0
+
+        def proof_structural_argument_subject_identity(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> usize:
+            root: sview = proof_structural_argument_root(expression)
+            for candidate in smaller |root|:
+                return candidate.subject_identity if candidate.name == root
+            return 0
+
+        def proof_structural_binding_identity(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&, parameters: darray[Ast::ParamDecl]&) -> usize:
+            identity: usize = proof_structural_argument_identity(expression, smaller)
+            return identity if identity != 0
+            return proof_structural_parameter_identity(parameters, proof_structural_argument_root(expression))
 
         def proof_structural_call_argument(arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, parameters: darray[Ast::ParamDecl]&, position: usize) -> Ast::Expr:
             return Ast::Expr.Invalid if position >= parameters.count
@@ -416,11 +433,12 @@ extend ElisaProof:
                                 if proof_structural_argument_is_smaller_for_subject(recursive_argument, subject, smaller):
                                     multi_strict <- true
                                     argument_root: sview = proof_structural_argument_root(recursive_argument)
-                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: argument_root, strict: true}) if argument_root != ""
+                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: argument_root, strict: true, subject_identity: proof_structural_argument_subject_identity(recursive_argument, smaller), argument_identity: proof_structural_argument_identity(recursive_argument, smaller)}) if argument_root != ""
                                 elif recursive_name != subject:
                                     multi_valid <- false
                                 else:
-                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: subject, strict: false})
+                                    subject_identity: usize = proof_structural_parameter_identity(parameters, subject)
+                                    witnesses.push(ProofStructuralWitness{subject: subject, argument: subject, strict: false, subject_identity: subject_identity, argument_identity: subject_identity})
                             if multi_valid and multi_strict:
                                 proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line)
                             else:
@@ -434,7 +452,7 @@ extend ElisaProof:
                                 argument_root: sview = proof_structural_argument_root(recursive_argument)
                                 witness_subject: mutable sview = proof_structural_argument_subject(recursive_argument, smaller)
                                 witness_subject <- parameters[recursive_position].name if witness_subject == "" and recursive_position < parameters.count
-                                witnesses: darray[ProofStructuralWitness] = [ProofStructuralWitness{subject: witness_subject, argument: argument_root, strict: true}]
+                                witnesses: darray[ProofStructuralWitness] = [ProofStructuralWitness{subject: witness_subject, argument: argument_root, strict: true, subject_identity: proof_structural_argument_subject_identity(recursive_argument, smaller), argument_identity: proof_structural_argument_identity(recursive_argument, smaller)}]
                                 proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line)
                             else:
                                 proof_structural_termination_finding(report, position.line, name, "recursive call does not pass a binder from a matched strict subterm")
@@ -511,7 +529,7 @@ extend ElisaProof:
                         scrutinee_name: sview = proof_ident_name(scrutinee)
                         if proof_structural_name_in(destructurable, scrutinee_name):
                             proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
-                            proof_structural_pattern_subterms(arm.pattern, scrutinee_name, &arm_smaller)
+                            proof_structural_pattern_subterms(arm.pattern, scrutinee_name, proof_structural_binding_identity(scrutinee, smaller, parameters), &arm_smaller, report)
                         proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
                         proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
                 Ast::Expr.Catch(guarded, arms, _):

@@ -508,6 +508,12 @@ if [[ "$inferred_product_structural_status" -ne 0 ]]; then
     printf 'proof test matrix failed: inferred product structural termination\n' >&2
     exit 1
 fi
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/structural_shadowed_subterm.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'
+structural_shadowed_subterm_status=${PIPESTATUS[1]}
+if [[ "$structural_shadowed_subterm_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: shadowed structural subterm identity\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/bounded_recursive_depth.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0'
 bounded_recursive_depth_status=${PIPESTATUS[1]}
 if [[ "$bounded_recursive_depth_status" -ne 0 ]]; then
