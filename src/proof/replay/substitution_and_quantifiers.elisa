@@ -1,16 +1,20 @@
 extend ElisaProof:
     private:
         def proof_replay_find_disjunction(expression: Ast::Expr) -> (known: bool, left: Ast::Expr, right: Ast::Expr):
+            return proof_replay_find_disjunction_depth(expression, 0)
+
+        def proof_replay_find_disjunction_depth(expression: Ast::Expr, depth: usize) -> (known: bool, left: Ast::Expr, right: Ast::Expr):
+            return (false, Ast::Expr.Absent, Ast::Expr.Absent) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_find_disjunction(inner)
+                    return proof_replay_find_disjunction_depth(inner, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
                     return (true, left, right)
                 Ast::Expr.Binary(left, TokenKind.And, right, position):
-                    left_split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_replay_find_disjunction(left)
+                    left_split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_replay_find_disjunction_depth(left, depth + 1)
                     if left_split.known:
                         return (true, Ast::Expr.Binary(left_split.left, TokenKind.And, right, position), Ast::Expr.Binary(left_split.right, TokenKind.And, right, position))
-                    right_split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_replay_find_disjunction(right)
+                    right_split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_replay_find_disjunction_depth(right, depth + 1)
                     if right_split.known:
                         return (true, Ast::Expr.Binary(left, TokenKind.And, right_split.left, position), Ast::Expr.Binary(left, TokenKind.And, right_split.right, position))
                 _:
@@ -33,6 +37,10 @@ extend ElisaProof:
         # Packed AST payloads contain growable side tables. Tie rebuilt payload arrays to the
         # caller's region so returning the AST cannot leave handles into call-local storage.
         def proof_replay_substitute(expression: Ast::Expr, name: sview, value: Ast::Expr) -> Ast::Expr:
+            return proof_replay_substitute_depth(expression, name, value, 0)
+
+        def proof_replay_substitute_depth(expression: Ast::Expr, name: sview, value: Ast::Expr, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _):
                     return expression
@@ -40,18 +48,18 @@ extend ElisaProof:
                     return value if expression_name == name
                     return expression
                 Ast::Expr.Paren(inner, position):
-                    return Ast::Expr.Paren(proof_replay_substitute(inner, name, value), position)
+                    return Ast::Expr.Paren(proof_replay_substitute_depth(inner, name, value, depth + 1), position)
                 Ast::Expr.Unary(operator, operand, position):
-                    return Ast::Expr.Unary(operator, proof_replay_substitute(operand, name, value), position)
+                    return Ast::Expr.Unary(operator, proof_replay_substitute_depth(operand, name, value, depth + 1), position)
                 Ast::Expr.Binary(left, operator, right, position):
-                    return Ast::Expr.Binary(proof_replay_substitute(left, name, value), operator, proof_replay_substitute(right, name, value), position)
+                    return Ast::Expr.Binary(proof_replay_substitute_depth(left, name, value, depth + 1), operator, proof_replay_substitute_depth(right, name, value, depth + 1), position)
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for argument in arguments |substituted, name, value|:
-                        substituted.push(proof_replay_substitute(argument, name, value))
-                    return Ast::Expr.Call(proof_replay_substitute(callee, name, value), substituted, argument_names, position)
+                        substituted.push(proof_replay_substitute_depth(argument, name, value, depth + 1))
+                    return Ast::Expr.Call(proof_replay_substitute_depth(callee, name, value, depth + 1), substituted, argument_names, position)
                 Ast::Expr.Field(object, field, position):
-                    substituted_object: Ast::Expr = proof_replay_substitute(object, name, value)
+                    substituted_object: Ast::Expr = proof_replay_substitute_depth(object, name, value, depth + 1)
                     match substituted_object:
                         Ast::Expr.Construct(_, fields, _):
                             for initializer in fields |field|:
@@ -64,65 +72,65 @@ extend ElisaProof:
                             pass
                     return Ast::Expr.Field(substituted_object, field, position)
                 Ast::Expr.Scope(base, member, position):
-                    return Ast::Expr.Scope(proof_replay_substitute(base, name, value), member, position)
+                    return Ast::Expr.Scope(proof_replay_substitute_depth(base, name, value, depth + 1), member, position)
                 Ast::Expr.Index(object, index, position):
-                    return Ast::Expr.Index(proof_replay_substitute(object, name, value), proof_replay_substitute(index, name, value), position)
+                    return Ast::Expr.Index(proof_replay_substitute_depth(object, name, value, depth + 1), proof_replay_substitute_depth(index, name, value, depth + 1), position)
                 Ast::Expr.Slice(object, low, high, position):
-                    return Ast::Expr.Slice(proof_replay_substitute(object, name, value), proof_replay_substitute(low, name, value), proof_replay_substitute(high, name, value), position)
+                    return Ast::Expr.Slice(proof_replay_substitute_depth(object, name, value, depth + 1), proof_replay_substitute_depth(low, name, value, depth + 1), proof_replay_substitute_depth(high, name, value, depth + 1), position)
                 Ast::Expr.IndexN(object, arguments, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for argument in arguments |substituted, name, value|:
-                        substituted.push(proof_replay_substitute(argument, name, value))
-                    return Ast::Expr.IndexN(proof_replay_substitute(object, name, value), substituted, position)
+                        substituted.push(proof_replay_substitute_depth(argument, name, value, depth + 1))
+                    return Ast::Expr.IndexN(proof_replay_substitute_depth(object, name, value, depth + 1), substituted, position)
                 Ast::Expr.Move(operand, position):
-                    return Ast::Expr.Move(proof_replay_substitute(operand, name, value), position)
+                    return Ast::Expr.Move(proof_replay_substitute_depth(operand, name, value, depth + 1), position)
                 Ast::Expr.RegionNew(operand, region, position):
-                    return Ast::Expr.RegionNew(proof_replay_substitute(operand, name, value), region, position)
+                    return Ast::Expr.RegionNew(proof_replay_substitute_depth(operand, name, value, depth + 1), region, position)
                 Ast::Expr.Array(elements, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for element in elements |substituted, name, value|:
-                        substituted.push(proof_replay_substitute(element, name, value))
+                        substituted.push(proof_replay_substitute_depth(element, name, value, depth + 1))
                     return Ast::Expr.Array(substituted, position)
                 Ast::Expr.Tuple(elements, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for element in elements |substituted, name, value|:
-                        substituted.push(proof_replay_substitute(element, name, value))
+                        substituted.push(proof_replay_substitute_depth(element, name, value, depth + 1))
                     return Ast::Expr.Tuple(substituted, position)
                 Ast::Expr.SetLit(elements, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for element in elements |substituted, name, value|:
-                        substituted.push(proof_replay_substitute(element, name, value))
+                        substituted.push(proof_replay_substitute_depth(element, name, value, depth + 1))
                     return Ast::Expr.SetLit(substituted, position)
                 Ast::Expr.DictLit(entries, position):
                     substituted: mutable darray[Ast::DictEntry] = []
                     for entry in entries |substituted, name, value|:
-                        substituted.push(Ast::DictEntry{key: proof_replay_substitute(entry.key, name, value), value: proof_replay_substitute(entry.value, name, value)})
+                        substituted.push(Ast::DictEntry{key: proof_replay_substitute_depth(entry.key, name, value, depth + 1), value: proof_replay_substitute_depth(entry.value, name, value, depth + 1)})
                     return Ast::Expr.DictLit(substituted, position)
                 Ast::Expr.Construct(type_expression, fields, position):
                     substituted: mutable darray[Ast::FieldInit] = []
                     for field in fields |substituted, name, value|:
-                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute(field.value, name, value)})
+                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute_depth(field.value, name, value, depth + 1)})
                     return Ast::Expr.Construct(type_expression, substituted, position)
                 Ast::Expr.RecordUpdate(base, fields, position):
                     substituted: mutable darray[Ast::FieldInit] = []
                     for field in fields |substituted, name, value|:
-                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute(field.value, name, value)})
-                    return Ast::Expr.RecordUpdate(proof_replay_substitute(base, name, value), substituted, position)
+                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute_depth(field.value, name, value, depth + 1)})
+                    return Ast::Expr.RecordUpdate(proof_replay_substitute_depth(base, name, value, depth + 1), substituted, position)
                 Ast::Expr.If(condition, then_expression, else_expression, position):
-                    return Ast::Expr.If(proof_replay_substitute(condition, name, value), proof_replay_substitute(then_expression, name, value), proof_replay_substitute(else_expression, name, value), position)
+                    return Ast::Expr.If(proof_replay_substitute_depth(condition, name, value, depth + 1), proof_replay_substitute_depth(then_expression, name, value, depth + 1), proof_replay_substitute_depth(else_expression, name, value, depth + 1), position)
                 Ast::Expr.GetElse(guarded, _, _):
-                    return proof_replay_substitute(guarded, name, value)
+                    return proof_replay_substitute_depth(guarded, name, value, depth + 1)
                 Ast::Expr.Comprehension(variable, iterable, condition, body, position):
-                    substituted_iterable: Ast::Expr = proof_replay_substitute(iterable, name, value)
+                    substituted_iterable: Ast::Expr = proof_replay_substitute_depth(iterable, name, value, depth + 1)
                     return Ast::Expr.Comprehension(variable, substituted_iterable, condition, body, position) if variable == name
                     # Substitution under a different binder is only valid when the replacement
                     # cannot introduce a free occurrence captured by that binder. We do not have
                     # alpha-renaming in the replay AST, so reject the ambiguous case instead of
                     # silently changing the contract's meaning.
                     return Ast::Expr.Invalid if variable != "" and proof_expr_mentions_name(value, variable)
-                    return Ast::Expr.Comprehension(variable, substituted_iterable, proof_replay_substitute(condition, name, value), proof_replay_substitute(body, name, value), position)
+                    return Ast::Expr.Comprehension(variable, substituted_iterable, proof_replay_substitute_depth(condition, name, value, depth + 1), proof_replay_substitute_depth(body, name, value, depth + 1), position)
                 Ast::Expr.Refinement(base, predicate, position):
-                    return Ast::Expr.Refinement(proof_replay_substitute(base, name, value), proof_replay_substitute(predicate, name, value), position)
+                    return Ast::Expr.Refinement(proof_replay_substitute_depth(base, name, value, depth + 1), proof_replay_substitute_depth(predicate, name, value, depth + 1), position)
                 Ast::Expr.Block(statements, block_value, captures, position):
                     substituted_statements: mutable darray[Ast::Stmt] = []
                     shadowed: mutable bool = false
@@ -134,12 +142,12 @@ extend ElisaProof:
                                 # substituted expressions would capture that replacement. Keep the
                                 # source-side summary replay fail-closed until alpha-renaming exists.
                                 return Ast::Expr.Invalid if not shadowed and local_name != name and local_name != "" and proof_expr_mentions_name(value, local_name)
-                                substituted_initializer: Ast::Expr = initializer if shadowed else proof_replay_substitute(initializer, name, value)
+                                substituted_initializer: Ast::Expr = initializer if shadowed else proof_replay_substitute_depth(initializer, name, value, depth + 1)
                                 substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
                                 shadowed <- true if local_name == name
                             _:
                                 return Ast::Expr.Invalid
-                    return Ast::Expr.Block(substituted_statements, block_value if shadowed else proof_replay_substitute(block_value, name, value), captures, position)
+                    return Ast::Expr.Block(substituted_statements, block_value if shadowed else proof_replay_substitute_depth(block_value, name, value, depth + 1), captures, position)
                 _:
                     return Ast::Expr.Invalid
 
@@ -155,6 +163,10 @@ extend ElisaProof:
             return false
 
         def proof_replay_substitute_many(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&) -> Ast::Expr:
+            return proof_replay_substitute_many_depth(expression, names, values, 0)
+
+        def proof_replay_substitute_many_depth(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _):
                     return expression
@@ -170,78 +182,78 @@ extend ElisaProof:
                                     return values[index]
                     return expression
                 Ast::Expr.Paren(inner, position):
-                    return Ast::Expr.Paren(proof_replay_substitute_many(inner, names, values), position)
+                    return Ast::Expr.Paren(proof_replay_substitute_many_depth(inner, names, values, depth + 1), position)
                 Ast::Expr.Unary(operator, operand, position):
-                    return Ast::Expr.Unary(operator, proof_replay_substitute_many(operand, names, values), position)
+                    return Ast::Expr.Unary(operator, proof_replay_substitute_many_depth(operand, names, values, depth + 1), position)
                 Ast::Expr.Binary(left, operator, right, position):
-                    return Ast::Expr.Binary(proof_replay_substitute_many(left, names, values), operator, proof_replay_substitute_many(right, names, values), position)
+                    return Ast::Expr.Binary(proof_replay_substitute_many_depth(left, names, values, depth + 1), operator, proof_replay_substitute_many_depth(right, names, values, depth + 1), position)
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for argument in arguments |substituted, names, values|:
-                        substituted.push(proof_replay_substitute_many(argument, names, values))
-                    return Ast::Expr.Call(proof_replay_substitute_many(callee, names, values), substituted, argument_names, position)
+                        substituted.push(proof_replay_substitute_many_depth(argument, names, values, depth + 1))
+                    return Ast::Expr.Call(proof_replay_substitute_many_depth(callee, names, values, depth + 1), substituted, argument_names, position)
                 Ast::Expr.Field(object, field, position):
-                    substituted_object: Ast::Expr = proof_replay_substitute_many(object, names, values)
+                    substituted_object: Ast::Expr = proof_replay_substitute_many_depth(object, names, values, depth + 1)
                     match substituted_object:
                         Ast::Expr.Construct(_, fields, _):
                             for initializer in fields |field, names, values|:
-                                return proof_replay_substitute_many(initializer.value, names, values) if initializer.name == field
+                                return proof_replay_substitute_many_depth(initializer.value, names, values, depth + 1) if initializer.name == field
                         Ast::Expr.RecordUpdate(base, fields, _):
                             for initializer in fields |field, names, values|:
-                                return proof_replay_substitute_many(initializer.value, names, values) if initializer.name == field
-                            return Ast::Expr.Field(proof_replay_substitute_many(base, names, values), field, position)
+                                return proof_replay_substitute_many_depth(initializer.value, names, values, depth + 1) if initializer.name == field
+                            return Ast::Expr.Field(proof_replay_substitute_many_depth(base, names, values, depth + 1), field, position)
                         _:
                             pass
                     return Ast::Expr.Field(substituted_object, field, position)
                 Ast::Expr.Scope(base, member, position):
-                    return Ast::Expr.Scope(proof_replay_substitute_many(base, names, values), member, position)
+                    return Ast::Expr.Scope(proof_replay_substitute_many_depth(base, names, values, depth + 1), member, position)
                 Ast::Expr.Index(object, index, position):
-                    return Ast::Expr.Index(proof_replay_substitute_many(object, names, values), proof_replay_substitute_many(index, names, values), position)
+                    return Ast::Expr.Index(proof_replay_substitute_many_depth(object, names, values, depth + 1), proof_replay_substitute_many_depth(index, names, values, depth + 1), position)
                 Ast::Expr.Slice(object, low, high, position):
-                    return Ast::Expr.Slice(proof_replay_substitute_many(object, names, values), proof_replay_substitute_many(low, names, values), proof_replay_substitute_many(high, names, values), position)
+                    return Ast::Expr.Slice(proof_replay_substitute_many_depth(object, names, values, depth + 1), proof_replay_substitute_many_depth(low, names, values, depth + 1), proof_replay_substitute_many_depth(high, names, values, depth + 1), position)
                 Ast::Expr.IndexN(object, arguments, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for argument in arguments |substituted, names, values|:
-                        substituted.push(proof_replay_substitute_many(argument, names, values))
-                    return Ast::Expr.IndexN(proof_replay_substitute_many(object, names, values), substituted, position)
+                        substituted.push(proof_replay_substitute_many_depth(argument, names, values, depth + 1))
+                    return Ast::Expr.IndexN(proof_replay_substitute_many_depth(object, names, values, depth + 1), substituted, position)
                 Ast::Expr.Move(operand, position):
-                    return Ast::Expr.Move(proof_replay_substitute_many(operand, names, values), position)
+                    return Ast::Expr.Move(proof_replay_substitute_many_depth(operand, names, values, depth + 1), position)
                 Ast::Expr.RegionNew(operand, region, position):
-                    return Ast::Expr.RegionNew(proof_replay_substitute_many(operand, names, values), region, position)
+                    return Ast::Expr.RegionNew(proof_replay_substitute_many_depth(operand, names, values, depth + 1), region, position)
                 Ast::Expr.Array(elements, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for element in elements |substituted, names, values|:
-                        substituted.push(proof_replay_substitute_many(element, names, values))
+                        substituted.push(proof_replay_substitute_many_depth(element, names, values, depth + 1))
                     return Ast::Expr.Array(substituted, position)
                 Ast::Expr.Tuple(elements, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for element in elements |substituted, names, values|:
-                        substituted.push(proof_replay_substitute_many(element, names, values))
+                        substituted.push(proof_replay_substitute_many_depth(element, names, values, depth + 1))
                     return Ast::Expr.Tuple(substituted, position)
                 Ast::Expr.SetLit(elements, position):
                     substituted: mutable darray[Ast::Expr] = []
                     for element in elements |substituted, names, values|:
-                        substituted.push(proof_replay_substitute_many(element, names, values))
+                        substituted.push(proof_replay_substitute_many_depth(element, names, values, depth + 1))
                     return Ast::Expr.SetLit(substituted, position)
                 Ast::Expr.DictLit(entries, position):
                     substituted: mutable darray[Ast::DictEntry] = []
                     for entry in entries |substituted, names, values|:
-                        substituted.push(Ast::DictEntry{key: proof_replay_substitute_many(entry.key, names, values), value: proof_replay_substitute_many(entry.value, names, values)})
+                        substituted.push(Ast::DictEntry{key: proof_replay_substitute_many_depth(entry.key, names, values, depth + 1), value: proof_replay_substitute_many_depth(entry.value, names, values, depth + 1)})
                     return Ast::Expr.DictLit(substituted, position)
                 Ast::Expr.Construct(type_expression, fields, position):
                     substituted: mutable darray[Ast::FieldInit] = []
                     for field in fields |substituted, names, values|:
-                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute_many(field.value, names, values)})
+                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute_many_depth(field.value, names, values, depth + 1)})
                     return Ast::Expr.Construct(type_expression, substituted, position)
                 Ast::Expr.RecordUpdate(base, fields, position):
                     substituted: mutable darray[Ast::FieldInit] = []
                     for field in fields |substituted, names, values|:
-                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute_many(field.value, names, values)})
-                    return Ast::Expr.RecordUpdate(proof_replay_substitute_many(base, names, values), substituted, position)
+                        substituted.push(Ast::FieldInit{name: field.name, value: proof_replay_substitute_many_depth(field.value, names, values, depth + 1)})
+                    return Ast::Expr.RecordUpdate(proof_replay_substitute_many_depth(base, names, values, depth + 1), substituted, position)
                 Ast::Expr.If(condition, then_expression, else_expression, position):
-                    return Ast::Expr.If(proof_replay_substitute_many(condition, names, values), proof_replay_substitute_many(then_expression, names, values), proof_replay_substitute_many(else_expression, names, values), position)
+                    return Ast::Expr.If(proof_replay_substitute_many_depth(condition, names, values, depth + 1), proof_replay_substitute_many_depth(then_expression, names, values, depth + 1), proof_replay_substitute_many_depth(else_expression, names, values, depth + 1), position)
                 Ast::Expr.GetElse(guarded, _, _):
-                    return proof_replay_substitute_many(guarded, names, values)
+                    return proof_replay_substitute_many_depth(guarded, names, values, depth + 1)
                 Ast::Expr.Comprehension(variable, iterable, condition, body, position):
                     return Ast::Expr.Invalid if proof_replay_substitution_would_capture(variable, names, values)
                     shadow_names: mutable darray[sview] = []
@@ -250,9 +262,9 @@ extend ElisaProof:
                     shadow_values.extend(values)
                     shadow_names.push(variable)
                     shadow_values.push(Ast::Expr.Ident(variable, position))
-                    return Ast::Expr.Comprehension(variable, proof_replay_substitute_many(iterable, names, values), proof_replay_substitute_many(condition, shadow_names, shadow_values), proof_replay_substitute_many(body, shadow_names, shadow_values), position)
+                    return Ast::Expr.Comprehension(variable, proof_replay_substitute_many_depth(iterable, names, values, depth + 1), proof_replay_substitute_many_depth(condition, shadow_names, shadow_values, depth + 1), proof_replay_substitute_many_depth(body, shadow_names, shadow_values, depth + 1), position)
                 Ast::Expr.Refinement(base, predicate, position):
-                    return Ast::Expr.Refinement(proof_replay_substitute_many(base, names, values), proof_replay_substitute_many(predicate, names, values), position)
+                    return Ast::Expr.Refinement(proof_replay_substitute_many_depth(base, names, values, depth + 1), proof_replay_substitute_many_depth(predicate, names, values, depth + 1), position)
                 Ast::Expr.Block(statements, block_value, captures, position):
                     shadow_names: mutable darray[sview] = []
                     shadow_values: mutable darray[Ast::Expr] = []
@@ -263,13 +275,13 @@ extend ElisaProof:
                         match statement:
                             Ast::Stmt.VarDecl(local_name, type_expression, initializer, statement_position):
                                 return Ast::Expr.Invalid if proof_replay_substitution_would_capture(local_name, shadow_names, shadow_values)
-                                substituted_initializer: Ast::Expr = proof_replay_substitute_many(initializer, shadow_names, shadow_values)
+                                substituted_initializer: Ast::Expr = proof_replay_substitute_many_depth(initializer, shadow_names, shadow_values, depth + 1)
                                 substituted_statements.push(Ast::Stmt.VarDecl(local_name, type_expression, substituted_initializer, statement_position))
                                 shadow_names.push(local_name)
                                 shadow_values.push(Ast::Expr.Ident(local_name, statement_position))
                             _:
                                 return Ast::Expr.Invalid
-                    return Ast::Expr.Block(substituted_statements, proof_replay_substitute_many(block_value, shadow_names, shadow_values), captures, position)
+                    return Ast::Expr.Block(substituted_statements, proof_replay_substitute_many_depth(block_value, shadow_names, shadow_values, depth + 1), captures, position)
                 _:
                     return Ast::Expr.Invalid
 
@@ -296,9 +308,13 @@ extend ElisaProof:
             return kind == "forall"
 
         def proof_replay_quantifier(kind: sview, facts: darray[Ast::Expr]&, expression: Ast::Expr) -> bool:
+            return proof_replay_quantifier_depth(kind, facts, expression, 0)
+
+        def proof_replay_quantifier_depth(kind: sview, facts: darray[Ast::Expr]&, expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_quantifier(kind, facts, inner)
+                    return proof_replay_quantifier_depth(kind, facts, inner, depth + 1)
                 Ast::Expr.Block(statements, body, _, _):
                     return false if statements.count == 0 or statements.count > 2
                     match statements[0]:
@@ -372,9 +388,13 @@ extend ElisaProof:
         # proves the existence of a candidate. It deliberately does not guess an existential
         # witness, so an `exists` certificate remains a gap unless its kind is preserved.
         def proof_replay_is_bounded_quantifier_shape(expression: Ast::Expr) -> bool:
+            return proof_replay_is_bounded_quantifier_shape_depth(expression, 0)
+
+        def proof_replay_is_bounded_quantifier_shape_depth(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_is_bounded_quantifier_shape(inner)
+                    return proof_replay_is_bounded_quantifier_shape_depth(inner, depth + 1)
                 Ast::Expr.Block(statements, _, _, _):
                     return false if statements.count != 1
                     match statements[0]:
@@ -391,6 +411,10 @@ extend ElisaProof:
             return false
 
         def proof_replay_goal_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, split_depth: usize) -> bool:
+            return proof_replay_goal_at_depth(facts, goal, split_depth, 0)
+
+        def proof_replay_goal_at_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, split_depth: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             for fact in facts:
                 return true if proof_replay_fact_contains(fact, goal)
             return true if proof_replay_facts_inconsistent(facts)
@@ -407,12 +431,12 @@ extend ElisaProof:
                             else:
                                 left_facts.push(facts[fact_index])
                                 right_facts.push(facts[fact_index])
-                        return proof_replay_goal_depth(left_facts, goal, split_depth + 1) and proof_replay_goal_depth(right_facts, goal, split_depth + 1)
+                        return proof_replay_goal_at_depth(left_facts, goal, split_depth + 1, depth + 1) and proof_replay_goal_at_depth(right_facts, goal, split_depth + 1, depth + 1)
             match goal:
                 Ast::Expr.BoolLit(value, _):
                     return value
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_goal_depth(facts, inner, split_depth)
+                    return proof_replay_goal_at_depth(facts, inner, split_depth, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
                     match operand:
                         Ast::Expr.BoolLit(value, _):
@@ -423,14 +447,14 @@ extend ElisaProof:
                         _:
                             pass
                 Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    return proof_replay_goal_depth(facts, left, split_depth) and proof_replay_goal_depth(facts, right, split_depth)
+                    return proof_replay_goal_at_depth(facts, left, split_depth, depth + 1) and proof_replay_goal_at_depth(facts, right, split_depth, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
-                    return proof_replay_goal_depth(facts, left, split_depth) or proof_replay_goal_depth(facts, right, split_depth)
+                    return proof_replay_goal_at_depth(facts, left, split_depth, depth + 1) or proof_replay_goal_at_depth(facts, right, split_depth, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.FatArrow, right, _):
                     implication_facts: mutable darray[Ast::Expr] = []
                     implication_facts.extend(facts)
                     implication_facts.push(left)
-                    return proof_replay_goal_depth(implication_facts, right, split_depth)
+                    return proof_replay_goal_at_depth(implication_facts, right, split_depth, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     negated_operator: TokenKind = proof_replay_comparison_negation(operator)
                     if negated_operator != TokenKind.Eof and proof_replay_definitionally_equal(left, right):
