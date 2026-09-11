@@ -126,62 +126,13 @@ extend ElisaProof:
             proof_add_finding(report, kind, position.line, function_name, message)
 
         def proof_resource_expr_has_call(expression: Ast::Expr) -> bool:
-            match expression:
-                Ast::Expr.Call(_, _, _, _):
-                    return true
-                Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_has_call(inner)
-                Ast::Expr.Unary(_, operand, _):
-                    return proof_resource_expr_has_call(operand)
-                Ast::Expr.Binary(left, _, right, _):
-                    return proof_resource_expr_has_call(left) or proof_resource_expr_has_call(right)
-                Ast::Expr.Field(object, _, _):
-                    return proof_resource_expr_has_call(object)
-                Ast::Expr.Scope(base, _, _):
-                    return proof_resource_expr_has_call(base)
-                Ast::Expr.Index(object, index, _):
-                    return proof_resource_expr_has_call(object) or proof_resource_expr_has_call(index)
-                Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_resource_expr_has_call(object)
-                    for argument in arguments:
-                        return true if proof_resource_expr_has_call(argument)
-                    return false
-                Ast::Expr.Slice(object, low, high, _):
-                    return proof_resource_expr_has_call(object) or proof_resource_expr_has_call(low) or proof_resource_expr_has_call(high)
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_resource_expr_has_call(condition) or proof_resource_expr_has_call(then_expression) or proof_resource_expr_has_call(else_expression)
-                Ast::Expr.Move(operand, _):
-                    return proof_resource_expr_has_call(operand)
-                _:
-                    return false
+            # Keep resource state transitions aligned with the main expression effect scan. The
+            # old local walk omitted calls hidden in aggregates and future AST forms, which could
+            # let a resource fact survive an expression the proof checker treated as effectful.
+            return proof_expr_has_call(expression)
 
         def proof_resource_expr_has_move(expression: Ast::Expr) -> bool:
-            match expression:
-                Ast::Expr.Move(_, _):
-                    return true
-                Ast::Expr.Paren(inner, _):
-                    return proof_resource_expr_has_move(inner)
-                Ast::Expr.Unary(_, operand, _):
-                    return proof_resource_expr_has_move(operand)
-                Ast::Expr.Binary(left, _, right, _):
-                    return proof_resource_expr_has_move(left) or proof_resource_expr_has_move(right)
-                Ast::Expr.Field(object, _, _):
-                    return proof_resource_expr_has_move(object)
-                Ast::Expr.Scope(base, _, _):
-                    return proof_resource_expr_has_move(base)
-                Ast::Expr.Index(object, index, _):
-                    return proof_resource_expr_has_move(object) or proof_resource_expr_has_move(index)
-                Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_resource_expr_has_move(object)
-                    for argument in arguments:
-                        return true if proof_resource_expr_has_move(argument)
-                    return false
-                Ast::Expr.Slice(object, low, high, _):
-                    return proof_resource_expr_has_move(object) or proof_resource_expr_has_move(low) or proof_resource_expr_has_move(high)
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_resource_expr_has_move(condition) or proof_resource_expr_has_move(then_expression) or proof_resource_expr_has_move(else_expression)
-                _:
-                    return false
+            return proof_expr_has_move(expression)
 
         def proof_resource_add_binding[@s](state: mutable ProofResourceState& @s, name: sview, is_reference: bool, is_mutable_reference: bool, is_writable: bool, target_slot: usize, borrow_is_mutable: bool, target_place: ProofResourcePlace) -> void:
             borrow_is_present: bool = target_slot < state.binding_names.count
@@ -201,6 +152,10 @@ extend ElisaProof:
             state.borrow_present.push(borrow_is_present)
 
         def proof_resource_expr_has_address_of(expression: Ast::Expr) -> bool:
+            # The general effect/support scans are bounded. If they identify an unsupported deep
+            # term, report a possible address-of conservatively before this resource-specific walk
+            # descends into it.
+            return true if proof_expr_has_call(expression) and not proof_expr_supported(expression)
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
                     return true if operator == TokenKind.Ampersand
@@ -282,6 +237,10 @@ extend ElisaProof:
                     return false
 
         def proof_resource_statements_have_address_of(statements: darray[Ast::Stmt]&) -> bool:
+            return proof_resource_statements_have_address_of_depth(statements, 0)
+
+        def proof_resource_statements_have_address_of_depth(statements: darray[Ast::Stmt]&, depth: usize) -> bool:
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             for statement in statements:
                 match statement:
                     Ast::Stmt.VarDecl(_, _, initializer, _):
@@ -293,17 +252,17 @@ extend ElisaProof:
                     Ast::Stmt.Return(value, _):
                         return true if value is returned and proof_resource_expr_has_address_of(returned)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_resource_expr_has_address_of(condition) or proof_resource_statements_have_address_of(then_body) or proof_resource_statements_have_address_of(else_body)
+                        return true if proof_resource_expr_has_address_of(condition) or proof_resource_statements_have_address_of_depth(then_body, depth + 1) or proof_resource_statements_have_address_of_depth(else_body, depth + 1)
                     Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_resource_expr_has_address_of(condition) or proof_resource_statements_have_address_of(while_body)
+                        return true if proof_resource_expr_has_address_of(condition) or proof_resource_statements_have_address_of_depth(while_body, depth + 1)
                     Ast::Stmt.For(_, _, iterable, for_body, _):
-                        return true if proof_resource_expr_has_address_of(iterable) or proof_resource_statements_have_address_of(for_body)
+                        return true if proof_resource_expr_has_address_of(iterable) or proof_resource_statements_have_address_of_depth(for_body, depth + 1)
                     Ast::Stmt.Match(scrutinee, arms, _):
                         return true if proof_resource_expr_has_address_of(scrutinee)
                         for arm in arms |arm|:
-                            return true if proof_resource_expr_has_address_of(arm.guard) or proof_resource_statements_have_address_of(arm.body)
+                            return true if proof_resource_expr_has_address_of(arm.guard) or proof_resource_statements_have_address_of_depth(arm.body, depth + 1)
                     Ast::Stmt.Block(_, _, _, block_body, _):
-                        return true if proof_resource_statements_have_address_of(block_body)
+                        return true if proof_resource_statements_have_address_of_depth(block_body, depth + 1)
                     Ast::Stmt.Contract(_, expression, _):
                         return true if proof_resource_expr_has_address_of(expression)
                     _:
@@ -311,6 +270,7 @@ extend ElisaProof:
             return false
 
         def proof_resource_expr_uses_local_borrow(expression: Ast::Expr, state: ProofResourceState&) -> bool:
+            return true if proof_expr_has_call(expression) and not proof_expr_supported(expression)
             match expression:
                 Ast::Expr.Ident(name, _):
                     slot: usize = proof_resource_lookup(state, name)
@@ -394,6 +354,10 @@ extend ElisaProof:
                     return false
 
         def proof_resource_statements_use_local_borrow(statements: darray[Ast::Stmt]&, state: ProofResourceState&) -> bool:
+            return proof_resource_statements_use_local_borrow_depth(statements, state, 0)
+
+        def proof_resource_statements_use_local_borrow_depth(statements: darray[Ast::Stmt]&, state: ProofResourceState&, depth: usize) -> bool:
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             for statement in statements:
                 match statement:
                     Ast::Stmt.VarDecl(_, _, initializer, _):
@@ -405,17 +369,17 @@ extend ElisaProof:
                     Ast::Stmt.Return(value, _):
                         return true if value is returned and proof_resource_expr_uses_local_borrow(returned, state)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_resource_expr_uses_local_borrow(condition, state) or proof_resource_statements_use_local_borrow(then_body, state) or proof_resource_statements_use_local_borrow(else_body, state)
+                        return true if proof_resource_expr_uses_local_borrow(condition, state) or proof_resource_statements_use_local_borrow_depth(then_body, state, depth + 1) or proof_resource_statements_use_local_borrow_depth(else_body, state, depth + 1)
                     Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_resource_expr_uses_local_borrow(condition, state) or proof_resource_statements_use_local_borrow(while_body, state)
+                        return true if proof_resource_expr_uses_local_borrow(condition, state) or proof_resource_statements_use_local_borrow_depth(while_body, state, depth + 1)
                     Ast::Stmt.For(_, _, iterable, for_body, _):
-                        return true if proof_resource_expr_uses_local_borrow(iterable, state) or proof_resource_statements_use_local_borrow(for_body, state)
+                        return true if proof_resource_expr_uses_local_borrow(iterable, state) or proof_resource_statements_use_local_borrow_depth(for_body, state, depth + 1)
                     Ast::Stmt.Match(scrutinee, arms, _):
                         return true if proof_resource_expr_uses_local_borrow(scrutinee, state)
                         for arm in arms |arm, state|:
-                            return true if proof_resource_expr_uses_local_borrow(arm.guard, state) or proof_resource_statements_use_local_borrow(arm.body, state)
+                            return true if proof_resource_expr_uses_local_borrow(arm.guard, state) or proof_resource_statements_use_local_borrow_depth(arm.body, state, depth + 1)
                     Ast::Stmt.Block(_, _, _, block_body, _):
-                        return true if proof_resource_statements_use_local_borrow(block_body, state)
+                        return true if proof_resource_statements_use_local_borrow_depth(block_body, state, depth + 1)
                     Ast::Stmt.Contract(_, expression, _):
                         return true if proof_resource_expr_uses_local_borrow(expression, state)
                     _:
