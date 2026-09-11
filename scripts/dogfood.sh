@@ -155,16 +155,19 @@ PY
 run_probe unsigned_local examples/unsigned_local.elisa 0
 run_probe rejected_unsigned_local examples/rejected_unsigned_local.elisa 1
 run_probe rejected_unsigned_local_states examples/rejected_unsigned_local_states.elisa 1
+run_probe unsigned_constant_in_range examples/unsigned_constant_in_range.elisa 0
+run_probe rejected_unsigned_constant examples/rejected_unsigned_constant_overflow.elisa 1
+run_probe rejected_unsigned_local_constant examples/rejected_unsigned_local_constant_overflow.elisa 1
 
 # Unsigned locals stay symbolic with their compiler width. Every arithmetic goal in
 # the rejected fixtures is false under wrapping, stale after a rebinding, or leaks a
 # shadowed symbol's facts; none may prove or certify. Only the per-function
 # resource-safety obligations, which carry no arithmetic, are admitted.
-python3 - "$REPORT_DIR/unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local_states.json" <<'PY'
+python3 - "$REPORT_DIR/unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local_states.json" "$REPORT_DIR/unsigned_constant_in_range.json" "$REPORT_DIR/rejected_unsigned_constant.json" "$REPORT_DIR/rejected_unsigned_local_constant.json" <<'PY'
 import json
 import sys
 
-accepted, *rejected = sys.argv[1:]
+accepted, *rejected = sys.argv[1:4]
 with open(accepted, encoding="utf-8") as handle:
     report = json.load(handle)
 assert report["status"] == "proved"
@@ -180,6 +183,20 @@ for path in rejected:
         raise SystemExit("dogfood failed: an unsigned local goal was proven under erased semantics")
     if report["replay"]["certificates"] != len(report["goals"]) - len(arithmetic_goals):
         raise SystemExit("dogfood failed: unsigned local fixture certified an arithmetic goal")
+
+with open(sys.argv[4], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["summary"]["semantic_errors"] == 0
+
+for path in sys.argv[5:]:
+    with open(path, encoding="utf-8") as handle:
+        report = json.load(handle)
+    if report["status"] != "failed" or report["replay"]["gaps"] != 0:
+        raise SystemExit("dogfood failed: unsigned constant overflow fixture did not fail cleanly")
+    arithmetic_goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]
+    if not arithmetic_goals or any(goal["proven"] for goal in arithmetic_goals):
+        raise SystemExit("dogfood failed: an unsigned constant overflow goal was proven")
 PY
 
 # This fixture intentionally contains unsupported surface around the standalone replay module.

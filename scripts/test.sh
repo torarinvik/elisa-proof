@@ -309,6 +309,27 @@ if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert r
     printf 'proof test matrix failed: unsigned overflow report was incomplete\n' >&2
     exit 1
 fi
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/unsigned_constant_in_range.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0'
+unsigned_constant_in_range_probe_status=${PIPESTATUS[1]}
+if [[ "$unsigned_constant_in_range_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: in-range unsigned constant arithmetic lost completeness\n' >&2
+    exit 1
+fi
+for unsigned_constant_fixture in rejected_unsigned_constant_overflow rejected_unsigned_local_constant_overflow; do
+    unsigned_constant_report="$standalone_probe_dir/$unsigned_constant_fixture.json"
+    set +e
+    "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/$unsigned_constant_fixture.elisa" >"$unsigned_constant_report"
+    unsigned_constant_status=$?
+    set -e
+    if [[ "$unsigned_constant_status" -ne 1 ]]; then
+        printf 'proof test matrix failed: wrapping unsigned constant arithmetic was accepted for %s\n' "$unsigned_constant_fixture" >&2
+        exit 1
+    fi
+    if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] >= 0; assert any(f["kind"] == "ensure-unproven" for f in report["findings"]); assert report["replay"]["gaps"] == 0; assert not any(goal["rule"] != "resource-safety" and goal["proven"] for goal in report["goals"])' "$unsigned_constant_report"; then
+        printf 'proof test matrix failed: wrapping unsigned constant report was incomplete for %s\n' "$unsigned_constant_fixture" >&2
+        exit 1
+    fi
+done
 set +e
 rejected_region_call_result_duplicate_owner_report="$standalone_probe_dir/rejected-region-call-result-duplicate-owner.json"
 "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_region_call_result_duplicate_owner.elisa" >"$rejected_region_call_result_duplicate_owner_report"
