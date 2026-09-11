@@ -1,13 +1,79 @@
 extend ElisaProof:
     private:
+        # Fact provenance is keyed by the owner name before exact expression/kernel equality is
+        # checked. Hashes only select a probe path; the stored sview comparison remains the
+        # authority, so collisions cannot admit a fact for another owner.
+        def proof_replay_owner_hash(value: sview) -> u32:
+            hash: mutable i64 = 2166136261
+            for index in 0..<sview_len(value) |index, hash, value|:
+                hash <- ((hash ^ sview_at(value, index).i64()) * 16777619) % 4294967296
+            return hash.u32()
+
+        def proof_replay_trace_index_capacity(count: usize) -> usize:
+            return 0 if count == 0
+            capacity: mutable usize = 1
+            while capacity < count |capacity, count|:
+                capacity <- capacity * 2
+            return capacity
+
+        def proof_replay_build_fact_trace_index(report: mutable ProofReport&) -> void:
+            count: usize = report.fact_traces.count
+            sentinel: usize = count
+            report.fact_trace_index_hashes.clear()
+            report.fact_trace_index_values.clear()
+            report.fact_trace_next_indices.clear()
+            report.fact_trace_next_indices.resize(count)
+            for index in 0..<count |index, report, sentinel|:
+                report.fact_trace_next_indices[index] <- sentinel
+            capacity: usize = proof_replay_trace_index_capacity(count)
+            return if capacity == 0
+            report.fact_trace_index_hashes.resize(capacity)
+            report.fact_trace_index_values.resize(capacity)
+            for slot in 0..<capacity |slot, report, sentinel|:
+                report.fact_trace_index_values[slot] <- sentinel
+            for index in 0..<count |index, report, capacity, sentinel|:
+                owner: sview = report.fact_traces[index].name
+                hash: u32 = proof_replay_owner_hash(owner)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, hash, index, report, capacity, sentinel|:
+                    current: usize = report.fact_trace_index_values[slot]
+                    if current == sentinel:
+                        report.fact_trace_index_hashes[slot] <- hash
+                        report.fact_trace_index_values[slot] <- index
+                        break
+                    if report.fact_trace_index_hashes[slot] == hash and report.fact_traces[current].name == owner:
+                        report.fact_trace_next_indices[index] <- current
+                        report.fact_trace_index_values[slot] <- index
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+
+        def proof_replay_fact_trace_head(report: ProofReport&, owner: sview) -> usize:
+            count: usize = report.fact_traces.count
+            capacity: usize = report.fact_trace_index_values.count
+            return count if capacity == 0
+            hash: u32 = proof_replay_owner_hash(owner)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hash, owner, report, capacity, count|:
+                index: usize = report.fact_trace_index_values[slot]
+                return count if index >= count
+                return index if report.fact_trace_index_hashes[slot] == hash and report.fact_traces[index].name == owner
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return count
+
         def proof_replay_fact_trace_is_valid(report: mutable ProofReport&, trace: ProofFactTrace, owner: sview, depth: usize) -> bool:
             dependency_stack: mutable darray[sview] = [owner]
             return proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, depth, dependency_stack)
 
         def proof_replay_fact_is_traced_with_stack(report: mutable ProofReport&, fact: Ast::Expr, owner: sview, dependency_stack: darray[sview]&) -> bool:
-            for trace in report.fact_traces:
-                continue if trace.name != owner
+            trace_index: mutable usize = proof_replay_fact_trace_head(report, owner)
+            while trace_index < report.fact_traces.count |trace_index, report, fact, owner, dependency_stack|:
+                trace: ProofFactTrace = report.fact_traces[trace_index]
                 return true if proof_replay_expr_equal(trace.expression, fact) and proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack)
+                trace_index <- report.fact_trace_next_indices[trace_index] if trace_index < report.fact_trace_next_indices.count else report.fact_traces.count
             return false
 
         def proof_replay_fact_is_traced(report: mutable ProofReport&, fact: Ast::Expr, owner: sview) -> bool:
@@ -65,4 +131,3 @@ extend ElisaProof:
         def proof_replay_certificate[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate) -> bool:
             dependency_stack: mutable darray[sview] = [certificate.name]
             return proof_replay_certificate_with_stack(report, certificate, dependency_stack, 0)
-
