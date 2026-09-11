@@ -150,7 +150,7 @@ extend ElisaProof:
         # enter the certificate stream; failed goals remain ordinary report findings.
         def proof_certify_goal_with_rule(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&, original_rule: sview) -> bool:
             exhausted: mutable bool = false
-            proven: bool = proof_kernel_expression_supported(goal) and proof_goal_with_limits(facts, goal, annotations, &exhausted)
+            proven: bool = not report.kernel_budget_exhausted and proof_kernel_expression_supported(goal) and proof_goal_with_limits(facts, goal, annotations, &exhausted)
             rule: mutable sview = original_rule
             quantifier_kind: mutable sview = ""
             quantifier_kind <- proof_quantifier_kind(goal, annotations) if original_rule == ""
@@ -159,7 +159,7 @@ extend ElisaProof:
             rule <- "quantifier-exists" if quantifier_kind == "exists"
             proof_add_goal_attempt(report, facts, goal, line, name, rule, proven)
             proof_mark_latest_attempt_exhausted(report, exhausted and not proven)
-            return proven
+            return proven and not report.kernel_budget_exhausted
 
         def proof_certify_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
             return proof_certify_goal_with_rule(facts, goal, report, line, name, annotations, "")
@@ -350,13 +350,15 @@ extend ElisaProof:
         def proof_add_fact(facts: mutable darray[Ast::Expr]&, expression: Ast::Expr) -> void:
             facts.push(expression)
 
-        def proof_trace_fact(report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> void:
-            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
-            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: "", premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+        def proof_trace_fact(report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> bool:
+            encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(expression, report, name)
+            return false if not encoded.known
+            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: kind, line: line, name: name, dependency: "", premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+            return true
 
         def proof_add_traced_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> void:
+            return if not proof_trace_fact(report, expression, kind, line, name)
             facts.push(expression)
-            proof_trace_fact(report, expression, kind, line, name)
 
         # A derived fact records the current logical context before it is added. Replay can then
         # recursively validate proof-step facts instead of treating their source assertion as an
@@ -364,14 +366,27 @@ extend ElisaProof:
         # they are explicit semantic assumptions at this boundary.
         def proof_add_derived_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> void:
             premises: darray[Ast::Expr] = proof_copy_exprs(facts)
-            facts.push(expression)
+            node_start: usize = report.kernel_nodes.count
+            child_start: usize = report.kernel_children.count
             premises_start: usize = report.fact_trace_premises.count
-            report.fact_trace_premises.extend(premises)
             kernel_premises_start: usize = report.kernel_fact_trace_premises.count
+            kernel_premises: mutable darray[usize] = []
             for premise in premises |premise, report|:
-                report.kernel_fact_trace_premises.push(proof_kernel_encode_annotated(premise, &report.kernel_nodes, &report.kernel_children, report.source_annotations))
-            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
-            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+                encoded_premise: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(premise, report, name)
+                if not encoded_premise.known:
+                    report.kernel_nodes <- report.kernel_nodes.truncate(node_start)
+                    report.kernel_children <- report.kernel_children.truncate(child_start)
+                    return
+                kernel_premises.push(encoded_premise.root)
+            encoded_expression: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(expression, report, name)
+            if not encoded_expression.known:
+                report.kernel_nodes <- report.kernel_nodes.truncate(node_start)
+                report.kernel_children <- report.kernel_children.truncate(child_start)
+                return
+            facts.push(expression)
+            report.fact_trace_premises.extend(premises)
+            report.kernel_fact_trace_premises.extend(kernel_premises)
+            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: encoded_expression.root, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
 
         # The same trace, but over an explicit premise list rather than the whole current context.
         # A step whose justification is a single named fact records exactly that fact, so replay
@@ -383,16 +398,31 @@ extend ElisaProof:
             # not available, which is the conservative direction.
             for premise in premises:
                 return if not proof_kernel_expression_supported(premise)
-            facts.push(expression)
+            node_start: usize = report.kernel_nodes.count
+            child_start: usize = report.kernel_children.count
             premises_start: usize = report.fact_trace_premises.count
-            report.fact_trace_premises.extend(premises)
             kernel_premises_start: usize = report.kernel_fact_trace_premises.count
+            kernel_premises: mutable darray[usize] = []
             for premise in premises |premise, report|:
-                report.kernel_fact_trace_premises.push(proof_kernel_encode_annotated(premise, &report.kernel_nodes, &report.kernel_children, report.source_annotations))
-            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
-            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
+                encoded_premise: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(premise, report, name)
+                if not encoded_premise.known:
+                    report.kernel_nodes <- report.kernel_nodes.truncate(node_start)
+                    report.kernel_children <- report.kernel_children.truncate(child_start)
+                    return
+                kernel_premises.push(encoded_premise.root)
+            encoded_expression: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(expression, report, name)
+            if not encoded_expression.known:
+                report.kernel_nodes <- report.kernel_nodes.truncate(node_start)
+                report.kernel_children <- report.kernel_children.truncate(child_start)
+                return
+            facts.push(expression)
+            report.fact_trace_premises.extend(premises)
+            report.kernel_fact_trace_premises.extend(kernel_premises)
+            report.fact_traces <- report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: encoded_expression.root, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.fact_trace_summary_names.count, summary_bindings_count: 0, summary_requires_start: report.fact_trace_summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0})
 
         def proof_add_function_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, result_value: Ast::Expr, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
+            encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(expression, report, name)
+            return if not encoded.known
             facts.push(expression)
             bindings_start: usize = report.fact_trace_summary_names.count
             report.fact_trace_summary_names.extend(parameter_names)
@@ -401,6 +431,4 @@ extend ElisaProof:
             report.fact_trace_summary_values.push(result_value)
             requires_start: usize = report.fact_trace_summary_require_goal_ids.count
             report.fact_trace_summary_require_goal_ids.extend(require_goal_ids)
-            kernel_expression: usize = proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
-            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: kernel_expression, kind: "function-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count + 1, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index})
-
+            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "function-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count + 1, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index})

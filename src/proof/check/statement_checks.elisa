@@ -1,5 +1,20 @@
 extend ElisaProof:
     private:
+        const PROOF_CONTROL_FLOW_DEPTH_LIMIT: usize = 64
+        const PROOF_RETURN_ANALYSIS_BUDGET: usize = 64
+        const PROOF_RETURN_FACT_STATE_BUDGET: usize = 256
+
+        def proof_return_analysis_budget_available(facts: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview) -> bool:
+            within_steps: bool = report.return_analysis_steps < PROOF_RETURN_ANALYSIS_BUDGET
+            within_facts: bool = facts.count <= PROOF_RETURN_FACT_STATE_BUDGET
+            within_names: bool = names.count <= PROOF_RETURN_FACT_STATE_BUDGET
+            within_values: bool = values.count <= PROOF_RETURN_FACT_STATE_BUDGET
+            return true if within_steps and within_facts and within_names and within_values
+            if not report.return_analysis_budget_reported:
+                report.return_analysis_budget_reported <- true
+                proof_add_finding(report, "control-flow-analysis-budget", 0, name, "control-flow analysis exceeded its bounded symbolic-state budget")
+            return false
+
         def proof_check_index_safety(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> void:
             # `proof_substitute` intentionally projects GetElse to its successful value for
             # ordinary symbolic reasoning. Preserve the control wrapper at this safety boundary
@@ -315,6 +330,10 @@ extend ElisaProof:
         # so the loop handler sees them, and its write-back to the enclosing state is the havoc
         # over the capture list together with everything the body assigns or references.
         def proof_check_captured_block(body: darray[Ast::Stmt]&, captures: darray[sview]&, block_position: Ast::Pos, loop_entry: bool, entry_conditions: darray[Ast::Expr]&, entry_invariants: darray[Ast::Expr]&, loop_scope_count: usize, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, end_names: mutable darray[sview]&, end_values: mutable darray[Ast::Expr]&, end_facts: mutable darray[Ast::Expr]&, end_flow: mutable ProofFlow&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, flow: mutable ProofFlow&) -> void:
+            if not proof_return_analysis_budget_available(facts, names, values, report, name):
+                end_flow.normal <- false
+                end_flow.valid <- false
+                return
             statement_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
             block_names: mutable darray[sview] = proof_copy_names(names)
             block_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
@@ -381,6 +400,17 @@ extend ElisaProof:
             proof_restore_uncaptured_facts(statement_facts, writeback, facts, names, frame_parameters, report, name)
 
         def proof_check_returns(body: darray[Ast::Stmt]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> void:
+            if not proof_return_analysis_budget_available(facts, names, values, report, name):
+                flow.normal <- false
+                flow.valid <- false
+                return
+            report.return_analysis_steps <- report.return_analysis_steps + 1
+            if loop_depth >= PROOF_CONTROL_FLOW_DEPTH_LIMIT:
+                flow.normal <- false
+                flow.valid <- false
+                report.proof_obligation(false)
+                proof_add_finding(report, "control-flow-unsupported", 0, name, "control-flow nesting exceeded the bounded proof-state depth")
+                return
             flow.normal <- true
             flow.breaks <- false
             flow.continues <- false
@@ -391,6 +421,11 @@ extend ElisaProof:
                 # affect the state on that path. The compiler separately diagnoses unreachable
                 # source; the proof checker still handles all reachable paths conservatively.
                 continue if not flow.normal
+                if not proof_return_analysis_budget_available(facts, names, values, report, name):
+                    flow.normal <- false
+                    flow.valid <- false
+                    return
+                report.return_analysis_steps <- report.return_analysis_steps + 1
                 moved_roots: mutable darray[sview] = []
                 proof_statement_move_roots(statement, &moved_roots)
                 statement_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
