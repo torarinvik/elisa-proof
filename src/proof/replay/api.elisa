@@ -74,21 +74,32 @@ extend ElisaProof:
             report.kernel_arena_validated <- ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel_nodes, &report.kernel_children)
             proof_replay_build_fact_trace_index(report)
             return if not proof_kernel_report_append_allowed(report, 0, report.certificates.count, "replay-certificates")
+            arena_grew: mutable bool = false
             for index in 0..<report.certificates.count |index, report|:
                 node_count: usize = report.kernel_nodes.count
                 child_count: usize = report.kernel_children.count
                 replayed: mutable bool = proof_replay_certificate(report, report.certificates[index], index)
                 # Quantifier instantiation and equality rewriting are intentionally append-only:
                 # they construct derived roots in the same arena while replaying a certificate.
-                # The batch admission above covers the serialized prefix, not those newly appended
-                # nodes. Re-admit after growth before exposing the certificate as replayed, and
-                # keep the cache bit honest for the next certificate as well.
+                # Each kernel rule independently checks the reachable facts/goal it consumes.
+                # Defer the global disconnected-node check until this synchronous batch is over.
+                # No certificate result escapes the batch before that final admission.
                 if node_count != report.kernel_nodes.count or child_count != report.kernel_children.count:
-                    report.kernel_arena_validated <- ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel_nodes, &report.kernel_children)
-                    replayed <- false if not report.kernel_arena_validated
+                    arena_grew <- true
                 report.certificates[index].replayed <- replayed
                 if replayed:
                     report.replayed <- report.replayed + 1
                 else:
                     report.replay_gaps <- report.replay_gaps + 1
+            if arena_grew:
+                report.kernel_arena_validated <- ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel_nodes, &report.kernel_children)
+                if not report.kernel_arena_validated:
+                    # The complete arena is the public serialization boundary. If any appended
+                    # disconnected component is malformed, revoke provisional results from this
+                    # batch rather than exposing certificates checked against a partial view.
+                    report.replayed <- 0
+                    report.replay_gaps <- 0
+                    for certificate in report.certificates |certificate, report|:
+                        certificate.replayed <- false
+                        report.replay_gaps <- report.replay_gaps + 1
             proof_replay_cache_fact_origins(report)
