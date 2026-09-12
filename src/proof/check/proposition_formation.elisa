@@ -1,7 +1,6 @@
-# Source-side proposition formation. This is deliberately only the Boolean boundary, not a
-# second Elisa typechecker: it asks the compiler frontend for the sort of opaque atoms and follows
-# the logical constructors itself. The imported AST and its lexical type environment are supplied
-# by the adapter; the source-neutral kernel separately replays the resulting derivation.
+# This projects compiler-checked declarations and lexical types into the source-neutral kernel's
+# typing environment. Proposition admission is decided by that typed kernel, not by a duplicate
+# source-side Boolean classifier; the independent replay checks the resulting derivation.
 extend ElisaProof:
     private:
         const PROOF_PROPOSITION_TYPE_DEPTH_LIMIT: usize = 127
@@ -23,6 +22,8 @@ extend ElisaProof:
                     return ""
                 Ast::Expr.Index(base, _, _):
                     return proof_source_type_spelling(base, depth + 1)
+                Ast::Expr.IndexN(base, _, _):
+                    return proof_source_type_spelling(base, depth + 1)
                 _:
                     return ""
 
@@ -40,7 +41,51 @@ extend ElisaProof:
                 Semantic::SemTypeKind.Tuple -> "tuple"
                 _ -> ""
 
-        def proof_source_range_element_type(range: Ast::Expr, names: darray[sview]&, types: darray[sview]&, table: Semantic::SymbolTable&) -> sview:
+        # Preserve a compiler-declared tuple signature when a local's type is inferred from a
+        # direct call. The kernel needs the declaration's tuple identity and named field map;
+        # the coarse semantic `Tuple` family alone intentionally does not carry either.
+        def proof_source_function_return_type(declarations: darray[Ast::Decl]&, function_name: sview, depth: usize) -> (count: usize, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            requires depth <= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            decreases PROOF_PROPOSITION_TYPE_DEPTH_LIMIT - depth
+            return (2, Ast::Expr.Absent) if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            count: mutable usize = 0
+            selected: mutable Ast::Expr = Ast::Expr.Absent
+            for declaration in declarations |function_name, depth, count, selected|:
+                match declaration:
+                    Ast::Decl.Func(name, _, return_type, _, _, _, _):
+                        if name == function_name:
+                            if return_type is declared_return_type:
+                                selected <- declared_return_type
+                            else:
+                                selected <- Ast::Expr.Ident("void", Ast::pos_at_line(0))
+                            count <- count + 1
+                    Ast::Decl.Module(_, body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(body, function_name, depth + 1)
+                        count <- count + nested.count
+                        selected <- nested.type_expression if nested.count == 1
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(body, function_name, depth + 1)
+                        count <- count + nested.count
+                        selected <- nested.type_expression if nested.count == 1
+                    _:
+                        pass
+            return (count, selected)
+
+        def proof_source_inferred_tuple_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+            requires depth <= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            decreases PROOF_PROPOSITION_TYPE_DEPTH_LIMIT - depth
+            return Ast::Expr.Absent if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(Ast::Expr.Ident(function_name, _), _, _, _):
+                    found: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(declarations, function_name, 0)
+                    return found.type_expression if found.count == 1
+                    return Ast::Expr.Absent
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_inferred_tuple_type(inner, declarations, depth + 1)
+                _:
+                    return Ast::Expr.Absent
+
+        def proof_source_range_element_type(range: Ast::Expr, names: darray[sview]&, types: darray[sview]&, table: Semantic::SymbolTable&) -> sview can[Memory.Allocate, Abort.Panic]:
             match range:
                 Ast::Expr.Array(elements, _):
                     return "" if elements.count == 0
@@ -63,7 +108,7 @@ extend ElisaProof:
         # A tiny source-type projection used only when the compiler's conservative inference
         # returns Unknown for a supported container element or declared struct field. It reads
         # declaration types; it never guesses from the kernel node kind.
-        def proof_source_expression_type_hint(expression: Ast::Expr, names: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, depth: usize) -> Ast::Expr:
+        def proof_source_expression_type_hint(expression: Ast::Expr, names: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
             return Ast::Expr.Absent if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Ident(name, _):
@@ -86,85 +131,139 @@ extend ElisaProof:
                     element: (known: bool, element: Ast::Expr) = proof_container_element_type(container_type, declarations, 0)
                     return element.element if element.known
                     return Ast::Expr.Absent
+                Ast::Expr.IndexN(object, arguments, _):
+                    indexed_type: mutable Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, depth + 1)
+                    for _ in arguments |indexed_type, declarations|:
+                        element: (known: bool, element: Ast::Expr) = proof_container_element_type(indexed_type, declarations, 0)
+                        return Ast::Expr.Absent if not element.known
+                        indexed_type <- element.element
+                    return indexed_type
+                Ast::Expr.Construct(type_expression, _, _):
+                    return type_expression
+                Ast::Expr.RecordUpdate(base, _, _):
+                    return proof_source_expression_type_hint(base, names, source_types, declarations, depth + 1)
                 _:
                     return Ast::Expr.Absent
 
-        def proof_source_type_is_boolean(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
-            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
-            match type_expression:
-                Ast::Expr.Ident("bool", _):
-                    return true
-                Ast::Expr.Ident(name, _):
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return proof_source_type_is_boolean(alias.target, declarations, depth + 1) if alias.count == 1
-                    return false
-                Ast::Expr.Scope(_, "bool", _):
-                    return true
-                Ast::Expr.Paren(inner, _):
-                    return proof_source_type_is_boolean(inner, declarations, depth + 1)
-                Ast::Expr.Refinement(base, _, _):
-                    return proof_source_type_is_boolean(base, declarations, depth + 1)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_source_type_is_boolean(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return false
-                _:
-                    return false
+        def proof_source_validate_context_proposition(expression: Ast::Expr, name: sview, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, kernel_workspace: mutable ProofSourceKernelFormationWorkspace&, file: Ast::File&, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
+            kernel_failure: mutable sview = ""
+            kernel_formed: bool = proof_source_kernel_proposition_formed(expression, names, types, source_types, global_kernel_bindings, kernel_workspace, file, &kernel_failure)
+            if not kernel_formed:
+                report.proof_obligation(false)
+                source_position: Ast::Pos = Ast::expr_pos(expression)
+                diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
+                proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic)
 
-        # `names`/`types` are lexical bindings for this exact source position, not proof facts.
-        # Logical constructors require Boolean children. Opaque identifiers, calls, projections,
-        # and indexes are admitted only when the compiler's type inference says they are Bool.
-        def proof_source_proposition_is_boolean(expression: Ast::Expr, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, table: Semantic::SymbolTable&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
-            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Unary(TokenKind.Not, operand, _):
-                    return proof_source_proposition_is_boolean(operand, names, types, source_types, declarations, table, annotations, depth + 1)
-                Ast::Expr.Binary(left, operator, right, _):
-                    if operator == TokenKind.And or operator == TokenKind.Or or operator == TokenKind.FatArrow:
-                        return proof_source_proposition_is_boolean(left, names, types, source_types, declarations, table, annotations, depth + 1) and proof_source_proposition_is_boolean(right, names, types, source_types, declarations, table, annotations, depth + 1)
-                    pass
-                Ast::Expr.If(condition, then_value, else_value, _):
-                    return proof_source_proposition_is_boolean(condition, names, types, source_types, declarations, table, annotations, depth + 1) and proof_source_proposition_is_boolean(then_value, names, types, source_types, declarations, table, annotations, depth + 1) and proof_source_proposition_is_boolean(else_value, names, types, source_types, declarations, table, annotations, depth + 1)
-                Ast::Expr.Block(statements, body, _, _):
-                    return false if proof_quantifier_kind(expression, annotations) == ""
-                    return false if statements.count == 0 or statements.count > 2
-                    match statements[0]:
-                        Ast::Stmt.VarDecl(binder, declared_type, range, _):
-                            return false if binder == ""
-                            binder_type: mutable sview = proof_source_type_spelling(declared_type, depth + 1)
-                            binder_type <- proof_source_range_element_type(range, names, types, table) if binder_type == ""
-                            return false if binder_type == ""
-                            inner_names: mutable darray[sview] = []
-                            inner_types: mutable darray[sview] = []
-                            inner_source_types: mutable darray[Ast::Expr] = []
-                            inner_names.extend(names)
-                            inner_types.extend(types)
-                            inner_source_types.extend(source_types)
-                            inner_names.push(binder)
-                            inner_types.push(binder_type)
-                            inner_source_types.push(Ast::Expr.Ident(binder_type, Ast::expr_pos(range)))
-                            if statements.count == 2:
-                                match statements[1]:
-                                    Ast::Stmt.VarDecl(value_binder, value_type, _, _):
-                                        value_sort: sview = proof_source_type_spelling(value_type, depth + 1)
-                                        return false if value_binder == "" or value_binder == binder or value_sort == ""
-                                        inner_names.push(value_binder)
-                                        inner_types.push(value_sort)
-                                        inner_source_types.push(value_type)
-                                    _:
-                                        return false
-                            return proof_source_proposition_is_boolean(body, inner_names, inner_types, inner_source_types, declarations, table, annotations, depth + 1)
-                        _:
-                            return false
-                Ast::Expr.Call(Ast::Expr.Ident("old", _), arguments, _, _):
-                    return arguments.count == 1 and proof_source_proposition_is_boolean(arguments[0], names, types, source_types, declarations, table, annotations, depth + 1)
-                _:
-                    pass
-            inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(expression, names, types, table)
-            return true if inferred.kind == Semantic::SemTypeKind.Bool
-            hinted: Ast::Expr = proof_source_expression_type_hint(expression, names, source_types, declarations, 0)
-            return proof_source_type_is_boolean(hinted, declarations, 0)
+        def proof_source_for_element_type(iterable: Ast::Expr, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, table: Semantic::SymbolTable&) -> sview can[Memory.Allocate, Abort.Panic]:
+            range_element: sview = proof_source_range_element_type(iterable, names, types, table)
+            return range_element if range_element != ""
+            iterable_type: Ast::Expr = proof_source_expression_type_hint(iterable, names, source_types, declarations, 0)
+            element: (known: bool, element: Ast::Expr) = proof_container_element_type(iterable_type, declarations, 0)
+            return proof_source_type_spelling(element.element, 0) if element.known
+            return ""
 
-        def proof_validate_function_propositions(file: Ast::File&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void:
+        # Statement guards, match guards, assertions, and loop invariants become assumptions
+        # or goals in later proof passes. Validate those at import time too; otherwise a direct
+        # proof_check consumer could report a function verified even though the CLI separately
+        # rejects its non-Boolean guard. Lexical contexts are copied at branches; a per-check
+        # scratch environment is rebuilt and reused in source order so shadowing stays explicit.
+        def proof_source_validate_statement_propositions(file: Ast::File&, name: sview, statements: darray[Ast::Stmt]&, names: mutable darray[sview]&, types: mutable darray[sview]&, source_types: mutable darray[Ast::Expr]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, kernel_workspace: mutable ProofSourceKernelFormationWorkspace&, table: Semantic::SymbolTable&, report: mutable ProofReport&, depth: usize) -> void can[Memory.Allocate, Abort.Panic]:
+            return if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            for statement in statements |file, name, names, types, source_types, global_kernel_bindings, kernel_workspace, table, report, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, declared_type, initializer, _):
+                        type_name: mutable sview = proof_source_type_spelling(declared_type, 0)
+                        context_type: mutable Ast::Expr = declared_type
+                        has_declared_type: bool = match declared_type:
+                            Ast::Expr.Absent: false
+                            _: true
+                        if not has_declared_type:
+                            inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(initializer, names, types, table)
+                            type_name <- proof_source_inferred_type_spelling(inferred)
+                            context_type <- proof_source_inferred_tuple_type(initializer, file.top_decls, 0) if inferred.kind == Semantic::SemTypeKind.Tuple
+                        names.push(local_name)
+                        types.push(type_name)
+                        source_types.push(context_type)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_source_validate_context_proposition(condition, name, names, types, source_types, global_kernel_bindings, kernel_workspace, file, table, report)
+                        then_names: mutable darray[sview] = []
+                        then_types: mutable darray[sview] = []
+                        then_source_types: mutable darray[Ast::Expr] = []
+                        then_names.extend(names)
+                        then_types.extend(types)
+                        then_source_types.extend(source_types)
+                        proof_source_validate_statement_propositions(file, name, then_body, &then_names, &then_types, &then_source_types, global_kernel_bindings, kernel_workspace, table, report, depth + 1)
+                        else_names: mutable darray[sview] = []
+                        else_types: mutable darray[sview] = []
+                        else_source_types: mutable darray[Ast::Expr] = []
+                        else_names.extend(names)
+                        else_types.extend(types)
+                        else_source_types.extend(source_types)
+                        proof_source_validate_statement_propositions(file, name, else_body, &else_names, &else_types, &else_source_types, global_kernel_bindings, kernel_workspace, table, report, depth + 1)
+                    Ast::Stmt.While(condition, loop_body, _):
+                        proof_source_validate_context_proposition(condition, name, names, types, source_types, global_kernel_bindings, kernel_workspace, file, table, report)
+                        loop_names: mutable darray[sview] = []
+                        loop_types: mutable darray[sview] = []
+                        loop_source_types: mutable darray[Ast::Expr] = []
+                        loop_names.extend(names)
+                        loop_types.extend(types)
+                        loop_source_types.extend(source_types)
+                        proof_source_validate_statement_propositions(file, name, loop_body, &loop_names, &loop_types, &loop_source_types, global_kernel_bindings, kernel_workspace, table, report, depth + 1)
+                    Ast::Stmt.For(_, variables, iterable, loop_body, _):
+                        loop_names: mutable darray[sview] = []
+                        loop_types: mutable darray[sview] = []
+                        loop_source_types: mutable darray[Ast::Expr] = []
+                        loop_names.extend(names)
+                        loop_types.extend(types)
+                        loop_source_types.extend(source_types)
+                        element_type: sview = proof_source_for_element_type(iterable, names, types, source_types, file.top_decls, table)
+                        for variable in variables |loop_names, loop_types, loop_source_types, element_type|:
+                            loop_names.push(variable)
+                            loop_types.push(element_type)
+                            loop_source_types.push(Ast::Expr.Absent)
+                        proof_source_validate_statement_propositions(file, name, loop_body, &loop_names, &loop_types, &loop_source_types, global_kernel_bindings, kernel_workspace, table, report, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, position):
+                        for arm in arms |file, name, names, types, source_types, global_kernel_bindings, kernel_workspace, table, report, depth, scrutinee, position|:
+                            arm_names: mutable darray[sview] = []
+                            arm_types: mutable darray[sview] = []
+                            arm_source_types: mutable darray[Ast::Expr] = []
+                            arm_names.extend(names)
+                            arm_types.extend(types)
+                            arm_source_types.extend(source_types)
+                            binding_names: mutable darray[sview] = []
+                            binding_values: mutable darray[Ast::Expr] = []
+                            proof_bind_pattern(arm.pattern, position, scrutinee, &binding_names, &binding_values)
+                            for binding_index in 0..<binding_names.count |binding_index, binding_names, binding_values, arm_names, arm_types, arm_source_types, table, file|:
+                                binding_source_type: Ast::Expr = proof_source_expression_type_hint(binding_values[binding_index], arm_names, arm_source_types, file.top_decls, 0)
+                                binding_type_name: mutable sview = proof_source_type_spelling(binding_source_type, 0)
+                                if binding_type_name == "":
+                                    inferred_binding: Semantic::InferType = Semantic::infer_expression_type_for_proof(binding_values[binding_index], arm_names, arm_types, table)
+                                    binding_type_name <- proof_source_inferred_type_spelling(inferred_binding)
+                                arm_names.push(binding_names[binding_index])
+                                arm_types.push(binding_type_name)
+                                arm_source_types.push(binding_source_type)
+                            has_guard: bool = match arm.guard:
+                                Ast::Expr.Absent: false
+                                _: true
+                            proof_source_validate_context_proposition(arm.guard, name, arm_names, arm_types, arm_source_types, global_kernel_bindings, kernel_workspace, file, table, report) if has_guard
+                            proof_source_validate_statement_propositions(file, name, arm.body, &arm_names, &arm_types, &arm_source_types, global_kernel_bindings, kernel_workspace, table, report, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested_body, _):
+                        block_names: mutable darray[sview] = []
+                        block_types: mutable darray[sview] = []
+                        block_source_types: mutable darray[Ast::Expr] = []
+                        block_names.extend(names)
+                        block_types.extend(types)
+                        block_source_types.extend(source_types)
+                        proof_source_validate_statement_propositions(file, name, nested_body, &block_names, &block_types, &block_source_types, global_kernel_bindings, kernel_workspace, table, report, depth + 1)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        if kind == "assert":
+                            proof_source_validate_context_proposition(expression, name, names, types, source_types, global_kernel_bindings, kernel_workspace, file, table, report)
+                        if kind == "invariant":
+                            proof_source_validate_context_proposition(expression, name, names, types, source_types, global_kernel_bindings, kernel_workspace, file, table, report)
+                    _:
+                        pass
+
+        def proof_validate_function_propositions(file: Ast::File&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, kernel_workspace: mutable ProofSourceKernelFormationWorkspace&, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
             names: mutable darray[sview] = []
             types: mutable darray[sview] = []
             source_types: mutable darray[Ast::Expr] = []
@@ -174,11 +273,14 @@ extend ElisaProof:
                 source_types.push(parameter.type_expression)
             requirements: mutable darray[Ast::Expr] = proof_contracts(body, "requires")
             requirements.extend(proof_signature_contracts(file, position.line, "requires"))
-            for requirement in requirements |names, types, source_types, table, file, report, name|:
-                if not proof_source_proposition_is_boolean(requirement, names, types, source_types, file.top_decls, table, file.enum_annotations, 0):
+            for requirement in requirements |names, types, source_types, global_kernel_bindings, kernel_workspace, table, file, report, name|:
+                kernel_failure: mutable sview = ""
+                kernel_formed: bool = proof_source_kernel_proposition_formed(requirement, names, types, source_types, global_kernel_bindings, kernel_workspace, file, &kernel_failure)
+                if not kernel_formed:
                     report.proof_obligation(false)
                     source_position: Ast::Pos = Ast::expr_pos(requirement)
-                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, "requires expression is not Boolean in its source type environment")
+                    diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
+                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic)
             post_names: mutable darray[sview] = []
             post_types: mutable darray[sview] = []
             post_source_types: mutable darray[Ast::Expr] = []
@@ -191,26 +293,30 @@ extend ElisaProof:
                 post_source_types.push(declared_return_type)
             postconditions: mutable darray[Ast::Expr] = proof_contracts(body, "ensure")
             postconditions.extend(proof_signature_contracts(file, position.line, "ensure"))
-            for postcondition in postconditions |post_names, post_types, post_source_types, table, file, report, name|:
-                if not proof_source_proposition_is_boolean(postcondition, post_names, post_types, post_source_types, file.top_decls, table, file.enum_annotations, 0):
+            for postcondition in postconditions |post_names, post_types, post_source_types, global_kernel_bindings, kernel_workspace, table, file, report, name|:
+                kernel_failure: mutable sview = ""
+                kernel_formed: bool = proof_source_kernel_proposition_formed(postcondition, post_names, post_types, post_source_types, global_kernel_bindings, kernel_workspace, file, &kernel_failure)
+                if not kernel_formed:
                     report.proof_obligation(false)
                     source_position: Ast::Pos = Ast::expr_pos(postcondition)
-                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, "ensure expression is not Boolean in its source type environment")
-            assertions: mutable darray[Ast::Expr] = proof_contracts(body, "assert")
-            for assertion in assertions |post_names, post_types, post_source_types, table, file, report, name|:
-                if not proof_source_proposition_is_boolean(assertion, post_names, post_types, post_source_types, file.top_decls, table, file.enum_annotations, 0):
-                    report.proof_obligation(false)
-                    source_position: Ast::Pos = Ast::expr_pos(assertion)
-                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, "assert expression is not Boolean in its source type environment")
+                    diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
+                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic)
+            body_names: mutable darray[sview] = []
+            body_types: mutable darray[sview] = []
+            body_source_types: mutable darray[Ast::Expr] = []
+            body_names.extend(names)
+            body_types.extend(types)
+            body_source_types.extend(source_types)
+            proof_source_validate_statement_propositions(file, name, body, &body_names, &body_types, &body_source_types, global_kernel_bindings, kernel_workspace, table, report, 0)
 
-        def proof_validate_propositions_in_declarations(file: Ast::File&, declarations: darray[Ast::Decl]&, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void:
-            for declaration in declarations |file, declarations, table, report|:
+        def proof_validate_propositions_in_declarations(file: Ast::File&, declarations: darray[Ast::Decl]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, kernel_workspace: mutable ProofSourceKernelFormationWorkspace&, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
+            for declaration in declarations |file, declarations, global_kernel_bindings, kernel_workspace, table, report|:
                 match declaration:
                     Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
-                        proof_validate_function_propositions(file, name, parameters, return_type, body, position, table, report)
+                        proof_validate_function_propositions(file, name, parameters, return_type, body, position, global_kernel_bindings, kernel_workspace, table, report)
                     Ast::Decl.Module(_, body, _):
-                        proof_validate_propositions_in_declarations(file, body, table, report)
+                        proof_validate_propositions_in_declarations(file, body, global_kernel_bindings, kernel_workspace, table, report)
                     Ast::Decl.Scoped(body, _):
-                        proof_validate_propositions_in_declarations(file, body, table, report)
+                        proof_validate_propositions_in_declarations(file, body, global_kernel_bindings, kernel_workspace, table, report)
                     _:
                         pass

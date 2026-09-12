@@ -1,0 +1,340 @@
+# Source-to-kernel declaration projection for proposition formation. The environment is derived
+# from the compiler-checked AST and lexical bindings at the exact source position; it contains
+# declaration sorts only, never proof facts or per-expression Boolean markers.
+extend ElisaProof:
+    private:
+        struct ProofSourceKernelFormationWorkspace:
+            bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]
+            children: mutable darray[usize]
+
+        struct ProofSourceKernelReferenceParameter:
+            function_line: u32
+            parameter_name: sview
+
+        def proof_source_kernel_numeric_sort(type_name: sview) -> sview:
+            return "character" if type_name == "char"
+            return "integer" if type_name == "i8" or type_name == "i16" or type_name == "i32" or type_name == "i64" or type_name == "i128" or type_name == "u8" or type_name == "u16" or type_name == "u32" or type_name == "u64" or type_name == "u128" or type_name == "usize" or type_name == "isize" or type_name == "uintptr" or type_name == "int" or type_name == "uint" or type_name == "byte"
+            return "floating" if type_name == "f16" or type_name == "f32" or type_name == "f64" or type_name == "float"
+            return ""
+
+        def proof_source_kernel_comparison_family(sort: sview) -> sview:
+            match sort:
+                "integer":
+                    return "numeric"
+                "floating":
+                    return "numeric"
+                "character":
+                    return "numeric"
+                "boolean":
+                    return "boolean"
+                "string":
+                    return "string"
+                "aggregate":
+                    return "aggregate"
+                "container":
+                    return "aggregate"
+                "void":
+                    return "void"
+                "named":
+                    return "named"
+                _:
+                    return ""
+
+        def proof_source_kernel_numeric_binary(operator: TokenKind) -> bool:
+            return operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent
+
+        def proof_source_kernel_named_type_identity(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> (count: usize, identity: usize):
+            return (2, 0) if depth >= 63
+            count: mutable usize = 0
+            identity: mutable usize = 0
+            for declaration in declarations |name, depth, count, identity|:
+                match declaration:
+                    Ast::Decl.Struct(type_name, _, _, _, _, _, position):
+                        if type_name == name:
+                            count <- count + 1
+                            identity <- position.offset.usize() + 1
+                    Ast::Decl.Enum(type_name, _, _, _, position):
+                        if type_name == name:
+                            count <- count + 1
+                            identity <- position.offset.usize() + 1
+                    Ast::Decl.Module(_, body, _):
+                        nested: (count: usize, identity: usize) = proof_source_kernel_named_type_identity(body, name, depth + 1)
+                        count <- count + nested.count
+                        identity <- nested.identity if nested.count == 1
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, identity: usize) = proof_source_kernel_named_type_identity(body, name, depth + 1)
+                        count <- count + nested.count
+                        identity <- nested.identity if nested.count == 1
+                    _:
+                        pass
+            return (2, 0) if count > 1
+            return (count, identity)
+
+        def proof_source_kernel_type_sort(type_expression: Ast::Expr, fallback_name: sview, declarations: darray[Ast::Decl]&, depth: usize) -> (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) can[Memory.Allocate, Abort.Panic]:
+            requires depth <= 63
+            decreases 63 - depth
+            return (false, "", "", "", "", 0, 0) if depth >= 63
+            match type_expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_kernel_type_sort(inner, fallback_name, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_source_kernel_type_sort(base, fallback_name, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail:
+                        return proof_source_kernel_type_sort(inner, fallback_name, declarations, depth + 1)
+                    pass
+                _:
+                    pass
+            has_expression: bool = match type_expression:
+                Ast::Expr.Absent: false
+                Ast::Expr.Invalid: false
+                _: true
+            match type_expression:
+                Ast::Expr.Tuple(_, tuple_position):
+                    tuple_identity: usize = tuple_position.offset.usize() + 1
+                    return (tuple_identity != 0, "aggregate", "tuple", "", "", tuple_identity, 0)
+                _:
+                    pass
+            if has_expression:
+                container_element: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, declarations, 0)
+                if container_element.known:
+                    container_sort: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(container_element.element, "", declarations, depth + 1)
+                    container_name: sview = proof_source_type_spelling(type_expression, 0)
+                    container_identity: usize = Ast::expr_pos(type_expression).offset.usize() + 1
+                    return (container_sort.known and container_identity != 0, "container", container_name, container_sort.sort, container_sort.type_name, container_identity, container_sort.type_identity) if container_name != ""
+                    return (false, "", "", "", "", 0, 0)
+            type_name: sview = proof_source_type_spelling(type_expression, 0) if has_expression else fallback_name
+            return (false, "", "", "", "", 0, 0) if type_name == ""
+            if type_name == "bool":
+                return (true, "boolean", "bool", "", "", 0, 0)
+            if type_name == "cstr" or type_name == "dstr" or type_name == "sview":
+                return (true, "string", type_name, "", "", 0, 0)
+            if type_name == "void":
+                return (true, "void", "void", "", "", 0, 0)
+            if type_name == "tuple":
+                # A bare spelling loses which named fields are actually present. The source
+                # adapter must carry the original tuple type expression and its identity.
+                return (false, "", "", "", "", 0, 0)
+            if type_name == "array" or type_name == "darray" or type_name == "view" or type_name == "set" or type_name == "dict":
+                return (false, "", "", "", "", 0, 0)
+            numeric_sort: sview = proof_source_kernel_numeric_sort(type_name)
+            return (true, numeric_sort, type_name, "", "", 0, 0) if numeric_sort != ""
+            if has_expression:
+                match type_expression:
+                    Ast::Expr.Call(_, _, _, _):
+                        # Generic instantiations need their type arguments preserved in the
+                        # kernel sort. Until that representation exists, they remain unadmitted.
+                        return (false, "", "", "", "", 0, 0)
+                    _:
+                        pass
+                alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, type_name, 0)
+                if alias.count == 1:
+                    return proof_source_kernel_type_sort(alias.target, "", declarations, depth + 1)
+                return (false, "", "", "", "", 0, 0) if alias.count > 1
+            named_type: sview = proof_type_head_name(type_expression, declarations, 0) if has_expression else type_name
+            if named_type != "":
+                declared_type: (count: usize, identity: usize) = proof_source_kernel_named_type_identity(declarations, named_type, depth + 1)
+                return (declared_type.count == 1 and declared_type.identity != 0, "named", named_type, "", "", declared_type.identity, 0) if declared_type.count == 1
+                return (false, "", "", "", "", 0, 0)
+            return (false, "", "", "", "", 0, 0)
+
+        def proof_source_kernel_tuple_label_count(annotations: darray[Ast::EnumAnnotation]&, line: u32) -> usize:
+            count: mutable usize = 0
+            for annotation in annotations |line, count|:
+                count <- count + 1 if annotation.owner == "__tuple_label" and annotation.line == line
+            return count
+
+        def proof_source_kernel_tuple_label_at(annotations: darray[Ast::EnumAnnotation]&, line: u32, requested: usize) -> sview:
+            index: mutable usize = 0
+            for annotation in annotations |line, requested, index|:
+                continue if annotation.owner != "__tuple_label" or annotation.line != line
+                return annotation.name if index == requested
+                index <- index + 1
+            return ""
+
+        def proof_source_kernel_collect_tuple_fields(type_expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, declarations: darray[Ast::Decl]&, bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            requires depth <= 63
+            decreases 63 - depth
+            return true if depth >= 63
+            container_element: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, declarations, 0)
+            if container_element.known:
+                resolved_container: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(type_expression, "", declarations, depth + 1)
+                if resolved_container.known and resolved_container.sort == "container" and resolved_container.type_identity != 0:
+                    descriptor_found: mutable bool = false
+                    for binding in bindings |resolved_container, descriptor_found|:
+                        continue if binding.kind != "type" or binding.type_identity != resolved_container.type_identity
+                        return false if binding.name != resolved_container.type_name or binding.sort != "container" or binding.element_sort != resolved_container.element_sort or binding.element_type_name != resolved_container.element_type_name or binding.element_type_identity != resolved_container.element_type_identity
+                        descriptor_found <- true
+                    if not descriptor_found:
+                        descriptor_added: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, "type", resolved_container.type_name, "", "container", resolved_container.type_name, resolved_container.element_sort, resolved_container.element_type_name, resolved_container.type_identity, 0, resolved_container.element_type_identity)
+                        return false if not descriptor_added
+            match type_expression:
+                Ast::Expr.Tuple(elements, tuple_position):
+                    tuple_identity: usize = tuple_position.offset.usize() + 1
+                    labels: usize = proof_source_kernel_tuple_label_count(annotations, tuple_position.line)
+                    if tuple_identity != 0 and labels == elements.count:
+                        for index in 0..<elements.count |index, elements, annotations, tuple_position, tuple_identity, declarations, bindings|:
+                            field_name: sview = proof_source_kernel_tuple_label_at(annotations, tuple_position.line, index)
+                            continue if field_name == ""
+                            field_sort: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(elements[index], "", declarations, depth + 1)
+                            continue if not field_sort.known or field_sort.type_name == ""
+                            added: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, "field", field_name, "tuple", field_sort.sort, field_sort.type_name, field_sort.element_sort, field_sort.element_type_name, field_sort.type_identity, tuple_identity, field_sort.element_type_identity)
+                            return false if not added
+                    for element in elements |element, annotations, declarations, bindings, depth|:
+                        return false if not proof_source_kernel_collect_tuple_fields(element, annotations, declarations, bindings, depth + 1)
+                Ast::Expr.Index(base, argument, _):
+                    return proof_source_kernel_collect_tuple_fields(base, annotations, declarations, bindings, depth + 1) and proof_source_kernel_collect_tuple_fields(argument, annotations, declarations, bindings, depth + 1)
+                Ast::Expr.IndexN(base, arguments, _):
+                    return false if not proof_source_kernel_collect_tuple_fields(base, annotations, declarations, bindings, depth + 1)
+                    for argument in arguments |annotations, declarations, bindings, depth|:
+                        return false if not proof_source_kernel_collect_tuple_fields(argument, annotations, declarations, bindings, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return proof_source_kernel_collect_tuple_fields(alias.target, annotations, declarations, bindings, depth + 1) if alias.count == 1
+                    return false if alias.count > 1
+                Ast::Expr.Unary(_, inner, _):
+                    return proof_source_kernel_collect_tuple_fields(inner, annotations, declarations, bindings, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_kernel_collect_tuple_fields(inner, annotations, declarations, bindings, depth + 1)
+                Ast::Expr.Refinement(inner, _, _):
+                    return proof_source_kernel_collect_tuple_fields(inner, annotations, declarations, bindings, depth + 1)
+                _:
+                    pass
+            return true
+
+        def proof_source_kernel_reference_parameters(annotations: darray[Ast::EnumAnnotation]&) -> darray[ProofSourceKernelReferenceParameter] can[Memory.Allocate]:
+            references: mutable darray[ProofSourceKernelReferenceParameter] = []
+            for annotation in annotations |references|:
+                continue if annotation.name != "__typestate_ref_param" or annotation.owner == ""
+                references.push(ProofSourceKernelReferenceParameter{function_line: annotation.line, parameter_name: annotation.owner})
+            return references
+
+        def proof_source_kernel_parameter_by_reference(parameter_name: sview, reference_names: darray[sview]&) -> bool:
+            for reference_name in reference_names |parameter_name|:
+                return true if reference_name == parameter_name
+            return false
+
+        def proof_source_kernel_add_type_binding(bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, kind: sview, name: sview, owner: sview, owner_type_identity: usize, type_expression: Ast::Expr, fallback_name: sview, declarations: darray[Ast::Decl]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 63
+            resolved: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(type_expression, fallback_name, declarations, depth + 1)
+            return true if not resolved.known or resolved.type_name == ""
+            return ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, kind, name, owner, resolved.sort, resolved.type_name, resolved.element_sort, resolved.element_type_name, resolved.type_identity, owner_type_identity, resolved.element_type_identity)
+
+        def proof_source_kernel_add_function_signature(bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, position: Ast::Pos, reference_parameters: darray[ProofSourceKernelReferenceParameter]&, declarations: darray[Ast::Decl]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return_expression: mutable Ast::Expr = Ast::Expr.Ident("void", Ast::pos_at_line(0))
+            if return_type is declared_return_type:
+                return_expression <- declared_return_type
+            result_sort: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(return_expression, "", declarations, 0)
+            return true if not result_sort.known or result_sort.type_name == ""
+            signature_identity: usize = position.offset.usize() + 1
+            added_signature: bool = ElisaProofKernelCore::proof_kernel_add_function_signature(bindings, name, result_sort.sort, result_sort.type_name, result_sort.element_sort, result_sort.element_type_name, result_sort.type_identity, result_sort.element_type_identity, signature_identity, parameters.count)
+            return false if not added_signature
+            reference_names: mutable darray[sview] = []
+            for reference in reference_parameters |position, reference_names|:
+                continue if reference.function_line != position.line
+                reference_names.push(reference.parameter_name)
+            for index in 0..<parameters.count |index, parameters, declarations, bindings, name, signature_identity|:
+                parameter_sort: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(parameters[index].type_expression, "", declarations, 0)
+                continue if not parameter_sort.known or parameter_sort.type_name == ""
+                by_reference: bool = proof_source_kernel_parameter_by_reference(parameters[index].name, reference_names)
+                added_parameter: bool = ElisaProofKernelCore::proof_kernel_add_function_parameter(bindings, name, parameters[index].name, parameter_sort.sort, parameter_sort.type_name, parameter_sort.element_sort, parameter_sort.element_type_name, parameter_sort.type_identity, parameter_sort.element_type_identity, signature_identity, index, parameters[index].has_default, by_reference)
+                return false if not added_parameter
+            return true
+
+        def proof_source_kernel_collect_declarations(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, reference_parameters: darray[ProofSourceKernelReferenceParameter]&, bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            requires depth <= 63
+            decreases 63 - depth
+            return false if depth >= 63
+            for declaration in declarations |all_declarations, annotations, reference_parameters, bindings, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, return_type, _, _, _, position):
+                        return_type_expression: mutable Ast::Expr = Ast::Expr.Ident("void", Ast::pos_at_line(0))
+                        if return_type is declared_return_type:
+                            return_type_expression <- declared_return_type
+                        return_fields: bool = proof_source_kernel_collect_tuple_fields(return_type_expression, annotations, all_declarations, bindings, depth + 1)
+                        return false if not return_fields
+                        for parameter in parameters |annotations, all_declarations, bindings, depth|:
+                            parameter_fields: bool = proof_source_kernel_collect_tuple_fields(parameter.type_expression, annotations, all_declarations, bindings, depth + 1)
+                            return false if not parameter_fields
+                        added: bool = proof_source_kernel_add_function_signature(bindings, name, parameters, return_type, position, reference_parameters, all_declarations)
+                        return false if not added
+                    Ast::Decl.Struct(name, members, _, _, _, _, position):
+                        type_identity: usize = position.offset.usize() + 1
+                        added_type: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, "type", name, "", "named", name, "", "", type_identity, 0, 0)
+                        return false if not added_type
+                        for member in members |annotations, all_declarations, bindings, depth, name|:
+                            tuple_fields: bool = proof_source_kernel_collect_tuple_fields(member.type_expression, annotations, all_declarations, bindings, depth + 1)
+                            return false if not tuple_fields
+                            added: bool = proof_source_kernel_add_type_binding(bindings, "field", member.name, name, type_identity, member.type_expression, "", all_declarations, depth + 1)
+                            return false if not added
+                    Ast::Decl.Enum(name, variants, is_const, _, position):
+                        type_identity: usize = position.offset.usize() + 1
+                        added_type: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, "type", name, "", "named", name, "", "", type_identity, 0, 0)
+                        return false if not added_type
+                        for variant in variants |variant, bindings, name|:
+                            added_tag: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, "enum-tag", variant.name, name, "named", name, "", "", type_identity, type_identity, 0)
+                            return false if not added_tag
+                        if is_const:
+                            for variant in variants |variant, bindings, name|:
+                                continue if variant.fields.count != 0
+                                added_member: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, "enum-member", variant.name, name, "named", name, "", "", type_identity, type_identity, 0)
+                                return false if not added_member
+                    Ast::Decl.Const(name, type_expression, _, _, _):
+                        has_type: bool = match type_expression:
+                            Ast::Expr.Absent: false
+                            _: true
+                        if has_type:
+                            tuple_fields: bool = proof_source_kernel_collect_tuple_fields(type_expression, annotations, all_declarations, bindings, depth + 1)
+                            return false if not tuple_fields
+                            added: bool = proof_source_kernel_add_type_binding(bindings, "value", name, "", 0, type_expression, "", all_declarations, depth + 1)
+                            return false if not added
+                    Ast::Decl.Alias(_, target, _):
+                        return false if not proof_source_kernel_collect_tuple_fields(target, annotations, all_declarations, bindings, depth + 1)
+                    Ast::Decl.Module(_, body, _):
+                        return false if not proof_source_kernel_collect_declarations(body, all_declarations, annotations, reference_parameters, bindings, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_source_kernel_collect_declarations(body, all_declarations, annotations, reference_parameters, bindings, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_kernel_global_bindings(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&) -> (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) can[Memory.Allocate, Abort.Panic]:
+            bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
+            reference_parameters: darray[ProofSourceKernelReferenceParameter] = proof_source_kernel_reference_parameters(annotations)
+            known: bool = proof_source_kernel_collect_declarations(declarations, declarations, annotations, reference_parameters, &bindings, 0)
+            return (known, bindings)
+
+        def proof_source_kernel_append_local_bindings(names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if names.count != types.count or names.count != source_types.count
+            for index in 0..<names.count |index, names, types, source_types, declarations, bindings|:
+                added: bool = proof_source_kernel_add_type_binding(bindings, "value", names[index], "", 0, source_types[index], types[index], declarations, 0)
+                return false if not added
+            return true
+
+        def proof_source_kernel_type_environment(names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, workspace: mutable ProofSourceKernelFormationWorkspace&, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
+            workspace.bindings.clear()
+            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{bindings: workspace.bindings}) if names.count != types.count or names.count != source_types.count
+            workspace.bindings.extend(global_bindings)
+            for source_type in source_types |source_type, annotations, declarations, workspace|:
+                if not proof_source_kernel_collect_tuple_fields(source_type, annotations, declarations, &workspace.bindings, 0):
+                    return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{bindings: workspace.bindings})
+            if not proof_source_kernel_append_local_bindings(names, types, source_types, declarations, &workspace.bindings):
+                return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{bindings: workspace.bindings})
+            environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{bindings: workspace.bindings}
+            return (true, environment)
+
+        def proof_source_kernel_proposition_formed(expression: Ast::Expr, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, workspace: mutable ProofSourceKernelFormationWorkspace&, file: Ast::File&, failure: mutable sview&) -> bool can[Memory.Allocate, Abort.Panic]:
+            typing: (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) = proof_source_kernel_type_environment(names, types, source_types, global_bindings, workspace, file.top_decls, file.enum_annotations)
+            failure <- "local-context-unrepresented" if not typing.known
+            return false if not typing.known
+            invalid_binding_name: sview = ElisaProofKernelReplay::proof_kernel_replay_type_environment_invalid_binding_name_report(typing.environment)
+            if invalid_binding_name != "":
+                failure <- invalid_binding_name
+                return false
+            workspace.nodes.clear()
+            workspace.children.clear()
+            root: usize = proof_kernel_encode_annotated(expression, &workspace.nodes, &workspace.children, file.enum_annotations)
+            formed: bool = ElisaProofKernelReplay::proof_kernel_replay_proposition_formation_report(&workspace.nodes, &workspace.children, typing.environment, [], root)
+            failure <- "term-sort-or-operator-rejected" if not formed and failure == ""
+            return formed

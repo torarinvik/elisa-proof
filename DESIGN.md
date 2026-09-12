@@ -10,6 +10,46 @@ diagnostic mode.
 
 The proof kernel is intentionally fail-closed:
 
+### Proposition admission
+
+The source-neutral kernel has two deliberately different contracts. The raw
+`proof_kernel_replay_goal_report`, tactic-step, and branch APIs implement an abstract propositional
+calculus over structurally valid arena nodes. An opaque call, field, or index may be an abstract
+atom there: assuming `P` and deriving that same `P` is valid abstract logic. Those APIs make no
+claim that an atom is a well-typed Elisa Boolean, nor that it corresponds to a source obligation.
+
+The typed APIs (`proof_kernel_replay_goal_report_typed`, `proof_kernel_replay_tactic_step_typed`,
+and `proof_kernel_replay_tactic_branch_typed`) first validate every fact and conclusion under an
+explicit `ProofKernelTypeEnvironment`, then perform the same logical replay. The environment holds
+declaration information only; it is not a fact list and cannot justify a proposition. Formation
+accepts Boolean terms and explicitly declared abstract propositions. It admits opaque calls,
+projections, and container elements only when their resolved declaration/signature/field/element
+types establish the required sort; call arguments are checked against the exact parameter mapping.
+Named declarations retain identity, numeric sorts retain width/signedness, and quantified binders
+are derived from a checked range. Missing, ambiguous, malformed, or inconsistent environment
+entries fail closed. A bare AST kind or caller-provided Boolean marker is not type evidence.
+
+The source adapter constructs this environment from the compiler's checked declarations and
+resolved identities, and runs proposition formation on source hypotheses and conclusions before
+they can authorize a source-bound proof. A `contract-proposition-type` finding makes the whole
+source inadmissible to theorem suggestions, repair, and source-bound tactic scripts; replaying a
+localized certificate cannot override that gate. This establishes the adapter's declared boundary,
+not an independently proved correspondence theorem: the compiler frontend's type judgment,
+symbol resolution, and the adapter's faithful projection into the kernel environment remain
+trusted. A forged environment can make a typed API accept an ill-typed source term, so this API is
+not itself a source-import authentication mechanism. The source-neutral harness tests that exact
+distinction: raw opaque-atom reasoning remains valid, while typed admission rejects non-Boolean
+calls/fields/indexes, malformed signatures, missing declarations, and forged argument/result
+types. It also keeps valid Boolean-valued opaque terms and explicitly declared abstract `Prop`
+atoms usable. This boundary work is not a proof of the complete assistant's logical soundness.
+
+The standalone source-neutral audit also verifies the production helper
+`proof_kernel_replay_required_identity_present`: when `identity_required` is true, a true result
+implies a nonzero identity. Its contract is discharged through the ordinary function-verification
+path and every resulting certificate is replayed. This is a
+functional contract for one admission invariant, not a soundness proof for the whole kernel. The
+adapter's mapping from compiler-checked declarations to this environment remains trusted.
+
 1. A proof block is erased at runtime, so purity is checked before any fact is accepted.
 2. An `assert` proof step is a checked `have`, not an axiom. It must follow from earlier facts.
 3. A lemma contributes facts only after its `requires` are established and its own obligations

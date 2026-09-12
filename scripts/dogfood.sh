@@ -115,7 +115,7 @@ python3 - "$REPORT_DIR/kernel_core.json" "$REPORT_DIR/kernel_core_fixture.json" 
 import json
 import sys
 
-for path, proven in zip(sys.argv[1:], (7, 20)):
+for path, proven in zip(sys.argv[1:], (12, 25)):
     with open(path, encoding="utf-8") as handle:
         report = json.load(handle)
     assert report["status"] == "proved"
@@ -507,13 +507,26 @@ if not any(fact["arguments"][0]["kind"] == "call" for fact in witnesses):
     raise SystemExit("dogfood failed: no verified pure call witness reached a certificate")
 with open(rejected, encoding="utf-8") as handle:
     report = json.load(handle)
-if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
+if report["status"] != "failed":
     raise SystemExit("dogfood failed: aggregate equality fixture did not fail cleanly")
-if report["replay"]["gaps"] != 0:
+diagnostics = report["semantic_diagnostics"]
+if len(diagnostics) not in (0, 2) or any(
+    diagnostic["message"] != "aggregate values do not support ==; compare their contents explicitly"
+    or diagnostic["detail"] != "__aggregate"
+    for diagnostic in diagnostics
+):
+    raise SystemExit("dogfood failed: unexpected aggregate-equality diagnostics")
+if report["summary"]["semantic_errors"] != len(diagnostics):
+    raise SystemExit("dogfood failed: aggregate diagnostic summary is inconsistent")
+if report["replay"]["gaps"] != 0 or report["replay"]["certificates"] != report["replay"]["replayed"]:
     raise SystemExit("dogfood failed: aggregate equality fixture left a replay gap")
+refused = {"array_equality", "nested_array_equality", "tuple_equality", "dictionary_equality", "construct_equality", "update_equality", "quantified_array_equality", "quantified_tuple_equality", "quantified_dictionary_equality", "quantified_construct_equality"}
+finding_names = {finding["name"] for finding in report["findings"]}
+if refused - finding_names:
+    raise SystemExit("dogfood failed: an aggregate-equality goal lacked a refusal diagnostic")
 claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}
-if claimed:
-    raise SystemExit("dogfood failed: aggregate equality admitted for %s" % sorted(claimed))
+if refused & claimed:
+    raise SystemExit("dogfood failed: aggregate equality admitted for %s" % sorted(refused & claimed))
 print("dogfood expression_witness: term-keyed type witnesses admit exactly the primitive scalar places")
 PY
 
@@ -929,6 +942,14 @@ if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: equality chain boundary fixture did not fail cleanly")
 goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
 for owner in ("struct_equality_is_not_an_order", "equality_alone_is_not_strict", "two_equalities_give_no_strict_goal", "inequality_is_not_a_step", "an_equality_to_the_wrong_term"):
+    if owner == "struct_equality_is_not_an_order":
+        if goals.get((owner, "goal")) is True:
+            raise SystemExit("dogfood failed: an overloaded struct equality authorized an order proof")
+        if any(declaration["name"] == owner and declaration["verified"] for declaration in report["declaration_details"]):
+            raise SystemExit("dogfood failed: a declaration with unsupported struct comparison was verified")
+        if (owner, "goal") not in goals and not any(finding["kind"] == "contract-proposition-type" and finding["name"] == owner for finding in report["findings"]):
+            raise SystemExit("dogfood failed: unsupported struct comparison was not rejected at admission")
+        continue
     if goals.get((owner, "goal")) is not False:
         raise SystemExit("dogfood failed: %s chained an equality it may not" % owner)
 print("dogfood comparison_chain_equality: an equality is two non-strict steps and never a strict one")
@@ -955,8 +976,14 @@ if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: region extent boundary fixture did not fail cleanly")
 owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
 for owner in ("struct_count_is_not_an_extent", "an_element_in_a_contract", "the_binding_itself", "a_field_of_an_element"):
-    if (owner, "region-contract-unsupported") not in owners:
+    rejected_at_region_boundary = (owner, "region-contract-unsupported") in owners
+    rejected_at_kernel_formation = (owner, "contract-proposition-type") in owners
+    if not rejected_at_region_boundary and not rejected_at_kernel_formation:
         raise SystemExit("dogfood failed: %s entered a contract as if it were an extent" % owner)
+    if any(goal["name"] == owner and goal["proven"] for goal in report["goals"]):
+        raise SystemExit("dogfood failed: %s used a region-owned value to prove a contract" % owner)
+    if any(declaration["name"] == owner and declaration["verified"] for declaration in report["declaration_details"]):
+        raise SystemExit("dogfood failed: %s was verified after a region-owned contract term" % owner)
 if ("shared_cannot_be_returned_mutable", "region-return-witness-unsupported") not in owners:
     raise SystemExit("dogfood failed: a shared binding witnessed a mutable-reference return")
 print("dogfood region_extent_contract: a collection extent is contractable, a region-owned value is not")
@@ -1953,7 +1980,14 @@ with open(refused, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: comparison chain boundary fixture did not fail cleanly")
 goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
-for entry in (("struct_order_is_not_transitive", "goal"), ("struct_non_strict_order_is_not_transitive", "goal"), ("non_strict_chain_gives_no_strict_goal", "goal"), ("wrong_direction_chain", "goal")):
+for owner in ("struct_order_is_not_transitive", "struct_non_strict_order_is_not_transitive"):
+    if goals.get((owner, "goal")) is True:
+        raise SystemExit("dogfood failed: a user-defined struct order authorized a transitivity proof")
+    if any(declaration["name"] == owner and declaration["verified"] for declaration in report["declaration_details"]):
+        raise SystemExit("dogfood failed: a declaration with unsupported struct ordering was verified")
+    if (owner, "goal") not in goals and not any(finding["kind"] == "contract-proposition-type" and finding["name"] == owner for finding in report["findings"]):
+        raise SystemExit("dogfood failed: unsupported struct ordering was not rejected at admission")
+for entry in (("non_strict_chain_gives_no_strict_goal", "goal"), ("wrong_direction_chain", "goal")):
     if goals.get(entry) is not False:
         raise SystemExit("dogfood failed: %s was chained without the order to do it" % (entry,))
 print("dogfood comparison_chain: transitivity replays in the kernel and is refused for a user comparison")
@@ -2232,6 +2266,22 @@ if [[ "$runtime_status" -ne 0 ]]; then
 fi
 printf 'dogfood arena_runtime: malformed arenas/resource places rejected and valid DAG sharing accepted\n'
 
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/proposition-admission-runtime.o" "$ROOT_DIR/examples/kernel_proposition_admission_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/proposition-admission-runtime" "$runtime_dir/proposition-admission-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/proposition-admission-runtime" "$runtime_dir/proposition-admission-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+set +e
+"$runtime_dir/proposition-admission-runtime"
+admission_status=$?
+set -e
+if [[ "$admission_status" -ne 0 ]]; then
+    printf 'dogfood failed: native typed proposition-admission suite exited %s\n' "$admission_status" >&2
+    exit 1
+fi
+printf 'dogfood proposition_admission_runtime: abstract atoms, typed source terms, and tactic boundaries passed\n'
+
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/comparison-runtime.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
     link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$RUNTIME_OBJ"
@@ -2281,14 +2331,23 @@ printf 'dogfood effect_runtime: contained rows admitted and uncontained or malfo
 # guards the stage0 miscompile of allocations made through an unannotated mutable
 # reference inside a region-polymorphic function (see AUDIT.md); the full arena
 # harness then confirms the whole replay layer under the bootstrap compiler.
-bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
+# Respect the same explicit stage0 compiler supplied to the stage1 driver/build; otherwise a
+# stale, unrelated `elisac-stage0` earlier on PATH can replace the verified bootstrap product.
+bootstrap_compiler="${ELISA_BOOTSTRAP_COMPILER_BIN:-${ELISACORE_BIN:-}}"
+if [[ -z "$bootstrap_compiler" ]]; then
+    if elisa_compiler_is_stage0 "$COMPILER"; then
+        bootstrap_compiler="$COMPILER"
+    else
+        bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
+    fi
+fi
 if [[ -n "$bootstrap_compiler" ]]; then
     elisa_verify_stage0_provenance "$bootstrap_compiler" "$ROOT_DIR" || exit $?
     "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
     # The raw runtime support object intentionally leaves the optional profiler
     # ABI unresolved.  Keep the stage0 bootstrap link honest by supplying the
     # same small hook implementation used by the compiler parity harness.
-    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime; do
+    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime kernel_proposition_admission_runtime; do
         "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
         link_native "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o"
         set +e

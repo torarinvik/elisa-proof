@@ -35,6 +35,7 @@ PROOF_STDERR="$AUDIT_DIR/proof-report.stderr"
 set +e
 python3 - "$ROOT_DIR" "$AUDIT_SOURCE" "$TIME_LIMIT" "$RSS_LIMIT_KB" "$PROOF_STDOUT" "$PROOF_STDERR" "$AUDIT_DIR" <<'PY'
 import json
+import ctypes
 import os
 import signal
 import subprocess
@@ -57,6 +58,39 @@ command = [os.path.join(root, "build", "elisa-proof"), "--json", source]
 started = time.monotonic()
 peak_rss_kb = 0
 stop_reason = None
+rss_monitor = "ps"
+proc_pidinfo = None
+proc_taskinfo_size = 0
+if sys.platform == "darwin":
+    class ProcTaskInfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint64) for name in ("virtual_size", "resident_size", "total_user", "total_system", "threads_user", "threads_system")] + [(f"counter_{index}", ctypes.c_int32) for index in range(12)]
+
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        proc_pidinfo = libproc.proc_pidinfo
+        proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        proc_pidinfo.restype = ctypes.c_int
+        proc_taskinfo_size = ctypes.sizeof(ProcTaskInfo)
+        rss_monitor = "proc_pidinfo"
+    except (OSError, AttributeError):
+        proc_pidinfo = None
+
+def sample_rss_kb(pid):
+    if proc_pidinfo is not None:
+        task = ProcTaskInfo()
+        received = proc_pidinfo(pid, 4, 0, ctypes.byref(task), proc_taskinfo_size)
+        if received != proc_taskinfo_size:
+            return None
+        return task.resident_size // 1024
+    try:
+        rss_text = subprocess.check_output(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        return int(rss_text.split()[0]) if rss_text else None
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return None
 
 with open(stdout_path, "w", encoding="utf-8") as stdout, open(stderr_path, "w", encoding="utf-8") as stderr:
     try:
@@ -72,16 +106,11 @@ with open(stdout_path, "w", encoding="utf-8") as stdout, open(stderr_path, "w", 
         raise SystemExit(2)
 
     while process.poll() is None:
-        try:
-            rss_text = subprocess.check_output(
-                ["ps", "-o", "rss=", "-p", str(process.pid)],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-            if rss_text:
-                peak_rss_kb = max(peak_rss_kb, int(rss_text.split()[0]))
-        except (OSError, ValueError, subprocess.CalledProcessError):
-            pass
+        rss_kb = sample_rss_kb(process.pid)
+        if rss_kb is None:
+            stop_reason = "rss-monitor-unavailable"
+            break
+        peak_rss_kb = max(peak_rss_kb, rss_kb)
 
         elapsed = time.monotonic() - started
         if elapsed >= time_limit:
@@ -124,6 +153,7 @@ result = {
     "elapsed_seconds": round(elapsed, 2),
     "exit_code": process.returncode,
     "peak_rss_kb": peak_rss_kb,
+    "rss_monitor": rss_monitor,
     "report": stdout_path,
     "report_stderr": stderr_path,
     "report_status": parsed.get("status") if isinstance(parsed, dict) else None,
