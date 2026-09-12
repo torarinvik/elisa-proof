@@ -42,10 +42,10 @@ fi
 # otherwise it is read out of the stage1 wrapper, which names its worktree.
 RUNTIME_OBJ="${ELISA_RUNTIME_OBJ:-}"
 COMPILER_IS_STAGE1=0
-if [[ -z "$RUNTIME_OBJ" ]]; then
-    driver="$(grep -o '/[^"]*/scripts/elisac_stage1\.sh' "$COMPILER" 2>/dev/null | head -1 || true)"
-    if [[ -n "$driver" ]]; then
-        COMPILER_IS_STAGE1=1
+driver="$(grep -o '/[^"]*/scripts/elisac_stage1\.sh' "$COMPILER" 2>/dev/null | head -1 || true)"
+if [[ -n "$driver" ]]; then
+    COMPILER_IS_STAGE1=1
+    if [[ -z "$RUNTIME_OBJ" ]]; then
         candidate="${driver%/scripts/elisac_stage1.sh}/build/runtime/elisacore_runtime.o"
         [[ -f "$candidate" ]] && RUNTIME_OBJ="$candidate"
     fi
