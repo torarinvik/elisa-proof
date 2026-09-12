@@ -1,0 +1,216 @@
+# Source-side proposition formation. This is deliberately only the Boolean boundary, not a
+# second Elisa typechecker: it asks the compiler frontend for the sort of opaque atoms and follows
+# the logical constructors itself. The imported AST and its lexical type environment are supplied
+# by the adapter; the source-neutral kernel separately replays the resulting derivation.
+extend ElisaProof:
+    private:
+        const PROOF_PROPOSITION_TYPE_DEPTH_LIMIT: usize = 127
+
+        def proof_source_type_spelling(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Scope(_, name, _):
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_type_spelling(inner, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_source_type_spelling(base, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail:
+                        return proof_source_type_spelling(inner, depth + 1)
+                    return ""
+                Ast::Expr.Index(base, _, _):
+                    return proof_source_type_spelling(base, depth + 1)
+                _:
+                    return ""
+
+        def proof_source_inferred_type_spelling(inferred: Semantic::InferType) -> sview:
+            if inferred.name != "":
+                return inferred.name
+            return when inferred.kind:
+                Semantic::SemTypeKind.Bool -> "bool"
+                Semantic::SemTypeKind.Int -> "i64"
+                Semantic::SemTypeKind.Float -> "f64"
+                Semantic::SemTypeKind.Char -> "char"
+                Semantic::SemTypeKind.String -> "cstr"
+                Semantic::SemTypeKind.Named -> inferred.name
+                Semantic::SemTypeKind.Container -> inferred.name
+                Semantic::SemTypeKind.Tuple -> "tuple"
+                _ -> ""
+
+        def proof_source_range_element_type(range: Ast::Expr, names: darray[sview]&, types: darray[sview]&, table: Semantic::SymbolTable&) -> sview:
+            match range:
+                Ast::Expr.Array(elements, _):
+                    return "" if elements.count == 0
+                    inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(elements[0], names, types, table)
+                    return proof_source_inferred_type_spelling(inferred)
+                Ast::Expr.Binary(_, operator, _, _):
+                    if operator == TokenKind.RangeLt or operator == TokenKind.RangeLe:
+                        return "i64"
+                    return ""
+                _:
+                    return ""
+
+        def proof_source_binding_type(name: sview, names: darray[sview]&, source_types: darray[Ast::Expr]&) -> Ast::Expr:
+            found: mutable Ast::Expr = Ast::Expr.Absent
+            return found if names.count != source_types.count
+            for index in 0..<names.count |index, names, source_types, name, found|:
+                found <- source_types[index] if names[index] == name
+            return found
+
+        # A tiny source-type projection used only when the compiler's conservative inference
+        # returns Unknown for a supported container element or declared struct field. It reads
+        # declaration types; it never guesses from the kernel node kind.
+        def proof_source_expression_type_hint(expression: Ast::Expr, names: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Absent if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return proof_source_binding_type(name, names, source_types)
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_expression_type_hint(inner, names, source_types, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_source_expression_type_hint(base, names, source_types, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_source_expression_type_hint(inner, names, source_types, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return Ast::Expr.Absent
+                Ast::Expr.Field(object, field, _):
+                    base_type: Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, depth + 1)
+                    head: sview = proof_type_head_name(base_type, declarations, 0)
+                    resolved: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(declarations, head, field, 0)
+                    return resolved.type_expression if head != "" and resolved.count == 1
+                    return Ast::Expr.Absent
+                Ast::Expr.Index(object, _, _):
+                    container_type: Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, depth + 1)
+                    element: (known: bool, element: Ast::Expr) = proof_container_element_type(container_type, declarations, 0)
+                    return element.element if element.known
+                    return Ast::Expr.Absent
+                _:
+                    return Ast::Expr.Absent
+
+        def proof_source_type_is_boolean(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            match type_expression:
+                Ast::Expr.Ident("bool", _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return proof_source_type_is_boolean(alias.target, declarations, depth + 1) if alias.count == 1
+                    return false
+                Ast::Expr.Scope(_, "bool", _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_type_is_boolean(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_source_type_is_boolean(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_source_type_is_boolean(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return false
+                _:
+                    return false
+
+        # `names`/`types` are lexical bindings for this exact source position, not proof facts.
+        # Logical constructors require Boolean children. Opaque identifiers, calls, projections,
+        # and indexes are admitted only when the compiler's type inference says they are Bool.
+        def proof_source_proposition_is_boolean(expression: Ast::Expr, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, table: Semantic::SymbolTable&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
+            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    return proof_source_proposition_is_boolean(operand, names, types, source_types, declarations, table, annotations, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or or operator == TokenKind.FatArrow:
+                        return proof_source_proposition_is_boolean(left, names, types, source_types, declarations, table, annotations, depth + 1) and proof_source_proposition_is_boolean(right, names, types, source_types, declarations, table, annotations, depth + 1)
+                    pass
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return proof_source_proposition_is_boolean(condition, names, types, source_types, declarations, table, annotations, depth + 1) and proof_source_proposition_is_boolean(then_value, names, types, source_types, declarations, table, annotations, depth + 1) and proof_source_proposition_is_boolean(else_value, names, types, source_types, declarations, table, annotations, depth + 1)
+                Ast::Expr.Block(statements, body, _, _):
+                    return false if proof_quantifier_kind(expression, annotations) == ""
+                    return false if statements.count == 0 or statements.count > 2
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, declared_type, range, _):
+                            return false if binder == ""
+                            binder_type: mutable sview = proof_source_type_spelling(declared_type, depth + 1)
+                            binder_type <- proof_source_range_element_type(range, names, types, table) if binder_type == ""
+                            return false if binder_type == ""
+                            inner_names: mutable darray[sview] = []
+                            inner_types: mutable darray[sview] = []
+                            inner_source_types: mutable darray[Ast::Expr] = []
+                            inner_names.extend(names)
+                            inner_types.extend(types)
+                            inner_source_types.extend(source_types)
+                            inner_names.push(binder)
+                            inner_types.push(binder_type)
+                            inner_source_types.push(Ast::Expr.Ident(binder_type, Ast::expr_pos(range)))
+                            if statements.count == 2:
+                                match statements[1]:
+                                    Ast::Stmt.VarDecl(value_binder, value_type, _, _):
+                                        value_sort: sview = proof_source_type_spelling(value_type, depth + 1)
+                                        return false if value_binder == "" or value_binder == binder or value_sort == ""
+                                        inner_names.push(value_binder)
+                                        inner_types.push(value_sort)
+                                        inner_source_types.push(value_type)
+                                    _:
+                                        return false
+                            return proof_source_proposition_is_boolean(body, inner_names, inner_types, inner_source_types, declarations, table, annotations, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Call(Ast::Expr.Ident("old", _), arguments, _, _):
+                    return arguments.count == 1 and proof_source_proposition_is_boolean(arguments[0], names, types, source_types, declarations, table, annotations, depth + 1)
+                _:
+                    pass
+            inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(expression, names, types, table)
+            return true if inferred.kind == Semantic::SemTypeKind.Bool
+            hinted: Ast::Expr = proof_source_expression_type_hint(expression, names, source_types, declarations, 0)
+            return proof_source_type_is_boolean(hinted, declarations, 0)
+
+        def proof_validate_function_propositions(file: Ast::File&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void:
+            names: mutable darray[sview] = []
+            types: mutable darray[sview] = []
+            source_types: mutable darray[Ast::Expr] = []
+            for parameter in parameters |names, types, source_types|:
+                names.push(parameter.name)
+                types.push(proof_source_type_spelling(parameter.type_expression, 0))
+                source_types.push(parameter.type_expression)
+            requirements: mutable darray[Ast::Expr] = proof_contracts(body, "requires")
+            requirements.extend(proof_signature_contracts(file, position.line, "requires"))
+            for requirement in requirements |names, types, source_types, table, file, report, name|:
+                if not proof_source_proposition_is_boolean(requirement, names, types, source_types, file.top_decls, table, file.enum_annotations, 0):
+                    report.proof_obligation(false)
+                    source_position: Ast::Pos = Ast::expr_pos(requirement)
+                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, "requires expression is not Boolean in its source type environment")
+            post_names: mutable darray[sview] = []
+            post_types: mutable darray[sview] = []
+            post_source_types: mutable darray[Ast::Expr] = []
+            post_names.extend(names)
+            post_types.extend(types)
+            post_source_types.extend(source_types)
+            if return_type is declared_return_type:
+                post_names.push("result")
+                post_types.push(proof_source_type_spelling(declared_return_type, 0))
+                post_source_types.push(declared_return_type)
+            postconditions: mutable darray[Ast::Expr] = proof_contracts(body, "ensure")
+            postconditions.extend(proof_signature_contracts(file, position.line, "ensure"))
+            for postcondition in postconditions |post_names, post_types, post_source_types, table, file, report, name|:
+                if not proof_source_proposition_is_boolean(postcondition, post_names, post_types, post_source_types, file.top_decls, table, file.enum_annotations, 0):
+                    report.proof_obligation(false)
+                    source_position: Ast::Pos = Ast::expr_pos(postcondition)
+                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, "ensure expression is not Boolean in its source type environment")
+            assertions: mutable darray[Ast::Expr] = proof_contracts(body, "assert")
+            for assertion in assertions |post_names, post_types, post_source_types, table, file, report, name|:
+                if not proof_source_proposition_is_boolean(assertion, post_names, post_types, post_source_types, file.top_decls, table, file.enum_annotations, 0):
+                    report.proof_obligation(false)
+                    source_position: Ast::Pos = Ast::expr_pos(assertion)
+                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, "assert expression is not Boolean in its source type environment")
+
+        def proof_validate_propositions_in_declarations(file: Ast::File&, declarations: darray[Ast::Decl]&, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void:
+            for declaration in declarations |file, declarations, table, report|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
+                        proof_validate_function_propositions(file, name, parameters, return_type, body, position, table, report)
+                    Ast::Decl.Module(_, body, _):
+                        proof_validate_propositions_in_declarations(file, body, table, report)
+                    Ast::Decl.Scoped(body, _):
+                        proof_validate_propositions_in_declarations(file, body, table, report)
+                    _:
+                        pass
