@@ -4574,6 +4574,34 @@ into a later state cannot become an untraced replay premise. The method body rem
 existing resource and scalar rules. `examples/rejected_operator_effect.elisa` pins the regression;
 the stage1 build, independent replay, and full test matrix must all reject it without replay gaps.
 
+## Repaired: a certificate could be rebound to another goal attempt
+
+Replay matched a certificate against any successful attempt with the same root metadata, but did
+not require that attempt's `certificate_index` to equal the certificate's position in the report.
+Because the index also identifies certificates during recursive summary replay, a mutated report
+could redirect a goal to another certificate that happened to share its metadata.
+
+Replay now requires the exact indexed attempt to own the certificate. The adversarial executable
+replaces one attempt record with an out-of-range certificate index and checks that replay refuses
+it, then restores the record and checks that all certificates replay again. Per-goal and theorem
+output use the same binding predicate rather than trusting the report's raw index.
+
+## Repaired: a goal's displayed AST could differ from its replayed root
+
+The certificate AST was checked against the source-neutral kernel root, but the duplicated AST on
+the goal attempt was not. Reporting code could therefore pair a replayed certificate with a
+different displayed goal if a report was mutated after checking.
+
+Attempt admission now independently checks that its AST mirror agrees with the same kernel root
+(or, for resource, structural, and effect certificates, exactly matches their inert certificate
+mirror). The shared output predicate is used by focused-goal, report, and theorem-catalog output.
+The adversarial runtime replaces only the attempt's goal AST and requires replay and output
+admission to reject it, then restores the original and requires a complete replay.
+
+The Stage1 Gen2 test matrix and dogfood report/runtime/tactic suites pass after these repairs with
+zero replay gaps. Stage0 bootstrap was deliberately skipped: the available Stage0 did not pass the
+repository's provenance guard, so no Stage0 parity claim is made for this run.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
