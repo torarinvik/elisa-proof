@@ -151,6 +151,54 @@ names = {entry["name"] for entry in report["declaration_details"]}
 assert {"absolute_include_value", "absolute_include_entry"} <= names
 print("dogfood include_absolute: compiler and proof importer resolved the same file")
 PY
+working_directory_dir="$REPORT_DIR/working-directory"
+physical_working_dir="$working_directory_dir/physical"
+logical_working_dir="$working_directory_dir/logical"
+stale_working_dir="$working_directory_dir/stale"
+mkdir -p "$physical_working_dir" "$stale_working_dir"
+ln -s "$physical_working_dir" "$logical_working_dir"
+printf 'def shared_include_value() -> i64:\n    return 42\n' >"$physical_working_dir/library.elisa"
+printf 'def shared_include_value() -> i64:\n    return 0\n' >"$stale_working_dir/library.elisa"
+printf 'include "./library.elisa"\ninclude "%s/library.elisa"\ndef imported_entry() -> i64:\n    ensure result == 42\n    return 42\n' "$physical_working_dir" >"$physical_working_dir/duplicate_entry.elisa"
+printf 'include "./library.elisa"\ndef imported_entry() -> i64:\n    ensure result == 42\n    return 42\n' >"$physical_working_dir/stale_pwd_entry.elisa"
+(
+    cd -L "$logical_working_dir"
+    if "$COMPILER" -emit obj -O0 -o "$working_directory_dir/duplicate.o" duplicate_entry.elisa >/dev/null 2>&1; then
+        printf 'dogfood failed: compiler accepted duplicate includes through distinct symlink paths\n' >&2
+        exit 1
+    fi
+    if "$ROOT_DIR/build/elisa-proof" --json duplicate_entry.elisa >"$REPORT_DIR/include_symlink_cwd.json"; then
+        printf 'dogfood failed: proof importer merged paths that compiler keeps distinct\n' >&2
+        exit 1
+    fi
+)
+python3 - "$REPORT_DIR/include_symlink_cwd.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "failed"
+assert report["summary"]["semantic_errors"] > 0
+assert report["replay"]["gaps"] == 0
+print("dogfood include_symlink_cwd: lexical include identity matches compiler cwd")
+PY
+(
+    cd "$physical_working_dir"
+    PWD="$stale_working_dir" "$COMPILER" -emit obj -O0 -o "$working_directory_dir/stale-pwd.o" stale_pwd_entry.elisa >/dev/null 2>&1
+    PWD="$stale_working_dir" "$ROOT_DIR/build/elisa-proof" --json stale_pwd_entry.elisa >"$REPORT_DIR/include_stale_pwd.json"
+)
+python3 - "$REPORT_DIR/include_stale_pwd.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["summary"]["semantic_errors"] == 0
+assert report["replay"]["gaps"] == 0
+print("dogfood include_stale_pwd: compiler and prover reject stale cwd metadata")
+PY
 run_probe rejected_float_reflexivity examples/rejected_float_reflexivity.elisa 1
 run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
 run_probe rejected_float_field examples/rejected_float_field.elisa 1

@@ -4,6 +4,8 @@
 # root file; there is no second parser or host-language import model.
 extend ElisaProof:
     private:
+        const PROOF_IMPORT_PATH_BUFFER_SIZE: usize = 4096
+
         def proof_path_directory(path: darray[u8]&) -> darray[u8]:
             directory: mutable darray[u8] = []
             last_slash: mutable i64 = -1
@@ -26,6 +28,32 @@ extend ElisaProof:
 
         def proof_path_is_absolute(path: darray[u8]&) -> bool:
             return path.count > 0 and path[0] == 47
+
+        # Match the compiler's working-directory choice: preserve a symlinked `$PWD` only
+        # when it resolves to the same directory as getcwd(). This matters because include-once
+        # identity is lexical; using the physical cwd unconditionally can merge two paths that
+        # the compiler keeps distinct, or split paths that the compiler treats as one.
+        def proof_same_directory(left: darray[u8]&, right: darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+            left_storage: mutable darray[u8] = []
+            left_storage.extend(left)
+            left_storage.push(0)
+            right_storage: mutable darray[u8] = []
+            right_storage.extend(right)
+            right_storage.push(0)
+            left_path: cstr = (&left_storage[0]).cast[cstr] can Unsafe.PointerCast
+            right_path: cstr = (&right_storage[0]).cast[cstr] can Unsafe.PointerCast
+            left_buffer: mutable darray[u8] = []
+            left_buffer.resize(PROOF_IMPORT_PATH_BUFFER_SIZE)
+            right_buffer: mutable darray[u8] = []
+            right_buffer.resize(PROOF_IMPORT_PATH_BUFFER_SIZE)
+            left_target: void& = (&left_buffer[0]).cast[void&] can Unsafe.PointerCast
+            right_target: void& = (&right_buffer[0]).cast[void&] can Unsafe.PointerCast
+            if proof_realpath(left_path, left_target) is resolved_left:
+                if proof_realpath(right_path, right_target) is resolved_right:
+                    for index in 0..<PROOF_IMPORT_PATH_BUFFER_SIZE |left_buffer, right_buffer|:
+                        return false if left_buffer[index] != right_buffer[index]
+                        return true if left_buffer[index] == 0
+            return false
 
         # Match the compiler's filepath.Clean behavior. The old importer removed only `./`,
         # which let `x`, `./x`, and `sub/../x` become three seen-set entries even though they
@@ -86,13 +114,26 @@ extend ElisaProof:
             normalized: darray[u8] = proof_normalize_path(path)
             return normalized if proof_path_is_absolute(normalized)
             cwd_buffer: mutable darray[u8] = []
-            cwd_buffer.resize(4096)
+            cwd_buffer.resize(PROOF_IMPORT_PATH_BUFFER_SIZE)
             target: void& = (&cwd_buffer[0]).cast[void&] can Unsafe.PointerCast
-            _ = getcwd(target, 4096)
-            cwd: mutable darray[u8] = []
-            for index in 0..<cwd_buffer.count |cwd, cwd_buffer|:
+            _ = getcwd(target, PROOF_IMPORT_PATH_BUFFER_SIZE)
+            physical_cwd: mutable darray[u8] = []
+            for index in 0..<cwd_buffer.count |physical_cwd, cwd_buffer|:
                 break if cwd_buffer[index] == 0
-                cwd.push(cwd_buffer[index])
+                physical_cwd.push(cwd_buffer[index])
+            pwd_name: mutable darray[u8] = []
+            pwd_name.push(80)
+            pwd_name.push(87)
+            pwd_name.push(68)
+            pwd_name.push(0)
+            pwd_key: cstr = (&pwd_name[0]).cast[cstr] can Unsafe.PointerCast
+            cwd: mutable darray[u8] = physical_cwd
+            if proof_getenv(pwd_key) is logical_cwd:
+                logical: mutable darray[u8] = []
+                for index in 0..<PROOF_IMPORT_PATH_BUFFER_SIZE |logical, logical_cwd|:
+                    break if logical_cwd[index] == 0
+                    logical.push(logical_cwd[index])
+                cwd <- logical if proof_path_is_absolute(logical) and proof_same_directory(logical, physical_cwd)
             return normalized if cwd.count == 0
             joined: mutable darray[u8] = []
             joined.extend(cwd)
