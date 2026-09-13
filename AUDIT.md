@@ -4602,6 +4602,22 @@ The Stage1 Gen2 test matrix and dogfood report/runtime/tactic suites pass after 
 zero replay gaps. Stage0 bootstrap was deliberately skipped: the available Stage0 did not pass the
 repository's provenance guard, so no Stage0 parity claim is made for this run.
 
+## Repaired: imported source could claim the proof system's internal identifiers
+
+The proof kernel encodes compiler-derived type witnesses and fresh rebinding symbols as ordinary
+identifier names in its current source-neutral AST. Elisa itself permits declarations such as
+`__elisa_unsigned_type_bound`, so a source program could define that predicate and use its call in
+a contract. The producer then treated the user predicate as an unsigned-type witness and marked
+`value >= 0` proven for an `i64`; independent replay refused the certificate, leaving a replay gap
+and an internally inconsistent `verified` declaration result. The same naming convention is used
+by the checker's fixed fresh-symbol pool.
+
+The importer now scans the compiler's collected globals, function parameters, local binders, and
+references before generating any proof state. Any source identifier in the reserved `__elisa_` namespace
+is reported as unsupported, with no proof attempts or certificates emitted. The adversarial marker
+and rebinding fixtures cover both collision classes; Stage1 accepts the marker fixture as Elisa
+source, while the proof assistant rejects both at the trust boundary with zero replay gaps.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
