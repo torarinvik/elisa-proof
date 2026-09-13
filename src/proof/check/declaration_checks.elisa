@@ -87,44 +87,90 @@ extend ElisaProof:
                 _:
                     unknown <- true
 
+        def proof_type_audit_declaration_name(declaration: Ast::Decl) -> sview:
+            match declaration:
+                Ast::Decl.Alias(name, _, _):
+                    return name
+                Ast::Decl.Struct(name, _, _, _, _, _, _):
+                    return name
+                _:
+                    return ""
+
+        def proof_type_audit_collect_declarations(declarations: darray[Ast::Decl], index: mutable ProofTypeAuditIndex&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |index, depth|:
+                match declaration:
+                    Ast::Decl.Alias(name, _, _):
+                        return false if index.entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+                        index.entries <- index.entries.push(ProofTypeAuditDeclaration{declaration: declaration, name_hash: proof_name_hash(name)})
+                    Ast::Decl.Struct(name, _, _, _, _, _, _):
+                        return false if index.entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+                        index.entries <- index.entries.push(ProofTypeAuditDeclaration{declaration: declaration, name_hash: proof_name_hash(name)})
+                    Ast::Decl.Module(_, body, _):
+                        return false if not proof_type_audit_collect_declarations(body, index, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_type_audit_collect_declarations(body, index, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_type_audit_index(declarations: darray[Ast::Decl]&) -> ProofTypeAuditIndex can[Memory.Allocate, Abort.Panic]:
+            index: mutable ProofTypeAuditIndex = ProofTypeAuditIndex{entries: [], bucket_heads: [], next_indices: [], complete: false}
+            return index if not proof_type_audit_collect_declarations(declarations, &index, 0)
+            count: usize = index.entries.count
+            capacity: usize = proof_index_capacity(count)
+            if capacity == 0:
+                index.complete <- true
+                return index
+            index.bucket_heads.resize(capacity)
+            index.next_indices.resize(count)
+            for slot in 0..<capacity |slot, count|:
+                index.bucket_heads[slot] <- count
+            for entry in 0..<count |entry, index, capacity, count|:
+                hash: u32 = index.entries[entry].name_hash
+                slot: usize = (hash.i64() % capacity.i64()).usize()
+                index.next_indices[entry] <- index.bucket_heads[slot]
+                index.bucket_heads[slot] <- entry
+            index.complete <- true
+            return index
+
         # Alias spelling must not hide a floating parameter from the proof-language gate.
-        # Search nested declaration scopes too; ambiguous names are handled conservatively.
-        # Cyclic or excessively deep aliases remain unsupported rather than being guessed safe.
-        def proof_type_may_contain_float_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, depth: usize, visited: darray[sview]&) -> bool:
-            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        # Search every exact-name match in the import's collision-safe declaration index;
+        # cycles, unknown AST forms, and incomplete indexes remain conservatively unsupported.
+        def proof_type_may_contain_float_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, depth: usize, visited: darray[sview]&) -> bool:
+            return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             type_names: mutable darray[sview] = []
             unknown: mutable bool = false
             proof_collect_type_names(expression, &type_names, &unknown, 0)
             return true if unknown
             return true if any referenced in type_names where referenced in {"f16", "f32", "f64", "float"}
-            for declaration in declarations |type_names, all_declarations, depth, visited|:
-                match declaration:
-                    Ast::Decl.Alias(name, target, _):
-                        if any referenced in type_names where referenced == name:
-                            continue if any seen in visited where seen == name
-                            nested_visited: mutable darray[sview] = []
-                            nested_visited.extend(visited)
-                            nested_visited.push(name)
-                            return true if proof_type_may_contain_float_depth(target, all_declarations, all_declarations, depth + 1, nested_visited)
-                    Ast::Decl.Struct(name, fields, _, _, _, _, _):
-                        if any referenced in type_names where referenced == name:
-                            continue if any seen in visited where seen == name
-                            nested_visited: mutable darray[sview] = []
-                            nested_visited.extend(visited)
-                            nested_visited.push(name)
-                            for field in fields |all_declarations, depth, nested_visited|:
-                                return true if proof_type_may_contain_float_depth(field.type_expression, all_declarations, all_declarations, depth + 1, nested_visited)
-                    Ast::Decl.Module(_, body, _):
-                        return true if proof_type_may_contain_float_depth(expression, body, all_declarations, depth + 1, visited)
-                    Ast::Decl.Scoped(body, _):
-                        return true if proof_type_may_contain_float_depth(expression, body, all_declarations, depth + 1, visited)
-                    _:
-                        pass
+            return false if index.bucket_heads.count == 0
+            for referenced in type_names |referenced, index, depth, visited|:
+                continue if any seen in visited where seen == referenced
+                hash: u32 = proof_name_hash(referenced)
+                slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
+                entry: mutable usize = index.bucket_heads[slot]
+                nested_visited: mutable darray[sview] = []
+                nested_visited.extend(visited)
+                nested_visited.push(referenced)
+                while entry < index.entries.count |entry, referenced, hash, index, depth, nested_visited|:
+                    audit_entry: ProofTypeAuditDeclaration = index.entries[entry]
+                    declaration: Ast::Decl = audit_entry.declaration
+                    if audit_entry.name_hash == hash and proof_type_audit_declaration_name(declaration) == referenced:
+                        match declaration:
+                            Ast::Decl.Alias(_, target, _):
+                                return true if proof_type_may_contain_float_depth(target, index, depth + 1, nested_visited)
+                            Ast::Decl.Struct(_, fields, _, _, _, _, _):
+                                for field in fields |index, depth, nested_visited|:
+                                    return true if proof_type_may_contain_float_depth(field.type_expression, index, depth + 1, nested_visited)
+                            _:
+                                pass
+                    entry <- index.next_indices[entry]
             return false
 
-        def proof_type_may_contain_float(expression: Ast::Expr, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+        def proof_type_may_contain_float(expression: Ast::Expr, index: ProofTypeAuditIndex) -> bool:
             visited: darray[sview] = []
-            return proof_type_may_contain_float_depth(expression, declarations, all_declarations, depth, visited)
+            return proof_type_may_contain_float_depth(expression, index, 0, visited)
 
         def proof_check_function(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
             # The logical kernel currently models ordinary equality and integer arithmetic,
@@ -150,7 +196,7 @@ extend ElisaProof:
                 if function_index < functions.param_starts.count and parameter_start + parameter_slot < functions.all_parameter_may_contain_float.count:
                     contains_float <- functions.all_parameter_may_contain_float[parameter_start + parameter_slot]
                 else:
-                    contains_float <- proof_type_may_contain_float(parameter.type_expression, file.top_decls, file.top_decls, 0)
+                    contains_float <- proof_type_may_contain_float(parameter.type_expression, functions.type_audit_index)
                 if contains_float:
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "floating-point parameter verification requires IEEE floating-point semantics")
@@ -207,7 +253,7 @@ extend ElisaProof:
             preserves: mutable darray[ProofFramePlace] = proof_frame_body_places(body, "preserves")
             header_changes: mutable darray[ProofFramePlace] = []
             header_preserves: mutable darray[ProofFramePlace] = []
-            proof_frame_collect_annotations(file, function_name, &header_changes, &header_preserves)
+            proof_frame_collect_annotations(file, functions.frame_annotation_index, function_name, &header_changes, &header_preserves)
             changes.extend(header_changes)
             preserves.extend(header_preserves)
             proof_check_frame_specs(body, changes, preserves, frame_parameters, report, function_name)

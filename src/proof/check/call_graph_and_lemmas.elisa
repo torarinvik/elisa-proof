@@ -1,5 +1,13 @@
 extend ElisaProof:
     private:
+        # Lemma annotations are stored in the parser's flat side table. Build a collision-safe
+        # set once before declaration traversal instead of rescanning that entire table for every
+        # function. Duplicate annotations for the same name remain a single marker.
+        struct ProofLemmaAnnotationIndex:
+            names: mutable darray[sview]
+            name_hashes: mutable darray[u32]
+            slot_values: mutable darray[usize]
+
         def proof_expr_may_be_opaque_reference(expression: Ast::Expr) -> bool:
             match expression:
                 Ast::Expr.Call(_, _, _, _):
@@ -105,12 +113,74 @@ extend ElisaProof:
                     return true if proof_argument_may_alias_place(argument, place) and proof_current_parameter(names, parameter_names, place.root)
             return false
 
-        def proof_frame_collect_annotations(file: Ast::File&, function_name: sview, changes: mutable darray[ProofFramePlace]&, preserves: mutable darray[ProofFramePlace]&) -> void:
+        def proof_frame_annotation_marker(line: u32) -> bool:
+            return line == 3900000010 or line == 3900000006 or line == 3900000003 or line == 3900000011 or line == 3900000012 or line == 3900000077
+
+        def proof_frame_annotation_index(file: Ast::File&) -> ProofFrameAnnotationIndex can[Memory.Allocate, Abort.Panic]:
+            marker_count: mutable usize = 0
+            for annotation in file.enum_annotations:
+                marker_count <- marker_count + 1 if annotation.owner != "" and proof_frame_annotation_marker(annotation.line)
+            index: mutable ProofFrameAnnotationIndex = ProofFrameAnnotationIndex{owner_names: [], owner_hashes: [], slot_values: [], head_indices: [], tail_indices: [], annotation_indices: [], next_indices: []}
+            capacity: usize = proof_index_capacity(marker_count)
+            return index if capacity == 0
+            index.slot_values.resize(capacity)
+            index.annotation_indices.resize(marker_count)
+            index.next_indices.resize(marker_count)
+            for slot in 0..<capacity |slot, marker_count|:
+                index.slot_values[slot] <- marker_count
+            row: mutable usize = 0
+            for source_index in 0..<file.enum_annotations.count |source_index, file, row, index, capacity, marker_count|:
+                annotation: Ast::EnumAnnotation = file.enum_annotations[source_index]
+                continue if annotation.owner == "" or not proof_frame_annotation_marker(annotation.line)
+                index.annotation_indices[row] <- source_index
+                index.next_indices[row] <- marker_count
+                hash: u32 = proof_name_hash(annotation.owner)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, hash, annotation, row, index, capacity, marker_count|:
+                    current: usize = index.slot_values[slot]
+                    if current == marker_count:
+                        owner_index: usize = index.owner_names.count
+                        index.owner_names <- index.owner_names.push(annotation.owner)
+                        index.owner_hashes <- index.owner_hashes.push(hash)
+                        index.head_indices <- index.head_indices.push(row)
+                        index.tail_indices <- index.tail_indices.push(row)
+                        index.slot_values[slot] <- owner_index
+                        break
+                    if index.owner_hashes[current] == hash and index.owner_names[current] == annotation.owner:
+                        last_row: usize = index.tail_indices[current]
+                        index.next_indices[last_row] <- row
+                        index.tail_indices[current] <- row
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                row <- row + 1
+            return index
+
+        def proof_frame_annotation_owner(index: ProofFrameAnnotationIndex, owner: sview) -> usize:
+            capacity: usize = index.slot_values.count
+            return index.owner_names.count if capacity == 0
+            wanted_hash: u32 = proof_name_hash(owner)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, owner, index, capacity|:
+                current: usize = index.slot_values[slot]
+                return index.owner_names.count if current >= index.owner_names.count
+                return current if index.owner_hashes[current] == wanted_hash and index.owner_names[current] == owner
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return index.owner_names.count
+
+        def proof_frame_collect_annotations(file: Ast::File&, frame_index: ProofFrameAnnotationIndex, function_name: sview, changes: mutable darray[ProofFramePlace]&, preserves: mutable darray[ProofFramePlace]&) -> void:
             header_change_roots: mutable darray[sview] = []
             header_change_fields: mutable darray[sview] = []
             preserved_roots: mutable darray[sview] = []
             preserved_fields: mutable darray[sview] = []
-            for annotation in file.enum_annotations |header_change_roots, header_change_fields, preserved_roots, preserved_fields|:
+            owner_index: usize = proof_frame_annotation_owner(frame_index, function_name)
+            return if owner_index >= frame_index.owner_names.count
+            annotation_row: mutable usize = frame_index.head_indices[owner_index]
+            while annotation_row < frame_index.annotation_indices.count |annotation_row, file, frame_index, owner_index, function_name, header_change_roots, header_change_fields, preserved_roots, preserved_fields|:
+                annotation: Ast::EnumAnnotation = file.enum_annotations[frame_index.annotation_indices[annotation_row]]
                 if annotation.owner == function_name and annotation.line == 3900000010:
                     changes.push(ProofFramePlace{root: annotation.name, field: "", field2: "", field3: "", depth: 0, whole: true})
                 if annotation.owner == function_name and annotation.line == 3900000006:
@@ -126,6 +196,7 @@ extend ElisaProof:
                 # absent; the paired 0006/0003 rows above retain the exact root.
                 if annotation.owner == function_name and annotation.line == 3900000077 and header_change_fields.count == 0:
                     header_change_fields.push(annotation.name)
+                annotation_row <- frame_index.next_indices[annotation_row]
             for index in 0..<header_change_fields.count |changes, header_change_roots, header_change_fields, index|:
                 root: sview = header_change_roots[index] if index < header_change_roots.count else ""
                 changes.push(ProofFramePlace{root: root, field: header_change_fields[index], field2: "", field3: "", depth: 1, whole: false})
@@ -134,9 +205,47 @@ extend ElisaProof:
                 preserves.push(ProofFramePlace{root: preserved_roots[index], field: preserved_fields[index], field2: "", field3: "", depth: 1, whole: false})
                 index <- index + 1
 
-        def proof_function_is_lemma(file: Ast::File&, name: sview) -> bool:
+        def proof_lemma_annotation_index(file: Ast::File&) -> ProofLemmaAnnotationIndex can[Memory.Allocate, Abort.Panic]:
+            marker_count: mutable usize = 0
             for annotation in file.enum_annotations:
-                return true if annotation.owner == "__lemma" and annotation.name == name
+                marker_count <- marker_count + 1 if annotation.owner == "__lemma"
+            index: mutable ProofLemmaAnnotationIndex = ProofLemmaAnnotationIndex{names: [], name_hashes: [], slot_values: []}
+            capacity: usize = proof_index_capacity(marker_count)
+            return index if capacity == 0
+            index.slot_values.resize(capacity)
+            for slot in 0..<capacity |slot, marker_count|:
+                index.slot_values[slot] <- marker_count
+            for annotation in file.enum_annotations |index, capacity, marker_count|:
+                continue if annotation.owner != "__lemma"
+                hash: u32 = proof_name_hash(annotation.name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, hash, annotation, index, capacity, marker_count|:
+                    current: usize = index.slot_values[slot]
+                    if current == marker_count:
+                        name_index: usize = index.names.count
+                        index.names <- index.names.push(annotation.name)
+                        index.name_hashes <- index.name_hashes.push(hash)
+                        index.slot_values[slot] <- name_index
+                        break
+                    if index.name_hashes[current] == hash and index.names[current] == annotation.name:
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+            return index
+
+        def proof_function_is_lemma(index: ProofLemmaAnnotationIndex, name: sview) -> bool:
+            capacity: usize = index.slot_values.count
+            return false if capacity == 0
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, name, index, capacity|:
+                current: usize = index.slot_values[slot]
+                return false if current == index.names.count
+                return true if index.name_hashes[current] == wanted_hash and index.names[current] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
             return false
 
         # Name lookup is on a hot path during call-graph construction and SCC analysis. The
@@ -219,11 +328,11 @@ extend ElisaProof:
         # Build the same kind of flat lemma summary used by the compiler's assert-by checker.
         # A call can contribute only a postcondition from a lemma whose preconditions are
         # established at the call site; opaque ordinary functions never contribute facts.
-        def proof_collect_lemmas(file: Ast::File&, declarations: darray[Ast::Decl], lemmas: mutable ProofLemmaTable&) -> void:
+        def proof_collect_lemmas(file: Ast::File&, declarations: darray[Ast::Decl], lemma_markers: ProofLemmaAnnotationIndex, lemmas: mutable ProofLemmaTable&) -> void:
             for declaration in declarations |file, lemmas|:
                 match declaration:
                     Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
-                        if proof_function_is_lemma(file, name):
+                        if proof_function_is_lemma(lemma_markers, name):
                             lemmas.names <- lemmas.names.push(name)
                             lemmas.name_hashes <- lemmas.name_hashes.push(proof_name_hash(name))
                             lemmas.param_starts <- lemmas.param_starts.push(lemmas.all_params.count)
@@ -275,9 +384,9 @@ extend ElisaProof:
                             lemmas.requires_counts <- lemmas.requires_counts.push(requires_count)
                             lemmas.ensure_counts <- lemmas.ensure_counts.push(ensures_count)
                     Ast::Decl.Module(_, module_body, _):
-                        proof_collect_lemmas(file, module_body, lemmas)
+                        proof_collect_lemmas(file, module_body, lemma_markers, lemmas)
                     Ast::Decl.Scoped(scoped_body, _):
-                        proof_collect_lemmas(file, scoped_body, lemmas)
+                        proof_collect_lemmas(file, scoped_body, lemma_markers, lemmas)
                     _:
                         pass
 
@@ -470,4 +579,3 @@ extend ElisaProof:
             for index in 0..<count |index, component_ids, component_sizes, self_edges, lemmas|:
                 lemmas.recursive_component_ids.push(component_ids[index])
                 lemmas.recursive.push(component_sizes[component_ids[index]] > 1 or self_edges[index])
-
