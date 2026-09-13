@@ -127,6 +127,30 @@ run_probe quantifier_hypothesis examples/quantifier_hypothesis.elisa 0
 run_probe rejected_include_trailing examples/rejected_include_trailing.elisa 1
 run_probe include_alias_diamond examples/include_alias_diamond.elisa 0
 run_probe rejected_include_cycle examples/rejected_include_cycle_a.elisa 1
+
+# Absolute include paths are valid in the compiler and must not be rebased against the
+# including file's directory by the proof importer.
+absolute_include_dir="$REPORT_DIR/absolute-include"
+mkdir -p "$absolute_include_dir"
+absolute_include_library="$absolute_include_dir/library.elisa"
+absolute_include_entry="$absolute_include_dir/entry.elisa"
+printf 'def absolute_include_value() -> i64:\n    ensure result == 42\n    return 42\n' >"$absolute_include_library"
+printf 'include "%s"\ndef absolute_include_entry() -> i64:\n    ensure result == 42\n    return 42\n' "$absolute_include_library" >"$absolute_include_entry"
+"$COMPILER" -emit obj -O0 -o "$absolute_include_dir/entry.o" "$absolute_include_entry" >/dev/null 2>&1
+"$ROOT_DIR/build/elisa-proof" --json "$absolute_include_entry" >"$REPORT_DIR/include_absolute.json"
+python3 - "$REPORT_DIR/include_absolute.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["summary"]["semantic_errors"] == 0
+assert report["replay"]["gaps"] == 0
+names = {entry["name"] for entry in report["declaration_details"]}
+assert {"absolute_include_value", "absolute_include_entry"} <= names
+print("dogfood include_absolute: compiler and proof importer resolved the same file")
+PY
 run_probe rejected_float_reflexivity examples/rejected_float_reflexivity.elisa 1
 run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
 run_probe rejected_float_field examples/rejected_float_field.elisa 1
