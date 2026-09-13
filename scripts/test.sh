@@ -3242,13 +3242,15 @@ fi
 set +e
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/reserved-proof-name.o" "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" >/dev/null 2>&1
 reserved_source_compiler_status=$?
-run_json_report "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == [{"kind": "proof-internal-name", "status": "unsupported", "line": 2, "name": "__elisa_unsigned_type_bound", "message": "source identifier uses the reserved __elisa_ proof-system namespace", "counterexample_found": False, "goal_id": None, "counterexample": []}]'
+run_json_report "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == [{"kind": "proof-internal-name", "status": "unsupported", "line": 2, "name": "__elisa_unsigned_type_bound", "message": "source identifier collides with a proof-system internal name", "counterexample_found": False, "goal_id": None, "counterexample": []}]'
 reserved_marker_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_rebind_symbol_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"][0]["kind"] == "proof-internal-name"; assert report["findings"][0]["name"] == "__elisa_rebind_0"; assert report["findings"][0]["line"] == 5'
 reserved_rebind_status=${PIPESTATUS[1]}
+run_json_report "$ROOT_DIR/examples/internal_prefix_noncollision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["verification_state"] == "proved"; assert report["replay"]["gaps"] == 0; assert not report["findings"]'
+reserved_noncollision_status=${PIPESTATUS[1]}
 set -e
-if [[ "$reserved_source_compiler_status" -ne 0 || "$reserved_marker_status" -ne 0 || "$reserved_rebind_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: source code collided with the reserved proof identifier namespace\n' >&2
+if [[ "$reserved_source_compiler_status" -ne 0 || "$reserved_marker_status" -ne 0 || "$reserved_rebind_status" -ne 0 || "$reserved_noncollision_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: source code collided with a proof-system internal name\n' >&2
     exit 1
 fi
 

@@ -4670,11 +4670,15 @@ a contract. The producer then treated the user predicate as an unsigned-type wit
 and an internally inconsistent `verified` declaration result. The same naming convention is used
 by the checker's fixed fresh-symbol pool.
 
-The importer now scans the compiler's collected globals, function parameters, local binders, and
-references before generating any proof state. Any source identifier in the reserved `__elisa_` namespace
-is reported as unsupported, with no proof attempts or certificates emitted. The adversarial marker
-and rebinding fixtures cover both collision classes; Stage1 accepts the marker fixture as Elisa
-source, while the proof assistant rejects both at the trust boundary with zero replay gaps.
+The importer scans the compiler's collected globals, function parameters, local binders, and
+references before generating any proof state. It rejects exact collisions with the proof kernel's
+serialized type-witness names and fixed fresh-rebinding pool, with no proof attempts or certificates
+emitted. A full-source dogfood run then exposed that reserving the entire `__elisa_` prefix also
+rejected legitimate compiler-library globals such as `__elisa_region_cache`, preventing the proof
+assistant from importing the compiler it is intended to verify. The guard now reserves only names
+the proof system actually emits; an unrelated `__elisa_` source name is covered by a positive
+regression while forged witness and rebind names remain rejected. This preserves the collision
+boundary without treating a compiler naming convention as proof-system ownership.
 
 ## Coverage still required
 
