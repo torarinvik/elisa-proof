@@ -1706,7 +1706,8 @@ for owner in ("a_rebound_literal_loses_its_guard", "a_guard_for_one_literal_is_n
 print("dogfood replay_literal_facts: a fact over a collection literal replays, and only against its own literal")
 PY
 
-# Nonnegativity needs no wrap proof for a subtraction-free unsigned term, and admits nothing else.
+# Every unsigned result is nonnegative even if it wraps; other integer-bound claims still need a
+# wrap proof. A width marker must not be inherited from a signed call result or branch condition.
 python3 - "$REPORT_DIR/unsigned_nonnegative_sum.json" "$REPORT_DIR/rejected_unsigned_nonnegative_sum.json" <<'PY'
 import json
 import sys
@@ -1725,7 +1726,10 @@ with open(refused, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: nonnegativity boundary fixture did not fail cleanly")
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("a_signed_sum_may_be_negative", "an_unguarded_difference_keeps_the_guard", "a_nested_difference_keeps_it_too", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"):
+for owner in ("an_unguarded_difference_is_nonnegative", "a_nested_difference_is_nonnegative"):
+    if reasons.get(owner) != "verified":
+        raise SystemExit("dogfood failed: unsigned result nonnegativity was lost for %s" % owner)
+for owner in ("a_signed_sum_may_be_negative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"):
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s was admitted by the nonnegativity rule" % owner)
 print("dogfood unsigned_nonnegative_sum: an unsigned sum is nonnegative without a wrap proof, and bounds nothing")

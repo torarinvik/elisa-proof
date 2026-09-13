@@ -1,5 +1,7 @@
 module ElisaProofKernelReplay:
     private:
+        const PROOF_KERNEL_SCALAR_ELEMENT_DEPTH_LIMIT: i64 = 64
+
         struct ProofKernelReplayInt:
             known: bool
             value: i64
@@ -188,6 +190,17 @@ module ElisaProofKernelReplay:
             return left.value <= right.value if operator == "<="
             return left.value >= right.value if operator == ">="
             return false
+
+        # Direct nonnegative integer literals cannot overflow under any admitted primitive
+        # integer type. Replay these ground comparisons before inspecting unrelated premises;
+        # otherwise one irrelevant wrapping expression can block a tautological kernel check.
+        # Keep this narrower than constant evaluation, since compound constant arithmetic may
+        # wrap in a contextually inferred unsigned type.
+        def proof_kernel_replay_direct_literal_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
+            left: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, left_root)
+            right: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, right_root)
+            return false if not left.known or not right.known or left.node.kind != "int" or right.node.kind != "int"
+            return proof_kernel_replay_constant_comparison(nodes, left_root, operator, right_root)
 
         # Mirror the exact closed rewrites performed by `proof_tactic_simplify_expression`.
         # This is deliberately narrower than logical entailment: only literals and Boolean
@@ -389,6 +402,35 @@ module ElisaProofKernelReplay:
                 width <- marker.width if width == 0 or marker.width < width
             return width
 
+        def proof_kernel_replay_unsigned_indexed_element_path(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> (known: bool, container: usize, subscripts: i64):
+            requires depth <= 127
+            decreases 127 - depth
+            return (false, 0, 0) if depth >= 127 or not ElisaProofKernelCore::depth_valid(depth) or not proof_kernel_replay_valid(nodes, root)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return (false, 0, 0) if not located.known or not proof_kernel_replay_arena_shape_valid(located.node)
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "index":
+                path: (known: bool, container: usize, subscripts: i64) = proof_kernel_replay_unsigned_indexed_element_path(nodes, children, node.left, depth + 1)
+                return (false, 0, 0) if not path.known or path.subscripts >= PROOF_KERNEL_SCALAR_ELEMENT_DEPTH_LIMIT
+                return (true, path.container, path.subscripts + 1)
+            if node.kind == "index-n":
+                return (false, 0, 0) if node.children_count == 0 or node.children_count > PROOF_KERNEL_SCALAR_ELEMENT_DEPTH_LIMIT.usize() or not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                path: (known: bool, container: usize, subscripts: i64) = proof_kernel_replay_unsigned_indexed_element_path(nodes, children, node.left, depth + 1)
+                count: i64 = node.children_count.i64()
+                return (false, 0, 0) if not path.known or path.subscripts > PROOF_KERNEL_SCALAR_ELEMENT_DEPTH_LIMIT - count
+                return (true, path.container, path.subscripts + count)
+            return (true, root, 0)
+
+        def proof_kernel_replay_unsigned_element_width_for_expression(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> i64:
+            path: (known: bool, container: usize, subscripts: i64) = proof_kernel_replay_unsigned_indexed_element_path(nodes, children, root, 0)
+            return 0 if not path.known or path.subscripts == 0
+            width: mutable i64 = 0
+            for fact in facts |fact, nodes, children, path, width|:
+                marker: (known: bool, root: usize, depth: i64, width: i64) = proof_kernel_replay_element_marker(nodes, children, fact)
+                continue if not marker.known or marker.width == 0 or marker.depth != path.subscripts or not proof_kernel_replay_expr_equal(nodes, children, marker.root, path.container, 0)
+                width <- marker.width if width == 0 or marker.width < width
+            return width
+
         def proof_kernel_replay_unsigned_width_in_expression(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], depth: usize) -> i64:
             requires depth <= 127
             decreases 127 - depth
@@ -399,6 +441,10 @@ module ElisaProofKernelReplay:
             node: ElisaProofKernelCore::ProofKernelNode = located.node
             if node.kind == "ident":
                 return proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, node.name)
+            if node.kind == "field":
+                return proof_kernel_replay_place_marker_width(nodes, children, facts, root)
+            if node.kind == "index" or node.kind == "index-n":
+                return proof_kernel_replay_unsigned_element_width_for_expression(nodes, children, facts, root)
             if node.kind == "unary":
                 return proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, depth + 1)
             if node.kind == "binary":
@@ -408,10 +454,11 @@ module ElisaProofKernelReplay:
                 return left_width if right_width == 0 or left_width < right_width
                 return right_width
             if node.kind == "if":
-                condition_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, depth + 1)
                 then_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.right, facts, depth + 1)
                 else_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.auxiliary, facts, depth + 1)
-                return condition_width if condition_width != 0 and (then_width == 0 or condition_width < then_width) and (else_width == 0 or condition_width < else_width)
-                return then_width if then_width != 0 and (else_width == 0 or then_width < else_width)
+                return 0 if then_width == 0 or else_width == 0
+                return then_width if then_width < else_width
                 return else_width
+            # In particular, a call's argument and callee types do not establish its return
+            # width. The replay kernel refuses that inference just as the source producer does.
             return 0

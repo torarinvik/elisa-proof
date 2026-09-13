@@ -41,6 +41,64 @@ tests require that no arithmetic goal in them proves or certifies. `kernel_core`
 call-site fixture now prove completely and the standalone replay audit verifies
 `proof_kernel_replay_difference_query` again, with 187 proven obligations instead of 160.
 
+## Repaired: unsigned field and element widths were lost before congruence replay
+
+Reproducers: `examples/rejected_unsigned_field_width_congruence.elisa` and
+`examples/rejected_unsigned_element_width_congruence.elisa`. A `u8` field or array element and a
+same-valued `u16` field or element were assumed equal, and the checker certified that adding one
+to both still gave equal results. At the `u8` endpoint, the first addition wraps to zero while the
+`u16` addition yields 256. Before the repair, both reports said `proved`, with all certificates
+replayed and no gaps: the producer and independent kernel agreed on the unsound result.
+
+The source importer did emit scalar-type witnesses for these places, but their unsigned widths
+were either deliberately excluded from the arithmetic-width resolver (struct fields) or never
+encoded at all (container elements). The broad place marker must also serve synthetic `.count`
+places; feeding every such width into the arithmetic guard had previously caused unrelated signed
+terms to inherit `usize` bounds. That containment accidentally left real unsigned field and
+element arithmetic to the signed-integer congruence rule.
+
+The fix makes the existing exact field marker participate in arithmetic-width lookup, and extends
+the existing scalar-element marker with an optional validated width for unsigned leaves of nested
+containers. The source resolver and kernel independently match the exact place/container plus
+element depth, then apply the existing overflow-safety guard before signed arithmetic or
+congruence can run. This adds no duplicate fact per field or container, and synthetic `.count`
+witnesses remain outside arithmetic-width lookup. These witnesses are retained and invalidated
+with the root binding, and the element marker remains an inert type fact in bounded-model replay.
+The old eight-subscript cutoff silently dropped the width marker for deeper nested arrays; the
+producer and kernel now share a 64-level schema limit, with AST traversal still separately bounded.
+`examples/rejected_unsigned_nested_element_width_congruence.elisa` checks a nine-level type.
+
+The audit also found unsound width propagation: a call result inherited its argument's width, and
+an `if` result could inherit the condition's width. The producer now refuses to infer a call's
+result width from its children and derives an `if` result width only from both value branches; the
+kernel mirrors those rules. The signed-return counterexample in
+`examples/rejected_unsigned_place.elisa` and
+`examples/rejected_unsigned_condition_width_inference.elisa` cover both boundaries.
+
+Unsigned nonnegativity is a type invariant even when arithmetic wraps. The previous negative
+fixture incorrectly required an unsigned subtraction result to remain unproven for `0 <= result`.
+The producer and kernel now admit that invariant without treating the wrapped expression as a
+mathematical integer for other goals. The fixture now expects the subtraction and nested
+subtraction nonnegativity claims to prove, while still rejecting signed nonnegativity, strict
+positivity, wrapped upper bounds, and using a wrapped sum as an index.
+
+One replay gap also exposed an ordering issue: an unrelated unsafe premise blocked a ground
+`0 <= 127` certificate. The kernel now evaluates only direct integer-literal comparisons before
+premise-dependent wrap checks. It deliberately does not move compound constant arithmetic ahead
+of those guards.
+`examples/rejected_unsigned_field_overflow.elisa` and
+`examples/rejected_unsigned_element_overflow.elisa` also ensure simple endpoint claims do not
+become proofs. The positive `examples/unsigned_field_increment_bound.elisa` keeps the useful
+same-width relational case: `x < y` proves `x + 1 <= y`.
+
+Coverage now requires all overflow, width-congruence, nested-width, and conditional-width
+counterexamples to remain unproven with complete replay; the positive field-bound and unsigned
+nonnegativity examples must prove. The full `scripts/test.sh` matrix passed under the pinned
+Stage1 compiler, including the standalone replay audit (1,111 certificates, zero gaps).
+`scripts/dogfood.sh` also passed under Stage1, including the standalone report (1,555 obligations,
+zero replay gaps) and native kernel/runtime harnesses. The optional Stage0 bootstrap portion was
+skipped because Stage0 is unavailable on the sanitized PATH; no Stage0 binary was used.
+
 ## Added: ground congruence closure over the primitive scalar fragment
 
 Before this change the checker had no congruence rule. Equality reasoning was limited to

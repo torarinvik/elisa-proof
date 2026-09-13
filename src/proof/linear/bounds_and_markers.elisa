@@ -127,23 +127,42 @@ extend ElisaProof:
             arguments: darray[Ast::Expr] = [Ast::Expr.Ident(name, position), Ast::Expr.IntLit(width, position)]
             return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
 
-        # The same marker over a place rather than a bare name. It is deliberately invisible to
-        # `proof_unsigned_marker_info`, which reads only the bare-name form, so a place width never
-        # reaches `proof_unsigned_width_in_expression` and never subjects an arithmetic term
-        # containing a field to the unsigned wrap guard. Reporting `.count` from the general width
-        # function once cost 39 proofs by exactly that contagion. Only the nonnegativity rule
-        # consults this form, and only to answer whether a term has an unsigned type at all.
+        # The same marker over a place rather than a bare name. The bare-name reader intentionally
+        # ignores it; the arithmetic-width reader consults it only for an exact field node, so a
+        # width cannot spread from a container's synthetic `.count` witness to neighboring terms.
         def proof_unsigned_place_marker(term: Ast::Expr, width: i64, position: Ast::Pos) -> Ast::Expr:
             arguments: darray[Ast::Expr] = [term, Ast::Expr.IntLit(width, position)]
             return Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), arguments, [], position)
 
-        # The place form read as a marker rather than as a width. This is deliberately separate
-        # from `proof_unsigned_marker_info`, which stays bare-name-only so a term containing a
-        # field never falls under the wrap guard. Retention is the other question, and it has to
-        # recognize the place form: a witness whose subject is a place lives and dies with that
-        # place's root binding, exactly as the scalar-type witness beside it does. Without this
-        # the width witness was dropped at the first call while the scalar witness survived, and
-        # `0 <= node.children_start + index` became unprovable for the rest of the body.
+        def proof_indexed_element_path(expression: Ast::Expr, depth: usize) -> (known: bool, container: Ast::Expr, subscripts: i64):
+            return (false, Ast::Expr.Invalid, 0) if depth > PROOF_CONGRUENCE_SCAN_DEPTH
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_indexed_element_path(inner, depth + 1)
+                Ast::Expr.Index(object, _, _):
+                    path: (known: bool, container: Ast::Expr, subscripts: i64) = proof_indexed_element_path(object, depth + 1)
+                    return (false, Ast::Expr.Invalid, 0) if not path.known or path.subscripts >= PROOF_TYPE_AUDIT_DEPTH_LIMIT.i64()
+                    return (true, path.container, path.subscripts + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return (false, Ast::Expr.Invalid, 0) if arguments.count == 0 or arguments.count > PROOF_TYPE_AUDIT_DEPTH_LIMIT
+                    path: (known: bool, container: Ast::Expr, subscripts: i64) = proof_indexed_element_path(object, depth + 1)
+                    return (false, Ast::Expr.Invalid, 0) if not path.known or path.subscripts > PROOF_TYPE_AUDIT_DEPTH_LIMIT.i64() - arguments.count.i64()
+                    return (true, path.container, path.subscripts + arguments.count.i64())
+                _:
+                    return (true, expression, 0)
+
+        def proof_unsigned_element_width_for_expression(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+            path: (known: bool, container: Ast::Expr, subscripts: i64) = proof_indexed_element_path(expression, 0)
+            return 0 if not path.known or path.subscripts == 0
+            width: mutable i64 = 0
+            for fact in facts |fact, path, width|:
+                marker: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(fact)
+                continue if not marker.known or marker.width == 0 or marker.depth != path.subscripts or not proof_expr_equal(marker.term, path.container)
+                width <- marker.width if width == 0 or marker.width < width
+            return width
+
+        # The place form read as a marker rather than as a bare-name marker. Retention follows the
+        # root binding, so the exact field width stays live only as long as the place it describes.
         def proof_unsigned_place_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, width: i64) can[Memory.Allocate, Abort.Panic]:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, _):
@@ -211,20 +230,26 @@ extend ElisaProof:
         # The depth is how many subscripts reach the scalar: 1 for `darray[i64]`, 2 for
         # `array[array[i64, 4], 4]`, so a nested or multi-argument subscript is witnessed only
         # when it goes exactly that deep.
-        def proof_scalar_element_marker(term: Ast::Expr, depth: i64, position: Ast::Pos) -> Ast::Expr:
-            arguments: darray[Ast::Expr] = [term, Ast::Expr.IntLit(depth, position)]
+        def proof_scalar_element_marker(term: Ast::Expr, depth: i64, position: Ast::Pos, width: i64) -> Ast::Expr:
+            arguments: mutable darray[Ast::Expr] = [term, Ast::Expr.IntLit(depth, position)]
+            arguments.push(Ast::Expr.IntLit(width, position)) if width >= 8 and width <= 64
             return Ast::Expr.Call(Ast::Expr.Ident("__elisa_primitive_scalar_element", position), arguments, [], position)
 
-        def proof_element_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, depth: i64):
+        def proof_element_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, depth: i64, width: i64):
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, _):
-                    return (false, Ast::Expr.Invalid, 0) if argument_names.count != 0 and argument_names.count != arguments.count
-                    return (false, Ast::Expr.Invalid, 0) if proof_ident_name(callee) != "__elisa_primitive_scalar_element" or arguments.count != 2
+                    return (false, Ast::Expr.Invalid, 0, 0) if argument_names.count != 0 and argument_names.count != arguments.count
+                    return (false, Ast::Expr.Invalid, 0, 0) if proof_ident_name(callee) != "__elisa_primitive_scalar_element" or (arguments.count != 2 and arguments.count != 3)
                     depth: (known: bool, value: i64) = proof_constant_int(arguments[1])
-                    return (false, Ast::Expr.Invalid, 0) if not depth.known or depth.value < 1 or depth.value > 8
-                    return (true, arguments[0], depth.value)
+                    return (false, Ast::Expr.Invalid, 0, 0) if not depth.known or depth.value < 1 or depth.value > PROOF_TYPE_AUDIT_DEPTH_LIMIT.i64()
+                    width: mutable i64 = 0
+                    if arguments.count == 3:
+                        marked_width: (known: bool, value: i64) = proof_constant_int(arguments[2])
+                        return (false, Ast::Expr.Invalid, 0, 0) if not marked_width.known or marked_width.value < 8 or marked_width.value > 64
+                        width <- marked_width.value
+                    return (true, arguments[0], depth.value, width)
                 _:
-                    return (false, Ast::Expr.Invalid, 0)
+                    return (false, Ast::Expr.Invalid, 0, 0)
 
         def proof_marker_argument(expression: Ast::Expr, callee_name: sview) -> (known: bool, term: Ast::Expr):
             match expression:
@@ -258,7 +283,7 @@ extend ElisaProof:
         def proof_type_marker_root_name(expression: Ast::Expr) -> sview:
             scalar: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
             return proof_place_root_name(scalar.term, 0) if scalar.known
-            element: (known: bool, term: Ast::Expr, depth: i64) = proof_element_marker_info(expression)
+            element: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(expression)
             return proof_place_root_name(element.term, 0) if element.known
             place: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_place_marker_info(expression)
             return proof_place_root_name(place.term, 0) if place.known
@@ -322,6 +347,10 @@ extend ElisaProof:
             match expression:
                 Ast::Expr.Ident(name, _):
                     return proof_unsigned_marker_width_for_name(facts, name)
+                Ast::Expr.Field(_, _, _):
+                    return proof_unsigned_place_marker_width(facts, expression)
+                Ast::Expr.Index(_, _, _) or Ast::Expr.IndexN(_, _, _):
+                    return proof_unsigned_element_width_for_expression(expression, facts)
                 Ast::Expr.Paren(inner, _):
                     return proof_unsigned_width_in_expression(inner, facts)
                 Ast::Expr.Unary(_, operand, _):
@@ -333,18 +362,16 @@ extend ElisaProof:
                     return left_width if right_width == 0 or left_width < right_width
                     return right_width
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    condition_width: i64 = proof_unsigned_width_in_expression(condition, facts)
                     then_width: i64 = proof_unsigned_width_in_expression(then_expression, facts)
                     else_width: i64 = proof_unsigned_width_in_expression(else_expression, facts)
-                    return condition_width if condition_width != 0 and (then_width == 0 or condition_width < then_width) and (else_width == 0 or condition_width < else_width)
-                    return then_width if then_width != 0 and (else_width == 0 or then_width < else_width)
+                    return 0 if then_width == 0 or else_width == 0
+                    return then_width if then_width < else_width
                     return else_width
-                Ast::Expr.Call(callee, arguments, _, _):
-                    width: mutable i64 = proof_unsigned_width_in_expression(callee, facts)
-                    for argument in arguments |argument, facts, width|:
-                        candidate: i64 = proof_unsigned_width_in_expression(argument, facts)
-                        width <- candidate if width == 0 or (candidate != 0 and candidate < width)
-                    return width
+                # Argument and callee types do not determine a call's return type. Calls need an
+                # explicit result-width witness; inheriting an unsigned argument's width here can
+                # misclassify a signed result.
+                Ast::Expr.Call(_, _, _, _):
+                    return 0
                 _:
                     return 0
 
@@ -406,4 +433,3 @@ extend ElisaProof:
                     return (inner.known, not inner.value)
                 _:
                     return (false, false)
-
