@@ -1,0 +1,98 @@
+# Typed proposition formation traverses the admitted term arena under declaration-only bindings.
+# The shared work counter bounds repeated DAG paths and environment scans across the goal and facts.
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_quantifier_range_sorts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, range_root: usize, depth: usize, work: mutable usize&) -> (known: bool, first: ProofKernelInferredSort, second: ProofKernelInferredSort):
+            return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if depth >= 127 or range_root >= nodes.count
+            return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if not proof_kernel_replay_type_work_consume(work)
+            range: ElisaProofKernelCore::ProofKernelNode = nodes[range_root]
+            if range.kind == "binary" and (range.operator == "range_lt" or range.operator == "range_le"):
+                lower: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, range.left, depth + 1, work)
+                upper: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, range.right, depth + 1, work)
+                return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if not lower.known or not upper.known or not proof_kernel_replay_integral_sort(lower) or not proof_kernel_replay_integral_sort(upper)
+                element: ProofKernelInferredSort = proof_kernel_replay_known_sort("integer", "i64")
+                return (true, element, proof_kernel_replay_unknown_sort())
+            if range.kind == "dict" and range.children_count > 0:
+                entry_root: usize = proof_kernel_replay_child_root(children, range, 0)
+                return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if entry_root >= nodes.count or nodes[entry_root].kind != "dict_entry"
+                first: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, nodes[entry_root].left, depth + 1, work)
+                second: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, nodes[entry_root].right, depth + 1, work)
+                return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if not first.known or not second.known
+                for offset in 1..<range.children_count |offset, nodes, children, environment, range, depth, first, second, work|:
+                    return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if not proof_kernel_replay_type_work_consume(work)
+                    next_entry_root: usize = proof_kernel_replay_child_root(children, range, offset)
+                    return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if next_entry_root >= nodes.count or nodes[next_entry_root].kind != "dict_entry"
+                    next_key: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, nodes[next_entry_root].left, depth + 1, work)
+                    next_value: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, nodes[next_entry_root].right, depth + 1, work)
+                    return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if not proof_kernel_replay_sort_equal(first, next_key) or not proof_kernel_replay_sort_equal(second, next_value)
+                return (true, first, second)
+            if range.kind == "array" or range.kind == "tuple" or range.kind == "set":
+                return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if range.children_count == 0
+                first_root: usize = proof_kernel_replay_child_root(children, range, 0)
+                first: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, first_root, depth + 1, work)
+                return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if not first.known
+                for offset in 1..<range.children_count |offset, nodes, children, environment, range, depth, first, work|:
+                    return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if not proof_kernel_replay_type_work_consume(work)
+                    child_root: usize = proof_kernel_replay_child_root(children, range, offset)
+                    child_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, child_root, depth + 1, work)
+                    # A quantified binder has one type. Tuple literals may be heterogeneous as
+                    # values, but treating their first element as the type of every later value
+                    # would let a proposition replay under a false typing premise.
+                    return (false, proof_kernel_replay_unknown_sort(), proof_kernel_replay_unknown_sort()) if not child_sort.known or not proof_kernel_replay_sort_equal(first, child_sort)
+                return (first.known, first, proof_kernel_replay_unknown_sort())
+            range_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, range_root, depth + 1, work)
+            element_known: bool = range_sort.known and range_sort.family == "container" and range_sort.element_family != ""
+            element: ProofKernelInferredSort = ProofKernelInferredSort{known: element_known, family: range_sort.element_family if element_known else "", name: range_sort.element_name if element_known else "", element_family: "", element_name: "", type_identity: range_sort.element_type_identity if element_known else 0, element_type_identity: 0}
+            unknown: ProofKernelInferredSort = ProofKernelInferredSort{known: false, family: "", name: "", element_family: "", element_name: "", type_identity: 0, element_type_identity: 0}
+            return (element.known, element, unknown)
+
+        def proof_kernel_replay_typed_proposition_at(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, root: usize, depth: usize, work: mutable usize&) -> bool:
+            requires depth <= 127
+            decreases 127 - depth
+            return false if depth >= 127 or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            return false if not proof_kernel_replay_type_work_consume(work)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "quantifier":
+                return false if node.operator != "forall" and node.operator != "exists"
+                range_sorts: (known: bool, first: ProofKernelInferredSort, second: ProofKernelInferredSort) = proof_kernel_replay_quantifier_range_sorts(nodes, children, environment, node.left, depth + 1, work)
+                return false if not range_sorts.known
+                scoped_bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = environment.bindings
+                if node.auxiliary == 1:
+                    added: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(&scoped_bindings, "value", node.name, "", range_sorts.first.family, range_sorts.first.name, range_sorts.first.element_family, range_sorts.first.element_name, range_sorts.first.type_identity, 0, range_sorts.first.element_type_identity)
+                    return false if not added
+                elif node.auxiliary == 2:
+                    return false if not range_sorts.second.known
+                    first_added: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(&scoped_bindings, "value", node.name, "", range_sorts.first.family, range_sorts.first.name, range_sorts.first.element_family, range_sorts.first.element_name, range_sorts.first.type_identity, 0, range_sorts.first.element_type_identity)
+                    second_added: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(&scoped_bindings, "value", node.secondary_name, "", range_sorts.second.family, range_sorts.second.name, range_sorts.second.element_family, range_sorts.second.element_name, range_sorts.second.type_identity, 0, range_sorts.second.element_type_identity)
+                    return false if not first_added or not second_added
+                else:
+                    return false
+                scoped: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: environment.global_bindings, bindings: scoped_bindings}
+                return proof_kernel_replay_typed_proposition_at(nodes, children, scoped, node.right, depth + 1, work)
+            if node.kind == "unary" and node.operator == "not":
+                return proof_kernel_replay_typed_proposition_at(nodes, children, environment, node.left, depth + 1, work)
+            if node.kind == "binary" and (node.operator == "and" or node.operator == "or" or node.operator == "=>"):
+                return false if not proof_kernel_replay_typed_proposition_at(nodes, children, environment, node.left, depth + 1, work)
+                return proof_kernel_replay_typed_proposition_at(nodes, children, environment, node.right, depth + 1, work)
+            if node.kind == "if":
+                return false if not proof_kernel_replay_typed_proposition_at(nodes, children, environment, node.left, depth + 1, work)
+                return false if not proof_kernel_replay_typed_proposition_at(nodes, children, environment, node.right, depth + 1, work)
+                return proof_kernel_replay_typed_proposition_at(nodes, children, environment, node.auxiliary, depth + 1, work)
+            if node.kind == "call" and proof_kernel_replay_symbol_name(nodes, node.left, 0, work) == "old" and node.children_count == 1:
+                argument_wrapper: usize = proof_kernel_replay_child_root(children, node, 0)
+                return false if argument_wrapper >= nodes.count or nodes[argument_wrapper].kind != "call_arg"
+                return proof_kernel_replay_typed_proposition_at(nodes, children, environment, nodes[argument_wrapper].left, depth + 1, work)
+            inferred: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, root, depth + 1, work)
+            return inferred.known and (inferred.family == "boolean" or inferred.family == "proposition")
+
+        def proof_kernel_replay_typed_proposition_state_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, facts: darray[usize], goal_root: usize) -> bool:
+            return false if not proof_kernel_replay_type_scan_budget_admitted(environment, nodes.count)
+            return false if not proof_kernel_replay_type_environment_valid(environment)
+            work_used: mutable usize = 0
+            return false if not proof_kernel_replay_typed_proposition_at(nodes, children, environment, goal_root, 0, &work_used)
+            return false if work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            for fact in facts |fact, work_used|:
+                return false if not proof_kernel_replay_type_work_consume(&work_used)
+                return false if not proof_kernel_replay_typed_proposition_at(nodes, children, environment, fact, 0, &work_used)
+                return false if work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            return true
