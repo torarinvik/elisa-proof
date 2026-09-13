@@ -75,57 +75,62 @@ extend ElisaProofKernelReplay:
         # memoizes completed nodes, and `validity` prevents a malformed shared child from being
         # accepted on a later path. Work insertion is bounded independently of the serialized
         # graph, while the explicit depth field retains the certificate-level term bound.
-        def proof_kernel_replay_arena_valid_iterative(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+        def proof_kernel_replay_arena_valid_with_workspace(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool:
             return false if nodes.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
             return false if children.count > ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET
             return false if facts.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
-            visiting: mutable darray[bool] = []
-            visited: mutable darray[bool] = []
-            validity: mutable darray[bool] = []
             # A DAG node can be reached at multiple depths. Memoizing only a boolean would let
             # a shallow first path hide a later path that exceeds the certificate depth bound.
             # Revisit the node whenever the new path is deeper than the deepest path validated.
-            visited_depth: mutable darray[usize] = []
-            visiting.resize(nodes.count)
-            visited.resize(nodes.count)
-            validity.resize(nodes.count)
-            visited_depth.resize(nodes.count)
-            work: mutable darray[ProofKernelReplayArenaWork] = []
-            work_used: mutable usize = 0
-            return false if not proof_kernel_replay_arena_push_work(work, work_used, goal_root, 0, false)
-            for fact in facts |fact, work, work_used|:
-                return false if not proof_kernel_replay_arena_push_work(work, work_used, fact, 0, false)
-            while work.count > 0 |work, nodes, children, visiting, visited, validity, visited_depth, work_used|:
-                current: ProofKernelReplayArenaWork = work.pop()
+            workspace.visiting.resize(nodes.count)
+            workspace.visited.resize(nodes.count)
+            workspace.validity.resize(nodes.count)
+            workspace.visited_depth.resize(nodes.count)
+            for index in 0..<nodes.count |workspace|:
+                workspace.visiting[index] <- false
+                workspace.visited[index] <- false
+                workspace.validity[index] <- false
+                workspace.visited_depth[index] <- 0
+            workspace.work.clear()
+            workspace.work_used <- 0
+            return false if not proof_kernel_replay_arena_push_work(&workspace.work, &workspace.work_used, goal_root, 0, false)
+            for fact in facts |fact, workspace|:
+                return false if not proof_kernel_replay_arena_push_work(&workspace.work, &workspace.work_used, fact, 0, false)
+            while workspace.work.count > 0 |workspace, nodes, children|:
+                current: ProofKernelReplayArenaWork = workspace.work.pop()
                 return false if current.root >= nodes.count
                 return false if current.depth >= 127 or not ElisaProofKernelCore::depth_valid(current.depth)
                 if current.exiting:
                     located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, current.root)
                     return false if not located.known
-                    valid: bool = proof_kernel_replay_arena_shape_valid(located.node) and proof_kernel_replay_arena_children_valid(nodes, located.node, children, validity)
-                    return false if not proof_kernel_replay_bool_set(visiting, current.root, false)
-                    return false if not proof_kernel_replay_bool_set(visited, current.root, true)
-                    visited_depth[current.root] <- current.depth
-                    return false if not proof_kernel_replay_bool_set(validity, current.root, valid)
+                    valid: bool = proof_kernel_replay_arena_shape_valid(located.node) and proof_kernel_replay_arena_children_valid(nodes, located.node, children, workspace.validity)
+                    return false if not proof_kernel_replay_bool_set(workspace.visiting, current.root, false)
+                    return false if not proof_kernel_replay_bool_set(workspace.visited, current.root, true)
+                    workspace.visited_depth[current.root] <- current.depth
+                    return false if not proof_kernel_replay_bool_set(workspace.validity, current.root, valid)
                     return false if not valid
                     continue
-                visited_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(visited, current.root)
-                visiting_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(visiting, current.root)
-                validity_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(validity, current.root)
+                visited_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(workspace.visited, current.root)
+                visiting_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(workspace.visiting, current.root)
+                validity_value: (known: bool, value: bool) = proof_kernel_replay_bool_at(workspace.validity, current.root)
                 return false if not visited_value.known or not visiting_value.known or not validity_value.known
                 return false if visiting_value.value
                 if visited_value.value:
                     return false if not validity_value.value
-                    continue if current.depth <= visited_depth[current.root]
+                    continue if current.depth <= workspace.visited_depth[current.root]
                     # This is a valid node, but its children have not yet been checked at this
                     # deeper path. Clear the memoized completion and perform a fresh DFS below.
-                    return false if not proof_kernel_replay_bool_set(visited, current.root, false)
+                    return false if not proof_kernel_replay_bool_set(workspace.visited, current.root, false)
                 located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, current.root)
                 return false if not located.known or not proof_kernel_replay_arena_shape_valid(located.node)
-                return false if not proof_kernel_replay_bool_set(visiting, current.root, true)
-                return false if not proof_kernel_replay_arena_push_work(work, work_used, current.root, current.depth, true)
-                return false if not proof_kernel_replay_arena_push_children(located.node, children, current.depth, &work, &work_used)
+                return false if not proof_kernel_replay_bool_set(workspace.visiting, current.root, true)
+                return false if not proof_kernel_replay_arena_push_work(&workspace.work, &workspace.work_used, current.root, current.depth, true)
+                return false if not proof_kernel_replay_arena_push_children(located.node, children, current.depth, &workspace.work, &workspace.work_used)
             return true
+
+        def proof_kernel_replay_arena_valid_iterative(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+            workspace: mutable ProofKernelReplayValidationWorkspace = proof_kernel_replay_validation_workspace_new()
+            return proof_kernel_replay_arena_valid_with_workspace(nodes, children, facts, goal_root, &workspace)
 
         def proof_kernel_replay_arena_valid[@r](nodes: darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
             return proof_kernel_replay_arena_valid_iterative(nodes, children, facts, goal_root)
