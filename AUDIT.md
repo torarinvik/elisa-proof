@@ -4593,10 +4593,10 @@ the goal attempt was not. Reporting code could therefore pair a replayed certifi
 different displayed goal if a report was mutated after checking.
 
 Attempt admission now independently checks that its AST mirror agrees with the same kernel root
-(or, for resource, structural, and effect certificates, exactly matches their inert certificate
-mirror). The shared output predicate is used by focused-goal, report, and theorem-catalog output.
-The adversarial runtime replaces only the attempt's goal AST and requires replay and output
-admission to reject it, then restores the original and requires a complete replay.
+(or, for resource, structural, and effect certificates, both mirrors must be the canonical `true`
+sentinel). The shared output predicate is used by focused-goal, report, and theorem-catalog output.
+The adversarial runtime replaces only an ordinary attempt goal, then jointly replaces both inert
+mirrors; replay and output admission must reject each mutation, then accept the restored report.
 
 The Stage1 Gen2 test matrix and dogfood report/runtime/tactic suites pass after these repairs with
 zero replay gaps. Stage0 bootstrap was deliberately skipped: the available Stage0 did not pass the
