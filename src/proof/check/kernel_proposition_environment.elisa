@@ -76,46 +76,64 @@ extend ElisaProof:
                         pass
             return true
 
-        def proof_source_kernel_named_type_lookup(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> (count: usize, identity: usize):
-            return (2, 0) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_source_kernel_alias_lookup(index: ProofSourceKernelTypeIndex, name: sview) -> (count: usize, target: Ast::Expr):
+            count: mutable usize = 0
+            target: mutable Ast::Expr = Ast::Expr.Invalid
+            for entry in index.entries |name, count, target|:
+                continue if not entry.is_alias or entry.name != name
+                count <- count + 1
+                target <- entry.target
+            return (2, Ast::Expr.Invalid) if count > 1
+            return (count, target)
+
+        def proof_source_kernel_named_type_lookup(index: ProofSourceKernelTypeIndex, name: sview) -> (count: usize, identity: usize):
             count: mutable usize = 0
             identity: mutable usize = 0
-            for declaration in declarations |name, depth, count, identity|:
-                match declaration:
-                    Ast::Decl.Struct(type_name, _, _, _, _, _, position):
-                        if type_name == name:
-                            count <- count + 1
-                            identity <- position.offset.usize() + 1
-                    Ast::Decl.Enum(type_name, _, _, _, position):
-                        if type_name == name:
-                            count <- count + 1
-                            identity <- position.offset.usize() + 1
-                    Ast::Decl.Module(_, body, _):
-                        nested: (count: usize, identity: usize) = proof_source_kernel_named_type_lookup(body, name, depth + 1)
-                        count <- count + nested.count
-                        identity <- nested.identity if nested.count == 1
-                    Ast::Decl.Scoped(body, _):
-                        nested: (count: usize, identity: usize) = proof_source_kernel_named_type_lookup(body, name, depth + 1)
-                        count <- count + nested.count
-                        identity <- nested.identity if nested.count == 1
-                    _:
-                        pass
+            for entry in index.entries |name, count, identity|:
+                continue if entry.is_alias or entry.name != name
+                count <- count + 1
+                identity <- entry.identity
             return (2, 0) if count > 1
             return (count, identity)
 
-        def proof_source_kernel_container_element_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> (known: bool, element: Ast::Expr):
+        def proof_source_kernel_type_head_name(expression: Ast::Expr, index: ProofSourceKernelTypeIndex, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return "" if proof_scalar_primitive_type_name(name)
+                    alias: (count: usize, target: Ast::Expr) = proof_source_kernel_alias_lookup(index, name)
+                    return proof_source_kernel_type_head_name(alias.target, index, depth + 1) if alias.count == 1
+                    return "" if alias.count > 1
+                    return name
+                Ast::Expr.Scope(_, name, _):
+                    return "" if proof_scalar_primitive_type_name(name)
+                    alias: (count: usize, target: Ast::Expr) = proof_source_kernel_alias_lookup(index, name)
+                    return proof_source_kernel_type_head_name(alias.target, index, depth + 1) if alias.count == 1
+                    return "" if alias.count > 1
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_kernel_type_head_name(inner, index, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_source_kernel_type_head_name(base, index, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_source_kernel_type_head_name(inner, index, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return ""
+                _:
+                    return ""
+
+        def proof_source_kernel_container_element_type(expression: Ast::Expr, index: ProofSourceKernelTypeIndex, depth: usize) -> (known: bool, element: Ast::Expr):
             return (false, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_source_kernel_container_element_type(inner, declarations, depth + 1)
+                    return proof_source_kernel_container_element_type(inner, index, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_source_kernel_container_element_type(base, declarations, depth + 1)
+                    return proof_source_kernel_container_element_type(base, index, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_source_kernel_container_element_type(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_source_kernel_container_element_type(inner, index, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                     return (false, Ast::Expr.Invalid)
                 Ast::Expr.Ident(name, _):
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return proof_source_kernel_container_element_type(alias.target, declarations, depth + 1) if alias.count == 1
+                    alias: (count: usize, target: Ast::Expr) = proof_source_kernel_alias_lookup(index, name)
+                    return proof_source_kernel_container_element_type(alias.target, index, depth + 1) if alias.count == 1
                     return (false, Ast::Expr.Invalid)
                 Ast::Expr.Index(head, argument, _):
                     head_name: sview = proof_ident_name(head)
@@ -165,7 +183,7 @@ extend ElisaProof:
                 _:
                     pass
             if has_expression:
-                container_element: (known: bool, element: Ast::Expr) = proof_source_kernel_container_element_type(type_expression, declarations, 0)
+                container_element: (known: bool, element: Ast::Expr) = proof_source_kernel_container_element_type(type_expression, index, 0)
                 if container_element.known:
                     container_sort: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(container_element.element, "", declarations, index, depth + 1)
                     container_name: sview = proof_source_type_spelling(type_expression, 0)
@@ -196,13 +214,13 @@ extend ElisaProof:
                         return (false, "", "", "", "", 0, 0)
                     _:
                         pass
-                alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, type_name, 0)
+                alias: (count: usize, target: Ast::Expr) = proof_source_kernel_alias_lookup(index, type_name)
                 if alias.count == 1:
                     return proof_source_kernel_type_sort(alias.target, "", declarations, index, depth + 1)
                 return (false, "", "", "", "", 0, 0) if alias.count > 1
-            named_type: sview = proof_type_head_name(type_expression, declarations, 0) if has_expression else type_name
+            named_type: sview = proof_source_kernel_type_head_name(type_expression, index, 0) if has_expression else type_name
             if named_type != "":
-                declared_type: (count: usize, identity: usize) = proof_source_kernel_named_type_lookup(declarations, named_type, 0)
+                declared_type: (count: usize, identity: usize) = proof_source_kernel_named_type_lookup(index, named_type)
                 return (declared_type.count == 1 and declared_type.identity != 0, "named", named_type, "", "", declared_type.identity, 0) if declared_type.count == 1
                 return (false, "", "", "", "", 0, 0)
             return (false, "", "", "", "", 0, 0)
@@ -225,7 +243,7 @@ extend ElisaProof:
             requires depth <= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             decreases PROOF_TYPE_AUDIT_DEPTH_LIMIT - depth
             return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            container_element: (known: bool, element: Ast::Expr) = proof_source_kernel_container_element_type(type_expression, declarations, 0)
+            container_element: (known: bool, element: Ast::Expr) = proof_source_kernel_container_element_type(type_expression, type_index, 0)
             if container_element.known:
                 resolved_container: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(type_expression, "", declarations, type_index, depth + 1)
                 if resolved_container.known and resolved_container.sort == "container" and resolved_container.type_identity != 0:
@@ -258,7 +276,7 @@ extend ElisaProof:
                     for argument in arguments |annotations, declarations, type_index, bindings, depth|:
                         return false if not proof_source_kernel_collect_tuple_fields(argument, annotations, declarations, type_index, bindings, depth + 1)
                 Ast::Expr.Ident(name, _):
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    alias: (count: usize, target: Ast::Expr) = proof_source_kernel_alias_lookup(type_index, name)
                     return proof_source_kernel_collect_tuple_fields(alias.target, annotations, declarations, type_index, bindings, depth + 1) if alias.count == 1
                     return false if alias.count > 1
                 Ast::Expr.Unary(_, inner, _):
