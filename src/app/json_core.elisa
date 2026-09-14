@@ -19,46 +19,81 @@ def proof_cstr_u32(value: cstr) -> (valid: bool, parsed: u32):
         index <- index + 1
     return (true, result)
 
+def proof_push_json_byte_escape(buffer: mutable darray[u8]&, byte: u8) -> void can[Memory.Allocate, Abort.Panic]:
+    # JSON strings must escape controls. Invalid source bytes are represented as their
+    # corresponding U+00XX code point so a byte-oriented Elisa name cannot corrupt JSON.
+    proof_push(buffer, "\\u00")
+    high_digit: u8 = (byte / 16)
+    low_digit: u8 = (byte % 16)
+    buffer.push('0'.u8() + high_digit) if high_digit < 10
+    buffer.push('a'.u8() + (high_digit - 10)) if high_digit >= 10
+    buffer.push('0'.u8() + low_digit) if low_digit < 10
+    buffer.push('a'.u8() + (low_digit - 10)) if low_digit >= 10
+
+def proof_json_utf8_width(value: sview, index: usize) -> usize:
+    length: usize = sview_len(value)
+    return 0 if index >= length
+    first: u8 = sview_at(value, index)
+    return 1 if first < 0x80
+    has_second: bool = index + 1 < length
+    has_third: bool = index + 2 < length
+    has_fourth: bool = index + 3 < length
+    second: u8 = sview_at(value, index + 1) if has_second else 0
+    third: u8 = sview_at(value, index + 2) if has_third else 0
+    fourth: u8 = sview_at(value, index + 3) if has_fourth else 0
+    second_continuation: bool = second in 0x80..0xBF
+    third_continuation: bool = third in 0x80..0xBF
+    fourth_continuation: bool = fourth in 0x80..0xBF
+    return 2 if first in 0xC2..0xDF and has_second and second_continuation
+    return 3 if first == 0xE0 and has_second and has_third and second in 0xA0..0xBF and third_continuation
+    return 3 if first in 0xE1..0xEC and has_second and has_third and second_continuation and third_continuation
+    return 3 if first == 0xED and has_second and has_third and second in 0x80..0x9F and third_continuation
+    return 3 if first in 0xEE..0xEF and has_second and has_third and second_continuation and third_continuation
+    return 4 if first == 0xF0 and has_second and has_third and has_fourth and second in 0x90..0xBF and third_continuation and fourth_continuation
+    return 4 if first in 0xF1..0xF3 and has_second and has_third and has_fourth and second_continuation and third_continuation and fourth_continuation
+    return 4 if first == 0xF4 and has_second and has_third and has_fourth and second in 0x80..0x8F and third_continuation and fourth_continuation
+    return 0
+
 def proof_push_json_string(buffer: mutable darray[u8]&, value: sview) -> void can[Memory.Allocate, Abort.Panic]:
     buffer.push('"'.u8())
-    for index in 0..<sview_len(value) |index, buffer, value|:
+    length: usize = sview_len(value)
+    index: mutable usize = 0
+    while index < length |index, buffer, value|:
         byte: u8 = sview_at(value, index)
-        if byte == '"'.u8() or byte == '\\'.u8():
-            buffer.push('\\'.u8())
-            buffer.push(byte)
-        elif byte == '\n'.u8():
-            proof_push(buffer, "\\n")
-        elif byte == '\r'.u8():
-            proof_push(buffer, "\\r")
-        elif byte == '\t'.u8():
-            proof_push(buffer, "\\t")
-        elif byte < 32:
-            proof_push(buffer, "?")
+        if byte >= 0x80:
+            utf8_width: usize = proof_json_utf8_width(value, index)
+            if utf8_width == 0:
+                proof_push_json_byte_escape(buffer, byte)
+                index <- index + 1
+            else:
+                for byte_index in index..<(index + utf8_width) |buffer, value, index, utf8_width|:
+                    buffer.push(sview_at(value, byte_index))
+                index <- index + utf8_width
         else:
-            buffer.push(byte)
+            if byte == '"'.u8() or byte == '\\'.u8():
+                buffer.push('\\'.u8())
+                buffer.push(byte)
+            elif byte == '\n'.u8():
+                proof_push(buffer, "\\n")
+            elif byte == '\r'.u8():
+                proof_push(buffer, "\\r")
+            elif byte == '\t'.u8():
+                proof_push(buffer, "\\t")
+            elif byte < 32:
+                proof_push_json_byte_escape(buffer, byte)
+            else:
+                buffer.push(byte)
+            index <- index + 1
     buffer.push('"'.u8())
 
 def proof_push_json_bytes(buffer: mutable darray[u8]&, value: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
-    # `Semantic::diagnostic_message` returns owned bytes rather than an sview. Keep the JSON
-    # encoder's escaping rules identical for compiler diagnostics without manufacturing a view
-    # whose lifetime would outlive the temporary message.
-    buffer.push('"'.u8())
-    for index in 0..<value.count |index, value, buffer|:
-        byte: u8 = value[index]
-        if byte == '"'.u8() or byte == '\\'.u8():
-            buffer.push('\\'.u8())
-            buffer.push(byte)
-        elif byte == '\n'.u8():
-            proof_push(buffer, "\\n")
-        elif byte == '\r'.u8():
-            proof_push(buffer, "\\r")
-        elif byte == '\t'.u8():
-            proof_push(buffer, "\\t")
-        elif byte < 32:
-            proof_push(buffer, "?")
-        else:
-            buffer.push(byte)
-    buffer.push('"'.u8())
+    # Diagnostics are owned byte arrays, so borrow their live storage as an sview and share
+    # the same UTF-8/control-byte validation path as ordinary report strings.
+    if value.count == 0:
+        proof_push_json_string(buffer, sview("", 0, 0))
+        return
+    text: sview = sview(&value[0], 0, value.count.i64())
+    proof_push_json_string(buffer, text)
 
 def proof_push_json_i64(buffer: mutable darray[u8]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
     if value == 0 - 9223372036854775807 - 1:
@@ -494,4 +529,3 @@ def proof_push_json_expr(buffer: mutable darray[u8]&, expression: Ast::Expr) -> 
             proof_push(buffer, "{\"kind\":\"unsupported\",\"line\":")
             proof_push_number(buffer, position.line)
             proof_push(buffer, "}")
-

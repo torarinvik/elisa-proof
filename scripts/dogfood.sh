@@ -228,6 +228,59 @@ assert report["replay"]["gaps"] == 0
 print("dogfood root_nul: proof parser consumes the compiler-visible full source extent")
 PY
 
+# Elisa accepts legacy single-byte Latin-1 letters in identifiers as well as UTF-8 names. The
+# report encoder must therefore escape malformed UTF-8 bytes without damaging valid multibyte
+# text, so ordinary JSON clients can still parse every compiler-accepted report.
+python3 - "$COMPILER" "$ROOT_DIR/build/elisa-proof" "$REPORT_DIR/latin1_identifier.elisa" "$REPORT_DIR/latin1_identifier.o" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+compiler, proof, source_path, object_path = sys.argv[1:]
+# Keep the invalid single-byte identifier separate from the valid UTF-8 source bytes.
+source = (
+    b"def latin_\xff(x: i64) -> i64:\n"
+    b"    ensure result == x\n"
+    b"    return x\n"
+    + "def lambda_λ(x: i64) -> i64:\n    ensure result == x\n    return x\n".encode("utf-8")
+)
+Path(source_path).write_bytes(source)
+compiled = subprocess.run(
+    [compiler, "-permissive", "-emit", "obj", "-O0", "-o", object_path, source_path],
+    capture_output=True,
+)
+assert compiled.returncode == 0, compiled.stderr.decode("utf-8", errors="replace")
+checked = subprocess.run([proof, "--json", source_path], capture_output=True)
+assert checked.returncode == 0, checked.stdout.decode("utf-8", errors="replace")
+report = json.loads(checked.stdout)
+assert report["status"] == "proved"
+assert report["source"]["bytes"] == len(source)
+verified = {
+    item["name"]
+    for item in report["declaration_details"]
+    if item["kind"] == "function" and item["verified"]
+}
+assert {"latin_ÿ", "lambda_λ"} <= verified
+
+# Semantic diagnostics are owned byte arrays and use the same encoder through
+# proof_push_json_bytes; keep that path valid for a non-ASCII unresolved identifier too.
+diagnostic_source_path = source_path.replace(".elisa", "-diagnostic.elisa")
+diagnostic_object_path = object_path.replace(".o", "-diagnostic.o")
+Path(diagnostic_source_path).write_bytes(b"def f() -> i64:\n    return missing_\xff\n")
+rejected_compile = subprocess.run(
+    [compiler, "-permissive", "-emit", "obj", "-O0", "-o", diagnostic_object_path, diagnostic_source_path],
+    capture_output=True,
+)
+assert rejected_compile.returncode != 0
+diagnostic_check = subprocess.run([proof, "--json", diagnostic_source_path], capture_output=True)
+assert diagnostic_check.returncode == 1
+diagnostic_report = json.loads(diagnostic_check.stdout)
+assert diagnostic_report["status"] == "failed"
+assert any("missing_ÿ" in item["message"] for item in diagnostic_report["semantic_diagnostics"])
+print("dogfood json_latin1: invalid byte escaped and valid UTF-8 preserved in reports and diagnostics")
+PY
+
 # Absolute include paths are valid in the compiler and must not be rebased against the
 # including file's directory by the proof importer.
 absolute_include_dir="$REPORT_DIR/absolute-include"

@@ -4591,6 +4591,21 @@ repair outputs. The dynamic dogfood regression asks Stage0 and the proof CLI to 
 NUL-containing file, checks exact imported byte length and parse-error findings, and requires zero
 declarations, proof obligations, proven results, or replay gaps.
 
+## Repaired: non-UTF-8 Elisa names could corrupt JSON reports
+
+The compiler lexer deliberately accepts certain single-byte Latin-1 letters in identifiers when
+they are not part of a valid UTF-8 sequence. The report encoder previously copied every byte
+above ASCII directly into a JSON string, so a compiler-accepted identifier containing `0xff`
+produced invalid UTF-8 JSON. Other control bytes were replaced with `?`, which could also distort
+the displayed proposition or diagnostic.
+
+The encoder now preserves valid UTF-8 sequences, escapes malformed bytes as `\\u00XX`, and emits
+JSON escapes for unhandled control bytes. The diagnostic-byte writer shares this same validation
+path. A dynamic Stage0 dogfood regression checks a Latin-1 identifier alongside valid Greek UTF-8
+and parses the resulting JSON; a separate Stage0 diagnostic probe checks an unresolved Latin-1
+identifier is preserved as `ÿ` in valid JSON. The full dogfood suite passed after the encoder
+change.
+
 ## Repaired: batch arena admission could accept a disconnected cycle
 
 The report-wide kernel admission pass checked node shapes and direct ranges, but did not enforce
