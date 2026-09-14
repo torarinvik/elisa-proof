@@ -61,6 +61,31 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
 fi
 
 mkdir -p "$ROOT_DIR/build"
+BUILD_LOCK="$ROOT_DIR/build/.elisa-proof-build.lock"
+if ! mkdir "$BUILD_LOCK" 2>/dev/null; then
+    lock_owner="unknown"
+    [[ -f "$BUILD_LOCK/pid" ]] && lock_owner="$(<"$BUILD_LOCK/pid")"
+    printf 'another proof build owns %s (pid %s); wait for it to finish before building again\n' \
+        "$BUILD_LOCK" "$lock_owner" >&2
+    exit 2
+fi
+printf '%s\n' "$$" >"$BUILD_LOCK/pid"
+
+BUILD_TOKEN="$$"
+STAGE_OBJECT="$ROOT_DIR/build/elisa-proof-stage.$BUILD_TOKEN.o"
+PROOF_BINARY="$ROOT_DIR/build/elisa-proof.$BUILD_TOKEN"
+DEFAULT_PROFILE_HOOKS_OBJ="$ROOT_DIR/build/profile_hooks.o"
+PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$DEFAULT_PROFILE_HOOKS_OBJ}"
+PROFILE_HOOKS_TEMP="$ROOT_DIR/build/profile_hooks.$BUILD_TOKEN.o"
+
+cleanup_build() {
+    rm -f "$STAGE_OBJECT" "$PROOF_BINARY" "$PROFILE_HOOKS_TEMP" "$BUILD_LOCK/pid"
+    rmdir "$BUILD_LOCK" 2>/dev/null || true
+}
+trap cleanup_build EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 cd "$ROOT_DIR"
 # Compile against the pinned compiler export, never the live sibling checkout.
 # shellcheck source=scripts/compiler_snapshot.sh
@@ -82,15 +107,17 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
     fi
 fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
-PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$ROOT_DIR/build/profile_hooks.o}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
     printf 'missing profiler ABI hook source: %s\n' "$PROFILE_HOOKS_SOURCE" >&2
     exit 2
 fi
 if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_OBJ" ]]; then
-    clang -c -O2 -o "$PROFILE_HOOKS_OBJ" "$PROFILE_HOOKS_SOURCE"
+    clang -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
+    mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
 fi
-"$COMPILER" -emit obj -O0 -o "build/elisa-proof-stage.o" "$SNAPSHOT_ROOT/src/main.elisa"
-LINK_INPUTS=("build/elisa-proof-stage.o" "$PROFILE_HOOKS_OBJ")
+"$COMPILER" -emit obj -O0 -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/src/main.elisa"
+LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
 [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
-clang -Wl,-dead_strip -o "build/elisa-proof" "${LINK_INPUTS[@]}"
+clang -Wl,-dead_strip -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+mv -f "$STAGE_OBJECT" "$ROOT_DIR/build/elisa-proof-stage.o"
+mv -f "$PROOF_BINARY" "$ROOT_DIR/build/elisa-proof"

@@ -4804,22 +4804,78 @@ boundary without treating a compiler naming convention as proof-system ownership
 
 ## Stage0 compiler parity and lifetime checks
 
-Stage0 is pinned to compiler revision `26a7730367293e2f730598313671309f486e6d4e`; the installed
-binary was rebuilt by the compiler commit hook and reports that revision with a clean worktree.
-This compiler change brings Stage0's top-level binding-free `or` pattern analysis in line with the
-newer frontend for string, integer, enum, and const-enum patterns. Alternatives are checked in
-isolated scopes so a refinement from one branch cannot leak into the shared body; top-level
-binding alternatives fail closed until their branch merge is modeled.
+At the earlier audited Stage0 pin `26a77303`, the compiler's binding-free top-level `or` pattern
+analysis was brought in line with Stage1 for string, integer, enum, and const-enum patterns;
+alternatives use isolated scopes, and binding alternatives fail closed. That revision also closed
+scoped-store lifetime gaps, summarized struct-field forwarding once before its fixpoint, and passed
+the compiler fast/full suites plus the complete proof dogfood/runtime and `scripts/test.sh` matrices
+with zero replay gaps.
 
-The same revision closes scoped-store lifetime gaps: reallocation into a shorter nested region is
-rejected for outer-region containers and global/parameter storage, including `dict.entry(...)`
-receivers. Struct-field forwarding inference now summarizes call sites once before its fixpoint,
-avoiding repeated AST scans. The compiler fast suite and full suite pass; a fresh Stage0 build also
-imports and compiles the proof assistant's complete source snapshot with exit code 0 (warnings only).
-The pinned binary's complete dogfood/runtime matrix now passes with `dogfood audit passed:
-formalized layers are replay-complete`; reports and native admission/tactic harnesses had zero replay
-gaps. The separate `scripts/test.sh` matrix also passes under the same pinned binary. This establishes
-Stage0 parity for the current audited matrix, not completion of the broader coverage table below.
+The currently selected Stage0 pin is `601f7bcd3de62877723ab7f5c5f9a502fb6ef9ae`. Its installed
+binary reports that exact Go VCS revision with a clean build; it successfully bootstrapped the
+latest Stage1 product and accepts the deep-expression regression input. The full Stage0 proof
+matrix has not been rerun at this refreshed pin, so the historical pass above is not attributed to
+it. Neither result completes the broader coverage table below.
+
+## Repaired: recursive semantic analysis could crash proof import
+
+A 768-term left-associated arithmetic expression is parsed iteratively, but recursive semantic
+expression walks exceeded the native stack. The crash report localized the fault to
+`Semantic.walk_expression_inner` at the stack guard. An earlier guard covered only the separate
+operator-compatibility walk; the proof importer's selected `check_full` mode bypassed that pass and
+still crashed. The pinned Stage0 compiler accepts the source in permissive mode, so it remains a
+useful importer robustness regression rather than a malformed-source test.
+
+The compiler now shares a named 128-level expression-analysis bound across both recursive walks.
+Every exhausted path emits the hard `ExpressionAnalysisDepthExceeded` diagnostic instead of
+silently skipping an unvisited subtree or recursing until stack exhaustion. Stage1 is based on the
+latest upstream main tip `fd2cb3cf` and includes the original operator guard (`59c4d3f2`) plus the
+all-walk fix (`cfd99261`). The dynamic proof dogfood compiles its input with the provenance-checked
+Stage0 oracle, then requires the proof CLI to return a valid failed/unsupported JSON report, one
+semantic error, zero replay gaps, and independent kernel replay without crashing. It passes under
+the final Stage1/proof build.
+
+## Repaired: Stage1 include paths containing NUL no longer truncate
+
+Differential testing against the freshly rebuilt Stage1 CLI found that an include path containing
+an embedded NUL was silently truncated at the C-string boundary: Stage0 rejected the source, but
+Stage1 opened the valid prefix and compiled it. `expand_includes` now detects NUL bytes in its
+owned path buffer before path normalization or any C-string filesystem call, and fails closed with
+the normal include-read diagnostic. The regression in the compiler's direct-CLI include suite
+requires both stages to reject the source and Stage1 to emit no object. Compiler commit
+`002922fb` contains this fix and its regression.
+
+The Stage1 product used for verification is rebuilt from the latest upstream main tip
+`fd2cb3cff470319500db362e5fce2833cbe300de`, plus the recursion-limit, NUL-path, and conservative
+compound-assignment fixes. Upstream main was rechecked and remains at that tip. The installed
+snapshot under `~/.elisac/stage1` remains older and is not used for this run.
+
+## Repaired: unknown compound-assignment targets stay conservative
+
+The per-file frontend/stdlib audit found a false `augmented assignment requires numeric operands`
+on `structs.cond_bind_names += name`: the target field's declaration lives in a sibling module,
+while the right-hand `sview` is visible in the isolated file. The check now emits a numeric error
+only when the target is known and non-overloadable; an unknown target no longer turns a firm RHS
+type into an unsupported claim about the operator. A dedicated unresolved-field control covers
+this boundary. Compiler commit `486d406b` passes the operator smoke suite, including the 768-term
+depth refusal and a zero-false-positive scan of all 800 frontend/stdlib Elisa files.
+
+## Repaired: concurrent proof builds cannot overwrite shared outputs
+
+Two proof builds previously wrote the same object and executable paths directly. `scripts/build.sh`
+now takes a per-project build lock, compiles to process-specific temporary files, and atomically
+publishes the object and executable only after successful linking; a failed build preserves the
+last good executable. Both `scripts/dogfood.sh` and `scripts/test.sh` completed sequentially against
+the pinned Stage1 product after this change.
+
+## Open: CJK identifiers do not import consistently
+
+The pinned Stage0 compiler accepts a definition containing a CJK identifier such as `cjk_漢`, but
+the freshly rebuilt Stage1 product (`486d406b`) rejects it at lexing, and the proof import frontend
+fails closed with parse errors and emits no declarations, obligations, proofs, or certificates.
+This loses coverage rather than certifying incorrect code. The Stage1 lexer has selected multibyte-
+letter cases but no general three-byte Unicode letter classification; this remains an explicit
+parity/coverage gap and the next compiler item to address.
 
 ## Coverage still required
 

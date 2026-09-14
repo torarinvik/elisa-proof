@@ -22,6 +22,21 @@ if elisa_compiler_is_stage0 "$COMPILER"; then
     elisa_verify_stage0_provenance "$COMPILER" "$ROOT_DIR" || exit $?
 fi
 
+# The depth-limit importer regression deliberately uses a source accepted by the bootstrap
+# compiler. Resolve and provenance-check that compiler once so the test cannot accidentally
+# change its oracle to whichever stage is selected for the dogfood run.
+BOOTSTRAP_COMPILER="${ELISA_BOOTSTRAP_COMPILER_BIN:-${ELISACORE_BIN:-}}"
+if [[ -z "$BOOTSTRAP_COMPILER" ]]; then
+    if elisa_compiler_is_stage0 "$COMPILER"; then
+        BOOTSTRAP_COMPILER="$COMPILER"
+    else
+        BOOTSTRAP_COMPILER="$(command -v elisac-stage0 2>/dev/null || true)"
+    fi
+fi
+if [[ -n "$BOOTSTRAP_COMPILER" ]]; then
+    elisa_verify_stage0_provenance "$BOOTSTRAP_COMPILER" "$ROOT_DIR" || exit $?
+fi
+
 # A stage1 wrapper emits objects that use the self-hosted runtime. Keep this in
 # sync with build.sh so the executable dogfood harness exercises the same product
 # configuration as the proof binary itself.
@@ -227,6 +242,51 @@ assert any(finding["kind"] == "parse-error" for finding in report["findings"])
 assert report["replay"]["gaps"] == 0
 print("dogfood root_nul: proof parser consumes the compiler-visible full source extent")
 PY
+
+# A left-associated source expression is parsed iteratively but several semantic
+# frontend passes recurse over its AST. The operator/type pass has a lower explicit
+# recursion bound and must reject the unexamined suffix instead of exhausting the
+# native stack. Stage0 accepts this source in permissive mode; proof import must fail
+# closed with a valid, replay-gap-free report rather than crash.
+if [[ -n "$BOOTSTRAP_COMPILER" ]]; then
+python3 - "$BOOTSTRAP_COMPILER" "$ROOT_DIR/build/elisa-proof" "$REPORT_DIR/deep_expression.elisa" "$REPORT_DIR/deep_expression.o" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+compiler, proof, source_path, object_path = sys.argv[1:]
+terms = 768
+expression = " + ".join(["x"] * terms)
+source = (
+    "def deep_expression(x: i64) -> i64:\n"
+    "    ensure result == x\n"
+    f"    intermediate: i64 = {expression}\n"
+    "    return x\n"
+)
+Path(source_path).write_text(source)
+compiled = subprocess.run(
+    [compiler, "-permissive", "-emit", "obj", "-O0", "-o", object_path, source_path],
+    capture_output=True,
+)
+assert compiled.returncode == 0, compiled.stderr.decode("utf-8", errors="replace")
+checked = subprocess.run([proof, "--json", source_path], capture_output=True, timeout=30)
+assert checked.returncode == 1, (checked.returncode, checked.stdout[:500], checked.stderr[:500])
+report = json.loads(checked.stdout)
+assert report["status"] == "failed"
+assert report["verification_state"] == "unsupported"
+assert report["summary"]["semantic_errors"] == 1
+assert any(
+    "safe semantic-analysis limit" in item["message"]
+    for item in report["semantic_diagnostics"]
+)
+assert report["replay"]["gaps"] == 0
+assert report["kernel"]["independent_replay"] is True
+print("dogfood deep_expression: semantic depth exhaustion is rejected without a crash")
+PY
+else
+    printf 'dogfood deep_expression: skipped (no provenance-verified Stage0 compiler is available)\n'
+fi
 
 # Elisa accepts legacy single-byte Latin-1 letters in identifiers as well as UTF-8 names. The
 # report encoder must therefore escape malformed UTF-8 bytes without damaging valid multibyte
@@ -2568,22 +2628,13 @@ printf 'dogfood effect_runtime: contained rows admitted and uncontained or malfo
 # harness then confirms the whole replay layer under the bootstrap compiler.
 # Respect the same explicit stage0 compiler supplied to the stage1 driver/build; otherwise a
 # stale, unrelated `elisac-stage0` earlier on PATH can replace the verified bootstrap product.
-bootstrap_compiler="${ELISA_BOOTSTRAP_COMPILER_BIN:-${ELISACORE_BIN:-}}"
-if [[ -z "$bootstrap_compiler" ]]; then
-    if elisa_compiler_is_stage0 "$COMPILER"; then
-        bootstrap_compiler="$COMPILER"
-    else
-        bootstrap_compiler="$(command -v elisac-stage0 2>/dev/null || true)"
-    fi
-fi
-if [[ -n "$bootstrap_compiler" ]]; then
-    elisa_verify_stage0_provenance "$bootstrap_compiler" "$ROOT_DIR" || exit $?
-    "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
+if [[ -n "$BOOTSTRAP_COMPILER" ]]; then
+    "$BOOTSTRAP_COMPILER" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
     # The raw runtime support object intentionally leaves the optional profiler
     # ABI unresolved.  Keep the stage0 bootstrap link honest by supplying the
     # same small hook implementation used by the compiler parity harness.
     for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime kernel_proposition_admission_runtime; do
-        "$bootstrap_compiler" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
+        "$BOOTSTRAP_COMPILER" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
         link_native "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o"
         set +e
         "$runtime_dir/bootstrap-$bootstrap_example"
