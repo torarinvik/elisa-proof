@@ -4,6 +4,44 @@ Passing the current suites is regression evidence, not completion of the full au
 The objective covers all existing implementation code, scripts, proof fixtures, and their
 assumptions about the compiler. No module below is yet certified as fully audited.
 
+## 2026-09-14 checkpoint: Elisa validity and admission exhaustion
+
+`proof_source_validate_statement_propositions` silently returned at its nesting bound.
+It now records a failed obligation and a `contract-proposition-type` finding before
+returning. Empty statement lists remain harmless. The new
+`examples/rejected_proposition_nesting.elisa` regression requires both exit status 1
+and the explicit exhaustion finding. This closes a missing fail-closed boundary;
+it is not evidence that a false theorem previously passed the whole verifier.
+
+The complete `scripts/test.sh` matrix passed with both pinned Stage0
+(`1d1ddf1c5260e1e02e64466dafc02bb6e792cfa4`) and an audit Stage1 candidate built
+from the compiler worktree. This checks compilation and tested behavior, not full
+language conformance: compilation still emits effect-grant warnings. Proof source
+files remain under 600 lines (largest: 593). The reviewed sources contain no
+dereference-style `*values` expression; unary dereference is not Elisa syntax.
+
+Related compiler repairs are committed in `6524bf3a`: region provenance through
+aggregate/value expressions, conservative treatment of unknown projections,
+match/catch local mutability, argument coercion, native AoS ABI alignment, and
+LLVM verification before optimization/emission. The verifier message is disposed
+on both success and failure. The audit candidate passed 318 diagnostic fixtures,
+match-expression smoke tests, Stage0/Stage1 conditional-call runtime parity at O2,
+and packed-AoS row-width tests. Native 64-bit ABI coverage is not 32-bit coverage.
+This checkpoint does not update the proof assistant's pinned compiler frontend or
+install the audit compiler as the user's default product.
+
+The full-source run against `build/snapshot/elisa-proof/src/main.elisa` did NOT
+complete: the watchdog stopped it after 93.77 seconds at 1,507,568 KB RSS
+(limit 1,500,000 KB). There is no complete JSON report or replay-gap count for
+that run, and no claim of self-verification. Dogfood was not rerun for this checkpoint.
+
+Further compiler review is required for branch-assignment provenance joins,
+legacy store-growth provenance traversal, and explicit-region allocation semantics.
+An experimental positive fixture assuming a local `@r` annotation selected fresh
+backing allocation was rejected by Stage0 too; the speculative change and fixture
+were removed, rather than changing lifetime rules on that assumption. These open
+questions prevent a claim that all compiler/prover code is correct.
+
 ## Repaired: unsigned local substitution erased fixed-width semantics
 
 Reproducer: `examples/rejected_unsigned_local.elisa` (with `rejected_unsigned_local_states.elisa`).

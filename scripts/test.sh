@@ -3343,4 +3343,13 @@ while IFS= read -r proof_source; do
     fi
 done < <(find "$ROOT_DIR/src" -type f -name '*.elisa' -print | sort)
 
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_proposition_nesting.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] != "proved"; assert any(finding["kind"] == "contract-proposition-type" and finding["message"] == "kernel proposition statement nesting exceeded its bounded representation" for finding in report["findings"])'
+proposition_nesting_status=("${PIPESTATUS[@]}")
+set -e
+if [[ "${proposition_nesting_status[0]}" -ne 1 || "${proposition_nesting_status[1]}" -ne 0 ]]; then
+    printf 'proof test matrix failed: exhausted proposition formation did not record its failure\n' >&2
+    exit 1
+fi
+
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'
