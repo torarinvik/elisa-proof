@@ -4829,12 +4829,12 @@ useful importer robustness regression rather than a malformed-source test.
 The compiler now shares a named 128-level expression-analysis bound across both recursive walks.
 Every exhausted path emits the hard `ExpressionAnalysisDepthExceeded` diagnostic instead of
 silently skipping an unvisited subtree or recursing until stack exhaustion. The proof repo is pinned
-to compiler commit `0260fd07`, based on upstream main tip `fd2cb3cf`, and includes the original
+to compiler commit `4cf3d6a8`, based on upstream main tip `fd2cb3cf`, and includes the original
 operator guard (`59c4d3f2`), all-walk fix (`cfd99261`), NUL-path rejection (`002922fb`), conservative
-compound-assignment handling (`486d406b`), and Unicode parity fix. The dynamic proof dogfood
-compiles its input with the provenance-checked Stage0 oracle, then requires the proof CLI to return
-a valid failed/unsupported JSON report, one semantic error, zero replay gaps, and independent kernel
-replay without crashing. It passes under the final Stage1/proof build.
+compound-assignment handling (`486d406b`), and exhaustive Unicode scalar-value parity. The dynamic
+proof dogfood compiles its input with the provenance-checked Stage0 oracle, then requires the proof
+CLI to return a valid failed/unsupported JSON report, one semantic error, zero replay gaps, and
+independent kernel replay without crashing. It passes under the final Stage1/proof build.
 
 ## Repaired: Stage1 include paths containing NUL no longer truncate
 
@@ -4846,10 +4846,11 @@ the normal include-read diagnostic. The regression in the compiler's direct-CLI 
 requires both stages to reject the source and Stage1 to emit no object. Compiler commit
 `002922fb` contains this fix and its regression.
 
-The Stage1 product used for verification is rebuilt from compiler commit `0260fd07741085e597a3525ba7f4b65abba21184`, based on the latest upstream main tip
+The Stage1 product used for verification is rebuilt from compiler commit
+`4cf3d6a82106cb11414d9fe9980ebf085fd6710d`, based on the latest upstream main tip
 `fd2cb3cff470319500db362e5fce2833cbe300de`, plus the recursion-limit, NUL-path, conservative
-compound-assignment, and Unicode-classification fixes. The installed snapshot under `~/.elisac/stage1`
-remains older and is not used for this run.
+compound-assignment, and full Unicode scalar-classification fixes. The installed snapshot under
+`~/.elisac/stage1` remains older and is not used for this run.
 
 ## Repaired: unknown compound-assignment targets stay conservative
 
@@ -4869,22 +4870,21 @@ publishes the object and executable only after successful linking; a failed buil
 last good executable. Both `scripts/dogfood.sh` and `scripts/test.sh` completed sequentially against
 the pinned Stage1 product after this change.
 
-## Repaired: Unicode BMP identifiers import consistently
+## Repaired: Unicode scalar-value identifiers import consistently
 
 Stage0's lexer classifies decoded runes with Go's Unicode 17.0 `IsLetter`/`IsDigit` tables, while
-Stage1 previously handled only selected multibyte ranges. This made a valid source name such as
+Stage1 previously handled only selected multibyte ranges. This made valid source names such as
 `cjk_漢` fail lexing, so proof import failed closed without declarations or obligations. Stage1 now
-decodes valid three-byte UTF-8 and uses generated range predicates from the same Go Unicode tables.
-The generator and generated ranges are kept separately in the compiler lexer tree; an exhaustive
-token-level differential checked every scalar from U+0800 through U+FFFF (excluding surrogates) in
-identifier-start and continuation positions, plus every valid two-byte code point U+0080..U+07FF.
-Both comparisons matched Stage0. The stage1 product builds multilingual function declarations
-(Greek, Han, Hangul, Devanagari letters, Kana, and a Devanagari digit continuation), and the proof
-dogfood now requires `cjk_漢` to be verified, not merely parsed.
+decodes valid two-, three-, and four-byte UTF-8 and uses generated, plane-dispatched range predicates
+from those same Go Unicode tables. The generator and generated predicates live in the compiler lexer
+tree. An exhaustive token-level differential checked every non-ASCII Unicode scalar from U+0080
+through U+10FFFF, excluding surrogate code points, in both identifier-start and continuation
+positions: 1,111,936 scalar values, with every Stage1 token stream matching the pinned Stage0 oracle.
 
-The importer remains fail-closed for Unicode it cannot tokenize. Supplementary-plane identifiers
-outside the currently supported mathematical alphanumeric block remain a known parity/coverage
-gap; this fix closes BMP Unicode classification, not all Unicode scalar values.
+The Stage1 compiler also builds identifiers containing Deseret (`𐐀`), CJK Extension B (`𠀀`),
+mathematical alphanumeric letters/digits (`𝜆`, `𝟝`), and an Adlam digit continuation (`𞥐`). Dynamic
+proof dogfood requires each corresponding declaration to be verified, not merely parsed. No known
+Unicode scalar-value classification parity gap remains between this pinned Stage0 and Stage1.
 
 ## Coverage still required
 
