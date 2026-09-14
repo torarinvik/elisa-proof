@@ -2,6 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OPT_LEVEL="${ELISA_OPT_LEVEL:-O0}"
+case "$OPT_LEVEL" in
+    O0|O1|O2|O3) ;;
+    *) printf 'ELISA_OPT_LEVEL must be O0, O1, O2, or O3 (got %s)\n' "$OPT_LEVEL" >&2; exit 2 ;;
+esac
+PROOF_OUTPUT="${ELISA_PROOF_OUTPUT:-$ROOT_DIR/build/elisa-proof}"
 COMPILER="${ELISA_COMPILER_BIN:-}"
 # shellcheck source=scripts/compiler_provenance.sh
 source "$ROOT_DIR/scripts/compiler_provenance.sh"
@@ -61,6 +67,7 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
 fi
 
 mkdir -p "$ROOT_DIR/build"
+mkdir -p "$(dirname -- "$PROOF_OUTPUT")"
 BUILD_LOCK="$ROOT_DIR/build/.elisa-proof-build.lock"
 if ! mkdir "$BUILD_LOCK" 2>/dev/null; then
     lock_owner="unknown"
@@ -115,9 +122,9 @@ if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_O
     clang -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
 fi
-"$COMPILER" -emit obj -O0 -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/src/main.elisa"
+"$COMPILER" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/src/main.elisa"
 LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
 [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
 clang -Wl,-dead_strip -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
 mv -f "$STAGE_OBJECT" "$ROOT_DIR/build/elisa-proof-stage.o"
-mv -f "$PROOF_BINARY" "$ROOT_DIR/build/elisa-proof"
+mv -f "$PROOF_BINARY" "$PROOF_OUTPUT"
