@@ -4731,6 +4731,22 @@ sentinel). The shared output predicate is used by focused-goal, report, and theo
 The adversarial runtime replaces only an ordinary attempt goal, then jointly replaces both inert
 mirrors; replay and output admission must reject each mutation, then accept the restored report.
 
+## Repaired: a summary trace could be reclassified as a trusted boundary
+
+Both trace validators dispatched trusted facts by `trace.kind` before checking that the rest of
+the record had the shape of a boundary fact. A caller could replace a `ProofFactTrace` in the
+mutable report array with the same record relabeled as `precondition`; the source and kernel
+validators would then bypass the summary's declaration, argument bindings, and required-goal
+certificates. Direct field mutation is forbidden by Elisa, but replacing the array element with a
+new record is permitted and is covered by the public revalidation threat model.
+
+Trusted-boundary admission now requires empty dependency, premise, and summary payloads, a zero
+ensure index, and in-range empty summary slices. `examples/lemma_summary_replay_runtime.elisa`
+replaces a valid lemma-summary record with a boundary-labeled copy and requires rejection, then
+restores the original and requires replay success. The full pinned-Stage0 dogfood run passes,
+including this native mutation harness and the final tactic/source-binding checks, with zero
+replay gaps.
+
 The Stage1 Gen2 test matrix and dogfood report/runtime/tactic suites pass after these repairs with
 zero replay gaps. Stage0 bootstrap was deliberately skipped: the available Stage0 did not pass the
 repository's provenance guard, so no Stage0 parity claim is made for this run.
