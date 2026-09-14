@@ -1492,6 +1492,12 @@ with open(withdrawn, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: collection builtin boundary fixture did not fail cleanly")
+if report["summary"]["semantic_errors"] != 1 or not any(
+    diagnostic["name"] == "push"
+    and "non-local darray from local arena" in diagnostic["message"]
+    for diagnostic in report["semantic_diagnostics"]
+):
+    raise SystemExit("dogfood failed: unsafe nested-region growth was not diagnosed by the compiler")
 if {f["kind"] for f in report["findings"]} != {"borrow-write-conflict", "borrow-call-opaque"}:
     raise SystemExit("dogfood failed: a builtin write escaped the borrow rules")
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
