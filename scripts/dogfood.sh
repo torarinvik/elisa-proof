@@ -179,6 +179,55 @@ assert report["replay"]["gaps"] == 0
 print("dogfood include_nul: proof importer rejects the compiler-invalid path")
 PY
 
+# Root source has the same byte-length boundary as included files. The compiler tokenizes the
+# complete buffer, so the proof assistant must not stop at an embedded NUL and certify only a
+# valid prefix while ignoring a compiler-visible syntax error in the suffix.
+nul_root_source="$REPORT_DIR/nul-root.elisa"
+python3 - "$nul_root_source" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_bytes(
+    b"def proof(x: i64) -> void:\n"
+    b"    requires x >= 0\n"
+    b"    assert x >= 0 by:\n"
+    b"        assert x >= 0\n"
+    b"\x00"
+    b"def broken(:\n"
+)
+PY
+if "$COMPILER" -permissive -emit obj -O0 -o "$REPORT_DIR/nul-root.o" "$nul_root_source" >"$REPORT_DIR/nul-root.compiler.log" 2>&1; then
+    printf 'dogfood failed: compiler accepted the NUL-containing root-source regression\n' >&2
+    exit 1
+fi
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$nul_root_source" >"$REPORT_DIR/nul-root.json"
+nul_root_status=$?
+set -e
+if [[ "$nul_root_status" -ne 1 ]]; then
+    printf 'dogfood failed: proof assistant returned %s for compiler-invalid bytes after root-source NUL\n' "$nul_root_status" >&2
+    exit 1
+fi
+python3 - "$REPORT_DIR/nul-root.json" "$nul_root_source" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+source_bytes = Path(sys.argv[2]).read_bytes()
+assert report["status"] == "failed"
+assert report["summary"]["declarations"] == 0
+assert report["summary"]["obligations"] == 0
+assert report["summary"]["proven"] == 0
+assert report["summary"]["failed"] > 0
+assert report["summary"]["semantic_errors"] == 0
+assert report["source"]["bytes"] == len(source_bytes)
+assert any(finding["kind"] == "parse-error" for finding in report["findings"])
+assert report["replay"]["gaps"] == 0
+print("dogfood root_nul: proof parser consumes the compiler-visible full source extent")
+PY
+
 # Absolute include paths are valid in the compiler and must not be rebased against the
 # including file's directory by the proof importer.
 absolute_include_dir="$REPORT_DIR/absolute-include"

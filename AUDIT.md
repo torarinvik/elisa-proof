@@ -4575,6 +4575,22 @@ exercises the long alias with double quotes and the short uppercase alias with s
 proves and replays under the pinned Stage0. Both `scripts/dogfood.sh` and `scripts/test.sh` cover
 the fixture. The full Stage0 dogfood run and the ordinary proof matrix pass after the repair.
 
+## Repaired: root source was truncated at an embedded NUL before proof checking
+
+Unlike included paths, root file contents are read into a length-aware byte array and then passed
+to the compiler lexer through `frontend_parse`, whose convenience wrapper derives its length as a
+C string. A source containing a valid proof, an embedded NUL, and malformed compiler-visible
+trailing bytes therefore returned `proved` in the proof CLI while the compiler rejected the same
+file. Reusing the original byte count for `frontend_tokenize_with_length` removes that truncation.
+
+The full-length parse also exposed an error-boundary defect: the proof CLI continued into proof and
+semantic analysis with an AST that already contained parser errors; the adversarial reproducer
+could hang there. The CLI now emits parse-error findings and skips proof replay and semantic
+analysis whenever parsing fails. Parse-error sources are not source-admissible for tactic or
+repair outputs. The dynamic dogfood regression asks Stage0 and the proof CLI to reject the same
+NUL-containing file, checks exact imported byte length and parse-error findings, and requires zero
+declarations, proof obligations, proven results, or replay gaps.
+
 ## Repaired: batch arena admission could accept a disconnected cycle
 
 The report-wide kernel admission pass checked node shapes and direct ranges, but did not enforce
