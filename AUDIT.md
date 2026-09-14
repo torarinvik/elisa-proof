@@ -4914,8 +4914,10 @@ Completion requires coverage of the full table and resolution of every confirmed
 
 ## Current compiler pin and optimized replay verification (2026-09-15)
 
-The proof project now pins compiler commit `05289f0430b359b4a28b761590a6a623f8497aec` in
-`ELISA_COMPILER_REV`. Its compiler base includes shared typed scalar lowering for EDIR and LLVM
+The proof project now pins compiler commit `1399160a1cafc981f9e7ccdafcbb4a90e5699454` in
+`ELISA_COMPILER_REV`. The Stage1 product was built from its parent compiler-source revision
+`05289f0430b359b4a28b761590a6a623f8497aec`; the tip commit adds only a smoke-test link fix and
+does not change `src/` or `elisacore_std/`. Its compiler base includes shared typed scalar lowering for EDIR and LLVM
 (`19f86a3b`, `c605b3fa`) and the subsequent native DWARF source-line mapping change (`ce9e0292`),
 with the required Stage0-parity and soundness fixes rebased on top. The Stage1 product was rebuilt
 from the provenance-checked Stage0 binary (`601f7bcd`) and checked for source freshness. A
