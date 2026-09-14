@@ -304,6 +304,7 @@ source = (
     b"    ensure result == x\n"
     b"    return x\n"
     + "def lambda_λ(x: i64) -> i64:\n    ensure result == x\n    return x\n".encode("utf-8")
+    + "def cjk_漢(x: i64) -> i64:\n    ensure result == x\n    return x\n".encode("utf-8")
 )
 Path(source_path).write_bytes(source)
 compiled = subprocess.run(
@@ -321,7 +322,7 @@ verified = {
     for item in report["declaration_details"]
     if item["kind"] == "function" and item["verified"]
 }
-assert {"latin_ÿ", "lambda_λ"} <= verified
+assert {"latin_ÿ", "lambda_λ", "cjk_漢"} <= verified
 
 # Semantic diagnostics are owned byte arrays and use the same encoder through
 # proof_push_json_bytes; keep that path valid for a non-ASCII unresolved identifier too.
