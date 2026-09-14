@@ -4553,6 +4553,28 @@ Finally, expansion now flushes only an unterminated final physical line. The old
 always appended a synthetic blank line to newline-terminated files, changing imported byte counts,
 fingerprints, and downstream source locations.
 
+## Repaired: NUL include paths were truncated at the proof import boundary
+
+An include path containing an embedded NUL exposed a source mismatch across the proof importer's
+C-string file API. The compiler kept the NUL in its path and rejected the filename as invalid,
+while the importer appended a terminator and passed the path to `proof_read_file_checked`; the
+operating-system call therefore saw only the valid prefix. A reproducer with
+`./included.elisa\0ignored.elisa` made the proof CLI import `included.elisa` and report `proved`
+while Stage0 rejected the exact source with `invalid argument`.
+
+The importer now rejects any NUL in the root or resolved include path before recording, comparing,
+or opening it. The dynamic dogfood regression verifies that Stage0 rejects the binary source and
+the proof CLI reports an import error without importing the prefix declaration. A type-bound
+certificate for the remaining parsed function may still replay, so the check asserts failure,
+absence of the truncated declaration, and zero replay gaps rather than requiring zero certificates.
+
+The same audit found that the compiler accepts `{$include path}` and `{$i path}` in addition to
+`include "path"` and `#include "path"`. The proof importer now recognizes those aliases, their
+case-insensitive keywords, and quoted or unquoted macro arguments. `examples/include_macro.elisa`
+exercises the long alias with double quotes and the short uppercase alias with single quotes; it
+proves and replays under the pinned Stage0. Both `scripts/dogfood.sh` and `scripts/test.sh` cover
+the fixture. The full Stage0 dogfood run and the ordinary proof matrix pass after the repair.
+
 ## Repaired: batch arena admission could accept a disconnected cycle
 
 The report-wide kernel admission pass checked node shapes and direct ranges, but did not enforce

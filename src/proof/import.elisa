@@ -162,46 +162,136 @@ extend ElisaProof:
                 seen.push(byte)
             seen.push(0)
 
-        # Parse one physical line as an include directive. Both `include "x"` and the
-        # compiler-compatible `#include "x"` spelling are accepted.
-        def proof_include_path(line: darray[u8]&) -> darray[u8]:
+        def proof_import_space(byte: u8) -> bool:
+            match byte:
+                9:
+                    return true
+                10:
+                    return true
+                11:
+                    return true
+                12:
+                    return true
+                13:
+                    return true
+                32:
+                    return true
+                _:
+                    return false
+            return false
+
+        def proof_import_path_has_nul(path: darray[u8]&) -> bool:
+            for byte in path |path|:
+                match byte:
+                    0:
+                        return true
+                    _:
+                        pass
+            return false
+
+        # Match the compiler's include parser: ordinary include/#include directives plus the
+        # {$include path} and {$i path} macro forms. Keep recognition separate from the path,
+        # because an empty but syntactically valid quoted path must still fail during file IO.
+        def proof_include_path(line: darray[u8]&) -> (recognized: bool, path: darray[u8]):
             empty: mutable darray[u8] = []
-            cursor: mutable usize = 0
-            while cursor < line.count |cursor, line|:
-                break if line[cursor] != 32 and line[cursor] != 9
+            start: mutable usize = 0
+            end: mutable usize = line.count
+            while start < end |start, end, line|:
+                break if not proof_import_space(line[start])
+                start <- start + 1
+            while end > start |start, end, line|:
+                break if not proof_import_space(line[end - 1])
+                end <- end - 1
+
+            if end - start >= 3 and line[start] == 123 and line[start + 1] == 36 and line[end - 1] == 125:
+                body_start: mutable usize = start + 2
+                body_end: mutable usize = end - 1
+                while body_start < body_end |body_start, body_end, line|:
+                    break if not proof_import_space(line[body_start])
+                    body_start <- body_start + 1
+                while body_end > body_start |body_start, body_end, line|:
+                    break if not proof_import_space(line[body_end - 1])
+                    body_end <- body_end - 1
+                keyword_end: mutable usize = body_start
+                while keyword_end < body_end |keyword_end, body_end, line|:
+                    break if proof_import_space(line[keyword_end])
+                    keyword_end <- keyword_end + 1
+                keyword_length: usize = keyword_end - body_start
+                keyword_is_i: mutable bool = false
+                keyword_is_include: mutable bool = keyword_length == 7
+                include_keyword: sview = "include"
+                if keyword_length == 1:
+                    original: u8 = line[body_start]
+                    lowered: u8 = original + 32 if original >= 65 and original <= 90 else original
+                    keyword_is_i <- lowered == 105
+                if keyword_is_include:
+                    for offset in 0..<7 |keyword_is_include, line, body_start, include_keyword|:
+                        original: u8 = line[body_start + offset]
+                        lowered: u8 = original + 32 if original >= 65 and original <= 90 else original
+                        keyword_is_include <- false if lowered != sview_at(include_keyword, offset)
+                keyword_recognized: mutable bool = keyword_is_i
+                keyword_recognized <- true if keyword_is_include
+                if keyword_recognized and keyword_end < body_end:
+                    argument_start: mutable usize = keyword_end
+                    argument_end: mutable usize = body_end
+                    while argument_start < argument_end |argument_start, argument_end, line|:
+                        break if not proof_import_space(line[argument_start])
+                        argument_start <- argument_start + 1
+                    while argument_end > argument_start |argument_start, argument_end, line|:
+                        break if not proof_import_space(line[argument_end - 1])
+                        argument_end <- argument_end - 1
+                    if argument_start < argument_end:
+                        first: u8 = line[argument_start]
+                        last: u8 = line[argument_end - 1]
+                        quoted_path: mutable bool = false
+                        match first:
+                            34:
+                                quoted_path <- last == 34
+                            39:
+                                quoted_path <- last == 39
+                            _:
+                                pass
+                        if quoted_path:
+                            captured: mutable darray[u8] = []
+                            for offset in 1..<(argument_end - argument_start - 1) |captured, line, argument_start|:
+                                captured.push(line[argument_start + offset])
+                            return (true, captured)
+                        has_space: mutable bool = false
+                        for offset in argument_start..<argument_end |has_space, line|:
+                            has_space <- true if proof_import_space(line[offset])
+                        if not has_space:
+                            captured: mutable darray[u8] = []
+                            for offset in argument_start..<argument_end |captured, line|:
+                                captured.push(line[offset])
+                            return (true, captured)
+                return (false, empty)
+
+            cursor: mutable usize = start
+            cursor <- cursor + 1 if cursor < end and line[cursor] == 35
+            while cursor < end |cursor, end, line|:
+                break if not proof_import_space(line[cursor])
                 cursor <- cursor + 1
-            cursor <- cursor + 1 if cursor < line.count and line[cursor] == 35
-            while cursor < line.count |cursor, line|:
-                break if line[cursor] != 32 and line[cursor] != 9
-                cursor <- cursor + 1
+            return (false, empty) if end - cursor < 8
             keyword: sview = "include"
-            return empty if cursor + 7 > line.count
             for keyword_index in 0..<7 |empty, line, cursor, keyword|:
-                return empty if line[cursor + keyword_index] != sview_at(keyword, keyword_index)
+                return (false, empty) if line[cursor + keyword_index] != sview_at(keyword, keyword_index)
             cursor <- cursor + 7
-            return empty if cursor >= line.count or (line[cursor] != 32 and line[cursor] != 9)
-            while cursor < line.count |cursor, line|:
-                break if line[cursor] != 32 and line[cursor] != 9
-                cursor <- cursor + 1
-            return empty if cursor >= line.count or line[cursor] != 34
+            return (false, empty) if line[cursor] != 32
             cursor <- cursor + 1
+            while cursor < end |cursor, end, line|:
+                break if not proof_import_space(line[cursor])
+                cursor <- cursor + 1
+            return (false, empty) if end - cursor < 2 or line[cursor] != 34 or line[end - 1] != 34
             captured: mutable darray[u8] = []
-            while cursor < line.count |cursor, line, captured|:
-                break if line[cursor] == 34
-                captured.push(line[cursor])
-                cursor <- cursor + 1
-            return empty if cursor >= line.count or line[cursor] != 34
-            cursor <- cursor + 1
-            # The compiler matches the entire physical line. Only horizontal whitespace and
-            # CR may follow the closing quote; otherwise this is ordinary source and must reach
-            # the parser instead of being silently erased by the proof importer.
-            while cursor < line.count |cursor, line|:
-                return empty if line[cursor] != 32 and line[cursor] != 9 and line[cursor] != 13
-                cursor <- cursor + 1
-            return captured
+            for offset in (cursor + 1)..<(end - 1) |captured, line, cursor|:
+                captured.push(line[offset])
+            return (true, captured)
 
         def proof_expand_file(path: darray[u8]&, output: mutable darray[u8]&, seen: mutable darray[u8]&, active: mutable darray[u8]&, depth: i64, failed: mutable bool&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             if depth > 64:
+                failed <- true
+                return
+            if proof_import_path_has_nul(path):
                 failed <- true
                 return
             if proof_path_seen(active, path):
@@ -228,10 +318,13 @@ extend ElisaProof:
                 at_end: bool = index == contents.count
                 byte: u8 = 10 if at_end else contents[index]
                 if byte == 10:
-                    included: darray[u8] = proof_include_path(line)
-                    if included.count > 0:
-                        resolved: darray[u8] = proof_resolve_include(directory, included)
-                        proof_expand_file(resolved, output, seen, active, depth + 1, failed)
+                    included: (recognized: bool, path: darray[u8]) = proof_include_path(line)
+                    if included.recognized:
+                        if proof_import_path_has_nul(included.path):
+                            failed <- true
+                        else:
+                            resolved: darray[u8] = proof_resolve_include(directory, included.path)
+                            proof_expand_file(resolved, output, seen, active, depth + 1, failed)
                     else:
                         output.extend(line)
                         output.push(10)

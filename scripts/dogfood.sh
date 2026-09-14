@@ -126,7 +126,58 @@ PY
 run_probe quantifier_hypothesis examples/quantifier_hypothesis.elisa 0
 run_probe rejected_include_trailing examples/rejected_include_trailing.elisa 1
 run_probe include_alias_diamond examples/include_alias_diamond.elisa 0
+run_probe include_macro examples/include_macro.elisa 0
 run_probe rejected_include_cycle examples/rejected_include_cycle_a.elisa 1
+
+# Embedded NUL bytes must not be truncated at the proof importer's C-string file API.
+# Before the guard, this source imported `included.elisa` and proved although the compiler
+# rejected the actual filename containing the NUL suffix.
+nul_include_dir="$REPORT_DIR/nul-include"
+mkdir -p "$nul_include_dir"
+python3 - "$nul_include_dir" <<'PY'
+from pathlib import Path
+import sys
+
+directory = Path(sys.argv[1])
+(directory / "included.elisa").write_text(
+    "def nul_import_identity(x: i64) -> i64:\n"
+    "    ensure result == x\n"
+    "    return x\n",
+    encoding="utf-8",
+)
+(directory / "entry.elisa").write_bytes(
+    b'include "./included.elisa\x00ignored.elisa"\n'
+    b'def use_nul_import(x: i64) -> i64:\n'
+    b'    ensure result == x\n'
+    b'    return nul_import_identity(x)\n'
+)
+PY
+if "$COMPILER" -permissive -emit obj -O0 -o "$nul_include_dir/entry.o" "$nul_include_dir/entry.elisa" >"$nul_include_dir/compiler.log" 2>&1; then
+    printf 'dogfood failed: compiler accepted an include path containing NUL\n' >&2
+    exit 1
+fi
+set +e
+"$ROOT_DIR/build/elisa-proof" --json "$nul_include_dir/entry.elisa" >"$nul_include_dir/proof.json"
+nul_include_status=$?
+set -e
+if [[ "$nul_include_status" -ne 1 ]]; then
+    printf 'dogfood failed: proof importer returned %s for an include path containing NUL\n' "$nul_include_status" >&2
+    exit 1
+fi
+python3 - "$nul_include_dir/proof.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "failed"
+assert report["summary"]["semantic_errors"] > 0
+assert any(finding["kind"] == "import-error" for finding in report["findings"])
+declarations = {entry["name"] for entry in report["declaration_details"]}
+assert "use_nul_import" in declarations and "nul_import_identity" not in declarations
+assert report["replay"]["gaps"] == 0
+print("dogfood include_nul: proof importer rejects the compiler-invalid path")
+PY
 
 # Absolute include paths are valid in the compiler and must not be rebased against the
 # including file's directory by the proof importer.

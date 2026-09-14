@@ -1129,6 +1129,10 @@ rejected_borrow_nested_match_status=$?
 rejected_value_match_impure_call_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/with_include.elisa" >/dev/null
 include_status=$?
+"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/include_macro.elisa" >/dev/null
+if [[ "$?" -ne 0 ]]; then
+    include_status=1
+fi
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/lemma.elisa" >/dev/null
 lemma_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/recursive_lemma_decreases.elisa" >/dev/null
