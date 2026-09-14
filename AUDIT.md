@@ -4733,6 +4733,25 @@ the proof system actually emits; an unrelated `__elisa_` source name is covered 
 regression while forged witness and rebind names remain rejected. This preserves the collision
 boundary without treating a compiler naming convention as proof-system ownership.
 
+## Stage0 compiler parity and lifetime checks
+
+Stage0 is pinned to compiler revision `26a7730367293e2f730598313671309f486e6d4e`; the installed
+binary was rebuilt by the compiler commit hook and reports that revision with a clean worktree.
+This compiler change brings Stage0's top-level binding-free `or` pattern analysis in line with the
+newer frontend for string, integer, enum, and const-enum patterns. Alternatives are checked in
+isolated scopes so a refinement from one branch cannot leak into the shared body; top-level
+binding alternatives fail closed until their branch merge is modeled.
+
+The same revision closes scoped-store lifetime gaps: reallocation into a shorter nested region is
+rejected for outer-region containers and global/parameter storage, including `dict.entry(...)`
+receivers. Struct-field forwarding inference now summarizes call sites once before its fixpoint,
+avoiding repeated AST scans. The compiler fast suite and full suite pass; a fresh Stage0 build also
+imports and compiles the proof assistant's complete source snapshot with exit code 0 (warnings only).
+The pinned binary's complete dogfood/runtime matrix now passes with `dogfood audit passed:
+formalized layers are replay-complete`; reports and native admission/tactic harnesses had zero replay
+gaps. The separate `scripts/test.sh` matrix also passes under the same pinned binary. This establishes
+Stage0 parity for the current audited matrix, not completion of the broader coverage table below.
+
 ## Coverage still required
 
 | Code | Required audit coverage |
