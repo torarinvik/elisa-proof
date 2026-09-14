@@ -4846,7 +4846,7 @@ the normal include-read diagnostic. The regression in the compiler's direct-CLI 
 requires both stages to reject the source and Stage1 to emit no object. Compiler commit
 `002922fb` contains this fix and its regression.
 
-The Stage1 product used for verification is rebuilt from compiler commit
+The Stage1 product used for the verification run recorded in this section was rebuilt from compiler commit
 `4cf3d6a82106cb11414d9fe9980ebf085fd6710d`, based on the latest upstream main tip
 `fd2cb3cff470319500db362e5fce2833cbe300de`, plus the recursion-limit, NUL-path, conservative
 compound-assignment, and full Unicode scalar-classification fixes. The installed snapshot under
@@ -4911,3 +4911,24 @@ binding, rejection of lossy JSON integers, floating-point exclusions, and unsign
 refinement widths. They do not establish type preservation through every symbolic transformation.
 
 Completion requires coverage of the full table and resolution of every confirmed open defect.
+
+## Current compiler pin and optimized replay verification (2026-09-15)
+
+The proof project now pins compiler commit `05289f0430b359b4a28b761590a6a623f8497aec` in
+`ELISA_COMPILER_REV`. Its compiler base includes shared typed scalar lowering for EDIR and LLVM
+(`19f86a3b`, `c605b3fa`) and the subsequent native DWARF source-line mapping change (`ce9e0292`),
+with the required Stage0-parity and soundness fixes rebased on top. The Stage1 product was rebuilt
+from the provenance-checked Stage0 binary (`601f7bcd`) and checked for source freshness. A
+separate test-only commit fixes the native-object smoke helper's missing runtime link input.
+
+`scripts/test_optimized_replay.sh` builds the proof system at O2 and O3, runs the verified,
+sum-bound, and dogfood-kernel examples, and checks that every proven goal has independently
+replayed status; it passes at both levels. The full `scripts/test.sh` matrix passed against the
+immediately preceding combined compiler revision; after the DWARF-only follow-up, the default O0
+build and verified example also pass, along with the O2/O3 replay regression.
+
+The compiler's broader standalone native-object smoke remains inconclusive on this host: newly
+linked native executables stalled in macOS `_dyld_start`, including executables produced by both
+Stage0 and Stage1. The same differential timeout on both stages points to the host loader rather
+than a Stage1-only code-generation regression. The smoke helper link failure itself was corrected,
+but its complete runtime sweep should be repeated when native executable startup is healthy.
