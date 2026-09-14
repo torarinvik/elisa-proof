@@ -35,12 +35,27 @@ complete: the watchdog stopped it after 93.77 seconds at 1,507,568 KB RSS
 (limit 1,500,000 KB). There is no complete JSON report or replay-gap count for
 that run, and no claim of self-verification. Dogfood was not rerun for this checkpoint.
 
-Further compiler review is required for branch-assignment provenance joins,
-legacy store-growth provenance traversal, and explicit-region allocation semantics.
-An experimental positive fixture assuming a local `@r` annotation selected fresh
-backing allocation was rejected by Stage0 too; the speculative change and fixture
-were removed, rather than changing lifetime rules on that assumption. These open
-questions prevent a claim that all compiler/prover code is correct.
+## 2026-09-14 follow-up: aggregate joins and nested container growth
+
+Further Stage0 review found that assigning a fresh aggregate with a nested region-bearing
+container on only one branch could lose its provenance before return. The Go compiler now
+propagates interior taint from fresh aggregate producers; a positive escape fixture and an
+unchanged-aggregate negative control cover the join. The fix and regression were committed in
+the Stage0 source repository at `bd2353db` (included in the clean installed Stage0 revision
+`24c3efc28b30f590088224d441b776e94c64be29`). The complete Go test suite passed at that revision.
+
+The self-hosted checker had a related gap for mutating a non-local container inside a nested
+region. It now rejects growth that would allocate the container's backing in the short-lived
+arena, including scalar-element containers, while allowing a receiver with an explicit or
+inferred longer-lived owner. Positive and negative fixtures cover both branch-tainted returns
+and nested growth. Stage0 and a fresh Stage1 built from the clean Stage0 each passed all 322
+diagnostic fixtures; both stages reject the unsafe cases and accept the safe controls. The
+self-hosted fix is committed as `9791a8e1`, and `ELISA_COMPILER_REV` now pins that exact commit.
+
+These findings close the specifically identified branch-assignment and nested-growth cases,
+not all region semantics. Explicit-region allocation semantics and other region combinations
+remain audit targets. The full-source proof run is still incomplete as recorded above, so no
+self-verification claim follows from these compiler checks.
 
 ## Repaired: unsigned local substitution erased fixed-width semantics
 
