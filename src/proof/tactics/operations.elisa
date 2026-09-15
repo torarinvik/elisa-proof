@@ -98,14 +98,14 @@ extend ElisaProof:
         # an indexed read, partial operation, or effectful call may not be interchangeable with
         # a logical shortcut in Elisa's execution semantics. Every arithmetic fold delegates to
         # the kernel's checked constant evaluator, so overflow and invalid division remain opaque.
-        def proof_tactic_simplify_expression(expression: Ast::Expr) -> (changed: bool, value: Ast::Expr):
+        def proof_tactic_simplify_expression_mode(expression: Ast::Expr, source_bound: bool) -> (changed: bool, value: Ast::Expr):
             match expression:
                 Ast::Expr.Paren(inner, position):
-                    rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression(inner)
+                    rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression_mode(inner, source_bound)
                     return (true, Ast::Expr.Paren(rewritten.value, position)) if rewritten.changed
                     return (false, expression)
                 Ast::Expr.Unary(operator, operand, position):
-                    rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression(operand)
+                    rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression_mode(operand, source_bound)
                     if operator == TokenKind.Not:
                         match rewritten.value:
                             Ast::Expr.BoolLit(value, _):
@@ -115,15 +115,15 @@ extend ElisaProof:
                             _:
                                 pass
                     candidate: Ast::Expr = Ast::Expr.Unary(operator, rewritten.value, position)
-                    if operator == TokenKind.Plus or operator == TokenKind.Minus:
+                    if not source_bound and (operator == TokenKind.Plus or operator == TokenKind.Minus):
                         constant: (known: bool, value: i64) = proof_constant_int(candidate)
                         return (true, Ast::Expr.IntLit(constant.value, Ast::pos_at_line(0))) if constant.known
                     return (rewritten.changed, candidate)
                 Ast::Expr.Binary(left, operator, right, position):
-                    rewritten_left: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression(left)
-                    rewritten_right: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression(right)
+                    rewritten_left: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression_mode(left, source_bound)
+                    rewritten_right: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression_mode(right, source_bound)
                     candidate: Ast::Expr = Ast::Expr.Binary(rewritten_left.value, operator, rewritten_right.value, position)
-                    if proof_is_comparison(operator):
+                    if not source_bound and proof_is_comparison(operator):
                         left_constant: (known: bool, value: i64) = proof_constant_int(rewritten_left.value)
                         right_constant: (known: bool, value: i64) = proof_constant_int(rewritten_right.value)
                         if left_constant.known and right_constant.known:
@@ -159,12 +159,15 @@ extend ElisaProof:
                                         pass
                             _:
                                 pass
-                    constant: (known: bool, value: i64) = proof_constant_int(candidate)
-                    if constant.known:
+                    constant: (known: bool, value: i64) = proof_constant_int(candidate) if not source_bound else (false, 0)
+                    if not source_bound and constant.known:
                         return (true, Ast::Expr.IntLit(constant.value, Ast::pos_at_line(0))) if operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret or operator == TokenKind.LShift or operator == TokenKind.RShift
                     return (rewritten_left.changed or rewritten_right.changed, candidate)
                 _:
                     return (false, expression)
+
+        def proof_tactic_simplify_expression(expression: Ast::Expr) -> (changed: bool, value: Ast::Expr):
+            return proof_tactic_simplify_expression_mode(expression, false)
 
         # Simplification is a state transformation, not an unchecked proof shortcut. It may
         # close the resulting goal only through the same bounded kernel used by `exact`; if no
@@ -178,6 +181,19 @@ extend ElisaProof:
                 state.solved <- true
                 return proof_tactic_record(state, "simp", true, "the goal was simplified and discharged by the existing proof kernel")
             return proof_tactic_record(state, "simp", true, "the goal was simplified; it remains to be discharged")
+
+        # Source-bound simplification may normalize proposition constructors, but it must not
+        # evaluate value-level operators. Elisa permits source implementations of primitive
+        # protocols, while this tactic's constant folder has only built-in semantics.
+        def proof_tactic_simplify_source_bound(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return proof_tactic_record(state, "simp", false, "a solved goal cannot accept another action") if state.solved
+            rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression_mode(state.goal, true)
+            return proof_tactic_record(state, "simp", false, "source-bound simplification does not evaluate value-level operators") if not rewritten.changed
+            state.goal <- rewritten.value
+            if proof_goal(state.facts, state.goal, annotations):
+                state.solved <- true
+                return proof_tactic_record(state, "simp", true, "the source-safe logical simplification discharged the goal")
+            return proof_tactic_record(state, "simp", true, "the source-safe logical simplification changed the goal")
 
         # Implication introduction is a structural proof rule. It only changes the state when
         # the goal is syntactically an implication; no arbitrary expression is promoted to a
