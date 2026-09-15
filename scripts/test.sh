@@ -200,6 +200,12 @@ if [[ "$rejected_overloaded_primitive_rewrite_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the valid primitive-overload audit fixture\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-overloaded-primitive-global-rewrite.o" "$ROOT_DIR/examples/rejected_overloaded_primitive_global_rewrite.elisa" >/dev/null 2>&1
+rejected_overloaded_primitive_global_rewrite_compiler_status=$?
+if [[ "$rejected_overloaded_primitive_global_rewrite_compiler_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: compiler rejected the valid global primitive-overload audit fixture\n' >&2
+    exit 1
+fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >/dev/null 2>&1
 rejected_borrow_call_duplicate_alias_compiler_status=$?
 if [[ "$rejected_borrow_call_duplicate_alias_compiler_status" -ne 0 ]]; then
@@ -417,6 +423,19 @@ if [[ "$rejected_overloaded_primitive_rewrite_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "ensure-unproven" and f["status"] == "unknown" for f in report["findings"]); assert any(f["kind"] == "expression-unsupported" for f in report["findings"]); assert not any(goal["rule"] == "goal" and goal["proven"] for goal in report["goals"]); assert report["replay"]["gaps"] == 0' "$rejected_overloaded_primitive_rewrite_report"; then
     printf 'proof test matrix failed: overloaded primitive equality report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+rejected_overloaded_primitive_global_rewrite_report="$standalone_probe_dir/rejected-overloaded-primitive-global-rewrite.json"
+run_json_report "$ROOT_DIR/examples/rejected_overloaded_primitive_global_rewrite.elisa" >"$rejected_overloaded_primitive_global_rewrite_report"
+rejected_overloaded_primitive_global_rewrite_status=$?
+set -e
+if [[ "$rejected_overloaded_primitive_global_rewrite_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: overloaded global primitive equality was accepted as Leibniz equality\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "ensure-unproven" and f["status"] == "unknown" for f in report["findings"]); assert any(f["kind"] == "expression-unsupported" for f in report["findings"]); assert not any(goal["rule"] == "goal" and goal["proven"] for goal in report["goals"]); assert report["replay"]["gaps"] == 0' "$rejected_overloaded_primitive_global_rewrite_report"; then
+    printf 'proof test matrix failed: overloaded global primitive equality report was incomplete\n' >&2
     exit 1
 fi
 run_json_report "$ROOT_DIR/examples/unsigned_constant_in_range.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0'
