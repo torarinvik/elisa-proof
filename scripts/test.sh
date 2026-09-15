@@ -3326,8 +3326,10 @@ run_json_report "$ROOT_DIR/examples/global_constant_module.elisa" | python3 -c '
 global_constant_module_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_global_constant_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong" for f in report["findings"])'
 rejected_global_constant_collision_status=${PIPESTATUS[1]}
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_global_constant_function_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "check" for f in report["findings"])'
+rejected_global_constant_function_collision_status=${PIPESTATUS[1]}
 set -e
-if [[ "$global_constant_module_status" -ne 0 || "$rejected_global_constant_collision_status" -ne 0 ]]; then
+if [[ "$global_constant_module_status" -ne 0 || "$rejected_global_constant_collision_status" -ne 0 || "$rejected_global_constant_function_collision_status" -ne 0 ]]; then
     printf 'proof test matrix failed: module constant scope was not preserved through replay\n' >&2
     exit 1
 fi
