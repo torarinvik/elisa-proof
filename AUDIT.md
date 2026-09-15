@@ -4917,11 +4917,16 @@ Completion requires coverage of the full table and resolution of every confirmed
 The proof project now pins compiler commit `1399160a1cafc981f9e7ccdafcbb4a90e5699454` in
 `ELISA_COMPILER_REV`. The Stage1 product was built from its parent compiler-source revision
 `05289f0430b359b4a28b761590a6a623f8497aec`; the tip commit adds only a smoke-test link fix and
-does not change `src/` or `elisacore_std/`. Its compiler base includes shared typed scalar lowering for EDIR and LLVM
-(`19f86a3b`, `c605b3fa`) and the subsequent native DWARF source-line mapping change (`ce9e0292`),
-with the required Stage0-parity and soundness fixes rebased on top. The Stage1 product was rebuilt
-from the provenance-checked Stage0 binary (`601f7bcd`) and checked for source freshness. A
-separate test-only commit fixes the native-object smoke helper's missing runtime link input.
+does not change `src/` or `elisacore_std/`. Its compiler base includes shared typed scalar lowering
+for EDIR and LLVM (`19f86a3b`, `c605b3fa`) and the subsequent native DWARF source-line mapping
+change (`ce9e0292`), with the required Stage0-parity and soundness fixes rebased on top. The Stage1
+product was rebuilt from the provenance-checked Stage0 binary (`601f7bcd`) and checked for source
+freshness. A separate test-only commit fixes the native-object smoke helper's missing runtime link
+input.
+
+The supported installer has updated the normal `~/.elisac/elisac-stage1` launcher and runtime to
+snapshot revision `1399160a`, matching this proof pin. The previous installed `1cbce422` snapshot
+is preserved at `~/.elisac/stage1.backup-before-05289-20260915` for rollback.
 
 `scripts/test_optimized_replay.sh` builds the proof system at O2 and O3, runs the verified,
 sum-bound, and dogfood-kernel examples, and checks that every proven goal has independently
