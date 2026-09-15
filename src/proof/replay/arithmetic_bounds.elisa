@@ -115,6 +115,51 @@ extend ElisaProof:
             return left_value.value >= right_value.value if operator == TokenKind.GtEq
             return false
 
+        # Replay has no compiler type table, so arithmetic facts must carry the same explicit
+        # scalar witness that the producer and kernel require. Without this gate an overloaded
+        # comparison on a struct could be read as an integer interval by the independent replay.
+        def proof_replay_scalar_term_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.ShorthandMember(parts, _):
+                    return parts.count == 1 and parts[0] != ""
+                _:
+                    pass
+            for fact in facts |expression|:
+                match fact:
+                    Ast::Expr.Call(callee, arguments, argument_names, _):
+                        return true if (argument_names.count == 0 or argument_names.count == arguments.count) and arguments.count == 1 and proof_replay_marker_name(callee) == "__elisa_primitive_scalar_type" and proof_replay_expr_equal(arguments[0], expression)
+                        return true if (argument_names.count == 0 or argument_names.count == arguments.count) and arguments.count == 2 and proof_replay_marker_name(callee) == "__elisa_unsigned_type_bound" and proof_replay_expr_equal(arguments[0], expression)
+                    _:
+                        pass
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_scalar_term_witnessed(inner, facts, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    return false if name == ""
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
+                    return proof_replay_scalar_term_witnessed(operand, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or and operator != TokenKind.Ampersand and operator != TokenKind.Pipe and operator != TokenKind.Caret and operator != TokenKind.LShift and operator != TokenKind.RShift
+                    return proof_replay_scalar_term_witnessed(left, facts, depth + 1) and proof_replay_scalar_term_witnessed(right, facts, depth + 1)
+                _:
+                    pass
+            return false
+
+        def proof_replay_marker_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                _:
+                    pass
+            return ""
+
+        def proof_replay_primitive_comparison(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return proof_replay_scalar_term_witnessed(left, facts, 0) and proof_replay_scalar_term_witnessed(right, facts, 0)
+
         def proof_replay_bound_index(bounds: darray[ProofReplayBound]&, name: sview) -> usize:
             index: mutable usize = 0
             while index < bounds.count |index, bounds, name|:
@@ -149,7 +194,8 @@ extend ElisaProof:
             bounds[index].has_upper <- true
             bounds[index].upper <- value if not old_has or value < old_value
 
-        def proof_replay_collect_bound_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, bounds: mutable darray[ProofReplayBound]&) -> void:
+        def proof_replay_collect_bound_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofReplayBound]&) -> void:
+            return if not proof_replay_primitive_comparison(left, right, facts)
             left_name: mutable sview = ""
             right_name: mutable sview = ""
             left_constant: ProofReplayInt = proof_replay_constant_int(left)
@@ -191,27 +237,27 @@ extend ElisaProof:
                 proof_replay_add_lower(bounds, right_name, incremented_left.value) if operator == TokenKind.Lt and incremented_left.known
                 proof_replay_add_lower(bounds, right_name, left_constant.value) if operator == TokenKind.LtEq or operator == TokenKind.EqEq
 
-        def proof_replay_collect_bounds(expression: Ast::Expr, bounds: mutable darray[ProofReplayBound]&) -> void:
-            proof_replay_collect_bounds_depth(expression, bounds, 0)
+        def proof_replay_collect_bounds(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofReplayBound]&) -> void:
+            proof_replay_collect_bounds_depth(expression, facts, bounds, 0)
 
-        def proof_replay_collect_bounds_depth(expression: Ast::Expr, bounds: mutable darray[ProofReplayBound]&, depth: usize) -> void:
+        def proof_replay_collect_bounds_depth(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofReplayBound]&, depth: usize) -> void:
             return if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    proof_replay_collect_bounds_depth(inner, bounds, depth + 1)
+                    proof_replay_collect_bounds_depth(inner, facts, bounds, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
                     match operand:
                         Ast::Expr.Binary(left, operator, right, _):
                             negated_operator: TokenKind = proof_replay_comparison_negation(operator)
-                            proof_replay_collect_bound_comparison(left, negated_operator, right, bounds) if negated_operator != TokenKind.Eof
+                            proof_replay_collect_bound_comparison(left, negated_operator, right, facts, bounds) if negated_operator != TokenKind.Eof
                         _:
                             pass
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And:
-                        proof_replay_collect_bounds_depth(left, bounds, depth + 1)
-                        proof_replay_collect_bounds_depth(right, bounds, depth + 1)
+                        proof_replay_collect_bounds_depth(left, facts, bounds, depth + 1)
+                        proof_replay_collect_bounds_depth(right, facts, bounds, depth + 1)
                     else:
-                        proof_replay_collect_bound_comparison(left, operator, right, bounds)
+                        proof_replay_collect_bound_comparison(left, operator, right, facts, bounds)
                 _:
                     pass
 
@@ -229,21 +275,21 @@ extend ElisaProof:
                     pass
             return ""
 
-        def proof_replay_collect_name_equalities(expression: Ast::Expr, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&) -> void:
-            proof_replay_collect_name_equalities_depth(expression, left_names, right_names, 0)
+        def proof_replay_collect_name_equalities(expression: Ast::Expr, facts: darray[Ast::Expr]&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&) -> void:
+            proof_replay_collect_name_equalities_depth(expression, facts, left_names, right_names, 0)
 
-        def proof_replay_collect_name_equalities_depth(expression: Ast::Expr, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, depth: usize) -> void:
+        def proof_replay_collect_name_equalities_depth(expression: Ast::Expr, facts: darray[Ast::Expr]&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&, depth: usize) -> void:
             return if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    proof_replay_collect_name_equalities_depth(inner, left_names, right_names, depth + 1)
+                    proof_replay_collect_name_equalities_depth(inner, facts, left_names, right_names, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    proof_replay_collect_name_equalities_depth(left, left_names, right_names, depth + 1)
-                    proof_replay_collect_name_equalities_depth(right, left_names, right_names, depth + 1)
+                    proof_replay_collect_name_equalities_depth(left, facts, left_names, right_names, depth + 1)
+                    proof_replay_collect_name_equalities_depth(right, facts, left_names, right_names, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                     left_name: sview = proof_replay_ident_name(left)
                     right_name: sview = proof_replay_ident_name(right)
-                    if left_name != "" and right_name != "":
+                    if left_name != "" and right_name != "" and proof_replay_primitive_comparison(left, right, facts):
                         left_names.push(left_name)
                         right_names.push(right_name)
                 _:
@@ -253,7 +299,7 @@ extend ElisaProof:
             left_names: mutable darray[sview] = []
             right_names: mutable darray[sview] = []
             for fact in facts |left_names, right_names|:
-                proof_replay_collect_name_equalities(fact, &left_names, &right_names)
+                proof_replay_collect_name_equalities(fact, facts, &left_names, &right_names)
             rounds: mutable usize = 0
             max_rounds: usize = facts.count * 2 + 2
             while rounds < max_rounds |rounds, left_names, right_names, bounds|:
@@ -272,7 +318,7 @@ extend ElisaProof:
             left_names: mutable darray[sview] = []
             right_names: mutable darray[sview] = []
             for fact in facts |left_names, right_names|:
-                proof_replay_collect_name_equalities(fact, &left_names, &right_names)
+                proof_replay_collect_name_equalities(fact, facts, &left_names, &right_names)
             reachable: mutable darray[sview] = [left_name]
             cursor: mutable usize = 0
             while cursor < reachable.count |cursor, reachable, left_names, right_names, right_name|:
@@ -342,7 +388,7 @@ extend ElisaProof:
             return false if left_affine.base != right_affine.base and not proof_replay_names_equal(left_affine.base, right_affine.base, facts)
             bounds: mutable darray[ProofReplayBound] = []
             for fact in facts |bounds|:
-                proof_replay_collect_bounds(fact, &bounds)
+                proof_replay_collect_bounds(fact, facts, &bounds)
             proof_replay_close_equalities(facts, &bounds)
             return false if not proof_replay_affine_safe(left_affine, bounds) or not proof_replay_affine_safe(right_affine, bounds)
             difference: ProofReplayInt = proof_replay_sub_safe(left_affine.offset, right_affine.offset)
@@ -416,9 +462,10 @@ extend ElisaProof:
 
         def proof_replay_interval_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
+            return false if not proof_replay_primitive_comparison(left, right, facts)
             bounds: mutable darray[ProofReplayBound] = []
             for fact in facts |bounds|:
-                proof_replay_collect_bounds(fact, &bounds)
+                proof_replay_collect_bounds(fact, facts, &bounds)
             proof_replay_close_equalities(facts, &bounds)
             a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(left, bounds)
             b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_replay_interval(right, bounds)
