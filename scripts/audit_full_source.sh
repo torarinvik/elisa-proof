@@ -3,11 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUDIT_SOURCE="${ELISA_FULL_AUDIT_SOURCE:-src/main.elisa}"
+PROOF_BINARY="${ELISA_FULL_AUDIT_BINARY:-$ROOT_DIR/build/elisa-proof}"
 TIME_LIMIT="${ELISA_FULL_AUDIT_TIME_LIMIT:-180}"
 RSS_LIMIT_KB="${ELISA_FULL_AUDIT_RSS_LIMIT_KB:-1500000}"
 
-if [[ ! -x "$ROOT_DIR/build/elisa-proof" ]]; then
-    printf 'full-source audit failed: build/elisa-proof is missing; run scripts/build.sh first\n' >&2
+if [[ ! -x "$PROOF_BINARY" ]]; then
+    printf 'full-source audit failed: proof binary is missing or not executable: %s\n' "$PROOF_BINARY" >&2
     exit 2
 fi
 if [[ ! -f "$ROOT_DIR/$AUDIT_SOURCE" && ! -f "$AUDIT_SOURCE" ]]; then
@@ -33,7 +34,7 @@ PROOF_STDERR="$AUDIT_DIR/proof-report.stderr"
 #   3 = the watchdog stopped it before a complete report was emitted
 #   2 = launcher, configuration, or report-format failure
 set +e
-python3 - "$ROOT_DIR" "$AUDIT_SOURCE" "$TIME_LIMIT" "$RSS_LIMIT_KB" "$PROOF_STDOUT" "$PROOF_STDERR" "$AUDIT_DIR" <<'PY'
+python3 - "$ROOT_DIR" "$PROOF_BINARY" "$AUDIT_SOURCE" "$TIME_LIMIT" "$RSS_LIMIT_KB" "$PROOF_STDOUT" "$PROOF_STDERR" "$AUDIT_DIR" <<'PY'
 import json
 import ctypes
 import os
@@ -43,7 +44,7 @@ import sys
 import time
 
 
-root, source, time_limit_text, rss_limit_text, stdout_path, stderr_path, audit_dir = sys.argv[1:]
+root, proof_binary, source, time_limit_text, rss_limit_text, stdout_path, stderr_path, audit_dir = sys.argv[1:]
 try:
     time_limit = float(time_limit_text)
     rss_limit_kb = int(rss_limit_text)
@@ -54,7 +55,7 @@ if time_limit <= 0 or rss_limit_kb <= 0:
     print("full-source audit failed: limits must be positive", file=sys.stderr)
     raise SystemExit(2)
 
-command = [os.path.join(root, "build", "elisa-proof"), "--json", source]
+command = [proof_binary, "--json", source]
 started = time.monotonic()
 peak_rss_kb = 0
 stop_reason = None
