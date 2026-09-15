@@ -206,7 +206,7 @@ if [[ "$rejected_overloaded_primitive_global_rewrite_compiler_status" -ne 0 ]]; 
     printf 'proof test matrix failed: compiler rejected the valid global primitive-overload audit fixture\n' >&2
     exit 1
 fi
-for overloaded_literal_fixture in rejected_overloaded_literal_equality rejected_overloaded_literal_fact; do
+for overloaded_literal_fixture in rejected_overloaded_literal_equality rejected_overloaded_literal_fact rejected_overloaded_literal_rewrite; do
     "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/$overloaded_literal_fixture.o" "$ROOT_DIR/examples/$overloaded_literal_fixture.elisa" >/dev/null 2>&1
     overloaded_literal_compiler_status=$?
     if [[ "$overloaded_literal_compiler_status" -ne 0 ]]; then
@@ -446,7 +446,7 @@ if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert r
     printf 'proof test matrix failed: overloaded global primitive equality report was incomplete\n' >&2
     exit 1
 fi
-for overloaded_literal_fixture in rejected_overloaded_literal_equality rejected_overloaded_literal_fact; do
+for overloaded_literal_fixture in rejected_overloaded_literal_equality rejected_overloaded_literal_fact rejected_overloaded_literal_rewrite; do
     overloaded_literal_report="$standalone_probe_dir/$overloaded_literal_fixture.json"
     set +e
     run_json_report "$ROOT_DIR/examples/$overloaded_literal_fixture.elisa" >"$overloaded_literal_report"
@@ -485,6 +485,19 @@ if [[ "$rejected_overloaded_literal_have_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); tactic=report["tactic"]; assert report["status"] == "failed"; assert tactic["valid"] is False and tactic["solved"] is False; assert tactic["action_count"] == 0' "$rejected_overloaded_literal_have_report"; then
     printf 'proof test matrix failed: overloaded literal have rejection report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+rejected_overloaded_literal_rewrite_report="$standalone_probe_dir/rejected-overloaded-literal-rewrite.json"
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_rewrite.json" "$ROOT_DIR/examples/rejected_overloaded_literal_rewrite.elisa" >"$rejected_overloaded_literal_rewrite_report"
+rejected_overloaded_literal_rewrite_status=$?
+set -e
+if [[ "$rejected_overloaded_literal_rewrite_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: source-bound rewrite used overloaded literal equality\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); tactic=report["tactic"]; assert report["status"] == "failed"; assert tactic["valid"] is True and tactic["solved"] is False; assert tactic["action_count"] == 1; assert tactic["accepted_count"] == 0; assert tactic["certificate_replayed"] is False; assert report["state"]["trace"][0]["accepted"] is False; assert "source-overloaded" in report["state"]["trace"][0]["reason"]' "$rejected_overloaded_literal_rewrite_report"; then
+    printf 'proof test matrix failed: overloaded literal rewrite rejection report was incomplete\n' >&2
     exit 1
 fi
 set +e
