@@ -3258,6 +3258,22 @@ if [[ "$reserved_source_compiler_status" -ne 0 || "$reserved_marker_status" -ne 
     exit 1
 fi
 
+# An include graph may legitimately expand to an empty source file. The importer must pass that
+# successful zero-byte expansion to the parser instead of falling back to the root include line.
+set +e
+run_json_report "$ROOT_DIR/examples/import_empty_root.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source"]["bytes"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == []'
+empty_import_status=${PIPESTATUS[1]}
+set -e
+if [[ "$empty_import_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: successful empty include expansion was not preserved\n' >&2
+    exit 1
+fi
+
+if "$ROOT_DIR/build/elisa-proof" --unknown-option "$ROOT_DIR/examples/verified.elisa" >/dev/null 2>&1; then
+    printf 'proof test matrix failed: unknown CLI option was accepted\n' >&2
+    exit 1
+fi
+
 # A megabyte of source must produce a verdict rather than a stack overflow. The tool used to die
 # on anything past roughly half a megabyte, which is less than `src/proof/check.elisa` itself: a
 # declaration whose initializer is a conditional expression, inside a captured loop body, leaks
