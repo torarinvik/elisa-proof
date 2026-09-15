@@ -1,0 +1,172 @@
+extend ElisaProof:
+    private:
+        # A proposition over a literal has no binding at which the importer can attach the
+        # ordinary operator witness. Keep a source-level policy for those closed terms: if the
+        # imported program replaces a primitive operator, the arithmetic kernel must not evaluate
+        # any source expression with that operator using built-in semantics. This is deliberately
+        # conservative across primitive spellings; type inference for unsuffixed literals belongs
+        # to the compiler, not to this source-neutral proof fragment.
+        def proof_source_primitive_operator_overloaded(annotations: darray[Ast::EnumAnnotation]&, protocol: sview) -> bool:
+            return false if protocol == ""
+            integer_types: darray[sview] = ["i8", "i16", "i32", "i64", "i128", "isize", "int", "u8", "u16", "u32", "u64", "u128", "usize", "uintptr", "uint", "byte"]
+            for concrete in integer_types:
+                return true if proof_builtin_operator_impl_exists(annotations, concrete, protocol)
+            scalar_types: darray[sview] = ["f32", "f64", "bool", "char", "sview", "cstr", "dstr"]
+            for concrete in scalar_types:
+                return true if proof_builtin_operator_impl_exists(annotations, concrete, protocol)
+            return false
+
+        def proof_source_statements_have_overloaded_operator(statements: darray[Ast::Stmt], annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
+            return true if depth >= 64
+            for statement in statements |annotations, depth|:
+                match statement:
+                    Ast::Stmt.Invalid:
+                        return true
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_source_expression_has_overloaded_operator(expression, annotations, depth + 1)
+                    Ast::Stmt.Block(_, _, _, body, _):
+                        return true if proof_source_statements_have_overloaded_operator(body, annotations, depth + 1)
+                    Ast::Stmt.VarDecl(_, type_expression, value, _):
+                        return true if proof_source_expression_has_overloaded_operator(type_expression, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(value, annotations, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return true if proof_source_expression_has_overloaded_operator(target, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(value, annotations, depth + 1)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_source_expression_has_overloaded_operator(condition, annotations, depth + 1)
+                        return true if proof_source_statements_have_overloaded_operator(then_body, annotations, depth + 1) or proof_source_statements_have_overloaded_operator(else_body, annotations, depth + 1)
+                    Ast::Stmt.While(condition, body, _):
+                        return true if proof_source_expression_has_overloaded_operator(condition, annotations, depth + 1) or proof_source_statements_have_overloaded_operator(body, annotations, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, body, _):
+                        return true if proof_source_expression_has_overloaded_operator(iterable, annotations, depth + 1) or proof_source_statements_have_overloaded_operator(body, annotations, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        return true if value is returned and proof_source_expression_has_overloaded_operator(returned, annotations, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_source_expression_has_overloaded_operator(scrutinee, annotations, depth + 1)
+                        for arm in arms |annotations, depth|:
+                            return true if proof_source_expression_has_overloaded_operator(arm.guard, annotations, depth + 1) or proof_source_statements_have_overloaded_operator(arm.body, annotations, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_source_expression_has_overloaded_operator(expression, annotations, depth + 1)
+                    Ast::Stmt.Break(_, _):
+                        pass
+                    Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return true
+            return false
+
+        # Detect a source operator whose dispatch may differ from the proof kernel's built-in
+        # interpretation. Logical connectives are intentionally not listed: they are proposition
+        # constructors, while the protocols below are the value-level operators that can be
+        # implemented by Elisa source code. Walk every compound AST shape accepted at the
+        # certificate boundary; otherwise an overloaded child inside a record, block, or recovery
+        # body could be hidden behind an innocent-looking outer term.
+        def proof_source_expression_has_overloaded_operator(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
+            return true if depth >= 64
+            match expression:
+                Ast::Expr.Unary(operator, operand, _):
+                    protocol: sview = proof_builtin_unary_operator_protocol(operator)
+                    return true if protocol != "" and proof_source_primitive_operator_overloaded(annotations, protocol)
+                    return proof_source_expression_has_overloaded_operator(operand, annotations, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    protocol: sview = proof_builtin_operator_protocol(operator)
+                    return true if protocol != "" and proof_source_primitive_operator_overloaded(annotations, protocol)
+                    return proof_source_expression_has_overloaded_operator(left, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(right, annotations, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_expression_has_overloaded_operator(inner, annotations, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_source_expression_has_overloaded_operator(callee, annotations, depth + 1)
+                    for argument in arguments |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(argument, annotations, depth + 1)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_source_expression_has_overloaded_operator(object, annotations, depth + 1)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_source_expression_has_overloaded_operator(base, annotations, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_source_expression_has_overloaded_operator(object, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(index, annotations, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_source_expression_has_overloaded_operator(object, annotations, depth + 1)
+                    for argument in arguments |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(argument, annotations, depth + 1)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_source_expression_has_overloaded_operator(object, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(low, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(high, annotations, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_source_expression_has_overloaded_operator(condition, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(then_expression, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(else_expression, annotations, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_source_expression_has_overloaded_operator(base, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(predicate, annotations, depth + 1)
+                Ast::Expr.Move(operand, _):
+                    return proof_source_expression_has_overloaded_operator(operand, annotations, depth + 1)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_source_expression_has_overloaded_operator(operand, annotations, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_source_expression_has_overloaded_operator(iterable, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(condition, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(body, annotations, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_source_expression_has_overloaded_operator(guarded, annotations, depth + 1) or proof_source_statements_have_overloaded_operator(recovery, annotations, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(element, annotations, depth + 1)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(element, annotations, depth + 1)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(element, annotations, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(entry.key, annotations, depth + 1) or proof_source_expression_has_overloaded_operator(entry.value, annotations, depth + 1)
+                    return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return true if proof_source_expression_has_overloaded_operator(type_expression, annotations, depth + 1)
+                    for field in fields |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(field.value, annotations, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_source_expression_has_overloaded_operator(base, annotations, depth + 1)
+                    for field in fields |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(field.value, annotations, depth + 1)
+                    return false
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_source_expression_has_overloaded_operator(scrutinee, annotations, depth + 1)
+                    for arm in arms |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(arm.guard, annotations, depth + 1) or proof_source_statements_have_overloaded_operator(arm.body, annotations, depth + 1)
+                    return false
+                Ast::Expr.Catch(guarded, arms, _):
+                    return true if proof_source_expression_has_overloaded_operator(guarded, annotations, depth + 1)
+                    for arm in arms |annotations, depth|:
+                        return true if proof_source_expression_has_overloaded_operator(arm.guard, annotations, depth + 1) or proof_source_statements_have_overloaded_operator(arm.body, annotations, depth + 1)
+                    return false
+                Ast::Expr.Lambda(_, body, _):
+                    return proof_source_statements_have_overloaded_operator(body, annotations, depth + 1)
+                Ast::Expr.Block(statements, value, _, _):
+                    return true if proof_source_statements_have_overloaded_operator(statements, annotations, depth + 1)
+                    return proof_source_expression_has_overloaded_operator(value, annotations, depth + 1)
+                Ast::Expr.IntLit(_, _):
+                    return false
+                Ast::Expr.BoolLit(_, _):
+                    return false
+                Ast::Expr.FloatLit(_, _):
+                    return false
+                Ast::Expr.StringLit(_, _):
+                    return false
+                Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.Ident(_, _):
+                    return false
+                Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Absent:
+                    return false
+                _:
+                    # Unknown or newly added expression shapes are not safe to classify as
+                    # source-neutral. The proof kernel may reject them later, but this guard must
+                    # not silently permit a future compound form to hide an overloaded child.
+                    return true
+
+        def proof_source_arithmetic_operator_guard(goal: Ast::Expr, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if proof_source_expression_has_overloaded_operator(goal, annotations, 0)
+            for fact in facts |annotations|:
+                return false if proof_source_expression_has_overloaded_operator(fact, annotations, 0)
+            return true
