@@ -12,8 +12,13 @@ extend ElisaProof:
         def proof_runtime_ast_matches_kernel(report: ProofReport&, expression: Ast::Expr, root: usize, depth: usize) -> bool:
             return proof_replay_ast_matches_kernel(report, expression, root, depth)
 
-        def proof_runtime_kernel_encode_annotated[@r](expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]& @r, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r) -> usize:
-            return proof_kernel_encode_annotated(expression, nodes, children, annotations)
+        # Keep the dogfood encoder tied to one report owner. The earlier three-buffer generic
+        # wrapper exposed independent region parameters to stage0, even though every caller was
+        # already passing fields from the same report. Stage1 can infer that accidental API, but
+        # stage0 correctly refuses the ambiguous call. The report boundary is also the honest
+        # ownership model: these arrays are one certificate arena, not unrelated buffers.
+        def proof_runtime_kernel_encode_annotated(expression: Ast::Expr, report: mutable ProofReport&) -> usize:
+            return proof_kernel_encode_annotated(expression, &report.kernel_nodes, &report.kernel_children, report.source_annotations)
 
         # Adversarial reports may carry a damaged fact-trace index. Rebuild the index, inject a
         # self-link at the selected owner's head, and verify that the lookup terminates without
@@ -44,52 +49,70 @@ extend ElisaProof:
         # The checked-get arena erases recovery statements, so admission must reject an invalid
         # recovery before that erasure. This exercises the same producer-side gate used by report
         # certificate creation.
-        def proof_runtime_invalid_getelse_rejected(position: Ast::Pos) -> bool:
-            object: Ast::Expr = Ast::Expr.Ident("values", position)
-            index: Ast::Expr = Ast::Expr.IntLit(0, position)
-            guarded: Ast::Expr = Ast::Expr.Index(object, index, position)
-            recovery: darray[Ast::Stmt] = [Ast::Stmt.Invalid]
-            malformed: Ast::Expr = Ast::Expr.GetElse(guarded, recovery, position)
-            return false if proof_kernel_expression_supported(malformed)
-            valid_recovery: darray[Ast::Stmt] = [Ast::Stmt.Return(Ast::Expr.IntLit(0, position), position)]
-            valid: Ast::Expr = Ast::Expr.GetElse(guarded, valid_recovery, position)
-            forged_report: mutable ProofReport = proof_empty_report()
-            valid_root: usize = proof_runtime_kernel_encode_annotated(valid, forged_report.source_annotations, &forged_report.kernel_nodes, &forged_report.kernel_children)
-            return not proof_runtime_ast_matches_kernel(forged_report, malformed, valid_root, 0)
+        def proof_runtime_invalid_getelse_rejected(position: Ast::Pos) -> bool can[Memory.Allocate, Abort.Panic]:
+            result: mutable bool = false
+            region audit_region(65536):
+                store: Ast::Node.Store[Local] = Ast::Node.Store(audit_region)
+                in store:
+                    object: Ast::Expr = new[store] Ast::Expr.Ident("values", position)
+                    index: Ast::Expr = new[store] Ast::Expr.IntLit(0, position)
+                    guarded: Ast::Expr = new[store] Ast::Expr.Index(object, index, position)
+                    recovery: darray[Ast::Stmt] = [Ast::Stmt.Invalid]
+                    malformed: Ast::Expr = new[store] Ast::Expr.GetElse(guarded, recovery, position)
+                    valid_recovery: darray[Ast::Stmt] = [Ast::Stmt.Return(new[store] Ast::Expr.IntLit(0, position), position)]
+                    valid: Ast::Expr = new[store] Ast::Expr.GetElse(guarded, valid_recovery, position)
+                    forged_report: mutable ProofReport = proof_empty_report()
+                    valid_root: usize = proof_runtime_kernel_encode_annotated(valid, &forged_report)
+                    result <- not proof_kernel_expression_supported(malformed) and not proof_runtime_ast_matches_kernel(forged_report, malformed, valid_root, 0)
+            return result
 
         # Quantifier binder type metadata is erased from the source-neutral term, but it still
         # must be a well-formed imported AST before erasure. Pair a valid arena root with an
         # Invalid binder type and require the mirror matcher to reject it.
-        def proof_runtime_invalid_quantifier_type_rejected(position: Ast::Pos) -> bool:
-            range_expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.RangeLt, Ast::Expr.IntLit(1, position), position)
-            body: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("i", position), TokenKind.EqEq, Ast::Expr.IntLit(0, position), position)
-            valid_statements: darray[Ast::Stmt] = [Ast::Stmt.VarDecl("i", Ast::Expr.Ident("i64", position), range_expression, position)]
-            valid: Ast::Expr = Ast::Expr.Block(valid_statements, body, [], position)
-            invalid_statements: darray[Ast::Stmt] = [Ast::Stmt.VarDecl("i", Ast::Expr.Invalid, range_expression, position)]
-            malformed: Ast::Expr = Ast::Expr.Block(invalid_statements, body, [], position)
-            annotations: mutable darray[Ast::EnumAnnotation] = [Ast::EnumAnnotation{owner: "__contract_quantifier", name: "forall", line: 1}]
-            return false if proof_kernel_expression_supported(malformed)
-            forged_report: mutable ProofReport = proof_empty_report()
-            forged_report.source_annotations.extend(annotations)
-            valid_root: usize = proof_runtime_kernel_encode_annotated(valid, forged_report.source_annotations, &forged_report.kernel_nodes, &forged_report.kernel_children)
-            return not proof_runtime_ast_matches_kernel(forged_report, malformed, valid_root, 0)
+        def proof_runtime_invalid_quantifier_type_rejected(position: Ast::Pos) -> bool can[Memory.Allocate, Abort.Panic]:
+            result: mutable bool = false
+            region audit_region(65536):
+                store: Ast::Node.Store[Local] = Ast::Node.Store(audit_region)
+                in store:
+                    range_expression: Ast::Expr = new[store] Ast::Expr.Binary(new[store] Ast::Expr.IntLit(0, position), TokenKind.RangeLt, new[store] Ast::Expr.IntLit(1, position), position)
+                    body: Ast::Expr = new[store] Ast::Expr.Binary(new[store] Ast::Expr.Ident("i", position), TokenKind.EqEq, new[store] Ast::Expr.IntLit(0, position), position)
+                    valid_statements: darray[Ast::Stmt] = [Ast::Stmt.VarDecl("i", new[store] Ast::Expr.Ident("i64", position), range_expression, position)]
+                    valid: Ast::Expr = new[store] Ast::Expr.Block(valid_statements, body, [], position)
+                    invalid_statements: darray[Ast::Stmt] = [Ast::Stmt.VarDecl("i", Ast::Expr.Invalid, range_expression, position)]
+                    malformed: Ast::Expr = new[store] Ast::Expr.Block(invalid_statements, body, [], position)
+                    annotations: mutable darray[Ast::EnumAnnotation] = [Ast::EnumAnnotation{owner: "__contract_quantifier", name: "forall", line: 1}]
+                    forged_report: mutable ProofReport = proof_empty_report()
+                    forged_report.source_annotations.extend(annotations)
+                    valid_root: usize = proof_runtime_kernel_encode_annotated(valid, &forged_report)
+                    result <- not proof_kernel_expression_supported(malformed) and not proof_runtime_ast_matches_kernel(forged_report, malformed, valid_root, 0)
+            return result
 
         # Quantifier captures are not serialized into the source-neutral node. A nonempty capture
         # list therefore must be rejected before erasure rather than ignored by replay.
-        def proof_runtime_captured_quantifier_rejected(position: Ast::Pos) -> bool:
-            range_expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.RangeLt, Ast::Expr.IntLit(1, position), position)
-            body: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("i", position), TokenKind.EqEq, Ast::Expr.IntLit(0, position), position)
-            statements: darray[Ast::Stmt] = [Ast::Stmt.VarDecl("i", Ast::Expr.Ident("i64", position), range_expression, position)]
-            captured: Ast::Expr = Ast::Expr.Block(statements, body, ["captured"], position)
-            return not proof_kernel_expression_supported(captured)
+        def proof_runtime_captured_quantifier_rejected(position: Ast::Pos) -> bool can[Memory.Allocate, Abort.Panic]:
+            result: mutable bool = false
+            region audit_region(65536):
+                store: Ast::Node.Store[Local] = Ast::Node.Store(audit_region)
+                in store:
+                    range_expression: Ast::Expr = new[store] Ast::Expr.Binary(new[store] Ast::Expr.IntLit(0, position), TokenKind.RangeLt, new[store] Ast::Expr.IntLit(1, position), position)
+                    body: Ast::Expr = new[store] Ast::Expr.Binary(new[store] Ast::Expr.Ident("i", position), TokenKind.EqEq, new[store] Ast::Expr.IntLit(0, position), position)
+                    statements: darray[Ast::Stmt] = [Ast::Stmt.VarDecl("i", new[store] Ast::Expr.Ident("i64", position), range_expression, position)]
+                    captured: Ast::Expr = new[store] Ast::Expr.Block(statements, body, ["captured"], position)
+                    result <- not proof_kernel_expression_supported(captured)
+            return result
 
         # Identifiers and selectors are serialized into mandatory arena name fields. Empty
         # names, including positional construction fields, must therefore fail before an AST can
         # become a certificate premise or goal.
-        def proof_runtime_empty_kernel_names_rejected(position: Ast::Pos) -> bool:
-            empty_ident: Ast::Expr = Ast::Expr.Ident("", position)
-            empty_field: Ast::Expr = Ast::Expr.Field(Ast::Expr.Ident("value", position), "", position)
-            empty_scope: Ast::Expr = Ast::Expr.Scope(Ast::Expr.Ident("Type", position), "", position)
-            empty_fields: darray[Ast::FieldInit] = [Ast::FieldInit{name: "", value: Ast::Expr.IntLit(0, position)}]
-            empty_construct: Ast::Expr = Ast::Expr.Construct(Ast::Expr.Ident("Type", position), empty_fields, position)
-            return not proof_kernel_expression_supported(empty_ident) and not proof_kernel_expression_supported(empty_field) and not proof_kernel_expression_supported(empty_scope) and not proof_kernel_expression_supported(empty_construct)
+        def proof_runtime_empty_kernel_names_rejected(position: Ast::Pos) -> bool can[Memory.Allocate, Abort.Panic]:
+            result: mutable bool = false
+            region audit_region(65536):
+                store: Ast::Node.Store[Local] = Ast::Node.Store(audit_region)
+                in store:
+                    empty_ident: Ast::Expr = new[store] Ast::Expr.Ident("", position)
+                    empty_field: Ast::Expr = new[store] Ast::Expr.Field(new[store] Ast::Expr.Ident("value", position), "", position)
+                    empty_scope: Ast::Expr = new[store] Ast::Expr.Scope(new[store] Ast::Expr.Ident("Type", position), "", position)
+                    empty_fields: darray[Ast::FieldInit] = [Ast::FieldInit{name: "", value: new[store] Ast::Expr.IntLit(0, position)}]
+                    empty_construct: Ast::Expr = new[store] Ast::Expr.Construct(new[store] Ast::Expr.Ident("Type", position), empty_fields, position)
+                    result <- not proof_kernel_expression_supported(empty_ident) and not proof_kernel_expression_supported(empty_field) and not proof_kernel_expression_supported(empty_scope) and not proof_kernel_expression_supported(empty_construct)
+            return result
