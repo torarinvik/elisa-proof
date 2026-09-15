@@ -61,6 +61,47 @@ extend ElisaProof:
             return proof_kernel_expression_supported_depth(expression, 0)
 
     private:
+        # Checked-get nodes intentionally erase their recovery body from the source-neutral
+        # arena, but that body still belongs to the source term being admitted. Validate its
+        # shape before erasure so an Invalid statement or an unsupported child cannot hide behind
+        # an otherwise valid guarded index. The statement semantics remain the responsibility of
+        # the source checker; this boundary only guarantees that the imported AST is well formed.
+        def proof_kernel_recovery_supported(statements: darray[Ast::Stmt], depth: usize) -> bool:
+            return false if not ElisaProofKernelCore::depth_valid(depth)
+            for statement in statements |statement, depth|:
+                match statement:
+                    Ast::Stmt.Invalid:
+                        return false
+                    Ast::Stmt.Expr(expression, _):
+                        return false if not proof_kernel_expression_supported_depth(expression, depth + 1)
+                    Ast::Stmt.Block(_, _, _, body, _):
+                        return false if not proof_kernel_recovery_supported(body, depth + 1)
+                    Ast::Stmt.VarDecl(_, type_expression, value, _):
+                        return false if not proof_kernel_expression_supported_depth(type_expression, depth + 1) or not proof_kernel_expression_supported_depth(value, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return false if not proof_kernel_expression_supported_depth(target, depth + 1) or not proof_kernel_expression_supported_depth(value, depth + 1)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if not proof_kernel_expression_supported_depth(condition, depth + 1)
+                        return false if not proof_kernel_recovery_supported(then_body, depth + 1) or not proof_kernel_recovery_supported(else_body, depth + 1)
+                    Ast::Stmt.While(condition, body, _):
+                        return false if not proof_kernel_expression_supported_depth(condition, depth + 1) or not proof_kernel_recovery_supported(body, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, body, _):
+                        return false if not proof_kernel_expression_supported_depth(iterable, depth + 1) or not proof_kernel_recovery_supported(body, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return false if not proof_kernel_expression_supported_depth(returned, depth + 1)
+                    Ast::Stmt.Break(_, _):
+                        pass
+                    Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_kernel_expression_supported_depth(scrutinee, depth + 1)
+                        for arm in arms |arm, depth|:
+                            return false if not proof_kernel_expression_supported_depth(arm.guard, depth + 1) or not proof_kernel_recovery_supported(arm.body, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_kernel_expression_supported_depth(expression, depth + 1)
+            return true
+
         # Keep the producer-side AST walk bounded just like the encoder and replay matcher. A
         # compiler-owned AST can still be malformed at an import boundary; rejecting it before
         # descending further is safer than relying on the host call stack to reject it.
@@ -102,7 +143,7 @@ extend ElisaProof:
                 # this source-neutral term records only the guarded load boundary so replay can
                 # validate that boundary independently.
                 Ast::Expr.GetElse(Ast::Expr.Index(object, index, _), recovery, _):
-                    return false if recovery.count == 0
+                    return false if recovery.count == 0 or not proof_kernel_recovery_supported(recovery, depth + 1)
                     return proof_kernel_expression_supported_depth(object, depth + 1) and proof_kernel_expression_supported_depth(index, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
                     return proof_kernel_operator_supported(operator) and proof_kernel_expression_supported_depth(operand, depth + 1)
