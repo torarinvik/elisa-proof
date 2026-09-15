@@ -3319,6 +3319,19 @@ if [[ "$rejected_collection_builtin_extent_status" -ne 0 ]]; then
     exit 1
 fi
 
+# Module-local literal constants must remain available to replay, while a same-named constant in
+# another namespace must not be flattened into the importing function's proof state.
+set +e
+run_json_report "$ROOT_DIR/examples/global_constant_module.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["verification_state"] == "proved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert not report["findings"]'
+global_constant_module_status=${PIPESTATUS[1]}
+run_json_report "$ROOT_DIR/examples/rejected_global_constant_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong" for f in report["findings"])'
+rejected_global_constant_collision_status=${PIPESTATUS[1]}
+set -e
+if [[ "$global_constant_module_status" -ne 0 || "$rejected_global_constant_collision_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: module constant scope was not preserved through replay\n' >&2
+    exit 1
+fi
+
 # A rebind written over the binding's own symbol takes a fresh symbol, so the new value is recorded
 # and the old one keeps its facts. The equality that records it is admitted into the difference
 # graph under the same increment argument the goal side already used: a strict peer of the same

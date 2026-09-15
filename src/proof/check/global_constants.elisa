@@ -3,32 +3,90 @@
 # turning the declaration checker into a collection of unrelated special cases.
 extend ElisaProof:
     private:
-        def proof_import_global_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos) -> void:
-            function_found: mutable bool = false
-            for declaration in file.top_decls |function_found, function_name, position|:
+        const PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT: usize = 127
+
+        # The compiler resolves a bare name in the function's namespace before it considers a
+        # file-global declaration. Keep the same priority here: importing every nested constant
+        # into one flat table would make a module-local `LIMIT` look global, and importing the
+        # root declaration as well could manufacture an inconsistent pair of facts.
+        def proof_global_constant_scope_equal(left: darray[sview]&, right: darray[sview]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |index, left, right|:
+                return false if left[index] != right[index]
+            return true
+
+        def proof_global_constant_find_function_scope(declarations: darray[Ast::Decl]&, function_name: sview, line: u32, current_scope: darray[sview]&, found_scope: mutable darray[sview]&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |function_name, line, current_scope, found_scope, matches, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate_name, _, _, _, _, _, candidate_position):
-                        function_found <- true if candidate_name == function_name and candidate_position.line == position.line
+                        if candidate_name == function_name and candidate_position.line == line:
+                            matches <- matches + 1
+                            found_scope.clear()
+                            found_scope.extend(current_scope)
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: mutable darray[sview] = []
+                        next_scope.extend(current_scope)
+                        next_scope.push(module_name)
+                        proof_global_constant_find_function_scope(body, function_name, line, &next_scope, found_scope, matches, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_global_constant_find_function_scope(body, function_name, line, current_scope, found_scope, matches, depth + 1)
                     _:
                         pass
-            return if not function_found
-            for declaration in file.top_decls |facts, report, parameters, function_name, names, values, position|:
+
+        def proof_global_constant_add_literal(constant_name: sview, constant_type: Ast::Expr, constant_initializer: Ast::Expr, constant_mutable: bool, constant_position: Ast::Pos, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview) -> void:
+            # Reserve the name even when its declaration is not importable. Otherwise a malformed
+            # or mutable module-local constant would be skipped and a same-named root constant
+            # could be imported as if the local declaration did not shadow it.
+            return if any existing in reserved_names where existing == constant_name
+            reserved_names.push(constant_name)
+            return if constant_mutable or any parameter in parameters where parameter.name == constant_name
+            return if any existing in names where existing == constant_name
+            match constant_type:
+                Ast::Expr.Ident(type_name, _):
+                    return if type_name != "i64"
+                _:
+                    return
+            match constant_initializer:
+                Ast::Expr.IntLit(constant_value, _):
+                    names.push(constant_name)
+                    values.push(Ast::Expr.Ident(constant_name, constant_position))
+                    constant_fact: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(constant_name, constant_position), TokenKind.EqEq, Ast::Expr.IntLit(constant_value, constant_position), constant_position)
+                    proof_add_traced_fact(facts, report, constant_fact, "global-constant", constant_position.line, function_name)
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(constant_name, constant_position), constant_position.line, function_name)
+                _:
+                    pass
+
+        def proof_global_constant_collect_scope(declarations: darray[Ast::Decl]&, function_scope: darray[sview]&, current_scope: darray[sview]&, include_root_scope: bool, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, depth: usize) -> void:
+            return if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            in_function_scope: bool = proof_global_constant_scope_equal(current_scope, function_scope)
+            in_root_scope: bool = include_root_scope and current_scope.count == 0
+            for declaration in declarations |function_scope, current_scope, include_root_scope, reserved_names, parameters, names, values, facts, report, function_name, depth, in_function_scope, in_root_scope|:
                 match declaration:
                     Ast::Decl.Const(constant_name, constant_type, constant_initializer, constant_mutable, constant_position):
-                        continue if constant_mutable or any parameter in parameters where parameter.name == constant_name
-                        match constant_type:
-                            Ast::Expr.Ident(type_name, _):
-                                continue if type_name != "i64"
-                            _:
-                                continue
-                        match constant_initializer:
-                            Ast::Expr.IntLit(constant_value, _):
-                                names.push(constant_name)
-                                values.push(Ast::Expr.Ident(constant_name, constant_position))
-                                constant_fact: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(constant_name, constant_position), TokenKind.EqEq, Ast::Expr.IntLit(constant_value, constant_position), constant_position)
-                                proof_add_traced_fact(facts, report, constant_fact, "global-constant", constant_position.line, function_name)
-                                proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(constant_name, constant_position), constant_position.line, function_name)
-                            _:
-                                pass
+                        if in_function_scope or in_root_scope:
+                            proof_global_constant_add_literal(constant_name, constant_type, constant_initializer, constant_mutable, constant_position, reserved_names, parameters, names, values, facts, report, function_name)
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: mutable darray[sview] = []
+                        next_scope.extend(current_scope)
+                        next_scope.push(module_name)
+                        proof_global_constant_collect_scope(body, function_scope, &next_scope, include_root_scope, reserved_names, parameters, names, values, facts, report, function_name, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_global_constant_collect_scope(body, function_scope, current_scope, include_root_scope, reserved_names, parameters, names, values, facts, report, function_name, depth + 1)
                     _:
                         pass
+
+        def proof_import_global_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos) -> void:
+            function_scope: mutable darray[sview] = []
+            function_matches: mutable usize = 0
+            root_scope: mutable darray[sview] = []
+            reserved_names: mutable darray[sview] = []
+            for parameter in parameters:
+                reserved_names.push(parameter.name)
+            proof_global_constant_find_function_scope(file.top_decls, function_name, position.line, &root_scope, &function_scope, &function_matches, 0)
+            return if function_matches != 1
+            # First collect the declaration's own namespace. A root pass follows only for names
+            # not already reserved, so a module-local constant shadows a same-named root
+            # constant even when the local declaration is not importable.
+            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, false, &reserved_names, parameters, names, values, facts, report, function_name, 0)
+            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, true, &reserved_names, parameters, names, values, facts, report, function_name, 0) if function_scope.count > 0

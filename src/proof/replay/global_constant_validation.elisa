@@ -1,0 +1,93 @@
+# Independent replay validation for literal constants. This deliberately does not call the
+# producer's importer: the replay boundary must derive the same binding from the source report
+# with a separate implementation, including module scope and shadowing.
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT: usize = 127
+
+        def proof_replay_global_constant_scope_equal(left: darray[sview]&, right: darray[sview]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |index, left, right|:
+                return false if left[index] != right[index]
+            return true
+
+        def proof_replay_global_constant_lookup(declarations: darray[Ast::Decl]&, wanted_scope: darray[sview]&, current_scope: darray[sview]&, constant_name: sview, constant_line: u32, expected_value: i64, visible: mutable bool&, valid: mutable bool&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            in_scope: bool = proof_replay_global_constant_scope_equal(wanted_scope, current_scope)
+            for declaration in declarations |wanted_scope, current_scope, constant_name, constant_line, expected_value, visible, valid, matches, depth, in_scope|:
+                match declaration:
+                    Ast::Decl.Const(candidate_name, candidate_type, candidate_initializer, candidate_mutable, candidate_position):
+                        if in_scope and candidate_name == constant_name:
+                            visible <- true
+                            matches <- matches + 1
+                            valid <- false
+                            if not candidate_mutable and candidate_position.line == constant_line:
+                                type_is_i64: bool = match candidate_type:
+                                    Ast::Expr.Ident(type_name, _): type_name == "i64"
+                                    _: false
+                                initializer_matches: bool = match candidate_initializer:
+                                    Ast::Expr.IntLit(candidate_value, _): candidate_value == expected_value
+                                    _: false
+                                valid <- type_is_i64 and initializer_matches
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: mutable darray[sview] = []
+                        next_scope.extend(current_scope)
+                        next_scope.push(module_name)
+                        proof_replay_global_constant_lookup(body, wanted_scope, &next_scope, constant_name, constant_line, expected_value, visible, valid, matches, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_global_constant_lookup(body, wanted_scope, current_scope, constant_name, constant_line, expected_value, visible, valid, matches, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_global_constant_resolves(declarations: darray[Ast::Decl]&, function_scope: darray[sview]&, parameters: darray[Ast::ParamDecl]&, constant_name: sview, constant_line: u32, expected_value: i64) -> bool:
+            return false if any parameter in parameters where parameter.name == constant_name
+            local_visible: mutable bool = false
+            local_valid: mutable bool = false
+            local_matches: mutable usize = 0
+            empty_scope: mutable darray[sview] = []
+            proof_replay_global_constant_lookup(declarations, function_scope, &empty_scope, constant_name, constant_line, expected_value, &local_visible, &local_valid, &local_matches, 0)
+            return local_matches == 1 and local_valid if local_visible
+            return false if function_scope.count == 0
+            root_visible: mutable bool = false
+            root_valid: mutable bool = false
+            root_matches: mutable usize = 0
+            proof_replay_global_constant_lookup(declarations, &empty_scope, &empty_scope, constant_name, constant_line, expected_value, &root_visible, &root_valid, &root_matches, 0)
+            root_matches == 1 and root_valid
+
+        def proof_replay_global_constant_find_candidates(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, function_name: sview, constant_name: sview, constant_line: u32, expected_value: i64, current_scope: darray[sview]&, candidates: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |declarations, all_declarations, function_name, constant_name, constant_line, expected_value, current_scope, candidates, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate_name, parameters, _, _, _, _, _):
+                        if candidate_name == function_name and proof_replay_global_constant_resolves(all_declarations, current_scope, parameters, constant_name, constant_line, expected_value):
+                            candidates <- candidates + 1
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: mutable darray[sview] = []
+                        next_scope.extend(current_scope)
+                        next_scope.push(module_name)
+                        proof_replay_global_constant_find_candidates(body, all_declarations, function_name, constant_name, constant_line, expected_value, &next_scope, candidates, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_global_constant_find_candidates(body, all_declarations, function_name, constant_name, constant_line, expected_value, current_scope, candidates, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_global_constant_fact_is_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            match trace.expression:
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    constant_name: sview = match left:
+                        Ast::Expr.Ident(name, _): name
+                        _: ""
+                    expected_value: i64 = match right:
+                        Ast::Expr.IntLit(value, _): value
+                        _: 0
+                    return false if constant_name == ""
+                    value_is_literal: bool = match right:
+                        Ast::Expr.IntLit(_, _): true
+                        _: false
+                    return false if not value_is_literal
+                    candidates: mutable usize = 0
+                    root_scope: mutable darray[sview] = []
+                    proof_replay_global_constant_find_candidates(report.source_declarations, report.source_declarations, trace.name, constant_name, trace.line, expected_value, &root_scope, &candidates, 0)
+                    candidates == 1
+                _:
+                    false
