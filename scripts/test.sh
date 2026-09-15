@@ -1788,6 +1788,17 @@ if [[ "$source_bound_script_status" -ne 0 ]]; then
     exit 1
 fi
 
+set +e
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_struct_rewrite.json" "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["goal_id"] == 14; assert report["tactic"]["valid"] is False; assert report["tactic"]["certificate_replayed"] is False; assert report["state"]["trace"][0]["accepted"] is False; assert "primitive-scalar" in report["state"]["trace"][0]["reason"]'
+source_bound_struct_rewrite_statuses=("${PIPESTATUS[@]}")
+source_bound_struct_rewrite_status=${source_bound_struct_rewrite_statuses[0]}
+source_bound_struct_rewrite_json_status=${source_bound_struct_rewrite_statuses[1]}
+set -e
+if [[ "$source_bound_struct_rewrite_status" -ne 1 || "$source_bound_struct_rewrite_json_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: source-bound rewrite used overloaded struct equality (proof=%s json=%s)\n' "$source_bound_struct_rewrite_status" "$source_bound_struct_rewrite_json_status" >&2
+    exit 1
+fi
+
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]; assert binding["goal_fingerprint"]["value"] == 3193966897 and binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert any(fact["kind"] == "call" and not fact.get("argument_names") for fact in report["state"]["initial_facts"])'
 repair_target_status=${PIPESTATUS[0]}
 if [[ "$repair_target_status" -ne 0 ]]; then
