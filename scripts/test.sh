@@ -2788,6 +2788,15 @@ if [[ "$rejected_value_root_field_status" -ne 0 ]]; then
     exit 1
 fi
 
+set +e
+run_json_report "$ROOT_DIR/examples/implicit_shared_borrow.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["findings"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"read", "read_value"}'
+implicit_shared_borrow_status=${PIPESTATUS[1]}
+set -e
+if [[ "$implicit_shared_borrow_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an implicit shared borrow was not replayed as a capability\n' >&2
+    exit 1
+fi
+
 # A shared borrow's extent is fixed for the borrow's lifetime, so a loop cannot change it and the
 # guard taken over `name.count` still holds on every iteration. Lending the collection anywhere in
 # the frame used to purge that guard at loop entry. Every other way the guarded quantity can move
