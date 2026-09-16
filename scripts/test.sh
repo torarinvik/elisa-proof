@@ -271,6 +271,31 @@ for rejected_tactic_fixture in tactic_script_rejected_large_line tactic_script_r
         exit 1
     fi
 done
+oversized_action_script="$standalone_probe_dir/tactic-script-oversized-actions.json"
+python3 - "$oversized_action_script" <<'PY'
+import json
+import sys
+
+script = {
+    "format": "elisa-proof-tactics-v1",
+    "initial": {"facts": [], "goal": {"kind": "bool", "value": True}},
+    "actions": [{"action": "unknown"}] * 65537,
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(script, handle)
+PY
+"$ROOT_DIR/build/elisa-proof" --tactics "$oversized_action_script" "$ROOT_DIR/examples/verified.elisa" >"$standalone_probe_dir/tactic-script-oversized-actions-report.json"
+oversized_action_status=$?
+if [[ "$oversized_action_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: oversized tactic action array was accepted\n' >&2
+    exit 1
+fi
+python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert report["tactic"]["valid"] is False; assert report["tactic"]["action_count"] == 0' "$standalone_probe_dir/tactic-script-oversized-actions-report.json"
+oversized_action_probe_status=$?
+if [[ "$oversized_action_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: oversized tactic action report was incomplete\n' >&2
+    exit 1
+fi
 for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias; do
     run_json_report "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
