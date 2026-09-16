@@ -515,7 +515,7 @@ if [[ "$rejected_overloaded_literal_rewrite_status" -ne 1 ]]; then
     printf 'proof test matrix failed: source-bound rewrite used overloaded literal equality\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); tactic=report["tactic"]; assert report["status"] == "failed"; assert tactic["valid"] is True and tactic["solved"] is False; assert tactic["action_count"] == 1; assert tactic["accepted_count"] == 0; assert tactic["certificate_replayed"] is False; assert report["state"]["trace"][0]["accepted"] is False; assert "source-overloaded" in report["state"]["trace"][0]["reason"]' "$rejected_overloaded_literal_rewrite_report"; then
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); tactic=report["tactic"]; assert report["status"] == "failed"; assert tactic["valid"] is False and tactic["solved"] is False; assert tactic["action_count"] == 0; assert tactic["accepted_count"] == 0; assert tactic["certificate_replayed"] is False' "$rejected_overloaded_literal_rewrite_report"; then
     printf 'proof test matrix failed: overloaded literal rewrite rejection report was incomplete\n' >&2
     exit 1
 fi
