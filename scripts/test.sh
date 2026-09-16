@@ -214,6 +214,12 @@ for overloaded_literal_fixture in rejected_overloaded_literal_equality rejected_
         exit 1
     fi
 done
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-overloaded-runtime-assert.o" "$ROOT_DIR/examples/rejected_overloaded_runtime_assert.elisa" >/dev/null 2>&1
+rejected_overloaded_runtime_assert_compiler_status=$?
+if [[ "$rejected_overloaded_runtime_assert_compiler_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: compiler rejected the valid runtime-assert overload audit fixture\n' >&2
+    exit 1
+fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >/dev/null 2>&1
 rejected_borrow_call_duplicate_alias_compiler_status=$?
 if [[ "$rejected_borrow_call_duplicate_alias_compiler_status" -ne 0 ]]; then
@@ -461,6 +467,19 @@ for overloaded_literal_fixture in rejected_overloaded_literal_equality rejected_
         exit 1
     fi
 done
+set +e
+rejected_overloaded_runtime_assert_report="$standalone_probe_dir/rejected-overloaded-runtime-assert.json"
+run_json_report "$ROOT_DIR/examples/rejected_overloaded_runtime_assert.elisa" >"$rejected_overloaded_runtime_assert_report"
+rejected_overloaded_runtime_assert_status=$?
+set -e
+if [[ "$rejected_overloaded_runtime_assert_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: overloaded runtime assertion fact was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert report["verification_state"] in ("unknown", "unsupported"); assert any(f["kind"] == "ensure-unproven" and f["status"] in ("unknown", "unsupported") for f in report["findings"]); assert not any(goal["rule"] == "goal" and goal["proven"] for goal in report["goals"]); assert report["replay"]["gaps"] == 0' "$rejected_overloaded_runtime_assert_report"; then
+    printf 'proof test matrix failed: overloaded runtime assertion report was incomplete\n' >&2
+    exit 1
+fi
 set +e
 rejected_overloaded_literal_simp_report="$standalone_probe_dir/rejected-overloaded-literal-simp.json"
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_equality.json" "$ROOT_DIR/examples/rejected_overloaded_literal_equality.elisa" >"$rejected_overloaded_literal_simp_report"
