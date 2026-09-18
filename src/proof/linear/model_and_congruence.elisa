@@ -106,6 +106,54 @@ extend ElisaProof:
             proof_bounded_model_visit(0, names, &values, lowers, widths, facts, goal, &budget, &all_known, &holds, exhausted)
             return all_known and holds
 
+        # The integer a fact set pins to a term. A literal denotes itself; a bare name denotes
+        # the value of an imported literal constant, whose `NAME == <literal>` fact the boundary
+        # importer records and replay re-derives from the declaration itself. Reading a term
+        # through those pins consumes a premise that is already present in the fact set, so it
+        # states nothing the facts do not.
+        def proof_constant_pin_of_fact(fact: Ast::Expr, name: sview) -> (known: bool, value: i64):
+            match fact:
+                Ast::Expr.Binary(pin_left, TokenKind.EqEq, pin_right, _):
+                    match pin_left:
+                        Ast::Expr.Ident(pin_name, _):
+                            return (false, 0) if pin_name != name
+                            match pin_right:
+                                Ast::Expr.IntLit(pinned_value, _):
+                                    return (true, pinned_value)
+                                _:
+                                    return (false, 0)
+                        _:
+                            return (false, 0)
+                _:
+                    return (false, 0)
+
+        def proof_pinned_constant_value(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, value: i64):
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_pinned_constant_value(inner, facts)
+                Ast::Expr.IntLit(literal_value, _):
+                    return (true, literal_value)
+                Ast::Expr.Ident(constant_name, _):
+                    for fact in facts:
+                        pinned: (known: bool, value: i64) = proof_constant_pin_of_fact(fact, constant_name)
+                        return pinned if pinned.known
+                    return (false, 0)
+                _:
+                    return (false, 0)
+
+        # Two operands denote the same value when they are structurally equal, or when the fact
+        # set pins both to the same integer. The second reading is what a place term needs: the
+        # interval and difference tiers key their bounds by a bare name, so a comparison whose
+        # subject is a field selection is left to the structural rule below, and a callee
+        # contract that spells its bound as a named constant would otherwise fail to meet the
+        # branch fact that already folded that constant to a literal.
+        def proof_operand_matches_through_pins(fact_operand: Ast::Expr, goal_operand: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return true if proof_expr_equal(fact_operand, goal_operand)
+            fact_constant: (known: bool, value: i64) = proof_pinned_constant_value(fact_operand, facts)
+            return false if not fact_constant.known
+            goal_constant: (known: bool, value: i64) = proof_pinned_constant_value(goal_operand, facts)
+            return goal_constant.known and goal_constant.value == fact_constant.value
+
         # A false branch carries `not condition`. Recognize the exact logical complement of a
         # comparison so branch-sensitive checking can prove facts such as `not (x < 0) |- x >= 0`
         # without pretending that arbitrary Boolean negation is an arithmetic theorem.
@@ -117,7 +165,7 @@ extend ElisaProof:
                     Ast::Expr.Unary(TokenKind.Not, operand, _):
                         match operand:
                             Ast::Expr.Binary(inner_left, inner_operator, inner_right, _):
-                                return true if inner_operator == negated_operator and proof_expr_equal(inner_left, left) and proof_expr_equal(inner_right, right)
+                                return true if inner_operator == negated_operator and proof_operand_matches_through_pins(inner_left, left, facts) and proof_operand_matches_through_pins(inner_right, right, facts)
                             _:
                                 pass
                     _:
