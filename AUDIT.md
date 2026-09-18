@@ -4939,3 +4939,33 @@ linked native executables stalled in macOS `_dyld_start`, including executables 
 Stage0 and Stage1. The same differential timeout on both stages points to the host loader rather
 than a Stage1-only code-generation regression. The smoke helper link failure itself was corrected,
 but its complete runtime sweep should be repeated when native executable startup is healthy.
+
+## Current verification checkpoint (2026-09-19)
+
+The proof tree is clean at commits `3fdff6f` and `4706a7a`. The proof checker now releases the
+compiler `Semantic::SymbolTable` before running its source-independent proof schedules. The CLI
+also preserves the compiler's diagnostic normalization policy when copying diagnostics out of that
+short-lived table: concrete violations suppress weaker unproven messages, non-exhaustive matches
+suppress derived missing-return messages, and duplicate ensure findings are collapsed by source
+identity. This is a memory-lifetime and diagnostic-fidelity fix, not a change that treats a
+compiler diagnostic as a proof certificate.
+
+The installed Stage1 snapshot at `~/.elisac/stage1` records `dcf5ce47`, matching the full
+`ELISA_COMPILER_REV` pin `dcf5ce4781c073b4669f7c85441bf82e5322a3c9`. The installed Stage0 product
+matches `ELISA_STAGE0_REV` `226451af4b5039f55adc6c543bdec1d8274b3289` and passes its provenance guard.
+The build guard rejects a Stage1 product whose embedded snapshot revision differs from the pinned
+front end; the active compiler checkout is intentionally not used while it has uncommitted work.
+
+Evidence after the fixes:
+
+- the complete `scripts/test.sh` matrix passes under the pinned Stage1;
+- the complete `scripts/dogfood.sh` corpus passes, including independent kernel replay, Stage0
+  bootstrap harnesses, tactic certificates, forged/stale certificate rejection, and deterministic
+  repeat checks;
+- the targeted region/diagnostic regression passes under both Stage1 and Stage0;
+- no Elisa source file exceeds 600 lines, with the largest at exactly 600;
+- the full `src/main.elisa` audit remains open. A 20-minute bounded run reached about 3.6 GB RSS
+  during whole-program function-summary verification and emitted no report. The earlier 1.5 GB
+  watchdog termination and this controlled high-memory timeout establish a scalability defect in
+  the monolithic self-audit; they do not justify raising proof verdicts, skipping compiler
+  semantics, or calling the full self-audit complete.
