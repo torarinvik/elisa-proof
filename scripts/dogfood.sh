@@ -1720,9 +1720,12 @@ with open(withdrawn, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: collection builtin boundary fixture did not fail cleanly")
+# Stage0 describes this as a builtin `push` error; the pinned self-hosted frontend reports the
+# same safety fact as a region-escape diagnostic. Assert the invariant rather than a frontend
+# wording: exactly one hard error, naming the local arena and the longer-lived destination.
 if report["summary"]["semantic_errors"] != 1 or not any(
-    diagnostic["name"] == "push"
-    and "non-local darray from local arena" in diagnostic["message"]
+    diagnostic["actual"] == "scratch"
+    and "longer-lived region" in diagnostic["message"]
     for diagnostic in report["semantic_diagnostics"]
 ):
     raise SystemExit("dogfood failed: unsafe nested-region growth was not diagnosed by the compiler")
