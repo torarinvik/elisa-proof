@@ -76,7 +76,12 @@ extend ElisaProof:
             report.replayed <- 0
             report.replay_gaps <- 0
 
-        def proof_check(file: Ast::File&, report: mutable ProofReport&) -> void:
+        # The semantic table is deliberately consumed only by this short source-formation
+        # phase.  The table owns a large collection of compiler indexes; keeping it alive while
+        # the proof schedules, checks, and records every declaration made full-file audits retain
+        # two whole-program working sets at once.  Returning before the proof phase lets Elisa
+        # release those indexes without weakening the source-typing boundary.
+        def proof_prepare_source(file: Ast::File&, report: mutable ProofReport&, source_types: Semantic::SymbolTable&) -> bool:
             # A report is a complete verification transaction, not an append-only session. Reset
             # every arena and counter before importing a new file; retaining certificates or
             # provenance from a previous file could make a later report observe stale proof state.
@@ -85,11 +90,10 @@ extend ElisaProof:
             # The source-neutral kernel does not know whether a call, field, or index denotes a
             # Boolean in Elisa. Reuse the compiler's parsed-program type context and reject
             # ill-formed source contracts before they can seed hypotheses or certificates.
-            source_types: Semantic::SymbolTable = Semantic::check_full(file, false, false, false, false, true, false, false, false, false, false, 64, false, false)
             internal_name: (found: bool, name: sview, line: u32) = proof_find_internal_name_collision(source_types)
             if internal_name.found:
                 proof_add_finding(report, "proof-internal-name", internal_name.line, internal_name.name, "source identifier collides with a proof-system internal name")
-                return
+                return false
             kernel_global_bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
             kernel_type_entries: mutable darray[ProofSourceKernelTypeEntry] = []
             kernel_type_index_known: bool = proof_source_kernel_collect_type_index(file.top_decls, &kernel_type_entries, 0)
@@ -103,6 +107,11 @@ extend ElisaProof:
             else:
                 report.proof_obligation(false)
                 proof_add_finding(report, "contract-proposition-type", 0, "", "kernel typing declaration environment exceeded its bounded representation")
+            return true
+
+        # This is the large, source-independent proof phase.  It must not receive or retain the
+        # compiler SymbolTable: all source proposition formation that needs it is complete above.
+        def proof_check_core(file: Ast::File&, report: mutable ProofReport&) -> void:
             # Contract quantifier syntax is erased from the AST and recovered through this
             # compiler-owned side table. Preserve the exact source annotations in the report so
             # a source-bound tactic store cannot substitute script-supplied quantifier kinds.
@@ -125,3 +134,28 @@ extend ElisaProof:
             proof_compute_verified_lemmas(file, file.top_decls, &lemmas, functions, report)
             proof_compute_verified_functions(file, file.top_decls, lemmas, &functions, report)
             proof_record_declarations(file, file.top_decls, lemmas, functions, report)
+
+        # Public compatibility wrapper for standalone proof consumers.  The semantic table is
+        # owned by this short helper and is gone before the larger proof core begins.
+        def proof_check(file: Ast::File&, report: mutable ProofReport&) -> void:
+            ready: bool = proof_prepare_semantic_source(file, report)
+            proof_check_core(file, report) if ready
+
+        # Build compiler semantics once, prepare source propositions, and copy only structured
+        # diagnostics. Returning releases the large compiler symbol table before the proof core,
+        # replay, and JSON rendering retain their own working sets.
+        def proof_check_with_semantic_diagnostics(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&) -> void:
+            ready: bool = proof_prepare_semantic_source_with_diagnostics(file, report, diagnostics)
+            proof_check_core(file, report) if ready
+
+    private:
+        def proof_prepare_semantic_source(file: Ast::File&, report: mutable ProofReport&) -> bool:
+            source_types: Semantic::SymbolTable = Semantic::check_full(file, false, false, false, false, true, false, false, false, false, false, 64, false, false)
+            return proof_prepare_source(file, report, source_types)
+
+        def proof_prepare_semantic_source_with_diagnostics(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&) -> bool:
+            source_types: Semantic::SymbolTable = Semantic::check_full(file, false, false, false, false, true, false, false, false, false, false, 64, false, false)
+            ready: bool = proof_prepare_source(file, report, source_types)
+            for diagnostic in source_types.diagnostics |diagnostics|:
+                diagnostics.push(diagnostic)
+            return ready
