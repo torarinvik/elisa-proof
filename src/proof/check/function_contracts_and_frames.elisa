@@ -6,7 +6,9 @@ extend ElisaProof:
                     function_name: sview = proof_callable_name(callee)
                     function_index: usize = proof_function_index(functions, function_name)
                     return false if function_name == "" or function_index >= functions.names.count
-                    if function_index >= functions.verified.count or not functions.verified[function_index]:
+                    caller_index: usize = proof_function_index(functions, name)
+                    recursive_summary_call: bool = function_index < functions.recursive.count and functions.recursive[function_index] and proof_functions_same_recursive_component(functions, caller_index, function_index)
+                    if (function_index >= functions.verified.count or not functions.verified[function_index]) and not recursive_summary_call:
                         report.proof_obligation(false)
                         proof_add_finding(report, "function-summary-unverified", position.line, name, "callee body has not established a verified executable summary")
                         return false
@@ -37,8 +39,7 @@ extend ElisaProof:
                         requires_ok <- false if not required_proven
                         proof_add_latest_goal_finding(report, "call-requires-unproven", position.line, name, "callee precondition is not established at the call") if not required_proven
                     return false if not requires_ok
-                    caller_index: usize = proof_function_index(functions, name)
-                    if function_index < functions.recursive.count and functions.recursive[function_index] and proof_functions_same_recursive_component(functions, caller_index, function_index):
+                    if recursive_summary_call:
                         # A structural shape in the function table is only a candidate. The
                         # structural walker must have independently certified both declarations
                         # before an executable recursive summary can skip arithmetic measure
@@ -72,13 +73,19 @@ extend ElisaProof:
                             recursive_nonnegative_proven: mutable bool = true
                             for component in current_components |facts, annotations, report, name, position, nonnegative_proven|:
                                 current_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0, position), position)
-                                component_proven: bool = proof_certify_goal(facts, current_nonnegative, report, position.line, name, annotations)
+                                component_expressions: mutable darray[Ast::Expr] = []
+                                component_expressions.push(component)
+                                relevant_facts: darray[Ast::Expr] = proof_relevant_facts_for_expressions(facts, component_expressions)
+                                component_proven: bool = proof_certify_goal(relevant_facts, current_nonnegative, report, position.line, name, annotations)
                                 report.proof_obligation(component_proven)
                                 nonnegative_proven <- false if not component_proven
                                 proof_add_latest_goal_finding(report, "recursive-decreases-unproven", position.line, name, "recursive decreases component is not proven nonnegative") if not component_proven
                             for component in recursive_components |facts, annotations, report, name, position, recursive_nonnegative_proven|:
                                 recursive_nonnegative: Ast::Expr = Ast::Expr.Binary(component, TokenKind.GtEq, Ast::Expr.IntLit(0, position), position)
-                                component_proven: bool = proof_certify_goal(facts, recursive_nonnegative, report, position.line, name, annotations)
+                                component_expressions: mutable darray[Ast::Expr] = []
+                                component_expressions.push(component)
+                                relevant_facts: darray[Ast::Expr] = proof_relevant_facts_for_expressions(facts, component_expressions)
+                                component_proven: bool = proof_certify_goal(relevant_facts, recursive_nonnegative, report, position.line, name, annotations)
                                 report.proof_obligation(component_proven)
                                 recursive_nonnegative_proven <- false if not component_proven
                                 proof_add_latest_goal_finding(report, "recursive-decreases-unproven", position.line, name, "callee decreases component is not proven nonnegative") if not component_proven
@@ -123,29 +130,37 @@ extend ElisaProof:
                         if changes_count == 0 and caller_preserves.count > 0 and proof_call_may_alias_places(arguments, caller_preserves, caller_names, caller_parameters):
                             report.proof_obligation(false)
                             proof_add_finding(report, "frame-preserve-opaque", position.line, name, "unframed or opaque callee may write a preserved caller place")
-                    old_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
-                    facts.clear()
                     # A verified total-pure callee cannot mutate or observe ambient mutable
                     # state, so all caller facts remain valid across the call. Every other call
                     # keeps the existing havoc/frame rules; an ensure alone is not permission to
                     # preserve unrelated facts.
-                    if function_index < functions.pure.count and functions.pure[function_index]:
-                        facts.extend(old_facts)
-                    elif changes_count > 0 and mapping_known:
-                        for old_fact in old_facts |facts, mapped_changes|:
-                            invalidated: mutable bool = false
-                            for changed in mapped_changes |invalidated, old_fact|:
-                                invalidated <- true if proof_expr_mentions_frame_place(old_fact, changed)
-                            facts.push(old_fact) if not invalidated
-                    # An unsigned binding's lower bound comes from compiler typing rather than
-                    # mutable state. Restore only that explicitly traced fact after the summary's
-                    # normal havoc/frame handling; enclosing move invalidation still removes it.
-                    proof_restore_type_bound_facts(old_facts, facts, caller_names, report, name)
-                    # A verified callee without a `changes` frame is havoced exactly like an
-                    # opaque one, and the same argument bounds that havoc: a callee reaches the
-                    # caller only through references and globals, so a fact over a by-value
-                    # scalar the caller's body never references survives this call too.
-                    proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_statement_lend_roots(expression, functions))
+                    callee_is_pure: bool = function_index < functions.pure.count and functions.pure[function_index]
+                    # A recursive summary without a pure proof or an explicit changes frame is
+                    # already treated as a havocing call. Dropping the ambient facts directly is
+                    # conservative and avoids copying a potentially large symbolic state on
+                    # every recursive edge. Non-recursive calls retain the established restore
+                    # path so this optimization does not change ordinary summary precision.
+                    if recursive_summary_call and not callee_is_pure and changes_count == 0:
+                        facts.clear()
+                    elif not callee_is_pure:
+                        old_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
+                        facts.clear()
+                        if changes_count > 0 and mapping_known:
+                            for old_fact in old_facts |facts, mapped_changes|:
+                                invalidated: mutable bool = false
+                                for changed in mapped_changes |invalidated, old_fact|:
+                                    invalidated <- true if proof_expr_mentions_frame_place(old_fact, changed)
+                                facts.push(old_fact) if not invalidated
+                        # An unsigned binding's lower bound comes from compiler typing rather
+                        # than mutable state. Restore only that explicitly traced fact after the
+                        # summary's normal havoc/frame handling; enclosing move invalidation still
+                        # removes it.
+                        proof_restore_type_bound_facts(old_facts, facts, caller_names, report, name)
+                        # A verified callee without a `changes` frame is havoced exactly like an
+                        # opaque one, and the same argument bounds that havoc: a callee reaches the
+                        # caller only through references and globals, so a fact over a by-value
+                        # scalar the caller's body never references survives this call too.
+                        proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_statement_lend_roots(expression, functions))
                     ensures_start: usize = functions.ensure_starts[function_index]
                     ensures_count: usize = functions.ensure_counts[function_index]
                     result_names: mutable darray[sview] = ["result"]
@@ -438,4 +453,3 @@ extend ElisaProof:
                 if opaque_reference or proof_expr_mentions_frame_place(root_value, preserved):
                     report.proof_obligation(false)
                     proof_add_finding(report, "frame-preserve-opaque", line, name, "write target may alias a preserved parameter but its root is not tracked")
-
