@@ -5300,3 +5300,17 @@ the rows visited. Compiler revision `85633e21` is installed and pinned in `ELISA
 Private-visibility, private-field, and mutable-reference smokes pass, as do the proof suite, O2/O3
 replay, and proof matrix. The authoritative 180-second full-source audit still timed out without a
 report at 1,583,984 KiB peak RSS, so the full self-audit remains incomplete.
+
+## Unsafe capability traversal through nested expressions (2026-09-19)
+
+The unsafe report previously missed calls in expression-form match/catch arms, value blocks,
+and recovery bodies. Stage1 now traverses those expression and statement subtrees, including arm
+guards, while preserving trusted/static bookkeeping. Stage0's permission inference had the same
+soundness gap: match guards and nested value-block/recovery bodies were omitted from the
+function effect closure. The Stage0 fix is committed as `90228b6f`; the Stage1 mirror is
+`e26ddaf8`, installed and pinned in `ELISA_COMPILER_REV`. The focused Stage0 regression passes,
+the unsafe report for `guarded_optional_match_value.elisa` now includes `validate:
+Unsafe.RawExtern`, and cross-stage unsafe parity passes with 155 byte-identical reports and zero
+divergences. The proof build passes its 7 tests, optimized replay at O2/O3, and accepted/rejected
+proof matrix. The independent permission model reports no over-claims; its remaining misses are
+conservative incompleteness and do not support a proof claim.
