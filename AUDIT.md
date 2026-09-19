@@ -5426,3 +5426,8 @@ The semantic consumers for permission-include rows and enum-parent rows now use 
 constants instead of raw parser sentinel values. The enum hierarchy recursion limit is also
 named explicitly. Values and behavior are unchanged. Compiler parity remains 175/175, and
 the proof build is pinned to compiler revision `be983362`.
+
+Replay resource-path composition and record-update typing now consume the kernel core's named
+depth-limit constants instead of repeating `128` and `127` in contracts and guards. The
+strict boundary is unchanged, and the proof suite, optimized replay, and accepted/rejected
+matrix pass against the same compiler pin.
