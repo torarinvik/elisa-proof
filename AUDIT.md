@@ -5368,3 +5368,7 @@ to compiler revision `e5a637c5`, which contains the change.
 The preserves/changes checker received the same treatment for its whole-change,
 preserves-root, and preserves-field annotation rows. Values and source-order pairing
 are unchanged; the proof build is now pinned to `01cd427b`.
+
+The effect-law fulfillment checker likewise names its forbids/includes, law-marker,
+subject, frame-law, and non-reference rows. Values and law-edge ordering are unchanged;
+the proof build is now pinned to `704dc60d`.
