@@ -5421,3 +5421,8 @@ After that index removed `callable_error_family` from the top profile, the next 
 the wrapper's two reverse marker scans. They are now one reverse pass with the same boolean
 result and an early stop once both markers are found. Compiler parity remains 175/175; the
 proof build is pinned to `e8734a40`.
+
+The semantic consumers for permission-include rows and enum-parent rows now use named
+constants instead of raw parser sentinel values. The enum hierarchy recursion limit is also
+named explicitly. Values and behavior are unchanged. Compiler parity remains 175/175, and
+the proof build is pinned to compiler revision `be983362`.
