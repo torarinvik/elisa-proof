@@ -5175,3 +5175,8 @@ binding fix, unknown nominal-type checking, parser recovery ordering, and parity
 The fresh product passed the 12-case unknown-type parity smoke and the complete compiler/include
 struct-layout smoke. The proof suite was green before this pin update; it must be rerun against
 this exact snapshot before this checkpoint is considered a full dogfood result.
+
+The Stage0 provenance guard then exposed a stale installed bootstrap binary: `~/.elisac/elisac-stage0`
+was still built from `beac948a` while the clean Elisa-core checkout had advanced to `8441c249`.
+Stage0 was rebuilt with `vcs.modified=false`, the provenance pin was advanced to the exact full
+revision, and Stage1 was reseeded from that Stage0 before dogfood was retried.
