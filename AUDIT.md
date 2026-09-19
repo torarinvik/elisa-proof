@@ -5390,3 +5390,8 @@ The next profile found `Semantic.enum_variant_count` recursively traversing all 
 declarations after its first matching enum, despite its prior `result == 0` guard. It now
 returns at that same first match. The compiler passed 175/175 formatter parity and the
 proof build is pinned to `621f5511`.
+
+The full-source profile then identified `local_binding_is_mutable` doing two passes over
+both its filtered annotation stream and compact side tables. These are now single passes
+that retain exact-offset precedence and line-only fallback behavior. Compiler parity is
+175/175 and the proof build is pinned to `ea56e16d`.
