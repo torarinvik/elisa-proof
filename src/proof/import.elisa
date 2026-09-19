@@ -5,6 +5,10 @@
 extend ElisaProof:
     private:
         const PROOF_IMPORT_PATH_BUFFER_SIZE: usize = 4096
+        # A single file is bounded by proof_read_file_checked; this second bound covers the
+        # complete include-once expansion. Without it, a graph of many individually acceptable
+        # files could retain an arbitrarily large parser input before semantic checking begins.
+        const PROOF_IMPORT_EXPANDED_SOURCE_MAX_BYTES: usize = 134217728
 
         def proof_path_directory(path: darray[u8]&) -> darray[u8]:
             directory: mutable darray[u8] = []
@@ -189,6 +193,17 @@ extend ElisaProof:
                         pass
             return false
 
+        # Append one source line including its newline only when the aggregate expansion budget
+        # still contains the complete record. Returning false is an import failure, never a
+        # truncated source that may be certified as if the missing suffix did not exist.
+        def proof_import_append_line(output: mutable darray[u8]&, line: darray[u8]&) -> bool:
+            return false if output.count >= PROOF_IMPORT_EXPANDED_SOURCE_MAX_BYTES
+            remaining: usize = PROOF_IMPORT_EXPANDED_SOURCE_MAX_BYTES - output.count
+            return false if line.count >= remaining
+            output.extend(line)
+            output.push(10)
+            return true
+
         # Match the compiler's include parser: ordinary include/#include directives plus the
         # {$include path} and {$i path} macro forms. Keep recognition separate from the path,
         # because an empty but syntactically valid quoted path must still fail during file IO.
@@ -314,7 +329,7 @@ extend ElisaProof:
             line: mutable darray[u8] = []
             index: mutable usize = 0
             trailing_partial: bool = contents.count > 0 and contents[contents.count - 1] != 10
-            while index < contents.count + (1 if trailing_partial else 0) |index, contents, line, output, seen, active, directory, path, depth, failed, trailing_partial|:
+            while index < contents.count + (1 if trailing_partial else 0) and not failed |index, contents, line, output, seen, active, directory, path, depth, failed, trailing_partial|:
                 at_end: bool = index == contents.count
                 byte: u8 = 10 if at_end else contents[index]
                 if byte == 10:
@@ -326,8 +341,7 @@ extend ElisaProof:
                             resolved: darray[u8] = proof_resolve_include(directory, included.path)
                             proof_expand_file(resolved, output, seen, active, depth + 1, failed)
                     else:
-                        output.extend(line)
-                        output.push(10)
+                        failed <- true if not proof_import_append_line(output, line)
                     line <- line.truncate(0)
                 else:
                     line.push(byte)
