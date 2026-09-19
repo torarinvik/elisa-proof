@@ -5405,3 +5405,9 @@ That one-pass rewrite was rejected after a live profile: it removed two early-ex
 scans but replaced them with one full-table scan, rising to 906 samples in the hot path.
 It was reverted in compiler `42bd57aa`; the proof build is pinned to that restored
 early-exit implementation. This is a measured negative result, not a retained optimization.
+
+The next profile isolated repeated module-provenance scans inside
+`callable_error_family`. The try/fallible pass now builds source-order `__fn_module` rows
+once and uses them for scope checks, while retaining the complete annotation table for
+candidate error rows. Compiler `emit_fmt` parity remains 175/175; the proof build is
+pinned to `638b4588`.
