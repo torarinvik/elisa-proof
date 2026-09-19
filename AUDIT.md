@@ -5358,3 +5358,9 @@ parity gate improved from the ratchet baseline of 173 to 175 byte-identical fixt
 revision `a7bd3b31` is installed and pinned in `ELISA_COMPILER_REV`. The proof suite, optimized
 replay, and accepted/rejected matrix pass against this pin. The full-source proof audit remains
 incomplete.
+## Abstract-effect annotation row constants (2026-09-19)
+
+The abstract-effect semantic checker now names every parser-generated annotation row
+used by its validation logic. The values are unchanged; this removes raw row IDs from
+the control flow and makes future parser-row changes auditable. The proof build is pinned
+to compiler revision `e5a637c5`, which contains the change.
