@@ -4974,3 +4974,22 @@ The current proof binary was also rebuilt at `-O2`; its verified example and reg
 regression passed. A separate ten-minute `src/main.elisa` run at `-O2` still emitted no report,
 peaking at about 4.16 GB RSS. The same behavior at O0 and O2 localizes the open issue to the
 proof/import workload and retained whole-program summary state, rather than the native optimizer.
+
+## Importer memory follow-up (2026-09-19)
+
+The proof importer now uses the compiler's caller-owned `Semantic::check_full_into` API in both
+semantic preparation paths. The symbol table is initialized in the caller and threaded through
+the Elisa assignment form, so the compiler does not return a giant semantic table by value before
+the proof phase begins. This is a real lifetime/ownership improvement and is accepted by both the
+pinned Stage1 and Stage0 compilers.
+
+The targeted region and diagnostic regressions pass under both stages. The complete optimized
+test matrix and `scripts/dogfood.sh` also pass, including independent kernel replay, forged and
+stale certificate rejection, deterministic repeat checks, and Stage0 bootstrap/runtime harnesses.
+
+The full `src/main.elisa` audit remains incomplete after this change. A 180-second bounded run
+reached about 0.96 GB RSS without producing a report; a 900-second bounded run reached
+4,362,000 KB RSS and was stopped by the time guard without producing a report. The in-place API
+removes one known table-return/copy path, but it does not yet solve the monolithic self-audit
+scalability problem. No incomplete run is treated as proof, and no verdict or semantic check is
+weakened to make the audit finish.
