@@ -5411,3 +5411,8 @@ The next profile isolated repeated module-provenance scans inside
 once and uses them for scope checks, while retaining the complete annotation table for
 candidate error rows. Compiler `emit_fmt` parity remains 175/175; the proof build is
 pinned to `638b4588`.
+
+The same module-row table is now threaded through errorset-wrapper return checking and
+its recursive declaration/body walk, so both call sites of `callable_error_family` avoid
+rebuilding or rescanning provenance metadata. Compiler parity remains 175/175; the proof
+build is pinned to `cdea329b`.
