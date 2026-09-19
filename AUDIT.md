@@ -5458,3 +5458,9 @@ checking, including its recursive statement/declaration walk and function-refere
 queries. The wrapper's semantics retain the original source-order fallback and module rows;
 the proof build is pinned to `f1622a83`, with the qualified error-set parity gate still passing
 11/11 cases.
+
+The ungranted-effect checker now builds a per-file concrete-wrapper index once and threads it
+through signature and recursive statement coverage checks. This replaces repeated annotation
+scans while preserving the prior overload rule that any matching concrete wrapper keeps the
+local grant requirement. Stage0/Stage1 unsafe parity passed 156 byte-identical cases with zero
+divergences; the proof build is pinned to `8253d214`.
