@@ -5021,3 +5021,27 @@ no report before the time guard stopped it. This is not a regression in correctn
 that the semantic lookup indexes improve local compiler hot paths without removing the retained
 whole-program proof schedule's scalability wall. The temporary benchmark worktree was removed and
 the pinned compiler was left unchanged.
+
+## Latest compiler snapshot and protocol-bound lookup checkpoint (2026-09-19)
+
+The proof tree now pins compiler revision `c4c3c94528e5b78e8ae4613e787ba75d8dfffe5d`, and the
+installed `~/.elisac/stage1` snapshot was rebuilt from a clean checkout of that exact revision.
+The compiler change is committed as `c4c3c945`: protocol-parameter lowering now uses a
+collision-safe fixed-bucket index for parser-known struct names instead of scanning every struct
+for every parameter. The indexed path preserves the important rule that an owner-matching
+concrete struct prevents protocol sugar; the first implementation accidentally inverted that
+result, the Stage1 runtime rebuild caught it, and the correction was made before the commit was
+published. Same-named structs from other modules remain eligible for the later owner check.
+
+Evidence for the new snapshot:
+
+- the Stage0-seeded clean Stage1 product rebuilt its runtime object successfully;
+- protocol-parameter smoke passed under both Stage0 and Stage1;
+- the full differential corpus reported `142 agreed, 0 diverged, 0 xfail, 3 skipped` (the skips
+  were rejected by Stage0 itself);
+- the complete proof test matrix passed, including O2/O3 optimized replay checks;
+- the complete `scripts/dogfood.sh` harness passed with deterministic reports, independent replay,
+  certificate/tactic rejection checks, runtime checks, and Stage0 bootstrap harnesses.
+
+This advances the pinned frontend and improves a measured parser hot path, but it does not close
+the open monolithic full-source self-audit scalability issue recorded above.
