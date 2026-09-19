@@ -5080,3 +5080,18 @@ completed successfully.
 The bounded full-source self-audit is still incomplete; the latest profile moved its dominant
 semantic sample away from protocol lookup and toward function-name span lookup, allocator churn,
 and parser effect installation. No incomplete audit is treated as proof.
+
+## Parser effect-installation index checkpoint (2026-09-19)
+
+The pinned compiler was advanced to `94c96e9b4ad62060d33414d5debc4f6801b46496`, rebuilt from a
+clean Stage0-seeded checkout, and installed as the current Stage1 snapshot. Effect-installation
+metadata is now stored in sparse parallel parser tables. Effect and handler names, identity IDs,
+and captures are resolved through the installation rows rather than scanning the complete parser
+annotation stream on every effect-polymorphic lookup. The installation order and first-match
+behavior remain unchanged.
+
+The candidate passed Stage0 bootstrap, the full differential corpus (`143 agreed, 0 diverged,
+0 xfail, 3 skipped`), the proof test matrix including O2/O3 replay, and the complete dogfood
+suite ending with `dogfood audit passed: formalized layers are replay-complete`. This is a parser
+performance/scope-preserving change; the monolithic full-source self-audit remains bounded and
+incomplete, so it is not treated as a self-proof.
