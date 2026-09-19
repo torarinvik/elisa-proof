@@ -5139,3 +5139,12 @@ with `dogfood audit passed: formalized layers are replay-complete`. A clean 544 
 repeated the differential corpus before installation. The live compiler checkout retains one
 unrelated installer-script edit, which was not committed. The monolithic full-source self-audit
 remains open and bounded; this performance change is not presented as a completed self-proof.
+
+## Bounded full-source rerun after contract lookup index (2026-09-19)
+
+With the proof build pinned to `54472098`, the guarded `src/main.elisa` audit was rerun under the
+same 180-second and 1,500,000 KiB limits. It again stopped at the time limit without a partial
+JSON report, so it remains incomplete and produces no proof verdict. Peak RSS was 673,952 KiB,
+down from 859,440 KiB at the preceding `763d9f22` baseline. This is measurable resource
+improvement, but the retained whole-program scheduling wall still requires decomposition or a
+longer bounded audit before the full self-audit can be considered complete.
