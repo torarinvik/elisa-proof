@@ -4993,3 +4993,7 @@ reached about 0.96 GB RSS without producing a report; a 900-second bounded run r
 removes one known table-return/copy path, but it does not yet solve the monolithic self-audit
 scalability problem. No incomplete run is treated as proof, and no verdict or semantic check is
 weakened to make the audit finish.
+
+An optimized comparison does not change that conclusion: the in-place O2 binary was stopped by a
+300-second time guard at 4,891,664 KB RSS with no report. Optimization changes the constant factor
+but does not remove the whole-program memory/time growth.
