@@ -186,10 +186,11 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
 assert report["status"] == "failed"
-assert report["summary"]["semantic_errors"] > 0
+assert report["summary"]["semantic_errors"] == 0
 assert any(finding["kind"] == "import-error" for finding in report["findings"])
 declarations = {entry["name"] for entry in report["declaration_details"]}
 assert "use_nul_import" in declarations and "nul_import_identity" not in declarations
+assert report["source"]["bytes"] == 0
 assert report["replay"]["gaps"] == 0
 print("dogfood include_nul: proof importer rejects the compiler-invalid path")
 PY
