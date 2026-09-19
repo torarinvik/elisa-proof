@@ -5445,3 +5445,10 @@ Proposition formation and proposition typing now name their recursive depth cont
 deliberately tighter call/argument entry guards. The constants preserve each prior boundary,
 including the one-level headroom used by recursive calls; the complete proof regression suite
 and optimized replay remain green.
+
+The compiler's try/fallible semantic pass now builds a source-order hash-chain index for only
+the callee owners appearing in `try` rows. The index retains each original annotation row, so
+module provenance, first-family fallback, and no-provenance fallback semantics are unchanged;
+the old full-table helpers remain available for compatibility paths. Stage0/Stage1 qualified
+error-set parity passed 11/11 cases, the try-fallback-void smoke passed with zero false
+positives, and the proof build is pinned to compiler revision `6c3eb2e4`.
