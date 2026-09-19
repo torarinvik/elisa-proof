@@ -5364,3 +5364,7 @@ The abstract-effect semantic checker now names every parser-generated annotation
 used by its validation logic. The values are unchanged; this removes raw row IDs from
 the control flow and makes future parser-row changes auditable. The proof build is pinned
 to compiler revision `e5a637c5`, which contains the change.
+
+The preserves/changes checker received the same treatment for its whole-change,
+preserves-root, and preserves-field annotation rows. Values and source-order pairing
+are unchanged; the proof build is now pinned to `01cd427b`.
