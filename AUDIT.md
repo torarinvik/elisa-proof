@@ -5464,3 +5464,9 @@ through signature and recursive statement coverage checks. This replaces repeate
 scans while preserving the prior overload rule that any matching concrete wrapper keeps the
 local grant requirement. Stage0/Stage1 unsafe parity passed 156 byte-identical cases with zero
 divergences; the proof build is pinned to `8253d214`.
+
+The concrete-wrapper index was tightened to classify effect-parameter and permission-parameter
+lines in one annotation pass before attaching function names. This removes the remaining
+per-symbol annotation rescans while retaining the same line and overload semantics. Formatted,
+unsafe, qualified-error, and try-fallback parity gates all passed; the proof build is pinned to
+`d9effdc5`.
