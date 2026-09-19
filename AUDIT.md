@@ -5290,3 +5290,13 @@ mutable-reference regression smokes pass, followed by the proof suite, O2/O3 rep
 matrix. A bounded 60-second full-source audit remained incomplete but reached 701,344 KiB peak RSS,
 down from the preceding 1,090,160 KiB sample; this is a performance checkpoint, not a completed
 self-proof.
+
+## Private-access semantic index reuse (2026-09-19)
+
+The compiler's private-member checker now uses its existing collision-safe symbol and module-member
+hash chains for `pma_has_global_value`, `pma_module_owns`, and unqualified-owner traversal. Each
+candidate still undergoes the original exact string and ownership checks; the index only narrows
+the rows visited. Compiler revision `85633e21` is installed and pinned in `ELISA_COMPILER_REV`.
+Private-visibility, private-field, and mutable-reference smokes pass, as do the proof suite, O2/O3
+replay, and proof matrix. The authoritative 180-second full-source audit still timed out without a
+report at 1,583,984 KiB peak RSS, so the full self-audit remains incomplete.
