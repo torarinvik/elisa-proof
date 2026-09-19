@@ -5395,3 +5395,8 @@ The full-source profile then identified `local_binding_is_mutable` doing two pas
 both its filtered annotation stream and compact side tables. These are now single passes
 that retain exact-offset precedence and line-only fallback behavior. Compiler parity is
 175/175 and the proof build is pinned to `ea56e16d`.
+
+The next profile showed `concrete_effect_wrapper_line` scanning the same annotation table
+twice for `__effect_param` and `__permission_param_decl`. It now performs one complete
+pass and returns the same conjunction. Compiler parity is 175/175 and the proof build is
+pinned to `94ab4e8c`.
