@@ -5241,3 +5241,6 @@ under Stage1, including when each file is compiled directly. The minimal loop/he
 extracted from the diagnostic files passes under both products, so the trigger is not that loop
 syntax alone. The rebuilt compiler again reports `144 agreed, 0 diverged, 0 xfail, 3 skipped` on
 the differential corpus. This remains a reproducible Stage1 formatter defect, not a proof result.
+Independent Stage1 probes containing 70-arm enum `when` expressions, 70-arm statement `match`
+expressions, and interpolated strings all passed, narrowing the fault away from those constructs
+in isolation.
