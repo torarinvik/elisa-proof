@@ -5470,3 +5470,7 @@ lines in one annotation pass before attaching function names. This removes the r
 per-symbol annotation rescans while retaining the same line and overload semantics. Formatted,
 unsafe, qualified-error, and try-fallback parity gates all passed; the proof build is pinned to
 `d9effdc5`.
+
+The callable-error annotation index now prefilters candidate owners through a hash set while
+retaining exact name comparison after the hash match, so collisions cannot change semantics.
+Qualified-error and try-fallback parity remain green; the proof build is pinned to `7c4407b6`.
