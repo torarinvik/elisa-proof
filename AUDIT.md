@@ -5122,3 +5122,20 @@ report. The run therefore remains incomplete; its exit is not a proof failure an
 promoted from the empty report. The lower observed RSS is useful performance evidence, but the
 retained whole-program scheduling/scalability wall still needs a separate bounded decomposition
 or profiling pass.
+
+## Readonly contract lookup index checkpoint (2026-09-19)
+
+The pinned compiler was advanced to `54472098e62f5b814527d4d70ce36bc973d73e71`, rebuilt from a
+clean detached checkout seeded by Stage0, and installed as the current Stage1 snapshot. The
+readonly-reference pass now builds a collision-safe hash-chain projection over its existing
+parallel declaration rows. Resolver and mutable-reference contract queries still compare the
+full callee name, module owner, parameter position, and contract type after bucket lookup, so
+hash collisions cannot change a diagnostic or accepted program; the change only removes the
+whole-program scan on cache misses.
+
+The candidate passed Stage0 bootstrap, the full differential corpus (`143 agreed, 0 diverged,
+0 xfail, 3 skipped`), the proof test matrix including O2/O3 optimized replay, and dogfood ending
+with `dogfood audit passed: formalized layers are replay-complete`. A clean 544 product then
+repeated the differential corpus before installation. The live compiler checkout retains one
+unrelated installer-script edit, which was not committed. The monolithic full-source self-audit
+remains open and bounded; this performance change is not presented as a completed self-proof.
