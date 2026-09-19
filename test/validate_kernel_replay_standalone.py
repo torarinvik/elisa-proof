@@ -1,0 +1,68 @@
+"""Validate the standalone replay audit's coverage and trust boundary."""
+
+import json
+import sys
+
+
+REQUIRED_VERIFIED_DECLARATIONS = {
+    "proof_kernel_replay_node_at",
+    "proof_kernel_replay_bool_at",
+    "proof_kernel_replay_bool_set",
+    "proof_kernel_replay_child_at",
+    "proof_kernel_replay_child_range_valid",
+    "proof_kernel_replay_scalar_kind",
+    "proof_kernel_replay_arena_shape_valid",
+    "proof_kernel_replay_arena_child_kind_valid",
+    "proof_kernel_replay_model_value_at",
+    "proof_kernel_replay_difference_query",
+    "proof_kernel_replay_required_identity_present",
+}
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
+
+
+def main() -> None:
+    report = json.load(sys.stdin)
+    summary = report["summary"]
+    replay = report["replay"]
+
+    require(report["status"] == "failed", "standalone audit must remain a failed corpus")
+    require(report["verification_state"] != "proved", "standalone audit unexpectedly became proved")
+    require(summary["semantic_errors"] == 0, "standalone audit introduced semantic errors")
+    require(summary["proven"] >= 180, f"standalone proof coverage fell below 180: {summary['proven']}")
+    require(
+        replay["certificates"] == replay["replayed"],
+        f"certificate replay count mismatch: {replay}",
+    )
+    require(replay["gaps"] == 0, f"standalone audit has replay gaps: {replay}")
+
+    verified = {
+        declaration["name"]
+        for declaration in report["declaration_details"]
+        if declaration["kind"] == "function" and declaration["verified"]
+    }
+    missing = sorted(REQUIRED_VERIFIED_DECLARATIONS - verified)
+    require(not missing, f"required verified declarations became unverified: {missing}")
+
+    budget_kinds = {"control-flow-analysis-budget", "resource-analysis-budget"}
+    bad_budget_findings = [
+        finding
+        for finding in report["findings"]
+        if finding["kind"] in budget_kinds and finding["status"] != "unsupported"
+    ]
+    require(not bad_budget_findings, f"budget exhaustion was misclassified: {bad_budget_findings}")
+    unsigned_findings = [
+        finding
+        for finding in report["findings"]
+        if finding["kind"] == "contract-expression-unsupported"
+        and "unsigned local" in finding["message"]
+    ]
+    require(not unsigned_findings, f"unsigned-local containment regressed: {unsigned_findings}")
+    require(report["trust"]["trusted_assumptions"] == [], "standalone audit gained trusted assumptions")
+
+
+if __name__ == "__main__":
+    main()
