@@ -5341,3 +5341,20 @@ Compiler validation passed 514/514 native checks and 357 valid LLVM modules. The
 The latest 60-second full-source audit remains incomplete: the proof process was watchdog-stopped
 before emitting JSON at 60.1 seconds, with a 1,092,560 KiB peak RSS. This is recorded as an audit
 limitation, not as a proof result.
+
+## Stage1 interpolated-f-string formatter trap (2026-09-19)
+
+The compiler audit reproduced a Stage1-only `Trace/BPT` on valid interpolated f-strings such as
+`f"{x}"`; Stage0 formatted the same source as `__fstr(x)`. The same trap affected three of the
+split semantic diagnostic modules (`semantic_api_message`, `_3`, and `_4`), which had hidden the
+bug in the full self-hosting input. Stage1's formatter handled only literal synthetic f-strings
+and sent interpolated synthetic `__fstr` nodes through ordinary call/source-token recovery.
+
+Stage1 now formats every synthetic f-string directly, handling identifiers and literal chunks
+without consulting their synthetic source positions. The compiler regression fixture
+`test/repro/fmt_interpolated_fstring.elisa` is byte-identical between Stage0 and Stage1, all five
+previously tested semantic API modules now format successfully under Stage1, and the formatter
+parity gate improved from the ratchet baseline of 173 to 175 byte-identical fixtures. Compiler
+revision `a7bd3b31` is installed and pinned in `ELISA_COMPILER_REV`. The proof suite, optimized
+replay, and accepted/rejected matrix pass against this pin. The full-source proof audit remains
+incomplete.
