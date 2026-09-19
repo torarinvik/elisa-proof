@@ -4997,3 +4997,20 @@ weakened to make the audit finish.
 An optimized comparison does not change that conclusion: the in-place O2 binary was stopped by a
 300-second time guard at 4,891,664 KB RSS with no report. Optimization changes the constant factor
 but does not remove the whole-program memory/time growth.
+
+## Dogfood regression checkpoint after importer fail-closed tightening (2026-09-19)
+
+The complete `scripts/dogfood.sh` run passes after the aggregate include-expansion bound and the
+NUL-path importer regressions. An invalid include path now produces an `import-error` with zero
+semantic diagnostics, zero imported source bytes, zero declarations, and zero replay gaps; the
+dogfood assertions previously expected a semantic diagnostic and a partially imported declaration
+set, which was weaker than the fail-closed importer behavior. Those expectations were corrected in
+proof commits `76b868c` and `aa3999c`. The same run still passes the root-NUL, deep-expression,
+Unicode/JSON, replay, tactic, forged-certificate, repair, and Stage0 bootstrap suites.
+
+The proof build remains provenance-pinned to Stage1 snapshot `dcf5ce47`. Two additional semantic
+lookup optimizations are committed in the compiler worktree (`2e679b5e` and `40aae61d`) and have
+been checked with Stage0-built differential products, but they are not silently used by this proof
+tree while the installed snapshot and `ELISA_COMPILER_REV` remain at `dcf5ce47`. A dirty live
+compiler checkout is never treated as proof-build input; moving the pin requires a fresh snapshot,
+provenance check, and a new complete matrix run.
