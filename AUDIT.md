@@ -5148,3 +5148,19 @@ JSON report, so it remains incomplete and produces no proof verdict. Peak RSS wa
 down from 859,440 KiB at the preceding `763d9f22` baseline. This is measurable resource
 improvement, but the retained whole-program scheduling wall still requires decomposition or a
 longer bounded audit before the full self-audit can be considered complete.
+
+## Audit watchdog completion validation (2026-09-19)
+
+The full-source watchdog previously treated any non-null JSON value as a completed report,
+without checking the prover's terminal exit status. It now requires a report object with known
+verdicts, nonnegative integer counters, consistent replay coverage, and an exit status matching
+the verdict. A proved report must have no outstanding obligations, semantic errors, or replay
+gaps. This is transport validation; proof validity remains the kernel's responsibility.
+
+Non-finite time limits are rejected, and an exit between polling and RSS sampling is handled as
+an ordinary process exit. Seven regression tests cover malformed reports, partial JSON, abnormal
+exits after valid JSON, inconsistent counters, replay gaps, timeouts, and invalid limits. The
+tests are included in scripts/test.sh. Real watchdog runs preserve both the proved result for
+examples/verified.elisa (8 obligations, 8 proven, zero replay gaps) and the failed result for
+examples/rejected_underflow.elisa (6 obligations, 4 proven, zero replay gaps). The complete
+implementation audit remains unfinished.

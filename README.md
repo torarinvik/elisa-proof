@@ -203,8 +203,9 @@ layers and standalone replay boundary to be fully independently replayable. Set
 `ELISA_DOGFOOD_FULL=1` to additionally run the complete imported implementation through the same
 bounded audit. For direct use, first build the proof binary and run
 `scripts/audit_full_source.sh`; it writes the proof JSON and stderr under a retained temporary
-directory and prints a machine-readable summary. Exit `0` means the process completed and emitted
-valid JSON (inspect `report_status` and `report_verification_state`); exit `3` means the watchdog
+directory and prints a machine-readable summary. Exit `0` means the process exit status agrees
+with a structurally valid report and consistent counters (inspect `report_status` and
+`report_verification_state`); this transport check does not itself verify a proof. Exit `3` means the watchdog
 stopped it for its time or RSS limit, which is an incomplete audit rather than a proof verdict;
 exit `2` means the harness or report format failed. Configure the bounds with
 `ELISA_FULL_AUDIT_TIME_LIMIT` and `ELISA_FULL_AUDIT_RSS_LIMIT_KB`.

@@ -30,13 +30,14 @@ PROOF_STDOUT="$AUDIT_DIR/proof-report.json"
 PROOF_STDERR="$AUDIT_DIR/proof-report.stderr"
 
 # Exit codes are intentionally about the audit harness, not the proof verdict:
-#   0 = the proof process completed and emitted valid JSON (inspect report_status)
+#   0 = the process exit and report envelope agree (inspect report_status)
 #   3 = the watchdog stopped it before a complete report was emitted
 #   2 = launcher, configuration, or report-format failure
 set +e
 python3 - "$ROOT_DIR" "$PROOF_BINARY" "$AUDIT_SOURCE" "$TIME_LIMIT" "$RSS_LIMIT_KB" "$PROOF_STDOUT" "$PROOF_STDERR" "$AUDIT_DIR" <<'PY'
 import json
 import ctypes
+import math
 import os
 import signal
 import subprocess
@@ -51,8 +52,8 @@ try:
 except ValueError:
     print("full-source audit failed: limits must be numeric", file=sys.stderr)
     raise SystemExit(2)
-if time_limit <= 0 or rss_limit_kb <= 0:
-    print("full-source audit failed: limits must be positive", file=sys.stderr)
+if not math.isfinite(time_limit) or time_limit <= 0 or rss_limit_kb <= 0:
+    print("full-source audit failed: limits must be finite and positive", file=sys.stderr)
     raise SystemExit(2)
 
 command = [proof_binary, "--json", source]
@@ -109,6 +110,10 @@ with open(stdout_path, "w", encoding="utf-8") as stdout, open(stderr_path, "w", 
     while process.poll() is None:
         rss_kb = sample_rss_kb(process.pid)
         if rss_kb is None:
+            # The process can exit between poll() and the RSS query. Its terminal
+            # status and report below decide completion in that ordinary race.
+            if process.poll() is not None:
+                break
             stop_reason = "rss-monitor-unavailable"
             break
         peak_rss_kb = max(peak_rss_kb, rss_kb)
@@ -147,10 +152,53 @@ try:
 except (OSError, json.JSONDecodeError) as error:
     parse_error = str(error)
 
+def validate_report(report, exit_code):
+    # Transport validation only: the kernel, not this watchdog, checks the proof.
+    # A parseable JSON prefix followed by a crash is never a completed audit.
+    if not isinstance(report, dict):
+        return "proof report must be a JSON object"
+    verdict = report.get("status")
+    state = report.get("verification_state")
+    expected_exits = {"proved": 0, "failed": 1, "proved_with_replay_gaps": 1}
+    if not isinstance(verdict, str) or verdict not in expected_exits:
+        return "proof report has an unknown status"
+    if exit_code != expected_exits[verdict]:
+        return f"proof exit/report mismatch: exit={exit_code}, status={verdict}"
+    if state not in ("proved", "disproved", "unsupported", "unknown"):
+        return "proof report has an unknown verification_state"
+    for section, fields in (
+        ("summary", ("obligations", "proven", "failed", "semantic_errors")),
+        ("replay", ("certificates", "replayed", "gaps")),
+    ):
+        counts = report.get(section)
+        if not isinstance(counts, dict):
+            return f"proof report is missing {section}"
+        for field in fields:
+            value = counts.get(field)
+            if type(value) is not int or value < 0:
+                return f"proof report has an invalid {section}.{field} count"
+    summary, replay = report["summary"], report["replay"]
+    if summary["proven"] > summary["obligations"]:
+        return "proof report proves more obligations than it contains"
+    if replay["replayed"] + replay["gaps"] != replay["certificates"]:
+        return "proof report replay counts disagree"
+    if verdict == "proved" and (
+        state != "proved" or summary["failed"] != 0 or summary["semantic_errors"] != 0
+        or summary["proven"] != summary["obligations"] or replay["gaps"] != 0
+    ):
+        return "proved report contains unresolved verification work"
+    if verdict == "proved_with_replay_gaps" and (state != "unknown" or replay["gaps"] == 0):
+        return "replay-gap report has inconsistent state or coverage"
+    if verdict == "failed" and state == "proved":
+        return "failed report claims a proved verification_state"
+    return None
+
+report_error = validate_report(parsed, process.returncode) if parse_error is None else None
+report_valid = parse_error is None and report_error is None
 result = {
     "audit_directory": audit_dir,
     "command": command,
-    "complete": stop_reason is None and parsed is not None,
+    "complete": stop_reason is None and report_valid,
     "elapsed_seconds": round(elapsed, 2),
     "exit_code": process.returncode,
     "peak_rss_kb": peak_rss_kb,
@@ -173,11 +221,13 @@ if isinstance(parsed, dict):
         result["replay_gaps"] = replay.get("gaps")
 if parse_error is not None:
     result["parse_error"] = parse_error
+if report_error is not None:
+    result["report_error"] = report_error
 
 print(json.dumps(result, indent=2, sort_keys=True))
 if stop_reason is not None:
     raise SystemExit(3)
-if parsed is None:
+if not report_valid:
     raise SystemExit(2)
 raise SystemExit(0)
 PY
