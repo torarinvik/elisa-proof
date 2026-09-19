@@ -5180,3 +5180,18 @@ The Stage0 provenance guard then exposed a stale installed bootstrap binary: `~/
 was still built from `beac948a` while the clean Elisa-core checkout had advanced to `8441c249`.
 Stage0 was rebuilt with `vcs.modified=false`, the provenance pin was advanced to the exact full
 revision, and Stage1 was reseeded from that Stage0 before dogfood was retried.
+
+## Full-source scalability checkpoint (2026-09-19)
+
+Dogfood completed under the fresh Stage0/Stage1 pair, but the monolithic audit of `src/main.elisa`
+did not produce a report. The standard 180-second watchdog run reached 869,072 KiB RSS and timed
+out with no partial JSON. A second bounded run with a 600-second time limit reached the 1,500,000
+KiB RSS limit after 193.74 seconds, again before report emission. The watchdog classified both runs
+as incomplete (exit 3), never as proof success.
+
+A short macOS `sample` capture during a 2,000,000 KiB / 60-second diagnostic run showed the hot
+paths were allocator churn (`arena_take_free_block`, `arena_reclaim_allocation`, and
+`ctx_aos_store_record`) around repeated semantic analyses, especially mutable-binding, enum-variant,
+readonly-function, and type-row lookups. This is the current highest-impact scalability target;
+the kernel remains independently replay-complete for the dogfood matrix, while the full self-audit
+requires decomposition or memory reduction before it can claim completion.
