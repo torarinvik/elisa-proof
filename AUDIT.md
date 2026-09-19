@@ -5112,3 +5112,13 @@ suite ending with `dogfood audit passed: formalized layers are replay-complete`.
 checkout retains one unrelated installer-script edit; it was not included in this change. The
 monolithic full-source self-audit remains open and bounded, so this checkpoint is not presented
 as a completed self-proof.
+
+## Bounded full-source rerun after readonly projection (2026-09-19)
+
+With the proof build pinned to the validated `763d9f22` Stage1 snapshot, the guarded
+`src/main.elisa` audit was rerun with a 180-second time limit and a 1,500,000 KiB RSS limit. It
+stopped at the time limit after 180.04 seconds, with a peak RSS of 859,440 KiB and no partial JSON
+report. The run therefore remains incomplete; its exit is not a proof failure and no verdict was
+promoted from the empty report. The lower observed RSS is useful performance evidence, but the
+retained whole-program scheduling/scalability wall still needs a separate bounded decomposition
+or profiling pass.
