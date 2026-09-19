@@ -5493,3 +5493,9 @@ The post-fix bounded full-source audit remained incomplete at 120 seconds, with 
 cost; the largest sampled path was trusted kernel replay, especially typed proposition replay and
 value-binding lookup. This is the next proof-system optimization target, and this incomplete run
 does not count as a proof result.
+
+The replay-bound constants cleanup was tested and reverted. Although the normal proof tests stayed
+green, the self-hosted standalone audit lost verification for two required replay declarations;
+restoring the original literals returned the full coverage gate. Commits `b0b1bed` and
+`2de298b` preserve that experiment and explicit rollback, so the trusted baseline remains
+reproducible rather than silently accepting a coverage regression.
