@@ -5452,3 +5452,9 @@ module provenance, first-family fallback, and no-provenance fallback semantics a
 the old full-table helpers remain available for compatibility paths. Stage0/Stage1 qualified
 error-set parity passed 11/11 cases, the try-fallback-void smoke passed with zero false
 positives, and the proof build is pinned to compiler revision `6c3eb2e4`.
+
+The same indexed annotation projection is now threaded through errorset-wrapper return
+checking, including its recursive statement/declaration walk and function-reference family
+queries. The wrapper's semantics retain the original source-order fallback and module rows;
+the proof build is pinned to `f1622a83`, with the qualified error-set parity gate still passing
+11/11 cases.
