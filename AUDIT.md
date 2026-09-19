@@ -5268,3 +5268,14 @@ modules. The committed compiler revision is `57e78b70`; the installed Stage1 sna
 then the compiler checks passed: 514/514 native differential checks, 356/356 LLVM verifier checks,
 and the match-arm regression smoke. The proof build passed its 7 Python tests, optimized replay at
 O2/O3, and accepted/rejected proof matrix. The full-source proof audit remains open.
+
+## Protocol-bound parser annotation index (2026-09-19)
+
+`Parser.protocol_parameter_bound` now uses sparse source-order indices for protocol declarations
+and wildcard `using` annotations instead of repeatedly scanning unrelated annotation metadata.
+The complete annotation table remains authoritative and the lookup retains its source-order scan
+fallback, so the index is an optimization rather than a trust boundary. Compiler revision
+`c38c22bb` is installed and pinned in `ELISA_COMPILER_REV`. Compiler validation passed 514/514
+native differential checks, 356/356 LLVM verifier checks, and the match-arm regression. The proof
+build passed its 7 Python tests, optimized replay at O2/O3, and accepted/rejected matrix. The
+full-source audit remains open.
