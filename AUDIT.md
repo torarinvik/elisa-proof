@@ -5244,3 +5244,17 @@ the differential corpus. This remains a reproducible Stage1 formatter defect, no
 Independent Stage1 probes containing 70-arm enum `when` expressions, 70-arm statement `match`
 expressions, and interpolated strings all passed, narrowing the fault away from those constructs
 in isolation.
+
+## Kernel validation workspace reuse checkpoint (2026-09-19)
+
+Source proposition admission now reuses one fail-closed replay validation workspace per function
+instead of allocating a fresh graph-validation scratch workspace for every proposition. The
+workspace is cleared and reinitialized by the kernel validator on every call; no validity bit or
+admission result is carried across propositions. The proof suite, native admission harness, O2/O3
+replay checks, and accepted/rejected proof matrix all pass after the change.
+
+The bounded full-source audit remains incomplete, but the resource effect is material: the 180-second
+watchdog peak fell from 1,089,344 KiB to 362,496 KiB. A 300-second run reached only 624,816 KiB and
+still timed out without a report, so this is not promoted to a self-proof. A one-minute sample of
+the reduced-memory binary moved the dominant CPU path into parser protocol-parameter lowering,
+especially `Parser.protocol_parameter_bound`; that is the next compiler scalability target.
