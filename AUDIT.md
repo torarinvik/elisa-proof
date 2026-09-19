@@ -5431,3 +5431,8 @@ Replay resource-path composition and record-update typing now consume the kernel
 depth-limit constants instead of repeating `128` and `127` in contracts and guards. The
 strict boundary is unchanged, and the proof suite, optimized replay, and accepted/rejected
 matrix pass against the same compiler pin.
+
+The proof frame annotation index now names all compiler metadata rows it consumes (whole
+changes, changed roots/fields, preserved roots/fields, and the dotted-field fallback), rather
+than embedding the sentinel numbers in matching logic. Row values and source-order behavior
+are unchanged; the proof suite, optimized replay, and accepted/rejected matrix remain green.
