@@ -5436,3 +5436,7 @@ The proof frame annotation index now names all compiler metadata rows it consume
 changes, changed roots/fields, preserved roots/fields, and the dotted-field fallback), rather
 than embedding the sentinel numbers in matching logic. Row values and source-order behavior
 are unchanged; the proof suite, optimized replay, and accepted/rejected matrix remain green.
+
+The remaining resource-model depth guards and contracts now use the same kernel replay depth
+constants throughout the file. This removes duplicated `127`/`128` bounds without changing
+the fail-closed limit; all proof and replay regression gates remain green.
