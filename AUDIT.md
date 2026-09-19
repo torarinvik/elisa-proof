@@ -5095,3 +5095,20 @@ The candidate passed Stage0 bootstrap, the full differential corpus (`143 agreed
 suite ending with `dogfood audit passed: formalized layers are replay-complete`. This is a parser
 performance/scope-preserving change; the monolithic full-source self-audit remains bounded and
 incomplete, so it is not treated as a self-proof.
+
+## Readonly function projection checkpoint (2026-09-19)
+
+The pinned compiler was advanced to `763d9f22348bc90979d51796b8f30599a5a52520`, rebuilt from
+a clean Stage0-seeded checkout, and installed as the current Stage1 snapshot. Readonly-function
+declarations now use a sparse symbol-table projection rather than scanning all declarations for
+each readonly-reference query. The projection records the declaration name and owning module;
+the final implementation preserves the caller-owned symbol table through `lmut` region
+transport. An earlier by-value helper shape was rejected because it would have made the
+projection update local to the helper, so it was corrected before this snapshot was accepted.
+
+The candidate passed the full compiler differential corpus (`143 agreed, 0 diverged, 0 xfail,
+3 skipped`), the proof test matrix including O2/O3 optimized replay, and the complete dogfood
+suite ending with `dogfood audit passed: formalized layers are replay-complete`. The live compiler
+checkout retains one unrelated installer-script edit; it was not included in this change. The
+monolithic full-source self-audit remains open and bounded, so this checkpoint is not presented
+as a completed self-proof.
