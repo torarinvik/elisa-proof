@@ -5385,3 +5385,8 @@ generic rows and annotations for every function. It now walks the current declar
 tail rows, retaining the same ordinary-generic/bound-row distinction and stopping at the
 current function marker for errorset metadata. Compiler `emit_fmt` parity remains 175/175;
 the proof build is pinned to `380b0aec`.
+
+The next profile found `Semantic.enum_variant_count` recursively traversing all later
+declarations after its first matching enum, despite its prior `result == 0` guard. It now
+returns at that same first match. The compiler passed 175/175 formatter parity and the
+proof build is pinned to `621f5511`.
