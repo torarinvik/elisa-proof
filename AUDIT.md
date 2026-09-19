@@ -5258,3 +5258,13 @@ watchdog peak fell from 1,089,344 KiB to 362,496 KiB. A 300-second run reached o
 still timed out without a report, so this is not promoted to a self-proof. A one-minute sample of
 the reduced-memory binary moved the dominant CPU path into parser protocol-parameter lowering,
 especially `Parser.protocol_parameter_bound`; that is the next compiler scalability target.
+
+## Compiler generic-bound marker constants (2026-09-19)
+
+The Stage1 parser's high-bit encoding for generic-bound metadata is now named
+`Parser::GENERIC_PARAM_BOUND_FLAG` instead of repeating the raw `2147483648` value across parser
+modules. The committed compiler revision is `57e78b70`; the installed Stage1 snapshot and
+`ELISA_COMPILER_REV` are aligned to that revision. Stage1 was reseeded from the current Stage0,
+then the compiler checks passed: 514/514 native differential checks, 356/356 LLVM verifier checks,
+and the match-arm regression smoke. The proof build passed its 7 Python tests, optimized replay at
+O2/O3, and accepted/rejected proof matrix. The full-source proof audit remains open.
