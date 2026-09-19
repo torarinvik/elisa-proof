@@ -5221,3 +5221,14 @@ an improvement. The compiler was rebuilt from the reverted source and still pass
 compile and differential corpus (`144 agreed, 0 diverged, 3 skipped`). The full-source audit
 therefore remains open, with the original readonly declaration index retained as the only
 accepted scalability change in this line of investigation.
+
+## Stage1 self-host formatter crash localization (2026-09-19)
+
+Stage0 successfully lowered the compiler driver source, while both the installed c2922 Stage1
+product and a freshly Stage0-seeded Stage1 product terminated with `Trace/BPT` (exit 133) on the
+same full self-host input. The reduction showed that Stage1 `ast`, `iface`, and `deps` emissions
+complete, individual formatter modules complete, and the failure is reached by the large combined
+`src/semantic/semantic.elisa` formatter input. `ELISA_DBG_DECLINE=1` produced no diagnostic, so
+this is an internal formatter/backend trap rather than a declared unsupported result. The
+constants-only compiler cleanup is independent and passes the Stage0 build plus the differential
+corpus; the Stage1 self-host trap remains an open compiler bug and no proof is claimed from it.
