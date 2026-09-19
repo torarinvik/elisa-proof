@@ -5487,3 +5487,9 @@ member/module annotations and trusts that parser record for qualified visibility
 exact path and lexical-boundary checks. Const-module visibility, private-state stress (7/7), and
 the full differential suite (143 agreed, 0 divergent) pass; the proof build is pinned to
 `8534daae`.
+
+The post-fix bounded full-source audit remained incomplete at 120 seconds, with peak RSS
+1,560,160 KB. Profiling no longer showed private-member access as the dominant compiler-side
+cost; the largest sampled path was trusted kernel replay, especially typed proposition replay and
+value-binding lookup. This is the next proof-system optimization target, and this incomplete run
+does not count as a proof result.
