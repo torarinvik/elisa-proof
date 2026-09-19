@@ -95,6 +95,9 @@ kernel_runtime_inputs=()
 kernel_runtime_obj="${ELISA_RUNTIME_OBJ:-}"
 if [[ -z "$kernel_runtime_obj" ]]; then
     kernel_driver="$(grep -o '/[^\"]*/scripts/elisac_stage1\.sh' "$SELF_HOST_COMPILER" 2>/dev/null | head -1 || true)"
+    if [[ -z "$kernel_driver" && "$(basename "$SELF_HOST_COMPILER")" == "elisac_stage1.sh" ]]; then
+        kernel_driver="$SELF_HOST_COMPILER"
+    fi
     if [[ -n "$kernel_driver" ]]; then
         kernel_runtime_candidate="${kernel_driver%/scripts/elisac_stage1.sh}/build/runtime/elisacore_runtime.o"
         [[ -f "$kernel_runtime_candidate" ]] && kernel_runtime_obj="$kernel_runtime_candidate"

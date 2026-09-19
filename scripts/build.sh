@@ -49,6 +49,9 @@ fi
 RUNTIME_OBJ="${ELISA_RUNTIME_OBJ:-}"
 COMPILER_IS_STAGE1=0
 driver="$(grep -o '/[^"]*/scripts/elisac_stage1\.sh' "$COMPILER" 2>/dev/null | head -1 || true)"
+if [[ -z "$driver" && "$(basename "$COMPILER")" == "elisac_stage1.sh" ]]; then
+    driver="$COMPILER"
+fi
 if [[ -n "$driver" ]]; then
     COMPILER_IS_STAGE1=1
     if [[ -z "$RUNTIME_OBJ" ]]; then
