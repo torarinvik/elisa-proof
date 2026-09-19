@@ -5164,3 +5164,14 @@ tests are included in scripts/test.sh. Real watchdog runs preserve both the prov
 examples/verified.elisa (8 obligations, 8 proven, zero replay gaps) and the failed result for
 examples/rejected_underflow.elisa (6 obligations, 4 proven, zero replay gaps). The complete
 implementation audit remains unfinished.
+
+## Fresh Stage1 compiler snapshot (2026-09-19)
+
+The proof build pin now resolves to compiler revision `2297a73fb3c660506d5e9e53f80a295c99ec7922`.
+That revision was seeded with the current Stage0 product, installed as a readonly Stage1 snapshot,
+and recorded in `~/.elisac/stage1/SNAPSHOT`. The compiler audit merge includes the scoped `Self`
+binding fix, unknown nominal-type checking, parser recovery ordering, and parity-harness fixes.
+
+The fresh product passed the 12-case unknown-type parity smoke and the complete compiler/include
+struct-layout smoke. The proof suite was green before this pin update; it must be rerun against
+this exact snapshot before this checkpoint is considered a full dogfood result.
