@@ -5480,3 +5480,10 @@ RSS fell to 1,413,488 KB. Sampling moved the dominant semantic work to private-m
 (`pma_scope_owner` and `pma_selective_imports`); no proof result is claimed from this incomplete
 run. The next audit target is therefore the private-access annotation lookup, which must be
 indexed without changing module-boundary or shadowing semantics.
+
+The private-access audit then found a stage1 soundness gap: qualified access through a private
+`const module` was accepted outside its parent module. The access pass now indexes paired private
+member/module annotations and trusts that parser record for qualified visibility, while retaining
+exact path and lexical-boundary checks. Const-module visibility, private-state stress (7/7), and
+the full differential suite (143 agreed, 0 divergent) pass; the proof build is pinned to
+`8534daae`.
