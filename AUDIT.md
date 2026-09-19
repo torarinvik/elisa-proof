@@ -5372,3 +5372,10 @@ are unchanged; the proof build is now pinned to `01cd427b`.
 The effect-law fulfillment checker likewise names its forbids/includes, law-marker,
 subject, frame-law, and non-reference rows. Values and law-edge ordering are unchanged;
 the proof build is now pinned to `704dc60d`.
+
+The full-source audit identified a scalability hotspot in abstract-effect installation
+collection: every `can` block rescanned the complete annotation table to find its handler
+and installed effect. The collector now builds source-order filtered installation rows
+once and passes them through the recursive walk. Handler target and realization lookups
+still use the complete table, so this changes lookup cost without changing resolution
+semantics. The compiler change is `34cf4003`, and the proof build is pinned to it.
