@@ -5209,3 +5209,15 @@ canonical runtime support source. The compiler differential corpus reported `143
 diverged, 0 xfail, 3 skipped`; the one divergence is the pre-existing `tuple_function_tail`
 parser worktree change and is outside this commit. The proof matrix and dogfood run both passed
 against this exact compiler pin; the bounded full-source audit remains incomplete.
+
+## Local-mutability scalability experiment rejected (2026-09-19)
+
+A fresh profile of the bounded full-source audit identified `Semantic.local_binding_is_mutable`
+as the largest semantic hot path. Two collision-safe lookup-index prototypes were implemented
+and tested in isolated Stage1 worktrees. The larger index reached the 1,500,000 KiB watchdog RSS
+limit after 174.83 seconds; the compact head-only version reached the same limit after 106.90
+seconds. Both were reverted, because a sound optimization that worsens the resource bound is not
+an improvement. The compiler was rebuilt from the reverted source and still passed the runtime
+compile and differential corpus (`144 agreed, 0 diverged, 3 skipped`). The full-source audit
+therefore remains open, with the original readonly declaration index retained as the only
+accepted scalability change in this line of investigation.
