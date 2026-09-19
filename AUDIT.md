@@ -4969,3 +4969,8 @@ Evidence after the fixes:
   watchdog termination and this controlled high-memory timeout establish a scalability defect in
   the monolithic self-audit; they do not justify raising proof verdicts, skipping compiler
   semantics, or calling the full self-audit complete.
+
+The current proof binary was also rebuilt at `-O2`; its verified example and region/replay
+regression passed. A separate ten-minute `src/main.elisa` run at `-O2` still emitted no report,
+peaking at about 4.16 GB RSS. The same behavior at O0 and O2 localizes the open issue to the
+proof/import workload and retained whole-program summary state, rather than the native optimizer.
