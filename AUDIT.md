@@ -4,6 +4,18 @@ Passing the current suites is regression evidence, not completion of the full au
 The objective covers all existing implementation code, scripts, proof fixtures, and their
 assumptions about the compiler. No module below is yet certified as fully audited.
 
+## 2026-09-19 checkpoint: constants refactor must preserve the verification frontier
+
+The committed constants cleanups (`03aa2ea`, `8d18da4`, and `d622b03`) preserve the proof
+matrix and replay counts. A broader cleanup in `src/proof/kernel_replay/unsigned_bounds.elisa`
+was intentionally not retained: replacing its inline bounds and recursive depth literals with
+module constants caused the bounded source audit to stop verifying
+`proof_kernel_replay_difference_query` and, transitively, `proof_kernel_replay_arena_shape_valid`.
+The generated reports still had zero replay gaps, but the required verified declaration set
+shrunk, so accepting the refactor would have weakened the trust boundary. The change was reverted
+and the working tree is clean. This is evidence that constants in recursive proof code must be
+introduced with a verification-frontier regression check, not only a native build check.
+
 ## 2026-09-14 checkpoint: Elisa validity and admission exhaustion
 
 `proof_source_validate_statement_propositions` silently returned at its nesting bound.
