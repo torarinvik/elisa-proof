@@ -5440,3 +5440,8 @@ are unchanged; the proof suite, optimized replay, and accepted/rejected matrix r
 The remaining resource-model depth guards and contracts now use the same kernel replay depth
 constants throughout the file. This removes duplicated `127`/`128` bounds without changing
 the fail-closed limit; all proof and replay regression gates remain green.
+
+Proposition formation and proposition typing now name their recursive depth contracts and the
+deliberately tighter call/argument entry guards. The constants preserve each prior boundary,
+including the one-level headroom used by recursive calls; the complete proof regression suite
+and optimized replay remain green.
