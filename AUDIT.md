@@ -5198,7 +5198,7 @@ requires decomposition or memory reduction before it can claim completion.
 
 ## Readonly declaration-index correctness checkpoint (2026-09-19)
 
-The compiler pin now advances to `c2922aa2`, which keeps the readonly declaration index separate
+The compiler pin now advances to `c2922aa2714bfa0263a94b2f315c7372d0544b63`, which keeps the readonly declaration index separate
 from the mutable-reference parameter index. The two tables have different lengths and meanings;
 using the parameter index for declaration membership could read the wrong row or trap while
 compiling the runtime. The corrected implementation hashes each table independently and still
@@ -5207,5 +5207,5 @@ checks the complete name and module-owner pair after bucket lookup.
 The compiler was reseeded with the installed Stage0 product, and Stage1 successfully compiled the
 canonical runtime support source. The compiler differential corpus reported `143 agreed, 1
 diverged, 0 xfail, 3 skipped`; the one divergence is the pre-existing `tuple_function_tail`
-parser worktree change and is outside this commit. The proof matrix and dogfood run still need to
-be rerun against this exact compiler pin; the bounded full-source audit remains incomplete.
+parser worktree change and is outside this commit. The proof matrix and dogfood run both passed
+against this exact compiler pin; the bounded full-source audit remains incomplete.
