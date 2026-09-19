@@ -5279,3 +5279,14 @@ fallback, so the index is an optimization rather than a trust boundary. Compiler
 native differential checks, 356/356 LLVM verifier checks, and the match-arm regression. The proof
 build passed its 7 Python tests, optimized replay at O2/O3, and accepted/rejected matrix. The
 full-source audit remains open.
+
+## Readonly contract cache locality (2026-09-19)
+
+The compiler's `Semantic.mutable_ref_param_type` cache now searches newest entries first. Cache
+entries remain fully checked by callee, owner, and argument position, so the change cannot create a
+false cache hit; it only improves locality for repeated calls during recursive declaration walks.
+Compiler revision `71fe42e3` is installed and pinned in `ELISA_COMPILER_REV`. The mutability and
+mutable-reference regression smokes pass, followed by the proof suite, O2/O3 replay, and proof
+matrix. A bounded 60-second full-source audit remained incomplete but reached 701,344 KiB peak RSS,
+down from the preceding 1,090,160 KiB sample; this is a performance checkpoint, not a completed
+self-proof.
