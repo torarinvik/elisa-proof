@@ -5014,3 +5014,10 @@ been checked with Stage0-built differential products, but they are not silently 
 tree while the installed snapshot and `ELISA_COMPILER_REV` remain at `dcf5ce47`. A dirty live
 compiler checkout is never treated as proof-build input; moving the pin requires a fresh snapshot,
 provenance check, and a new complete matrix run.
+
+An isolated clean Stage1 product built from `40aae61d` was also benchmarked against the unchanged
+proof source. Its ten-minute bounded full-source audit reached a peak of 4,689,408 KiB and emitted
+no report before the time guard stopped it. This is not a regression in correctness, but it shows
+that the semantic lookup indexes improve local compiler hot paths without removing the retained
+whole-program proof schedule's scalability wall. The temporary benchmark worktree was removed and
+the pinned compiler was left unchanged.
