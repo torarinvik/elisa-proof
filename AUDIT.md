@@ -5379,3 +5379,9 @@ and installed effect. The collector now builds source-order filtered installatio
 once and passes them through the recursive walk. Handler target and realization lookups
 still use the complete table, so this changes lookup cost without changing resolution
 semantics. The compiler change is `34cf4003`, and the proof build is pinned to it.
+
+A live profile then found `Parser.record_generic_func_metadata` rescanning all prior
+generic rows and annotations for every function. It now walks the current declaration's
+tail rows, retaining the same ordinary-generic/bound-row distinction and stopping at the
+current function marker for errorset metadata. Compiler `emit_fmt` parity remains 175/175;
+the proof build is pinned to `380b0aec`.
