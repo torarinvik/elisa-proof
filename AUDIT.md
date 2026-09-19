@@ -5474,3 +5474,9 @@ unsafe, qualified-error, and try-fallback parity gates all passed; the proof bui
 The callable-error annotation index now prefilters candidate owners through a hash set while
 retaining exact name comparison after the hash match, so collisions cannot change semantics.
 Qualified-error and try-fallback parity remain green; the proof build is pinned to `7c4407b6`.
+
+After that pin, a bounded full-source run remained incomplete at the 120-second cutoff, but peak
+RSS fell to 1,413,488 KB. Sampling moved the dominant semantic work to private-member access
+(`pma_scope_owner` and `pma_selective_imports`); no proof result is claimed from this incomplete
+run. The next audit target is therefore the private-access annotation lookup, which must be
+indexed without changing module-boundary or shadowing semantics.
