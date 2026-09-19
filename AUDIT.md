@@ -5400,3 +5400,8 @@ The next profile showed `concrete_effect_wrapper_line` scanning the same annotat
 twice for `__effect_param` and `__permission_param_decl`. It now performs one complete
 pass and returns the same conjunction. Compiler parity is 175/175 and the proof build is
 pinned to `94ab4e8c`.
+
+That one-pass rewrite was rejected after a live profile: it removed two early-exit reverse
+scans but replaced them with one full-table scan, rising to 906 samples in the hot path.
+It was reverted in compiler `42bd57aa`; the proof build is pinned to that restored
+early-exit implementation. This is a measured negative result, not a retained optimization.
