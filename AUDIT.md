@@ -5314,3 +5314,14 @@ Unsafe.RawExtern`, and cross-stage unsafe parity passes with 155 byte-identical 
 divergences. The proof build passes its 7 tests, optimized replay at O2/O3, and accepted/rejected
 proof matrix. The independent permission model reports no over-claims; its remaining misses are
 conservative incompleteness and do not support a proof claim.
+
+## Typed character constants and magic-number cleanup (2026-09-19)
+
+The proof runtime now names its POSIX descriptors, syscall failure value, ASCII digit bounds,
+JSON byte base, control-byte limit, and signed minimum instead of embedding those ABI/protocol
+values at use sites. This exposed a Stage1 backend defect: `CharLit` was absent from integer
+constant folding, so `const ZERO: u8 = '0'.u8()` remained unresolved and any reader declined.
+Stage1 now folds character literals as integer code units; compiler revision `15c54315` is
+installed and pinned in `ELISA_COMPILER_REV`, with a dedicated `global_char_const` regression.
+Compiler validation passed 514/514 native checks and 357 valid LLVM modules. The proof build passed
+7 tests, optimized O2/O3 replay, and the accepted/rejected proof matrix.
