@@ -5325,3 +5325,7 @@ Stage1 now folds character literals as integer code units; compiler revision `15
 installed and pinned in `ELISA_COMPILER_REV`, with a dedicated `global_char_const` regression.
 Compiler validation passed 514/514 native checks and 357 valid LLVM modules. The proof build passed
 7 tests, optimized O2/O3 replay, and the accepted/rejected proof matrix.
+
+The latest 60-second full-source audit remains incomplete: the proof process was watchdog-stopped
+before emitting JSON at 60.1 seconds, with a 1,092,560 KiB peak RSS. This is recorded as an audit
+limitation, not as a proof result.
