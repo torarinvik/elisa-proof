@@ -5167,7 +5167,7 @@ implementation audit remains unfinished.
 
 ## Fresh Stage1 compiler snapshot (2026-09-19)
 
-The proof build pin now resolves to compiler revision `2297a73fb3c660506d5e9e53f80a295c99ec7922`.
+The proof build pin now resolves to compiler revision `7f84f61f4b019c1be9a4b6c083322e62ce91f848`.
 That revision was seeded with the current Stage0 product, installed as a readonly Stage1 snapshot,
 and recorded in `~/.elisac/stage1/SNAPSHOT`. The compiler audit merge includes the scoped `Self`
 binding fix, unknown nominal-type checking, parser recovery ordering, and parity-harness fixes.
