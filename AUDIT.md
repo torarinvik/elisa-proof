@@ -5232,3 +5232,12 @@ complete, individual formatter modules complete, and the failure is reached by t
 this is an internal formatter/backend trap rather than a declared unsupported result. The
 constants-only compiler cleanup is independent and passes the Stage0 build plus the differential
 corpus; the Stage1 self-host trap remains an open compiler bug and no proof is claimed from it.
+
+The reduction was tightened against the freshly reseeded Stage1 product after the qualified-error
+owner fixes. Each of `semantic_api_message.elisa`, `semantic_api_message_2.elisa`,
+`semantic_api_message_effects.elisa`, `semantic_api_message_3.elisa`, and
+`semantic_api_message_4.elisa` formats successfully under Stage0 but terminates with exit 133
+under Stage1, including when each file is compiled directly. The minimal loop/helper construct
+extracted from the diagnostic files passes under both products, so the trigger is not that loop
+syntax alone. The rebuilt compiler again reports `144 agreed, 0 diverged, 0 xfail, 3 skipped` on
+the differential corpus. This remains a reproducible Stage1 formatter defect, not a proof result.
