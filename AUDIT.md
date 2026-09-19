@@ -5045,3 +5045,20 @@ Evidence for the new snapshot:
 
 This advances the pinned frontend and improves a measured parser hot path, but it does not close
 the open monolithic full-source self-audit scalability issue recorded above.
+
+## Protocol declaration projection checkpoint (2026-09-19)
+
+The pinned compiler was advanced to `62113e7c4508812b1bf818c24d8eedc88188c4f8`, rebuilt from a
+clean checkout, and installed as the current Stage1 snapshot. This compiler change adds a
+declaration-only projection of the parser annotation stream and makes unknown-type protocol
+constraint checks consult that projection. Generic-interface implementation checks continue to
+use the complete annotation table, so the optimization does not discard implementation metadata.
+
+The initial candidate was exercised under Stage0 bootstrap before installation. It passed the
+complete compiler differential corpus (`142 agreed, 0 diverged, 0 xfail, 3 skipped`), the full
+proof test matrix including O2/O3 replay, and the complete dogfood suite ending with independent
+replay and `formalized layers are replay-complete`. The live compiler checkout still contains
+unrelated uncommitted work; only the three semantic files for this change were committed.
+
+The full `src/main.elisa` self-audit remains open and bounded by the retained whole-program
+summary workload; this lookup optimization is not presented as a completed self-proof.
