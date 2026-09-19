@@ -5062,3 +5062,21 @@ unrelated uncommitted work; only the three semantic files for this change were c
 
 The full `src/main.elisa` self-audit remains open and bounded by the retained whole-program
 summary workload; this lookup optimization is not presented as a completed self-proof.
+
+## Function-name span projection checkpoint (2026-09-19)
+
+The pinned compiler was advanced to `60a9a2aa8c04652400ef633b42cce497b2521c49`, rebuilt from a
+clean Stage0-seeded checkout, and installed as the current Stage1 snapshot. The compiler change
+adds a sparse projection for `__lsp_func_name` annotations. Symbol collection now searches only
+function-name markers when attaching declaration spans, while preserving the exact owner/name/
+offset match and the existing empty-position fallback.
+
+The candidate passed Stage0 bootstrap, the full differential corpus (`142 agreed, 0 diverged,
+0 xfail, 3 skipped`), the proof test matrix including O2/O3 replay, and the dogfood log reached
+`dogfood audit passed: formalized layers are replay-complete`. The dogfood wrapper's final shell
+status variable was not reused because zsh reserves that name; the logged dogfood run itself
+completed successfully.
+
+The bounded full-source self-audit is still incomplete; the latest profile moved its dominant
+semantic sample away from protocol lookup and toward function-name span lookup, allocator churn,
+and parser effect installation. No incomplete audit is treated as proof.
