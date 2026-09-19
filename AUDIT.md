@@ -5416,3 +5416,8 @@ The same module-row table is now threaded through errorset-wrapper return checki
 its recursive declaration/body walk, so both call sites of `callable_error_family` avoid
 rebuilding or rescanning provenance metadata. Compiler parity remains 175/175; the proof
 build is pinned to `cdea329b`.
+
+After that index removed `callable_error_family` from the top profile, the next hotspot was
+the wrapper's two reverse marker scans. They are now one reverse pass with the same boolean
+result and an early stop once both markers are found. Compiler parity remains 175/175; the
+proof build is pinned to `e8734a40`.
