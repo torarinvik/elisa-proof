@@ -5698,13 +5698,34 @@ another 180-second/2,000,000-KiB run hit its RSS limit at 102.62 seconds and 2,0
 Neither emitted a report.
 
 A 10-second native sample during the subsequent pre-enum-index 180-second/3,000,000-KiB run showed
-late proof work repeatedly scanning nested declarations in `proof_declaration_has_enum`. That query now uses
-the existing collision-safe per-import type declaration index, extended to include enum rows;
-lookups check both the stored hash and exact enum name. An incomplete index declines structural
-classification rather than inferring it from partial data. Stage1 build, the O0/O2/O3 proof matrix,
-and complete dogfood—including Stage0 kernel bootstrap and adversarial certificate tests—passed.
-The post-change full-source attempt hit the 2,500,000-KiB RSS limit at 92.92 seconds, with a
-2,533,328-KiB peak. The earlier 3,000,000-KiB run and this run are too variable to establish a
-whole-run performance gain; a same-limit post-change rerun remains necessary. Samples implicate
-both compiler semantic/arena allocation and later proof declaration collection. Full-source
-self-verification remains open.
+late proof work repeatedly scanning nested declarations in `proof_declaration_has_enum`. That query
+now uses a separate compact per-import enum-name index, rather than retaining enum AST payloads in
+the float-audit type index. Lookups check both the stored hash and exact enum name. An incomplete
+index declines structural classification rather than inferring it from partial data. Stage1 build,
+the O0/O2/O3 proof matrix, and complete dogfood—including Stage0 kernel bootstrap and adversarial
+certificate tests—passed. A same-limit full-source rerun on this implementation stopped at
+170.89 seconds after reaching the 3,000,000-KiB RSS watchdog (peak 3,001,776 KiB), before emitting
+a report. Samples during that run showed repeated scans of `__tuple_label` annotations in
+`proof_source_kernel_collect_tuple_fields`. Those annotations are now grouped in a collision-safe
+per-import line index; each line's labels preserve their original order, and incomplete indexes
+fail closed before any tuple field can enter the typing environment. The full matrix and dogfood
+suite passed again. A same-limit 180-second rerun now stops on time instead of memory, with a
+2,260,464-KiB peak; this is lower peak memory but still no full-source report. A five-minute
+run later reached the 3,000,000-KiB RSS watchdog at 270.20 seconds (3,005,136-KiB peak). Late
+samples showed `proof_builtin_operator_impl_exists` dominating repeated lookups. The report's
+cached implementation rows now have a collision-safe pair hash index; exact concrete/protocol
+strings remain authoritative, and extension rows retain their wildcard-protocol behavior. A
+subsequent full-source attempt was interrupted after profiling showed the old query still active.
+The cause was that included files restart annotation line numbers, invalidating a cache that
+assumed globally ordered annotations. The builder now pairs implementation/scope rows by exact
+line independent of order. The full O0/O2/O3 matrix and dogfood suite passed after this correction;
+a fresh whole-source run is still needed. The next run reached the RSS watchdog at 175.46 seconds
+(3,027,552-KiB peak); its sample showed the separate source-operator guard still repeating generic
+annotation scans for every primitive spelling, so the report index did not cover that path. That
+guard now scans source annotations once per check while preserving extension and exact-line impl
+semantics. The full O0/O2/O3 matrix and complete dogfood suite passed after the change. The current
+whole-source attempt still stopped at the 3,000,000-KiB RSS watchdog after 172.68 seconds (peak
+3,000,336 KiB); samples no longer show repeated operator-annotation scans and instead show
+`proof_check_function`/return-contract matching and arena allocation. Self-verification remains
+incomplete; the next experiment is a larger bounded memory allowance to determine whether this is
+only resource headroom or another repeated-work bottleneck.
