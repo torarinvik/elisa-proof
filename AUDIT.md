@@ -5838,3 +5838,34 @@ one run was collected at each revision, this is evidence that the targeted looku
 and the audit advances farther, not a controlled proof of causal throughput/RSS improvement. The
 whole-source audit still did not emit a report; repeated index construction is the next profiling
 target.
+
+## Reusable typed-index scratch (2026-09-20)
+
+Proposition formation now accepts caller-owned typing scratch for repeated source obligations.
+The builder clears all logical entries, revalidates every global and local environment binding,
+and rebuilds value/parameter positions and parameter bucket chains on every call. It returns only
+success/failure; the temporary index view is formed and consumed inside the checker and is never
+returned from the scratch builder. Quantifier-local environments continue using independent
+indices so constructing a binder scope cannot mutate the outer environment's active index. A
+runtime fixture reuses one workspace across valid, cyclic-arena, recovered, malformed-environment,
+and recovered-again checks, guarding against stale scratch becoming admission authority.
+The function-parameter index fixture also exercises this path: it rejects duplicate slots for one
+signature, then reuses the same workspace with a unique parameter whose signature identity collides
+in the bucket selector with an unrelated function. Exact owner/signature/index checks admit the
+valid call without admitting the ambiguous one.
+
+The proof frontend pin was advanced from `a51f3dd7` to `010fe325`, matching the installed Stage1
+snapshot. The Stage1 build, complete proof matrix including O2/O3 replay, and full dogfood suite
+passed; dogfood also compiled and ran the proposition-admission harness under Stage0. The current
+profiler doctor passed against the matching Stage1 product and compiler manifest. A 120-second
+sample of whole-source verification timed out after 59,741 samples (peak RSS 1,154,826,240 bytes);
+its active stack ended at `proof_kernel_replay_build_typing_workspace`. The capture was partial and
+the compiler revision changed since the previous sample, so this is diagnostic evidence only—not
+a controlled allocation or speedup comparison. No whole-source proof report was emitted; further
+optimization and completion of self-verification remain open.
+
+The standalone index builder remains separately allocating. A Stage0 experiment that factored it
+through a helper borrowing a locally created workspace was rejected because Stage0 could not infer
+the local scratch region; the reusable production path borrows the caller-owned workspace and
+returns no scratch-backed view. This bootstrap region-inference limitation remains a compiler
+parity investigation, not a proof-system workaround to accept under Stage0.

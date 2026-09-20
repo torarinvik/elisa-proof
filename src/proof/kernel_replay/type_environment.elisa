@@ -1,6 +1,17 @@
 # Validation and indexed access for the segmented typing environment. Global declaration
 # signatures are shared across obligations; local context bindings are scoped per expression.
 extend ElisaProofKernelReplay:
+    public:
+        # Reusable allocation scratch only; every index row is rebuilt from validated input.
+        struct ProofKernelReplayTypingWorkspace:
+            value_binding_indices: mutable darray[usize]
+            function_parameter_indices: mutable darray[usize]
+            function_parameter_bucket_heads: mutable darray[usize]
+            function_parameter_next_indices: mutable darray[usize]
+
+        def proof_kernel_replay_typing_workspace_new() -> ProofKernelReplayTypingWorkspace:
+            return ProofKernelReplayTypingWorkspace{value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: []}
+
     private:
         const PROOF_KERNEL_MAX_TYPED_FUNCTION_PARAMETERS: usize = 1024
 
@@ -22,10 +33,6 @@ extend ElisaProofKernelReplay:
             empty: ProofKernelReplayTypingIndex = proof_kernel_replay_empty_typing_index()
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
             return (false, empty) if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
-            # This pass is the admission boundary for every environment row. Validate rows while
-            # collecting indexed positions, so proposition formation need not make a separate
-            # full environment pass before constructing the index. Non-indexed rows (types,
-            # fields, and declarations) are checked here too; none are trusted by omission.
             value_indices: mutable darray[usize] = []
             parameter_indices: mutable darray[usize] = []
             value_binding_count: mutable usize = 0
@@ -62,6 +69,48 @@ extend ElisaProofKernelReplay:
                     parameter_next_indices[parameter_offset] <- parameter_bucket_heads[slot]
                     parameter_bucket_heads[slot] <- parameter_offset
             return (true, ProofKernelReplayTypingIndex{value_binding_count: value_binding_count, function_parameter_count: parameter_binding_count, source_binding_count: total_bindings, value_binding_indices: value_indices, function_parameter_indices: parameter_indices, function_parameter_bucket_heads: parameter_bucket_heads, function_parameter_next_indices: parameter_next_indices})
+
+        # Fills caller-owned scratch, but returns no view of it. Callers form the temporary index
+        # locally only after this complete validation-and-build pass succeeds.
+        def proof_kernel_replay_build_typing_workspace(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
+            scratch.value_binding_indices.clear()
+            scratch.function_parameter_indices.clear()
+            scratch.function_parameter_bucket_heads.clear()
+            scratch.function_parameter_next_indices.clear()
+            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return false if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            value_binding_count: mutable usize = 0
+            parameter_binding_count: mutable usize = 0
+            for binding_index in 0..<total_bindings |binding_index, environment, scratch, value_binding_count, parameter_binding_count, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                return false if not proof_kernel_replay_typing_binding_valid(binding)
+                is_value_binding: bool = match binding.kind:
+                    "value": true
+                    "proposition": true
+                    _: false
+                if is_value_binding:
+                    scratch.value_binding_indices.push(binding_index)
+                    value_binding_count <- value_binding_count + 1
+                if binding.kind == "function-parameter":
+                    scratch.function_parameter_indices.push(binding_index)
+                    parameter_binding_count <- parameter_binding_count + 1
+            if parameter_binding_count > 0:
+                scratch.function_parameter_bucket_heads.resize(parameter_binding_count)
+                scratch.function_parameter_next_indices.resize(parameter_binding_count)
+                for slot in 0..<parameter_binding_count |slot, parameter_binding_count, scratch, work|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    scratch.function_parameter_bucket_heads[slot] <- parameter_binding_count
+                for parameter_offset in 0..<parameter_binding_count |parameter_offset, environment, scratch, parameter_binding_count, work|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    binding_index: usize = scratch.function_parameter_indices[parameter_offset]
+                    return false if binding_index >= total_bindings
+                    binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                    return false if binding.kind != "function-parameter" or binding.signature_identity == 0
+                    slot: usize = (binding.signature_identity % parameter_binding_count).usize()
+                    scratch.function_parameter_next_indices[parameter_offset] <- scratch.function_parameter_bucket_heads[slot]
+                    scratch.function_parameter_bucket_heads[slot] <- parameter_offset
+            return true
 
         def proof_kernel_replay_typing_binding_valid(binding: ElisaProofKernelCore::ProofKernelTypingBinding) -> bool:
             return false if binding.name == "" or binding.type_name == ""
