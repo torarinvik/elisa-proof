@@ -1,0 +1,110 @@
+extend ElisaProof:
+    private:
+        def proof_signed_i64_only_context(facts: darray[Ast::Expr]&) -> bool:
+            has_i64_type: mutable bool = false
+            for fact in facts |fact, has_i64_type|:
+                signed: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(fact)
+                return false if signed.known and signed.width != 64
+                has_i64_type <- true if signed.known
+                unsigned: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(fact)
+                return false if unsigned.known
+                place: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_place_marker_info(fact)
+                return false if place.known
+                element: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(fact)
+                return false if element.known and element.width > 0
+                untrusted: (known: bool, term: Ast::Expr, protocol: sview) = proof_untrusted_operator_marker_info(fact)
+                return false if untrusted.known
+            return has_i64_type
+
+        def proof_closed_signed_i64_comparison(goal: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if not proof_signed_i64_only_context(facts)
+            match goal:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_is_comparison(operator)
+                    a: (known: bool, value: i64) = proof_constant_int(left)
+                    b: (known: bool, value: i64) = proof_constant_int(right)
+                    return false if not a.known or not b.known
+                    return a.value == b.value if operator == TokenKind.EqEq
+                    return a.value != b.value if operator == TokenKind.BangEq
+                    return a.value < b.value if operator == TokenKind.Lt
+                    return a.value > b.value if operator == TokenKind.Gt
+                    return a.value <= b.value if operator == TokenKind.LtEq
+                    return a.value >= b.value if operator == TokenKind.GtEq
+                    return false
+                _:
+                    return false
+
+        def proof_signed_width_min(width: i64) -> i64:
+            return -128 if width == 8
+            return -32768 if width == 16
+            return -2147483648 if width == 32
+            return ElisaProofKernelCore::PROOF_KERNEL_I64_MIN if width == 64
+            return 0
+
+        def proof_signed_width_max(width: i64) -> i64:
+            return 127 if width == 8
+            return 32767 if width == 16
+            return 2147483647 if width == 32
+            return ElisaProofKernelCore::PROOF_KERNEL_I64_MAX if width == 64
+            return 0
+
+        def proof_signed_add_type_bounds(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            for fact in facts |fact, bounds|:
+                marker: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(fact)
+                continue if not marker.known
+                name: sview = proof_ident_name(marker.term)
+                continue if name == ""
+                proof_add_lower(bounds, name, proof_signed_width_min(marker.width))
+                proof_add_upper(bounds, name, proof_signed_width_max(marker.width))
+
+        def proof_signed_expression_safe_with_bounds(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_signed_expression_safe_with_bounds(inner, facts, bounds, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if not proof_signed_expression_safe_with_bounds(operand, facts, bounds, depth + 1)
+                    if operator == TokenKind.Minus:
+                        width: i64 = proof_signed_width_in_expression(operand, facts)
+                        if width != 0:
+                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+                            return interval.has_lower and interval.has_upper and interval.lower >= proof_signed_width_min(width) and interval.upper <= proof_signed_width_max(width)
+                    return true
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_signed_expression_safe_with_bounds(left, facts, bounds, depth + 1)
+                    return false if not proof_signed_expression_safe_with_bounds(right, facts, bounds, depth + 1)
+                    arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.LShift or operator == TokenKind.RShift or operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret
+                    return true if not arithmetic
+                    width: i64 = proof_signed_width_in_expression(expression, facts)
+                    if width == 0:
+                        return true if proof_unsigned_width_in_expression(expression, facts) != 0
+                        constant: (known: bool, value: i64) = proof_constant_int(expression)
+                        return constant.known and constant.value >= ElisaProofKernelCore::PROOF_KERNEL_I64_MIN and constant.value <= ElisaProofKernelCore::PROOF_KERNEL_I64_MAX if constant.known
+                        # A witnessed primitive integer with no signed-width trace is not safe to
+                        # reinterpret using the host i64 model. Calls and overloaded terms are
+                        # independently excluded by their witness/dispatch gates.
+                        return not proof_scalar_term_witnessed(expression, facts, depth + 1)
+                    interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+                    return interval.has_lower and interval.has_upper and interval.lower >= proof_signed_width_min(width) and interval.upper <= proof_signed_width_max(width)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_signed_expression_safe_with_bounds(condition, facts, bounds, depth + 1) and proof_signed_expression_safe_with_bounds(then_expression, facts, bounds, depth + 1) and proof_signed_expression_safe_with_bounds(else_expression, facts, bounds, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_signed_expression_safe_with_bounds(callee, facts, bounds, depth + 1)
+                    for argument in arguments |argument, facts, bounds, depth|:
+                        return false if not proof_signed_expression_safe_with_bounds(argument, facts, bounds, depth + 1)
+                    return true
+                _:
+                    return true
+
+        def proof_signed_expression_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, facts, &bounds)
+            proof_close_equalities(facts, &bounds)
+            proof_signed_add_type_bounds(facts, &bounds)
+            constraints: mutable darray[ProofDifference] = []
+            for fact in facts |fact, bounds, constraints|:
+                proof_collect_difference_constraints(fact, bounds, facts, &constraints)
+            if constraints.count <= PROOF_LINEAR_MAX_DIFFERENCE_CONSTRAINTS:
+                proof_close_bounds_through_differences(constraints, &bounds)
+            return proof_signed_expression_safe_with_bounds(expression, facts, bounds, 0)
