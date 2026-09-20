@@ -1176,6 +1176,22 @@ if [[ "$counterexample_probe_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
+run_json_report "$ROOT_DIR/examples/counterexample_domain.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; findings = {finding["name"]: finding for finding in report["findings"]}; exact = findings["exact_scalar_counterexample"]; wrapped = findings["narrow_wrap_is_not_a_counterexample"]; assert exact["status"] == "disproved" and exact["counterexample_found"] and exact["counterexample"][0]["right"]["value"] == 0; assert wrapped["status"] == "unknown" and not wrapped["counterexample_found"] and wrapped["counterexample"] == []'
+counterexample_domain_status=${PIPESTATUS[1]}
+set -e
+if [[ "$counterexample_domain_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: width-inexact model emitted a false counterexample\n' >&2
+    exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_inexact_overloaded_counterexample.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert any(f["name"] == "always_equal_contract" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"])'
+overloaded_counterexample_status=${PIPESTATUS[1]}
+set -e
+if [[ "$overloaded_counterexample_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: overloaded equality was evaluated with built-in counterexample semantics\n' >&2
+    exit 1
+fi
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_dogfood_kernel_core.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; assert [goal["goal_id"] for goal in report["goals"]] == list(range(len(report["goals"]))); assert [certificate["certificate_id"] for certificate in report["certificates"]] == list(range(len(report["certificates"]))); assert any(goal["certificate_id"] is None and not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "ensure-unproven" and finding["status"] == "unknown" for finding in report["findings"])'
 dogfood_kernel_core_probe_statuses=("${PIPESTATUS[@]}")
 if [[ "${dogfood_kernel_core_probe_statuses[0]}" -ne 1 || "${dogfood_kernel_core_probe_statuses[1]}" -ne 0 ]]; then
@@ -2072,7 +2088,7 @@ fi
 # The exact-field scalar witness must still defer when the selected primitive operator is
 # replaced by user code; a source-level `Eq` implementation is not Leibniz equality.
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_record_element_overloaded_eq.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] in ("failed", "unsupported"); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert any(goal["name"] == "overloaded_record_element_eq" and goal["rule"] == "goal" and not goal["proven"] for goal in report["goals"])'
+run_json_report "$ROOT_DIR/examples/rejected_record_element_overloaded_eq.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] in ("failed", "unsupported"); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert any(goal["name"] == "overloaded_record_element_eq" and goal["rule"] == "goal" and not goal["proven"] for goal in report["goals"]); assert not any(finding["counterexample_found"] for finding in report["findings"])'
 record_element_overloaded_eq_status=${PIPESTATUS[1]}
 set -e
 if [[ "$record_element_overloaded_eq_status" -ne 0 ]]; then
@@ -3533,9 +3549,9 @@ run_json_report "$ROOT_DIR/examples/global_constant_module.elisa" | python3 -c '
 global_constant_module_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_global_constant_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong" for f in report["findings"])'
 rejected_global_constant_collision_status=${PIPESTATUS[1]}
-run_json_report "$ROOT_DIR/examples/rejected_global_constant_usize_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong" for f in report["findings"])'
+run_json_report "$ROOT_DIR/examples/rejected_global_constant_usize_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"])'
 rejected_global_constant_usize_collision_status=${PIPESTATUS[1]}
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_global_constant_function_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "check" for f in report["findings"])'
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_global_constant_function_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "check" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"])'
 rejected_global_constant_function_collision_status=${PIPESTATUS[1]}
 set -e
 if [[ "$global_constant_module_status" -ne 0 || "$rejected_global_constant_collision_status" -ne 0 || "$rejected_global_constant_usize_collision_status" -ne 0 || "$rejected_global_constant_function_collision_status" -ne 0 ]]; then
