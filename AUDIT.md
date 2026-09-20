@@ -5538,3 +5538,10 @@ stage1 test matrix and O2/O3 replay checks passed. A fresh full-source audit pro
 showed `callable_error_index_build` among the hot paths, but still stopped at the 4,000,000 KB
 RSS ceiling after 122.06 seconds without a report. The next compiler-side audit targets are
 the newly dominant semantic walkers, especially catch classification and positional construction.
+
+The compiler then reused the semantic `SymbolTable.catch_match_lines` index in catch subset
+classification instead of rescanning all annotations for each match. Compiler qualified-error,
+try-fallback, and catch-exhaustiveness parity stayed green, and the proof matrix plus optimized
+replay remained green under stage1 `7e6dde06`. A 180-second full-source run still reached the
+4,000,000 KB RSS ceiling at 142.48 seconds without a report; this optimization is therefore
+validated for semantic preservation but does not close the whole-source resource boundary.
