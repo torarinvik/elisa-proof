@@ -5828,3 +5828,13 @@ cached across imports. Stage1 build, the full proof matrix with O2/O3 replay, an
 (including Stage0 bootstrap, integer/unsigned aliases, rejected floating aliases, and malformed
 proposition environments) passed. This change has not yet had a post-change whole-source profile;
 no measured speedup is claimed.
+
+The post-change 120-second sample did time out, but its phase progressed into resource-event
+checking after 85,543 samples (peak RSS 2,449,702,912 bytes). The active stack no longer contained
+type-alias resolution; the `proof_find_type_alias` leaf count was 2,984 compared with 11,913 in
+the immediately preceding partial sample, while the largest leaf shifted to
+`proof_kernel_replay_build_typing_index` at 23,965. Because samples are phase-sensitive and only
+one run was collected at each revision, this is evidence that the targeted lookup is less prominent
+and the audit advances farther, not a controlled proof of causal throughput/RSS improvement. The
+whole-source audit still did not emit a report; repeated index construction is the next profiling
+target.
