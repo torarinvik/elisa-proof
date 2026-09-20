@@ -6053,9 +6053,17 @@ limit is unchanged, and larger entry states remain unsupported. The budget findi
 whether the exhausted resource was steps, facts, names, or values, rather than reporting all four
 as an undifferentiated state-budget failure.
 
-At this cap the standalone module emits 1,615 obligations and 243 certificates, all independently
-replayed with zero gaps (previously 1,548 obligations and 227 certificates). The newly verified
-`proof_kernel_replay_difference_affine_query` is required by the standalone coverage test. An
-experiment using the pre-existing 256-fact small-function cap emitted 365 certificates, but the
-dogfood probe consumed about 6.3 GB RSS; that cap was rejected and is not part of the final change.
-`proof_kernel_replay_unsigned_marker_info` remains unverified. Full self-verification remains open.
+At this cap the standalone module initially emitted 1,615 obligations and 243 certificates, all
+independently replayed with zero gaps (previously 1,548 obligations and 227 certificates). The
+newly verified `proof_kernel_replay_difference_affine_query` is required by the standalone
+coverage test. A further refactor removed aggregate temporaries from
+`proof_kernel_replay_unsigned_marker_info` and kept direct element access behind explicit unsigned
+index and array-bound guards. The current report emits 1,647 obligations and 273 certificates,
+again with zero replay gaps; the validator now requires at least 270 certificates.
+
+That helper is still dependency-unverified: field operators on dynamic array elements lack exact
+primitive-type witnesses, and its width decoder depends on the recursive, unverified
+`proof_kernel_replay_constant_int`. We keep those refusals rather than treating the fields or
+recursive summary as trusted. An experiment using the pre-existing 256-fact small-function cap
+emitted 365 certificates, but the dogfood probe consumed about 6.3 GB RSS; that cap was rejected
+and is not part of the implementation. Full self-verification remains open.

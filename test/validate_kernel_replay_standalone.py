@@ -19,7 +19,7 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_difference_query",
     "proof_kernel_replay_required_identity_present",
 }
-MIN_REPLAYED_CERTIFICATES = 240
+MIN_REPLAYED_CERTIFICATES = 270
 
 
 def require(condition: bool, message: str) -> None:
