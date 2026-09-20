@@ -5601,3 +5601,12 @@ audit harnesses, complete matrix, O2/O3 replay, and accepted/rejected matrix pas
 The exact pinned state then passed the complete dogfood suite: proof fixtures, stage0 bootstrap
 harnesses, kernel runtime adversarial checks, tactic scripts, nested branch and quantifier
 certificates, stale/forged certificate rejection, and the final replay-complete audit summary.
+
+The kernel-identity fingerprint path was hardened to fail closed for unknown node kinds. The
+first implementation deliberately changed the wildcard to rejection, and the existing tactic
+script regression immediately exposed that several legitimate resource, effect, structural,
+and unsupported nodes are source-neutral atomic roots. Those recognized kinds are now enumerated
+explicitly and retain their scalar identity encoding; only an unrecognized future kind invalidates
+the identity. Kernel replay remains authoritative, while the fingerprint protocol can no longer
+silently bless a malformed or future node kind. The stage1 build, seven audit harnesses, complete
+proof matrix, optimized O2/O3 replay, accepted/rejected matrix, and full dogfood suite all pass.
