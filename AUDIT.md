@@ -5591,3 +5591,9 @@ row for each primitive-to-struct compatibility check. It now uses the symbol ind
 `SymbolKind.Struct` check. Stage0/stage1 compiler diagnostics parity passed all 360/360 fixtures,
 including the named-type positive and negative cases. The proof build, seven audit harnesses,
 complete matrix, O2/O3 replay, and accepted/rejected matrix passed under stage1 `44a9cf62`.
+
+The mutability audit then moved the exact local-binding side-table lookup ahead of the filtered
+annotation fallback in `local_binding_is_mutable`. Partial-table recovery and loop-header handling
+remain intact. Compiler diagnostics parity passed all 360/360 fixtures, and the proof build, seven
+audit harnesses, complete matrix, O2/O3 replay, and accepted/rejected matrix passed under stage1
+`5d81c620`.
