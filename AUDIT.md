@@ -5963,5 +5963,13 @@ fell by about 95% in this pair, and observed peak RSS was lower, but no general 
 made.
 
 The Stage1 build, focused global-constant fixtures (including rejection of an overloaded
-primitive equality), full accepted/rejected proof matrix, and O2/O3 optimized replay passed. The
-full-source proof remains incomplete.
+primitive equality), full accepted/rejected proof matrix, O2/O3 optimized replay, and full dogfood
+passed. Dogfood included the Stage0 bootstrap kernel harnesses and ended with
+`audit passed: formalized layers are replay-complete`.
+
+The full-source audit was then tried with a 240-second limit and 4,000,000 KiB RSS ceiling. It
+timed out at 240.22 seconds after reaching a 3,260,336 KiB peak, without emitting a report. A
+previous run at the same 2,500,000 KiB ceiling reached the watchdog after 157.56 seconds. These
+runs show the audit progresses longer under the same memory ceiling and stayed below the larger
+ceiling for four minutes, but neither is a completed verification; the full-source self-audit
+remains open.
