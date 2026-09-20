@@ -5745,3 +5745,22 @@ still emitted no report (peak 4,655,328 KiB). Its 49-second sample showed typed 
 a later sample showed `proof_check_return_contracts` and arena allocation. These bounded runs do
 not establish a completed self-proof or an overall full-source performance gain. Self-verification
 remains open.
+
+## Typed function-parameter lookup index (2026-09-20)
+
+After source-operator policy reuse, a fresh whole-source profile showed typed replay repeatedly
+searching every function-parameter binding for each call argument. The typing index now buckets
+parameter positions by the existing signature identity. That value selects a bucket only: every
+candidate still requires exact function owner, signature identity, and parameter index/name
+matching, and duplicate matches remain ambiguous and rejected. Bucket chains are built only from
+validated indexed rows, and index construction consumes the same bounded replay work budget.
+The existing proposition-admission runtime fixture checks both rejection of duplicate parameter
+indices and acceptance of a unique parameter signature; it passed under stage1 and in the stage0
+bootstrap harness. The complete stage1 proof matrix, O2/O3 replay checks, and dogfood suite passed.
+
+At 39 seconds, the full-source sample showed `proof_kernel_replay_build_typing_index` and typed
+environment validation but no parameter-lookup function in its leading stacks; a 2:39 sample again
+showed return-contract checking rather than parameter lookup. The 300-second/6,000,000-KiB
+self-audit still emitted no report, but peak RSS was 3,869,504 KiB, compared with 4,655,328 KiB on
+the immediately preceding bounded run. This is encouraging measured evidence, not proof that this
+single index caused the entire RSS difference; the full-source proof remains incomplete.
