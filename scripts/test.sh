@@ -2030,7 +2030,7 @@ if [[ "$congruence_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "indexed_element", "constructed_aggregate", "call_congruence", "cross_width", "wrapping_operand"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
+run_json_report "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "local_struct_equality_premise", "indexed_element", "constructed_aggregate", "call_congruence", "cross_width", "wrapping_operand"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
 rejected_congruence_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_congruence_status" -ne 0 ]]; then
