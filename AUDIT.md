@@ -5796,3 +5796,24 @@ whole-source run still emitted no report (peak 4,176,448 KiB). Samples no longer
 matching among leading stacks; return matching, expression validation, and arena allocation/reclaim
 dominate instead. This confirms the targeted repeated lookup is gone, not a whole-run speedup or a
 completed self-proof.
+
+## Fuse typing-environment validation with index construction (2026-09-20)
+
+The installed Stage1 snapshot and compiler source were checked before profiling: both identify
+`a51f3dd7`, its build manifest passed freshness and artifact-hash validation, and the profiler
+doctor passed every check. A 120-second sample-mode whole-source audit timed out after collecting
+72,935 samples (peak RSS 1,160,790,016 bytes); its largest proof-code leaf was
+`proof_kernel_replay_build_typing_index`. Typed proposition admission had validated the complete
+environment, then scanned it again to construct the compact lookup index. Index construction now
+validates every row—including rows it does not index—during its existing scan, and the redundant
+validation pass was removed. The malformed non-indexed field-row fixture remains in the hostile
+environment tests and passed, as did the full Stage1 build, proof matrix with O2/O3 independent
+replay, and complete dogfood suite including Stage0 bootstrap.
+
+A same-limit sample after the change timed out after 90,116 samples, with 4,066,213,888 bytes peak
+RSS. The active stack had advanced from proposition formation/index construction to return-contract
+checking; the separate `proof_kernel_replay_typing_binding_valid` leaf fell from 5,008 samples to
+1,930 while index construction rose from 9,852 to 17,949 samples. These are partial, phase-sensitive
+samples, not a controlled throughput benchmark or proof of overall speedup. The whole-source audit
+still did not produce a report. The next high-impact work remains reducing repeated proof checking
+and allocation enough for self-verification to complete, without weakening any admission checks.
