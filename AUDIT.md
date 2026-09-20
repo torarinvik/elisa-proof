@@ -5558,3 +5558,10 @@ The exact pinned state was then run through the complete dogfood suite. All proo
 stage0 bootstrap harnesses, kernel runtime adversarial checks, tactic scripts, nested branch and
 quantifier certificates, stale/forged certificate rejection, and the final replay-complete audit
 summary passed under stage1 `41d1e229`.
+
+The typestate sentinel audit then named the parser and semantic metadata constants separately.
+The first stage1 provenance build intentionally caught a private cross-module name collision;
+parser-specific names fixed it before installation. The corrected compiler self-hosted from stage0
+at `22e30e1e`, the linear-typestate stage0/stage1 regression passed, and the proof build, seven
+audit harnesses, complete matrix, optimized replay, and accepted/rejected matrix passed under the
+new snapshot. The failed intermediate build was not installed or pinned.
