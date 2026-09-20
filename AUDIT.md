@@ -5942,3 +5942,26 @@ replay and accepted/rejected proof fixtures.
 The bounded full-source audit was rerun with a 180-second limit and a 2,500,000 KiB RSS ceiling.
 It was stopped at the watchdog before emitting a report; the output files are empty. This does
 not establish a whole-source performance improvement, and the self-audit remains incomplete.
+
+## Indexed alias checks for global operator witnesses (2026-09-20)
+
+A paired, instrumented sample-mode run on the same pinned Stage1 binary (`43f7ebed`, SHA-256
+`655aae4f5606b56abeab8d63d163abaad3420057371c16b319e581e68fe20a5a`) showed repeated
+`proof_find_type_alias` scans under `proof_add_primitive_operator_witnesses` while global
+constants were imported. The source-wide, collision-safe `ProofTypeAuditIndex` was already built
+for this import, but that path did not receive it. The global-constant operator-witness path now
+uses the index; exact alias names remain authoritative, and ambiguous, malformed, or incomplete
+index state adds an untrusted-operator marker so uncertainty can only decline a proof. The shared
+ambiguity sentinel is named `PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT`.
+
+In two single 120-second instrumented captures, `proof_find_type_alias` accounted for 14,496 of
+81,793 recorded stack leaves before the change and 703 of 77,931 after it. Peak target RSS was
+3,692,625,920 bytes before and 1,326,448,640 bytes after. Both captures timed out without a full
+proof report; these phase-sensitive single captures are diagnostic evidence, not a controlled
+throughput benchmark or a completed self-audit. The stack-record leaf count for the targeted scan
+fell by about 95% in this pair, and observed peak RSS was lower, but no general speedup claim is
+made.
+
+The Stage1 build, focused global-constant fixtures (including rejection of an overloaded
+primitive equality), full accepted/rejected proof matrix, and O2/O3 optimized replay passed. The
+full-source proof remains incomplete.
