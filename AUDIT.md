@@ -5585,3 +5585,9 @@ symbol hash chain and an exact `SymbolKind.Struct` check. The compiler self-host
 resolver smoke passed, including whole-program self-resolution across 525 frontend files with
 zero unresolved references. The proof build, seven audit harnesses, complete matrix, O2/O3 replay,
 and accepted/rejected matrix passed under stage1 `65842568`.
+
+The following semantic scan was `named_struct_target`, which walked every registered struct field
+row for each primitive-to-struct compatibility check. It now uses the symbol index with an exact
+`SymbolKind.Struct` check. Stage0/stage1 compiler diagnostics parity passed all 360/360 fixtures,
+including the named-type positive and negative cases. The proof build, seven audit harnesses,
+complete matrix, O2/O3 replay, and accepted/rejected matrix passed under stage1 `44a9cf62`.
