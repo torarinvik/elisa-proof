@@ -5610,3 +5610,13 @@ explicitly and retain their scalar identity encoding; only an unrecognized futur
 the identity. Kernel replay remains authoritative, while the fingerprint protocol can no longer
 silently bless a malformed or future node kind. The stage1 build, seven audit harnesses, complete
 proof matrix, optimized O2/O3 replay, accepted/rejected matrix, and full dogfood suite all pass.
+
+The live full-source profile was sampled before the next optimization decision. It confirmed that
+the dominant remaining cost is compiler semantic processing rather than trusted replay: arena
+allocation was hottest, followed by `Semantic.mutable_ref_param_type`, local mutability, extern
+parameter/protocol scans, and struct-field lookup. No semantic lookup was changed speculatively.
+As a separate maintainability hardening, unsigned-width maxima and width identifiers were named in
+the kernel core and reused by both producer and replay; the boolean-fold and unsigned-term/place
+depth bounds were named at their owning layers. Values and fail-closed boundaries are unchanged.
+The stage1 build, seven audit harnesses, complete proof matrix, O2/O3 replay, accepted/rejected
+matrix, and complete dogfood suite—including stage0 bootstrap and adversarial replay checks—pass.
