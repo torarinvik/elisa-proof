@@ -5573,3 +5573,9 @@ names and empty enums. Stage0/stage1 native differential testing passed all 514/
 the proof build, seven audit harnesses, complete matrix, O2/O3 replay, and accepted/rejected
 matrix passed under stage1 `94498709`. A bounded full-source run at a 2,000,000 KiB RSS ceiling
 remained incomplete after 148.05 seconds without a JSON report; it is not a proof result.
+
+The subsequent profile identified `Semantic.find_symbol` as another repeated full-symbol scan.
+It now walks the existing collision-safe symbol hash chain while retaining insertion order and
+exact-name checks. The full stage0/stage1 native differential gate passed 514/514 checks, and the
+proof build, seven audit harnesses, complete matrix, O2/O3 replay, and accepted/rejected matrix
+passed under stage1 `187a33ef`.
