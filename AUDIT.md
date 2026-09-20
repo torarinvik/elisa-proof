@@ -5499,3 +5499,15 @@ green, the self-hosted standalone audit lost verification for two required repla
 restoring the original literals returned the full coverage gate. Commits `b0b1bed` and
 `2de298b` preserve that experiment and explicit rollback, so the trusted baseline remains
 reproducible rather than silently accepting a coverage regression.
+
+The replay audit then centralized shared depth, signed-integer, machine-width, and shift-limit
+constants across the trusted kernel. Commits `ccdaea5`, `c7ca581`, `efdc3be`, `b911360`,
+`6af867c`, `b89e330`, and `48ffc59` preserve those changes. The full stage1 matrix, standalone
+coverage gate, and O2/O3 replay checks remained green after each cluster. A bounded full-source
+audit on the current baseline was still incomplete at the 120-second cutoff, but its peak RSS
+was 572,816 KB and it emitted no partial report; this establishes no full-source proof result.
+
+Structural replay now rejects an empty `structural-safety` trace explicitly, with the native
+kernel adversarial suite covering that case. Arena-shape admission already required a non-empty
+edge list, so the guard is defense in depth; the complete proof matrix and optimized replay
+remain green. This hardening is recorded in `3472f65`.
