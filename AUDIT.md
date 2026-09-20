@@ -5579,3 +5579,9 @@ It now walks the existing collision-safe symbol hash chain while retaining inser
 exact-name checks. The full stage0/stage1 native differential gate passed 514/514 checks, and the
 proof build, seven audit harnesses, complete matrix, O2/O3 replay, and accepted/rejected matrix
 passed under stage1 `187a33ef`.
+
+The next indexed lookup replaced `struct_is_declared`'s repeated declaration-tree scan with the
+symbol hash chain and an exact `SymbolKind.Struct` check. The compiler self-hosted from stage0;
+resolver smoke passed, including whole-program self-resolution across 525 frontend files with
+zero unresolved references. The proof build, seven audit harnesses, complete matrix, O2/O3 replay,
+and accepted/rejected matrix passed under stage1 `65842568`.
