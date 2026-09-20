@@ -5764,3 +5764,16 @@ showed return-contract checking rather than parameter lookup. The 300-second/6,0
 self-audit still emitted no report, but peak RSS was 3,869,504 KiB, compared with 4,655,328 KiB on
 the immediately preceding bounded run. This is encouraging measured evidence, not proof that this
 single index caused the entire RSS difference; the full-source proof remains incomplete.
+
+## Report-scoped operator policy reuse (2026-09-20)
+
+The preceding source-operator mask was still rebuilt for every top-level certified goal and every
+runtime assertion/guard. `ProofReport` now stores the exact mask once after copying the current
+compiler annotations, and report reset clears it before another source is checked. Certificate
+construction and runtime-fact admission use that report-scoped value; the standalone goal API
+continues deriving a mask from its explicit annotations. Stage1 build, the complete proof matrix,
+O2/O3 replay checks, and the stage0/stage1 dogfood suites passed. A fresh 300-second/6,000,000-KiB
+whole-source run still emitted no report (peak 4,176,448 KiB). Samples no longer show annotation
+matching among leading stacks; return matching, expression validation, and arena allocation/reclaim
+dominate instead. This confirms the targeted repeated lookup is gone, not a whole-run speedup or a
+completed self-proof.
