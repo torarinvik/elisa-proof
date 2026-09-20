@@ -5,6 +5,7 @@ import sys
 
 
 REQUIRED_VERIFIED_DECLARATIONS = {
+    "proof_kernel_replay_difference_affine_query",
     "proof_kernel_replay_ident_name",
     "proof_kernel_replay_node_at",
     "proof_kernel_replay_bool_at",
@@ -18,6 +19,7 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_difference_query",
     "proof_kernel_replay_required_identity_present",
 }
+MIN_REPLAYED_CERTIFICATES = 240
 
 
 def require(condition: bool, message: str) -> None:
@@ -33,7 +35,10 @@ def main() -> None:
     require(report["status"] == "failed", "standalone audit must remain a failed corpus")
     require(report["verification_state"] != "proved", "standalone audit unexpectedly became proved")
     require(summary["semantic_errors"] == 0, "standalone audit introduced semantic errors")
-    require(summary["proven"] >= 180, f"standalone proof coverage fell below 180: {summary['proven']}")
+    require(
+        summary["proven"] >= MIN_REPLAYED_CERTIFICATES,
+        f"standalone proof coverage fell below {MIN_REPLAYED_CERTIFICATES}: {summary['proven']}",
+    )
     require(
         replay["certificates"] == replay["replayed"],
         f"certificate replay count mismatch: {replay}",

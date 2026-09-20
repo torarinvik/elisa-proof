@@ -6042,3 +6042,20 @@ declaration to remain verified. On the same source, standalone coverage increase
 certificates out of 1,546 obligations to 227 out of 1,548, with zero replay gaps in both reports.
 The new availability also exposes more downstream region-call obligations, so the broader
 self-verification gap remains open; this is not a claim that the replay module is fully proved.
+
+## Standalone replay self-verification: bounded entry-state headroom (2026-09-20)
+
+The standalone report showed that typed arena parameters add 83 trusted type-bound facts to
+`proof_kernel_replay_unsigned_marker_info` before its body runs, exceeding the normal 64-fact
+symbolic-state budget. The control-flow guard now permits a bounded 128-fact ceiling when a
+function starts with more than 64 but no more than 128 facts. The independent 64-step control-flow
+limit is unchanged, and larger entry states remain unsupported. The budget finding now identifies
+whether the exhausted resource was steps, facts, names, or values, rather than reporting all four
+as an undifferentiated state-budget failure.
+
+At this cap the standalone module emits 1,615 obligations and 243 certificates, all independently
+replayed with zero gaps (previously 1,548 obligations and 227 certificates). The newly verified
+`proof_kernel_replay_difference_affine_query` is required by the standalone coverage test. An
+experiment using the pre-existing 256-fact small-function cap emitted 365 certificates, but the
+dogfood probe consumed about 6.3 GB RSS; that cap was rejected and is not part of the final change.
+`proof_kernel_replay_unsigned_marker_info` remains unverified. Full self-verification remains open.
