@@ -199,6 +199,45 @@ extend ElisaProofKernelReplay:
                 width <- marked_width.value
             return (true, term_node.node.left, depth.value, width)
 
+        # Peel a pure chain of source subscripts and return its base container plus every index
+        # term. Record-field element witnesses are matched against that exact base and field.
+        def proof_kernel_replay_indexed_container_path(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, expression: usize, container: mutable usize&, subscripts: mutable darray[usize]&, depth: usize) -> bool:
+            requires depth <= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
+            decreases PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
+            return false if not proof_kernel_replay_valid(nodes, expression)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, expression)
+            return false if not located.known or not proof_kernel_replay_arena_shape_valid(located.node)
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "paren":
+                return proof_kernel_replay_indexed_container_path(nodes, children, node.left, container, subscripts, depth + 1)
+            if node.kind == "index":
+                return false if not proof_kernel_replay_indexed_container_path(nodes, children, node.left, container, subscripts, depth + 1)
+                subscripts.push(node.right)
+                return true
+            if node.kind == "index-n":
+                return false if node.children_count == 0 or not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                return false if not proof_kernel_replay_indexed_container_path(nodes, children, node.left, container, subscripts, depth + 1)
+                for offset in 0..<node.children_count |offset, children, node, subscripts|:
+                    argument: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start + offset)
+                    return false if not argument.known
+                    subscripts.push(argument.value)
+                return true
+            container <- expression
+            return true
+
+        def proof_kernel_replay_untrusted_operator_applies(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, marked_term: usize, term: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
+            return true if proof_kernel_replay_expr_equal(nodes, children, marked_term, term, 0)
+            term_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, term)
+            return false if not term_node.known or term_node.node.kind != "field"
+            container: mutable usize = 0
+            subscripts: mutable darray[usize] = []
+            return false if not proof_kernel_replay_indexed_container_path(nodes, children, term_node.node.left, &container, &subscripts, depth + 1) or subscripts.count == 0
+            marked_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, marked_term)
+            return false if not marked_node.known or marked_node.node.kind != "field" or marked_node.node.name != term_node.node.name
+            return proof_kernel_replay_expr_equal(nodes, children, marked_node.node.left, container, 0)
+
         # How many further subscripts this term needs to reach a primitive scalar: the marker's
         # depth for a witnessed container, one less per subscript, and -1 when nothing is known.
         # The subscript terms met on the way are collected for the caller to witness; a term is a
@@ -217,17 +256,19 @@ extend ElisaProofKernelReplay:
             node: ElisaProofKernelCore::ProofKernelNode = located.node
             return -1 if not proof_kernel_replay_arena_shape_valid(node)
             if node.kind == "field":
-                object: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
-                return -1 if not object.known or object.node.kind != "index"
-                for fact in facts |nodes, children, node, object, root|:
+                container: mutable usize = 0
+                subscripts: mutable darray[usize] = []
+                return -1 if not proof_kernel_replay_indexed_container_path(nodes, children, node.left, &container, &subscripts, depth + 1) or subscripts.count == 0
+                for fact in facts |nodes, children, node, container, subscripts, root|:
                     marker: (known: bool, root: usize, depth: i64, width: i64) = proof_kernel_replay_element_marker(nodes, children, fact)
                     continue if not marker.known
                     field: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, marker.root)
                     continue if not field.known or field.node.kind != "field" or field.node.name != node.name
-                    continue if not proof_kernel_replay_expr_equal(nodes, children, field.node.left, object.node.left, 0)
-                    return -1 if marker.depth < 1
-                    subscripts.push(object.node.right)
-                    return marker.depth - 1
+                    continue if not proof_kernel_replay_expr_equal(nodes, children, field.node.left, container, 0)
+                    return -1 if marker.depth < subscripts.count.i64()
+                    for subscript in subscripts |nodes, children, facts, depth|:
+                        return -1 if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, subscript, depth + 1)
+                    return marker.depth - subscripts.count.i64()
                 return -1
             if node.kind == "index":
                 remaining: i64 = proof_kernel_replay_scalar_element_remaining(nodes, children, facts, node.left, subscripts, depth + 1)
@@ -273,7 +314,7 @@ extend ElisaProofKernelReplay:
             return false if not proof_kernel_replay_arena_shape_valid(node)
             for fact in facts |fact, nodes, children, root|:
                 untrusted: (known: bool, root: usize) = proof_kernel_replay_untrusted_operator_marker(nodes, children, fact)
-                return false if untrusted.known and proof_kernel_replay_expr_equal(nodes, children, untrusted.root, root, 0)
+                return false if untrusted.known and proof_kernel_replay_untrusted_operator_applies(nodes, children, untrusted.root, root, depth + 1)
             return true if proof_kernel_replay_congruent_scalar_literal(node)
             for fact in facts |fact, nodes, children, root|:
                 argument: (known: bool, root: usize) = proof_kernel_replay_marker_argument(nodes, children, fact, "__elisa_primitive_scalar_type")
