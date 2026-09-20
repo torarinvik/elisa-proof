@@ -5597,3 +5597,7 @@ annotation fallback in `local_binding_is_mutable`. Partial-table recovery and lo
 remain intact. Compiler diagnostics parity passed all 360/360 fixtures, and the proof build, seven
 audit harnesses, complete matrix, O2/O3 replay, and accepted/rejected matrix passed under stage1
 `5d81c620`.
+
+The exact pinned state then passed the complete dogfood suite: proof fixtures, stage0 bootstrap
+harnesses, kernel runtime adversarial checks, tactic scripts, nested branch and quantifier
+certificates, stale/forged certificate rejection, and the final replay-complete audit summary.
