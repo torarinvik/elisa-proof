@@ -5729,3 +5729,19 @@ whole-source attempt still stopped at the 3,000,000-KiB RSS watchdog after 172.6
 `proof_check_function`/return-contract matching and arena allocation. Self-verification remains
 incomplete; the next experiment is a larger bounded memory allowance to determine whether this is
 only resource headroom or another repeated-work bottleneck.
+
+## Source-operator guard reuse and larger self-audit (2026-09-20)
+
+A fresh 300-second/6,000,000-KiB whole-source run on the current stage1-built binary stopped at
+the time limit without emitting a report (peak 4,366,768 KiB). Sampling at 1:54 showed repeated
+`proof_source_primitive_operator_overloaded` scans in return-contract checking. The arithmetic goal
+walker now computes the exact primitive protocol policy once at its top-level entry and carries a
+scalar bitmask through recursive checks, rather than rescanning source annotations at every nested
+goal. The mask is derived by the prior authoritative extension and exact same-line implementation/
+scope scan; named constants define every protocol bit. The source-bound tactic path retains the
+same exact semantics. Stage1 build, the complete O0/O2/O3 proof matrix, and dogfood—including
+stage0 adversarial replay harnesses—passed. A second 300-second/6,000,000-KiB whole-source run
+still emitted no report (peak 4,655,328 KiB). Its 49-second sample showed typed proposition replay;
+a later sample showed `proof_check_return_contracts` and arena allocation. These bounded runs do
+not establish a completed self-proof or an overall full-source performance gain. Self-verification
+remains open.
