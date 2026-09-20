@@ -5921,3 +5921,24 @@ completed workload or a performance comparison. It captured 79,103 stack samples
 the proposition typing workspace while walking source specification contexts. This directs the
 next audit item at repeated global type-binding validation/index construction; no soundness-critical
 validation has been removed or cached yet.
+
+## Validated source-global typing cache (2026-09-20)
+
+The source proposition-formation path now snapshots and validates declaration-wide typing
+bindings once per source check, then reuses their value and function-parameter indexes across
+propositions. The cache is held through a module-private opaque type; callers can prepare it only
+through the public validating API. Each proposition still validates all local bindings and builds
+the combined indexes against the existing typing-work budget. Generic replay APIs are unchanged
+and continue validating their complete environment on every call, keeping caching confined to the
+trusted source-checking path.
+
+Regression coverage checks source-array mutation after snapshotting, malformed local bindings,
+recovery after a failed local check, ambiguous generic environments, and failed cache preparation
+not reusing stale authority. The standalone source report no longer traps while using the cache;
+it returns its usual unsupported report with 220/220 certificates replayed, zero replay gaps,
+and six semantic diagnostics. The complete proof test suite passed, including O2/O3 optimized
+replay and accepted/rejected proof fixtures.
+
+The bounded full-source audit was rerun with a 180-second limit and a 2,500,000 KiB RSS ceiling.
+It was stopped at the watchdog before emitting a report; the output files are empty. This does
+not establish a whole-source performance improvement, and the self-audit remains incomplete.

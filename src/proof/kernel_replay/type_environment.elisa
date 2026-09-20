@@ -1,6 +1,19 @@
 # Validation and indexed access for the segmented typing environment. Global declaration
 # signatures are shared across obligations; local context bindings are scoped per expression.
 extend ElisaProofKernelReplay:
+    private:
+        # Opaque validated cache: callers may hold a workspace but cannot forge or mutate this
+        # source-wide typing authority through its public API.
+        struct ProofKernelReplayTypingCache:
+            ready: mutable bool
+            bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]
+            value_binding_indices: mutable darray[usize]
+            function_parameter_indices: mutable darray[usize]
+            combined_value_binding_indices: mutable darray[usize]
+            combined_function_parameter_indices: mutable darray[usize]
+            combined_function_parameter_bucket_heads: mutable darray[usize]
+            combined_function_parameter_next_indices: mutable darray[usize]
+
     public:
         # Reusable allocation scratch only; every index row is rebuilt from validated input.
         struct ProofKernelReplayTypingWorkspace:
@@ -8,9 +21,11 @@ extend ElisaProofKernelReplay:
             function_parameter_indices: mutable darray[usize]
             function_parameter_bucket_heads: mutable darray[usize]
             function_parameter_next_indices: mutable darray[usize]
+            public:
+                cache: ProofKernelReplayTypingCache
 
         def proof_kernel_replay_typing_workspace_new() -> ProofKernelReplayTypingWorkspace:
-            return ProofKernelReplayTypingWorkspace{value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: []}
+            return ProofKernelReplayTypingWorkspace{value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: [], cache: ProofKernelReplayTypingCache{ready: false, bindings: [], value_binding_indices: [], function_parameter_indices: [], combined_value_binding_indices: [], combined_function_parameter_indices: [], combined_function_parameter_bucket_heads: [], combined_function_parameter_next_indices: []}}
 
     private:
         const PROOF_KERNEL_MAX_TYPED_FUNCTION_PARAMETERS: usize = 1024
@@ -72,19 +87,17 @@ extend ElisaProofKernelReplay:
 
         # Fills caller-owned scratch, but returns no view of it. Callers form the temporary index
         # locally only after this complete validation-and-build pass succeeds.
-        def proof_kernel_replay_build_typing_workspace(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
+        def proof_kernel_replay_collect_typing_indices(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> (known: bool, value_binding_count: usize, function_parameter_count: usize):
             scratch.value_binding_indices.clear()
             scratch.function_parameter_indices.clear()
-            scratch.function_parameter_bucket_heads.clear()
-            scratch.function_parameter_next_indices.clear()
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
-            return false if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            return (false, 0, 0) if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
             value_binding_count: mutable usize = 0
             parameter_binding_count: mutable usize = 0
             for binding_index in 0..<total_bindings |binding_index, environment, scratch, value_binding_count, parameter_binding_count, work|:
-                return false if not proof_kernel_replay_type_work_consume(work)
+                return (false, 0, 0) if not proof_kernel_replay_type_work_consume(work)
                 binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                return false if not proof_kernel_replay_typing_binding_valid(binding)
+                return (false, 0, 0) if not proof_kernel_replay_typing_binding_valid(binding)
                 is_value_binding: bool = match binding.kind:
                     "value": true
                     "proposition": true
@@ -95,6 +108,15 @@ extend ElisaProofKernelReplay:
                 if binding.kind == "function-parameter":
                     scratch.function_parameter_indices.push(binding_index)
                     parameter_binding_count <- parameter_binding_count + 1
+            return (true, value_binding_count, parameter_binding_count)
+
+        def proof_kernel_replay_build_typing_workspace(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
+            scratch.function_parameter_bucket_heads.clear()
+            scratch.function_parameter_next_indices.clear()
+            collected: (known: bool, value_binding_count: usize, function_parameter_count: usize) = proof_kernel_replay_collect_typing_indices(environment, work, scratch)
+            return false if not collected.known
+            parameter_binding_count: usize = collected.function_parameter_count
+            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
             if parameter_binding_count > 0:
                 scratch.function_parameter_bucket_heads.resize(parameter_binding_count)
                 scratch.function_parameter_next_indices.resize(parameter_binding_count)
@@ -110,6 +132,71 @@ extend ElisaProofKernelReplay:
                     slot: usize = (binding.signature_identity % parameter_binding_count).usize()
                     scratch.function_parameter_next_indices[parameter_offset] <- scratch.function_parameter_bucket_heads[slot]
                     scratch.function_parameter_bucket_heads[slot] <- parameter_offset
+            return true
+
+        # Cache only the immutable, source-wide declaration environment. The API takes a private
+        # copy before validation so later mutation through the caller's darray cannot invalidate
+        # the index. Generic replay APIs continue to validate their complete environment per call.
+        def proof_kernel_replay_typing_workspace_prepare_globals_internal(global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
+            scratch.cache.ready <- false
+            scratch.cache.bindings.clear()
+            scratch.cache.value_binding_indices.clear()
+            scratch.cache.function_parameter_indices.clear()
+            return false if global_bindings.count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            for binding in global_bindings |scratch|:
+                scratch.cache.bindings.push(binding)
+            environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: scratch.cache.bindings, bindings: []}
+            work: mutable usize = 0
+            return false if not proof_kernel_replay_build_typing_workspace(environment, &work, scratch)
+            for binding_index in scratch.value_binding_indices |binding_index, scratch|:
+                scratch.cache.value_binding_indices.push(binding_index)
+            for binding_index in scratch.function_parameter_indices |binding_index, scratch|:
+                scratch.cache.function_parameter_indices.push(binding_index)
+            scratch.cache.ready <- true
+            return true
+
+        # Revalidates every local binding but reuses the independently validated immutable global
+        # prefix. The resulting combined index is scratch-only and never escapes replay.
+        def proof_kernel_replay_build_typing_workspace_with_globals(local_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
+            return false if not scratch.cache.ready
+            local_environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: [], bindings: local_bindings}
+            collected: (known: bool, value_binding_count: usize, function_parameter_count: usize) = proof_kernel_replay_collect_typing_indices(local_environment, work, scratch)
+            return false if not collected.known
+            total_bindings: usize = scratch.cache.bindings.count + local_bindings.count
+            return false if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            scratch.cache.combined_value_binding_indices.clear()
+            scratch.cache.combined_function_parameter_indices.clear()
+            scratch.cache.combined_function_parameter_bucket_heads.clear()
+            scratch.cache.combined_function_parameter_next_indices.clear()
+            for binding_index in scratch.cache.value_binding_indices |binding_index, scratch, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                scratch.cache.combined_value_binding_indices.push(binding_index)
+            for binding_index in scratch.value_binding_indices |binding_index, scratch, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                scratch.cache.combined_value_binding_indices.push(scratch.cache.bindings.count + binding_index)
+            for binding_index in scratch.cache.function_parameter_indices |binding_index, scratch, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                scratch.cache.combined_function_parameter_indices.push(binding_index)
+            for binding_index in scratch.function_parameter_indices |binding_index, scratch, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                scratch.cache.combined_function_parameter_indices.push(scratch.cache.bindings.count + binding_index)
+            parameter_count: usize = scratch.cache.combined_function_parameter_indices.count
+            if parameter_count > 0:
+                scratch.cache.combined_function_parameter_bucket_heads.resize(parameter_count)
+                scratch.cache.combined_function_parameter_next_indices.resize(parameter_count)
+                for slot in 0..<parameter_count |slot, parameter_count, scratch, work|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    scratch.cache.combined_function_parameter_bucket_heads[slot] <- parameter_count
+                combined_environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: scratch.cache.bindings, bindings: local_bindings}
+                for parameter_offset in 0..<parameter_count |parameter_offset, parameter_count, scratch, combined_environment, work|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    binding_index: usize = scratch.cache.combined_function_parameter_indices[parameter_offset]
+                    return false if binding_index >= total_bindings
+                    binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(combined_environment, binding_index)
+                    return false if binding.kind != "function-parameter" or binding.signature_identity == 0
+                    slot: usize = (binding.signature_identity % parameter_count).usize()
+                    scratch.cache.combined_function_parameter_next_indices[parameter_offset] <- scratch.cache.combined_function_parameter_bucket_heads[slot]
+                    scratch.cache.combined_function_parameter_bucket_heads[slot] <- parameter_offset
             return true
 
         def proof_kernel_replay_typing_binding_valid(binding: ElisaProofKernelCore::ProofKernelTypingBinding) -> bool:
