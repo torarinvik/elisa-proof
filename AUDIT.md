@@ -5652,3 +5652,13 @@ incomplete: the pre-index 45-second run reached 1,326,576 KB RSS without a repor
 60-second run reached 1,037,568 KB, while a longer 90-second run reached the 1,500,000 KB RSS
 watchdog at 82 seconds. A new sample shows typed proposition replay and repeated type/value
 binding lookup as the current hot path, so full self-verification is still an open goal.
+
+Typed proposition replay now builds a compact table of only value/proposition binding positions,
+so identifier typing no longer scans unrelated type, field, and declaration rows. Lookup still
+compares exact source names and rejects conflicting duplicate evidence. A hash-table variant was
+discarded because stage1 declined `sview_len` in the standalone AST-free kernel module; the compact
+index preserves that module boundary without changing compiler code. The stage1 build, source
+length check, full proof matrix (including O2/O3 replay), and complete dogfood suite passed. A
+bounded full-source rerun remained incomplete at 60.08 seconds and 1,376,096 KB RSS under the
+1,500,000 KB ceiling. This single run does not demonstrate a measurable full-audit speedup; typed
+replay and full self-verification remain open performance work.
