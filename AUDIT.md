@@ -5890,3 +5890,19 @@ Stage0 kernel bootstrap harnesses. The default installed-snapshot build also suc
 kernel-core dogfood source proved with 25 replayed certificates and zero gaps. The monolithic
 `src/main.elisa` self-audit remains incomplete; these gates do not certify the full assistant, and
 no whole-source speedup is claimed from the structural early exit alone.
+
+## Full-source audit and constant postcondition limit (2026-09-20)
+
+A renewed full-source check with the installed Stage1 snapshot was stopped by the explicit memory
+watchdog at 2,561,104 KB RSS after 101.71 seconds; no JSON report was emitted. Native macOS stack
+samples from the live check show high activity in Elisa semantic-check routines and arena block
+allocation, so this still points to compiler/front-end checking as the current whole-source audit
+cost center. It is diagnostic evidence, not a completed proof or a controlled benchmark.
+
+While honoring the constants cleanup request, replacing the literal replay-depth guard inside
+`depth_valid` with `PROOF_KERNEL_REPLAY_DEPTH_BOUND` caused the kernel-core dogfood fixture to
+return `unsupported` (22 replayed certificates). Restoring the literal returned the fixture to
+`proved` (25 replayed certificates). The proof checker currently needs the literal in this
+contract/body pair; do not replace it until constant unfolding in verified contracts is supported
+and the fixture demonstrates equivalence. Other traversal sites continue to use the named replay
+limit/bound.
