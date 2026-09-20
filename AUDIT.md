@@ -5565,3 +5565,11 @@ parser-specific names fixed it before installation. The corrected compiler self-
 at `22e30e1e`, the linear-typestate stage0/stage1 regression passed, and the proof build, seven
 audit harnesses, complete matrix, optimized replay, and accepted/rejected matrix passed under the
 new snapshot. The failed intermediate build was not installed or pinned.
+
+The next compiler hotspot was `Semantic.enum_variant_count`, which repeatedly traversed the full
+declaration tree during enum-index checking. The checker now reuses the declaration-order cache
+from `enum_tag_declaration_index`, preserving first-positive-match behavior for nested duplicate
+names and empty enums. Stage0/stage1 native differential testing passed all 514/514 checks, and
+the proof build, seven audit harnesses, complete matrix, O2/O3 replay, and accepted/rejected
+matrix passed under stage1 `94498709`. A bounded full-source run at a 2,000,000 KiB RSS ceiling
+remained incomplete after 148.05 seconds without a JSON report; it is not a proof result.
