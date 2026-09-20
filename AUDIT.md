@@ -5662,3 +5662,9 @@ length check, full proof matrix (including O2/O3 replay), and complete dogfood s
 bounded full-source rerun remained incomplete at 60.08 seconds and 1,376,096 KB RSS under the
 1,500,000 KB ceiling. This single run does not demonstrate a measurable full-audit speedup; typed
 replay and full self-verification remain open performance work.
+
+A follow-up trusted-kernel review restored an explicit fail-closed category check at the compact
+lookup boundary: every indexed row must still be a `value` or `proposition`, matching the former
+full-scan predicate rather than relying solely on the private index builder. The check uses Elisa
+pattern matching. Stage1 build, source-length check, full proof matrix, and complete dogfood suite
+passed, including stage0 bootstrap replay harnesses.
