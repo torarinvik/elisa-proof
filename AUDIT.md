@@ -5640,3 +5640,15 @@ postconditions; changing it to the constant made the kernel's own contract unpro
 weaker proof was substituted. The proof frontend is pinned to `66b8ed02`; the stage1 build,
 seven audit harnesses, complete proof matrix, O2/O3 replay, accepted/rejected matrix, and full
 dogfood suite pass at that revision.
+
+Full-source profiling then found repeated scans of compiler-owned operator implementation
+annotations in scalar-witness construction. A report-local lookup cache now groups exact impl/scope
+rows by source line after verifying annotation order; non-monotone input or an index expansion
+larger than the source annotation table invalidates the cache and retains the original scan. The
+operator-index record is in a separate model file included before the report definition, and both
+standalone Elisa runtime harnesses include it explicitly. The complete proof matrix and dogfood
+suite pass, including stage0 adversarial replay harnesses. Bounded full-source runs remain
+incomplete: the pre-index 45-second run reached 1,326,576 KB RSS without a report; a post-index
+60-second run reached 1,037,568 KB, while a longer 90-second run reached the 1,500,000 KB RSS
+watchdog at 82 seconds. A new sample shows typed proposition replay and repeated type/value
+binding lookup as the current hot path, so full self-verification is still an open goal.

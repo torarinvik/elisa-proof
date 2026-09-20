@@ -178,8 +178,47 @@ extend ElisaProof:
                         return true if scope.owner == "__impl_scope" and scope.line == annotation.line and scope.name == protocol
             return false
 
+        # Annotation lines are parser ordered. Validate that invariant before grouping rows by
+        # source line; an unexpected order leaves the cache invalid and preserves the exact scan
+        # above as the fail-closed fallback.
+        def proof_build_operator_impl_index(report: mutable ProofReport&) -> void:
+            report.operator_impl_index.clear()
+            report.operator_impl_index_valid <- false
+            for index in 1..<report.source_annotations.count:
+                return if report.source_annotations[index].line < report.source_annotations[index - 1].line
+            start: mutable usize = 0
+            while start < report.source_annotations.count |start, report|:
+                line: u32 = report.source_annotations[start].line
+                end: mutable usize = start + 1
+                while end < report.source_annotations.count and report.source_annotations[end].line == line |end, report|:
+                    end <- end + 1
+                for concrete_index in start..<end |concrete_index, end, report|:
+                    concrete_annotation: Ast::EnumAnnotation = report.source_annotations[concrete_index]
+                    if concrete_annotation.owner == "__ext_concrete":
+                        if report.operator_impl_index.count >= report.source_annotations.count:
+                            report.operator_impl_index.clear()
+                            return
+                        report.operator_impl_index.push(ProofOperatorImpl{concrete: concrete_annotation.name, protocol: ""})
+                    if concrete_annotation.owner == "__impl_concrete":
+                        for scope_index in start..<end |scope_index, concrete_annotation, end, report|:
+                            scope_annotation: Ast::EnumAnnotation = report.source_annotations[scope_index]
+                            if scope_annotation.owner == "__impl_scope":
+                                if report.operator_impl_index.count >= report.source_annotations.count:
+                                    report.operator_impl_index.clear()
+                                    return
+                                report.operator_impl_index.push(ProofOperatorImpl{concrete: concrete_annotation.name, protocol: scope_annotation.name})
+                start <- end
+            report.operator_impl_index_valid <- true
+
+        def proof_report_builtin_operator_impl_exists(report: ProofReport&, concrete: sview, protocol: sview) -> bool:
+            return proof_builtin_operator_impl_exists(report.source_annotations, concrete, protocol) if not report.operator_impl_index_valid
+            return false if concrete == "" or protocol == ""
+            for implementation in report.operator_impl_index:
+                return true if implementation.concrete == concrete and (implementation.protocol == "" or implementation.protocol == protocol)
+            return false
+
         def proof_add_operator_witness_for_concrete(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, concrete: sview, protocol: sview, position: Ast::Pos) -> void:
-            marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position) if proof_builtin_operator_impl_exists(report.source_annotations, concrete, protocol) else proof_builtin_operator_marker(root, protocol, position)
+            marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position) if proof_report_builtin_operator_impl_exists(report, concrete, protocol) else proof_builtin_operator_marker(root, protocol, position)
             proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bound_owner)
 
         def proof_add_untrusted_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, position: Ast::Pos) -> void:
@@ -192,22 +231,22 @@ extend ElisaProof:
         # protocol implementations for a concrete primitive spelling. Follow aliases and storage
         # wrappers while looking for that implementation; otherwise a primitive scalar witness
         # could accidentally bless a user-defined equality as if it were Leibniz equality.
-        def proof_type_has_operator_impl(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, declarations: darray[Ast::Decl]&, protocol: sview, depth: usize) -> bool:
+        def proof_type_has_operator_impl(expression: Ast::Expr, report: ProofReport&, protocol: sview, depth: usize) -> bool:
             return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Ident(name, _):
-                    return true if proof_builtin_operator_impl_exists(annotations, name, protocol)
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return proof_type_has_operator_impl(alias.target, annotations, declarations, protocol, depth + 1) if alias.count == 1
+                    return true if proof_report_builtin_operator_impl_exists(report, name, protocol)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(report.source_declarations, name, 0)
+                    return proof_type_has_operator_impl(alias.target, report, protocol, depth + 1) if alias.count == 1
                     return false
                 Ast::Expr.Scope(_, name, _):
-                    return proof_builtin_operator_impl_exists(annotations, name, protocol)
+                    return proof_report_builtin_operator_impl_exists(report, name, protocol)
                 Ast::Expr.Paren(inner, _):
-                    return proof_type_has_operator_impl(inner, annotations, declarations, protocol, depth + 1)
+                    return proof_type_has_operator_impl(inner, report, protocol, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_type_has_operator_impl(base, annotations, declarations, protocol, depth + 1)
+                    return proof_type_has_operator_impl(base, report, protocol, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_type_has_operator_impl(inner, annotations, declarations, protocol, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_type_has_operator_impl(inner, report, protocol, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                     return false
                 _:
                     return false
@@ -215,7 +254,7 @@ extend ElisaProof:
         def proof_add_primitive_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos) -> void:
             protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
             for protocol in protocols |facts, report, root, type_expression, position|:
-                has_impl: bool = proof_type_has_operator_impl(type_expression, report.source_annotations, report.source_declarations, protocol, 0)
+                has_impl: bool = proof_type_has_operator_impl(type_expression, report, protocol, 0)
                 if has_impl:
                     marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position)
                     proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bound_owner)
