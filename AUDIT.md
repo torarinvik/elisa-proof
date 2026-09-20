@@ -5529,3 +5529,12 @@ The remaining proposition-typing headroom constants are now derived from the sha
 limit rather than carrying independent `122`--`126` literals. This preserves the exact recursive
 entry margins while making a future bound change atomic. The stage1 build, complete proof matrix,
 and O2/O3 optimized replay checks pass with the derived values.
+
+The compiler's callable-error target projection was then optimized with a collision-safe hash
+chain, preserving exact owner-name comparisons while removing repeated linear target membership
+scans. Compiler qualified-error parity remained 11/11 and try-fallback-void remained free of
+false positives. The proof frontend was repinned to compiler commit `1c9c767f`; its complete
+stage1 test matrix and O2/O3 replay checks passed. A fresh full-source audit profile no longer
+showed `callable_error_index_build` among the hot paths, but still stopped at the 4,000,000 KB
+RSS ceiling after 122.06 seconds without a report. The next compiler-side audit targets are
+the newly dominant semantic walkers, especially catch classification and positional construction.
