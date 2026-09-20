@@ -5668,3 +5668,23 @@ lookup boundary: every indexed row must still be a `value` or `proposition`, mat
 full-scan predicate rather than relying solely on the private index builder. The check uses Elisa
 pattern matching. Stage1 build, source-length check, full proof matrix, and complete dogfood suite
 passed, including stage0 bootstrap replay harnesses.
+
+The profiler's first function-trace run timed out before any function completed, but its active
+stack at 180 seconds was in typed proposition replay, ending in
+`proof_kernel_replay_find_function_parameter_by_index`. The replay lookup index now also retains
+function-parameter row positions, while preserving exact owner/signature/index or name matching
+and the original ambiguous-duplicate rejection. A native kernel fixture checks both rejection of
+a duplicate parameter slot and acceptance of the unique signature under Stage0 and Stage1. The
+full proof matrix (O0/O2/O3) and complete dogfood suite passed.
+
+The profiler's 60-second sample-mode capture against the immutable `66b8ed02` source snapshot
+produced 35,218 stack samples before the target timed out; capture quality is explicitly partial,
+so it is diagnostic only. The hottest sampled leaves were `arena_realloc` (8,345 samples),
+`arena_take_free_block` (3,017), `note_local_type` (1,974), `new_region_with_owner` (1,957), and
+`annotation_type_id` (1,944); most early samples were compiler semantic checking. The live
+compiler checkout changed during an initial profile attempt, so that capture was discarded and
+the pinned installed Stage1 binary/runtime were used against the immutable source snapshot.
+Repeated 60-second full-source audit runs remain incomplete: the run after the value-only index
+used 1,376,096 KB RSS, and the run after the parameter index used 1,406,288 KB. These do not
+establish a performance improvement; full-source self-verification and reduction of the semantic/
+allocation cost remain open.
