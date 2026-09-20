@@ -5869,3 +5869,24 @@ through a helper borrowing a locally created workspace was rejected because Stag
 the local scratch region; the reusable production path borrows the caller-owned workspace and
 returns no scratch-backed view. This bootstrap region-inference limitation remains a compiler
 parity investigation, not a proof-system workaround to accept under Stage0.
+
+## Skip unused compiler call-precondition setup (2026-09-20)
+
+The refreshed self-audit diagnostic capture on compiler `010fe325` showed repeated work in
+`check_call_precondition_unproven`. Inspection found that the checker computed `skip_func` for
+callers whose relational facts it deliberately does not model, but only used that flag to suppress
+the final call walk; it still built parameter, bound, and local-constant state for those callers.
+Compiler commit `43f7ebed` moves the existing skip to the top of the function branch, before that
+setup. This preserves the checker’s existing conservative warning policy and removes work only on
+paths whose result was already discarded. A focused fixture checks a relational caller whose fact
+matches the callee requirement and a clean caller that must still receive the unproven-precondition
+warning. Stage0 and Stage1 produced the same single expected warning; the existing interval endpoint
+smoke also passed.
+
+`ELISA_COMPILER_REV` is now pinned to `43f7ebed`, and the committed compiler was rebuilt from the
+fresh Stage0 bootstrap and installed as the new Stage1 snapshot. Against that exact Stage1 product,
+the complete proof matrix passed, including O2/O3 optimized replay, and full dogfood passed with all
+Stage0 kernel bootstrap harnesses. The default installed-snapshot build also succeeded, and the
+kernel-core dogfood source proved with 25 replayed certificates and zero gaps. The monolithic
+`src/main.elisa` self-audit remains incomplete; these gates do not certify the full assistant, and
+no whole-source speedup is claimed from the structural early exit alone.
