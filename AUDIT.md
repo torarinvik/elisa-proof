@@ -238,14 +238,15 @@ mutations of the kernel were each caught by that harness: dropping the scalar-ty
 re-admitting `field` as a former, treating `call` as a former, seeding from `!=`, dropping the
 selector identity check, and treating unary `&` as a value former.
 
-### Not covered
+### Still not covered
 
 Field selection, indexing, slicing, and the aggregate constructors need a witness that the
 receiver's selector is the language's own and that the selected type's equality is primitive.
 That witness is not represented in the term language, so those formers stay excluded and the
 adversarial fixture pins the refusal. Congruence through a call additionally needs a determinism
-witness. The scalar witness is currently emitted for function parameters only, so a congruence
-whose universe includes a local declaration declines.
+witness. Scalar witnesses are emitted for scalar locals as well as parameters, but the positive
+congruence suite previously covered only parameter witnesses; a regression now exercises opaque
+locals whose equality is introduced by a runtime guard.
 
 Auditing operator dispatch for this rule also exposed the same hazard in the pre-existing
 reflexivity and identifier-alias tiers, which are not reached by congruence. That is repaired

@@ -2022,7 +2022,7 @@ if [[ "$rejected_borrow_after_move_probe_status" -ne 1 || "$rejected_borrow_afte
     exit 1
 fi
 
-run_json_report "$ROOT_DIR/examples/congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; assert report["findings"] == []; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"congruence_sum", "congruence_difference", "congruence_product", "congruence_nested", "congruence_chain", "congruence_boolean", "congruence_bitwise", "congruence_conditional", "congruence_character", "congruence_boolean_parameters", "congruence_bounded_unsigned", "congruence_pure_call_result"} <= names'
+run_json_report "$ROOT_DIR/examples/congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; assert report["findings"] == []; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"congruence_sum", "congruence_difference", "congruence_product", "congruence_nested", "congruence_chain", "congruence_boolean", "congruence_bitwise", "congruence_conditional", "congruence_character", "congruence_boolean_parameters", "congruence_bounded_unsigned", "congruence_pure_call_result", "congruence_opaque_locals"} <= names'
 congruence_status=${PIPESTATUS[1]}
 if [[ "$congruence_status" -ne 0 ]]; then
     printf 'proof test matrix failed: ground congruence closure did not carry equalities through deterministic formers\n' >&2
