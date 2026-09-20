@@ -5906,3 +5906,18 @@ return `unsupported` (22 replayed certificates). Restoring the literal returned 
 contract/body pair; do not replace it until constant unfolding in verified contracts is supported
 and the fixture demonstrates equivalence. Other traversal sites continue to use the named replay
 limit/bound.
+
+## Instrumented full-source typing profile (2026-09-20)
+
+The installed Elisa Profiler compiled `src/main.elisa` with function tracing using the proof
+repository's pinned Stage1 compiler and ran `elisa-proof --json src/main.elisa` in sample mode.
+The target hit the 120-second execution cap; the profile is partial and must not be treated as a
+completed workload or a performance comparison. It captured 79,103 stack samples and peaked at
+1,081,065,472 bytes RSS. Among leaf frames, samples concentrated in
+`proof_kernel_replay_typing_binding_valid` (12,395),
+`proof_kernel_replay_build_typing_workspace` (11,589), `arena_take_free_block` (10,176),
+`arena_realloc` (4,495), `proof_kernel_replay_type_environment_binding_at` (4,191), and
+`proof_source_kernel_collect_tuple_fields` (3,469). The dominant nested path builds and validates
+the proposition typing workspace while walking source specification contexts. This directs the
+next audit item at repeated global type-binding validation/index construction; no soundness-critical
+validation has been removed or cached yet.
