@@ -5545,3 +5545,11 @@ try-fallback, and catch-exhaustiveness parity stayed green, and the proof matrix
 replay remained green under stage1 `7e6dde06`. A 180-second full-source run still reached the
 4,000,000 KB RSS ceiling at 142.48 seconds without a report; this optimization is therefore
 validated for semantic preservation but does not close the whole-source resource boundary.
+
+The compiler then replaced positional-constructor struct classification's repeated full symbol
+table scan with the existing collision-safe symbol-name hash chain, retaining exact name and kind
+checks. Qualified-error parity remained 11/11, try-fallback-void remained free of false positives,
+and catch-exhaustiveness parity passed. The proof frontend is pinned to stage1 compiler commit
+`41d1e229`; the proof rebuild, seven audit harnesses, complete proof matrix, O2/O3 optimized replay,
+and accepted/rejected matrix all passed. This is a targeted compiler optimization only; the bounded
+full-source audit remains incomplete and is not represented as a full proof result.
