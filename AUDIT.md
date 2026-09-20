@@ -5817,3 +5817,14 @@ checking; the separate `proof_kernel_replay_typing_binding_valid` leaf fell from
 samples, not a controlled throughput benchmark or proof of overall speedup. The whole-source audit
 still did not produce a report. The next high-impact work remains reducing repeated proof checking
 and allocation enough for self-verification to complete, without weakening any admission checks.
+
+The same post-change profile identified declaration-alias resolution as a frequent leaf during
+return/type checking. The checker now uses its existing bounded per-import type-audit index for
+alias resolution in unsigned-width and scalar-type classification, including function returns,
+parameters, locals, and return-local analysis. The hash is only a bucket selector; every candidate
+is matched by exact alias name, duplicates remain ambiguous, and incomplete or malformed bucket
+chains return the existing conservative unsupported result. No declarations or classifications are
+cached across imports. Stage1 build, the full proof matrix with O2/O3 replay, and full dogfood
+(including Stage0 bootstrap, integer/unsigned aliases, rejected floating aliases, and malformed
+proposition environments) passed. This change has not yet had a post-change whole-source profile;
+no measured speedup is claimed.
