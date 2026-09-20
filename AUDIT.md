@@ -5511,3 +5511,16 @@ Structural replay now rejects an empty `structural-safety` trace explicitly, wit
 kernel adversarial suite covering that case. Arena-shape admission already required a non-empty
 edge list, so the guard is defense in depth; the complete proof matrix and optimized replay
 remain green. This hardening is recorded in `3472f65`.
+
+The proof traversal-depth cleanup names the remaining import, source-operator, unconditional-call,
+and runtime-witness bounds instead of embedding policy numbers in trusted checks. The current
+stage1 build compiled these changes; the full stage1 proof matrix, O2/O3 replay checks, and
+accepted/rejected matrix passed. The watchdog harness also passed all seven transport and
+malformed-report tests on rerun.
+
+The stage0 oracle was rebuilt from the clean canonical Elisa-core checkout at revision
+`90228b6f` and its embedded VCS revision was verified before use. `ELISA_STAGE0_REV` now pins
+that verified revision. The complete dogfood suite passed, including all stage0 bootstrap
+harnesses, independent replay checks, tactic certificates, forged-certificate rejection, and
+the final replay-complete audit summary. No stale or unverifiable stage0 binary is accepted by
+the provenance guard.
