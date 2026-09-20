@@ -5973,3 +5973,27 @@ previous run at the same 2,500,000 KiB ceiling reached the watchdog after 157.56
 runs show the audit progresses longer under the same memory ceiling and stayed below the larger
 ceiling for four minutes, but neither is a completed verification; the full-source self-audit
 remains open.
+
+## Reuse validated global function-parameter buckets (2026-09-20)
+
+Profiling the cached source-typing path showed that each proposition still rebuilt the hash
+buckets for the same declaration-wide function-parameter rows. The opaque cache now snapshots
+those bucket heads and collision chains at the same time it validates global bindings. When local
+bindings add no function-parameter rows, replay uses the validated global index directly. If
+caller-supplied locals do add such rows, the checker still validates and rebuilds the combined
+index; this preserves the public cached API's general behavior rather than relying on source-only
+assumptions.
+
+Regression cases exercise both branches: a valid call using cached global function parameters,
+and a valid call with function-parameter rows supplied locally. The full proof matrix, O2/O3
+optimized replay, full dogfood, and Stage0 bootstrap kernel-admission harness passed.
+
+In two 120-second instrumented captures against the same Stage1 product, the leaf
+`proof_kernel_replay_build_typing_workspace_with_globals` fell from 4,123 recorded stacks before
+this change to 3 after it (the function appeared in 5 full stacks after the change). Peak RSS fell
+from 1,326,448,640 bytes to 687,439,872 bytes. Both captures timed out and their phase/sample
+counts differ; these are diagnostic observations, not a controlled performance benchmark.
+
+A subsequent 240-second full-source audit peaked at 609,808 KiB and timed out without a report. A
+10-minute attempt also timed out without a report, peaking at 3,063,264 KiB. Neither proves the
+whole source; the self-audit remains open despite the reduced repeated-index work.
