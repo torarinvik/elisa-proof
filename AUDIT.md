@@ -6027,3 +6027,18 @@ locals cannot capture a callee's global names. Negative local-shadow and call-bo
 confirm these false proofs are rejected, with complete replay and zero gaps. The audit caught this
 while adding machine-sized constants; it is included here as a soundness correction, not merely a
 constant-import extension.
+
+## Standalone replay self-verification: direct borrowed-name projection (2026-09-20)
+
+`proof_kernel_replay_ident_name` was unverified because it copied a `ProofKernelNode` through the
+tuple-returning `proof_kernel_replay_node_at` helper and then returned that copy's `sview` field.
+The resource checker could not encode the borrowed-result summary across that aggregate temporary.
+After preserving both existing root bounds checks, the function now indexes the already-validated
+node directly and returns its `name` field. This keeps the same empty-string behavior for invalid
+roots and non-identifier nodes while making the borrow's source place explicit to the verifier.
+
+The standalone source audit now proves and replays this function, and its validator requires that
+declaration to remain verified. On the same source, standalone coverage increased from 220 proven
+certificates out of 1,546 obligations to 227 out of 1,548, with zero replay gaps in both reports.
+The new availability also exposes more downstream region-call obligations, so the broader
+self-verification gap remains open; this is not a claim that the replay module is fully proved.

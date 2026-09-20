@@ -5,6 +5,7 @@ import sys
 
 
 REQUIRED_VERIFIED_DECLARATIONS = {
+    "proof_kernel_replay_ident_name",
     "proof_kernel_replay_node_at",
     "proof_kernel_replay_bool_at",
     "proof_kernel_replay_bool_set",
