@@ -5524,3 +5524,8 @@ that verified revision. The complete dogfood suite passed, including all stage0 
 harnesses, independent replay checks, tactic certificates, forged-certificate rejection, and
 the final replay-complete audit summary. No stale or unverifiable stage0 binary is accepted by
 the provenance guard.
+
+The remaining proposition-typing headroom constants are now derived from the shared replay depth
+limit rather than carrying independent `122`--`126` literals. This preserves the exact recursive
+entry margins while making a future bound change atomic. The stage1 build, complete proof matrix,
+and O2/O3 optimized replay checks pass with the derived values.
