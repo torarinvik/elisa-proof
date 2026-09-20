@@ -5997,3 +5997,32 @@ counts differ; these are diagnostic observations, not a controlled performance b
 A subsequent 240-second full-source audit peaked at 609,808 KiB and timed out without a report. A
 10-minute attempt also timed out without a report, peaking at 3,063,264 KiB. Neither proves the
 whole source; the self-audit remains open despite the reduced repeated-index work.
+
+## Named machine-sized replay bound (2026-09-20)
+
+Removed the literal `128` from `depth_valid`'s postcondition and implementation and from its direct
+dogfood caller. The source constant importer and its independent replay validator previously
+accepted only immutable `i64` literal constants, so the `usize` replay-depth bound was not available
+to executable-summary verification. Both paths now recognize an immutable literal `usize` constant;
+replay still independently confirms exact declaration scope, source line, immutability, type, and
+initializer value. The importer adds these machine-sized constants only when they occur in a
+contract, avoiding unrelated entry facts across the large replay module. Existing `i64` constant
+handling is unchanged. Unknown or over-depth expression forms do not trigger an import, which can
+only leave a proof unsupported.
+
+The core dogfood proves 25/25 obligations with zero replay gaps. The standalone replay validator
+retains its required verified declarations and zero-gap invariant. A new negative fixture checks
+that a module-local `usize` constant cannot be replaced by a same-named root constant. The complete
+Stage1 test matrix, optimized replay at O2/O3, full dogfood, and all Stage0 bootstrap kernel
+harnesses passed. A broader prototype that imported every `usize` constant exhausted control-flow
+budgets in large replay functions; that experiment was narrowed before acceptance. No whole-source
+self-proof is claimed, and the full-source audit remains open.
+
+The adversarial shadowing checks also found a soundness defect in contract handling: a function
+postcondition referring to a global constant could previously be reinterpreted against a same-named
+local, allowing a false result to pass. Contracts are now resolved in declaration scope at function
+entry and the normalized requires/ensures are retained in the verified function summary, so caller
+locals cannot capture a callee's global names. Negative local-shadow and call-boundary fixtures now
+confirm these false proofs are rejected, with complete replay and zero gaps. The audit caught this
+while adding machine-sized constants; it is included here as a soundness correction, not merely a
+constant-import extension.

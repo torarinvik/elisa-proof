@@ -10,6 +10,8 @@ for name, succeeds in [
     ("literal_constants_tail", True),
     ("literal_constants_shadow_parameter", False),
     ("literal_constants_shadow_local", False),
+    ("literal_constants_usize_shadow_local", False),
+    ("literal_constants_usize_shadow_call", False),
     ("literal_constants_false", False),
 ]:
     result = subprocess.run(
@@ -18,7 +20,14 @@ for name, succeeds in [
     )
     report = json.loads(result.stdout)
     assert (result.returncode == 0) == succeeds, (name, result.stdout, result.stderr)
-    assert report["summary"]["failed"] == 0 if succeeds else report["summary"]["failed"] > 0
+    if succeeds:
+        assert report["summary"]["failed"] == 0
+    else:
+        assert report["summary"]["failed"] > 0
+    if name.startswith("literal_constants_usize_shadow_"):
+        assert report["verification_state"] != "proved"
+        assert report["replay"]["certificates"] == report["replay"]["replayed"]
+        assert report["replay"]["gaps"] == 0
     if succeeds:
         assert report["summary"]["semantic_errors"] == 0
         assert all(certificate["replayed"] for certificate in report["certificates"])

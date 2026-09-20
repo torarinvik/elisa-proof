@@ -1,4 +1,4 @@
-# Literal immutable constants are imported as exact facts only at a function boundary. Keeping
+# Literal immutable integer constants are imported as exact facts only at a function boundary. Keeping
 # this policy separate from declaration traversal makes shadowing and provenance auditable without
 # turning the declaration checker into a collection of unrelated special cases.
 extend ElisaProof:
@@ -14,6 +14,113 @@ extend ElisaProof:
             for index in 0..<left.count |index, left, right|:
                 return false if left[index] != right[index]
             return true
+
+        # This lookup is used only to decide whether unfolding a constant is worthwhile. Unlike
+        # proof_expr_mentions_name, it returns false at the depth limit: a missed use merely keeps
+        # an expression opaque, while treating every deep expression as every constant would add
+        # unrelated trusted facts and exhaust analysis budgets.
+        def proof_global_constant_expr_mentions_name(expression: Ast::Expr, target: sview, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name == target
+                Ast::Expr.Scope(base, scoped_name, _):
+                    return scoped_name == target or proof_global_constant_expr_mentions_name(base, target, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_global_constant_expr_mentions_name(inner, target, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_global_constant_expr_mentions_name(operand, target, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_global_constant_expr_mentions_name(left, target, depth + 1) or proof_global_constant_expr_mentions_name(right, target, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_global_constant_expr_mentions_name(callee, target, depth + 1)
+                    for argument in arguments:
+                        return true if proof_global_constant_expr_mentions_name(argument, target, depth + 1)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_global_constant_expr_mentions_name(object, target, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_global_constant_expr_mentions_name(object, target, depth + 1) or proof_global_constant_expr_mentions_name(index, target, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_global_constant_expr_mentions_name(object, target, depth + 1) or proof_global_constant_expr_mentions_name(low, target, depth + 1) or proof_global_constant_expr_mentions_name(high, target, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return proof_global_constant_expr_mentions_name(condition, target, depth + 1) or proof_global_constant_expr_mentions_name(then_value, target, depth + 1) or proof_global_constant_expr_mentions_name(else_value, target, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_global_constant_expr_mentions_name(base, target, depth + 1) or proof_global_constant_expr_mentions_name(predicate, target, depth + 1)
+                Ast::Expr.Move(operand, _):
+                    return proof_global_constant_expr_mentions_name(operand, target, depth + 1)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_global_constant_expr_mentions_name(operand, target, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if proof_global_constant_expr_mentions_name(element, target, depth + 1)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if proof_global_constant_expr_mentions_name(element, target, depth + 1)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_global_constant_expr_mentions_name(element, target, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_global_constant_expr_mentions_name(entry.key, target, depth + 1) or proof_global_constant_expr_mentions_name(entry.value, target, depth + 1)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields:
+                        return true if proof_global_constant_expr_mentions_name(field.value, target, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_global_constant_expr_mentions_name(base, target, depth + 1)
+                    for field in fields:
+                        return true if proof_global_constant_expr_mentions_name(field.value, target, depth + 1)
+                    return false
+                _:
+                    # Unmodeled expression forms simply do not trigger a constant import. Their
+                    # proof path remains conservative and can report unsupported.
+                    return false
+
+        def proof_global_constant_contract_mentions_name(body: darray[Ast::Stmt]&, target: sview) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_global_constant_expr_mentions_name(expression, target, 0)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        return true if proof_global_constant_contract_mentions_name(then_body, target) or proof_global_constant_contract_mentions_name(else_body, target)
+                    Ast::Stmt.While(_, loop_body, _):
+                        return true if proof_global_constant_contract_mentions_name(loop_body, target)
+                    Ast::Stmt.For(_, _, _, loop_body, _):
+                        return true if proof_global_constant_contract_mentions_name(loop_body, target)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |target|:
+                            return true if proof_global_constant_contract_mentions_name(arm.body, target)
+                    Ast::Stmt.Block(_, _, _, nested_body, _):
+                        return true if proof_global_constant_contract_mentions_name(nested_body, target)
+                    _:
+                        pass
+            return false
+
+        # Freeze declaration-scope constants before later locals can shadow their spellings.
+        # The normalized contracts are also the call-summary source; their proof certificates
+        # depend on the independently replayed global-constant traces created at import time.
+        def proof_resolve_global_constants_in_contracts(preconditions: mutable darray[Ast::Expr]&, postconditions: mutable darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, functions: ProofFunctionTable&, function_index: usize) -> void:
+            for contract_index in 0..<preconditions.count |contract_index, preconditions, names, values|:
+                preconditions[contract_index] <- proof_substitute(preconditions[contract_index], names, values)
+            for contract_index in 0..<postconditions.count |contract_index, postconditions, names, values|:
+                postconditions[contract_index] <- proof_substitute(postconditions[contract_index], names, values)
+            if function_index < functions.requires_starts.count and function_index < functions.requires_counts.count:
+                requires_start: usize = functions.requires_starts[function_index]
+                requires_count: usize = functions.requires_counts[function_index]
+                if requires_start <= functions.all_requires.count and requires_count <= functions.all_requires.count - requires_start:
+                    for contract_index in 0..<requires_count |contract_index, functions, requires_start, names, values|:
+                        functions.all_requires[requires_start + contract_index] <- proof_substitute(functions.all_requires[requires_start + contract_index], names, values)
+            if function_index < functions.ensure_starts.count and function_index < functions.ensure_counts.count:
+                ensures_start: usize = functions.ensure_starts[function_index]
+                ensures_count: usize = functions.ensure_counts[function_index]
+                if ensures_start <= functions.all_ensures.count and ensures_count <= functions.all_ensures.count - ensures_start:
+                    for contract_index in 0..<ensures_count |contract_index, functions, ensures_start, names, values|:
+                        functions.all_ensures[ensures_start + contract_index] <- proof_substitute(functions.all_ensures[ensures_start + contract_index], names, values)
 
         def proof_global_constant_find_function_scope(declarations: darray[Ast::Decl]&, function_name: sview, line: u32, current_scope: darray[sview]&, found_scope: mutable darray[sview]&, name_matches: mutable usize&, matches: mutable usize&, depth: usize) -> void:
             return if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
@@ -36,7 +143,7 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_global_constant_add_literal(constant_name: sview, constant_type: Ast::Expr, constant_initializer: Ast::Expr, constant_mutable: bool, constant_position: Ast::Pos, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex) -> void:
+        def proof_global_constant_add_literal(constant_name: sview, constant_type: Ast::Expr, constant_initializer: Ast::Expr, constant_mutable: bool, constant_position: Ast::Pos, function_body: darray[Ast::Stmt]&, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex) -> void:
             # Reserve the name even when its declaration is not importable. Otherwise a malformed
             # or mutable module-local constant would be skipped and a same-named root constant
             # could be imported as if the local declaration did not shadow it.
@@ -46,7 +153,8 @@ extend ElisaProof:
             return if any existing in names where existing == constant_name
             match constant_type:
                 Ast::Expr.Ident(type_name, _):
-                    return if type_name != "i64"
+                    return if type_name != "i64" and type_name != "usize"
+                    return if type_name == "usize" and not proof_global_constant_contract_mentions_name(function_body, constant_name)
                 _:
                     return
             match constant_initializer:
@@ -59,12 +167,17 @@ extend ElisaProof:
                     values.push(constant_initializer)
                     constant_fact: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(constant_name, constant_position), TokenKind.EqEq, Ast::Expr.IntLit(constant_value, constant_position), constant_position)
                     proof_add_traced_fact(facts, report, constant_fact, "global-constant", constant_position.line, function_name)
-                    proof_add_primitive_operator_witnesses_with_type_index(facts, report, Ast::Expr.Ident(constant_name, constant_position), constant_type, constant_position, type_index)
-                    proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(constant_name, constant_position), constant_position.line, function_name)
+                    is_machine_unsigned: bool = match constant_type:
+                        Ast::Expr.Ident(type_name, _): type_name == "usize"
+                        _: false
+                    if not is_machine_unsigned:
+                        proof_add_primitive_operator_witnesses_with_type_index(facts, report, Ast::Expr.Ident(constant_name, constant_position), constant_type, constant_position, type_index)
+                    needs_contract_witness: bool = not is_machine_unsigned or proof_global_constant_contract_mentions_name(function_body, constant_name)
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(constant_name, constant_position), constant_position.line, function_name) if needs_contract_witness
                 _:
                     pass
 
-        def proof_global_constant_collect_scope(declarations: darray[Ast::Decl]&, function_scope: darray[sview]&, current_scope: darray[sview]&, include_root_scope: bool, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex, depth: usize) -> void:
+        def proof_global_constant_collect_scope(declarations: darray[Ast::Decl]&, function_scope: darray[sview]&, current_scope: darray[sview]&, include_root_scope: bool, function_body: darray[Ast::Stmt]&, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex, depth: usize) -> void:
             return if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
             in_function_scope: bool = proof_global_constant_scope_equal(current_scope, function_scope)
             in_root_scope: bool = include_root_scope and current_scope.count == 0
@@ -72,18 +185,18 @@ extend ElisaProof:
                 match declaration:
                     Ast::Decl.Const(constant_name, constant_type, constant_initializer, constant_mutable, constant_position):
                         if in_function_scope or in_root_scope:
-                            proof_global_constant_add_literal(constant_name, constant_type, constant_initializer, constant_mutable, constant_position, reserved_names, parameters, names, values, facts, report, function_name, type_index)
+                            proof_global_constant_add_literal(constant_name, constant_type, constant_initializer, constant_mutable, constant_position, function_body, reserved_names, parameters, names, values, facts, report, function_name, type_index)
                     Ast::Decl.Module(module_name, body, _):
                         next_scope: mutable darray[sview] = []
                         next_scope.extend(current_scope)
                         next_scope.push(module_name)
-                        proof_global_constant_collect_scope(body, function_scope, &next_scope, include_root_scope, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth + 1)
+                        proof_global_constant_collect_scope(body, function_scope, &next_scope, include_root_scope, function_body, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_global_constant_collect_scope(body, function_scope, current_scope, include_root_scope, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth + 1)
+                        proof_global_constant_collect_scope(body, function_scope, current_scope, include_root_scope, function_body, reserved_names, parameters, names, values, facts, report, function_name, type_index, depth + 1)
                     _:
                         pass
 
-        def proof_import_global_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos, type_index: ProofTypeAuditIndex) -> void:
+        def proof_import_global_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, function_body: darray[Ast::Stmt]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos, type_index: ProofTypeAuditIndex) -> void:
             function_scope: mutable darray[sview] = []
             function_name_matches: mutable usize = 0
             function_matches: mutable usize = 0
@@ -99,5 +212,5 @@ extend ElisaProof:
             # First collect the declaration's own namespace. A root pass follows only for names
             # not already reserved, so a module-local constant shadows a same-named root
             # constant even when the local declaration is not importable.
-            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, false, &reserved_names, parameters, names, values, facts, report, function_name, type_index, 0)
-            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, true, &reserved_names, parameters, names, values, facts, report, function_name, type_index, 0) if function_scope.count > 0
+            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, false, function_body, &reserved_names, parameters, names, values, facts, report, function_name, type_index, 0)
+            proof_global_constant_collect_scope(file.top_decls, function_scope, &root_scope, true, function_body, &reserved_names, parameters, names, values, facts, report, function_name, type_index, 0) if function_scope.count > 0
