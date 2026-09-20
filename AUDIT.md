@@ -5631,3 +5631,12 @@ line parity passed 364/364, and the field-type and module-field-mutability smoke
 frontend is pinned to `a160013a`; after installing a matching stage1 snapshot, its build, seven
 audit harnesses, complete proof matrix, O2/O3 replay, accepted/rejected matrix, and complete
 dogfood suite passed.
+
+The next cleanup names shared semantic recursion and difference-graph node limits, reuses the
+kernel replay depth bound for resource-place walks, and encodes resource-event flags through their
+existing constants instead of repeating raw bit values. The arithmetic postcondition for
+`depth_valid` remains literal because the source checker does not yet unfold module constants in
+postconditions; changing it to the constant made the kernel's own contract unprovable, so no
+weaker proof was substituted. The proof frontend is pinned to `66b8ed02`; the stage1 build,
+seven audit harnesses, complete proof matrix, O2/O3 replay, accepted/rejected matrix, and full
+dogfood suite pass at that revision.
