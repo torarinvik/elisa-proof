@@ -5765,6 +5765,25 @@ self-audit still emitted no report, but peak RSS was 3,869,504 KiB, compared wit
 the immediately preceding bounded run. This is encouraging measured evidence, not proof that this
 single index caused the entire RSS difference; the full-source proof remains incomplete.
 
+## Compiler provenance and executable harness dependencies (2026-09-20)
+
+The compiler's generic type-parameter field-access checker had collected names from every nested
+branch function-wide, suppressing diagnostics after a branch-local shadow. Its replacement follows
+the lexical scope of active locals, branch conditions, loop variables, pattern binders, and nested
+expression blocks, and traverses every value-bearing expression form. Stage0/Stage1 differential
+fixtures reject a post-branch or post-match generic field access, reject one nested in an array
+literal, retain a valid branch-local struct field access, and reject field access through a
+primitive reference. The compiler change is committed as `a51f3dd7`; its rebuilt Stage1 product
+and installed snapshot both identify that revision.
+
+`ELISA_COMPILER_REV` now pins the proof importer to `a51f3dd7`. The standalone tactic and lemma
+summary replay harnesses now include `proof/model/enum_index.elisa` before `model.elisa`, matching
+the production import graph. With the matching Stage1 product and source snapshot, the complete
+proof test matrix passed, including O2/O3 independent replay. The full dogfood suite also reached
+its final “formalized layers are replay-complete” result, including Stage0 kernel bootstrap tests.
+The bounded complete-source self-audit remains a separate unfinished requirement; these gates do
+not establish that the proof assistant verifies its entire implementation.
+
 ## Report-scoped operator policy reuse (2026-09-20)
 
 The preceding source-operator mask was still rebuilt for every top-level certified goal and every
