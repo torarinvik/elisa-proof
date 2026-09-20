@@ -5620,3 +5620,14 @@ the kernel core and reused by both producer and replay; the boolean-fold and uns
 depth bounds were named at their owning layers. Values and fail-closed boundaries are unchanged.
 The stage1 build, seven audit harnesses, complete proof matrix, O2/O3 replay, accepted/rejected
 matrix, and complete dogfood suite—including stage0 bootstrap and adversarial replay checks—pass.
+
+The compiler full-source profile's struct-field lookup hotspot was addressed in compiler commit
+`a160013a`: `struct_field_row_for_type` now makes one pass while retaining the prior exact
+precedence of current-module row, top-level row, then an unambiguous external row. A first attempt
+to index the readonly mutable-reference query cache was rejected by stage0's value-block mutation
+rules and fully removed; no unbuilt compiler source was retained. The optimized compiler
+self-hosted from the canonical stage0. Native backend differential passed 514/514, diagnostic
+line parity passed 364/364, and the field-type and module-field-mutability smokes passed. The proof
+frontend is pinned to `a160013a`; after installing a matching stage1 snapshot, its build, seven
+audit harnesses, complete proof matrix, O2/O3 replay, accepted/rejected matrix, and complete
+dogfood suite passed.
