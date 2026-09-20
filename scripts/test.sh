@@ -2058,6 +2058,17 @@ if [[ "$expression_witness_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A scalar-field witness for a record element is exact to the selected field; it cannot
+# justify congruence for a different field of the same indexed record.
+set +e
+run_json_report "$ROOT_DIR/examples/record_element_witness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; goals = report["goals"]; assert any(goal["name"] == "indexed_field_congruence" and goal["proven"] for goal in goals); assert any(goal["name"] == "distinct_field_not_congruent" and not goal["proven"] for goal in goals)'
+record_element_witness_status=${PIPESTATUS[1]}
+set -e
+if [[ "$record_element_witness_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: record-element scalar witness escaped its exact field\n' >&2
+    exit 1
+fi
+
 # Aggregate equality must never be proved by the kernel. Newer frontends diagnose tuple equality
 # as unsupported; older pinned revisions leave that refusal to proposition formation. Arrays and
 # dictionaries are rejected there too, while constructors/updates remain independently replayed.
