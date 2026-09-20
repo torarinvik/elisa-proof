@@ -5688,3 +5688,23 @@ Repeated 60-second full-source audit runs remain incomplete: the run after the v
 used 1,376,096 KB RSS, and the run after the parameter index used 1,406,288 KB. These do not
 establish a performance improvement; full-source self-verification and reduction of the semantic/
 allocation cost remain open.
+
+The compact typed-replay index now appends only the value/proposition and function-parameter
+positions it actually stores, rather than sizing both arrays to the entire binding environment.
+This preserves exact lookup order and duplicate rejection while removing guaranteed unused slots.
+The existing full test matrix and dogfood suite passed. Full-source measurements remain noisy and
+incomplete: a 180-second/3,000,000-KiB run stopped at the time limit with a 1,606,048-KiB peak;
+another 180-second/2,000,000-KiB run hit its RSS limit at 102.62 seconds and 2,000,416 KiB.
+Neither emitted a report.
+
+A 10-second native sample during the subsequent pre-enum-index 180-second/3,000,000-KiB run showed
+late proof work repeatedly scanning nested declarations in `proof_declaration_has_enum`. That query now uses
+the existing collision-safe per-import type declaration index, extended to include enum rows;
+lookups check both the stored hash and exact enum name. An incomplete index declines structural
+classification rather than inferring it from partial data. Stage1 build, the O0/O2/O3 proof matrix,
+and complete dogfood—including Stage0 kernel bootstrap and adversarial certificate tests—passed.
+The post-change full-source attempt hit the 2,500,000-KiB RSS limit at 92.92 seconds, with a
+2,533,328-KiB peak. The earlier 3,000,000-KiB run and this run are too variable to establish a
+whole-run performance gain; a same-limit post-change rerun remains necessary. Samples implicate
+both compiler semantic/arena allocation and later proof declaration collection. Full-source
+self-verification remains open.
