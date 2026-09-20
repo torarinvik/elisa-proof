@@ -5553,3 +5553,8 @@ and catch-exhaustiveness parity passed. The proof frontend is pinned to stage1 c
 `41d1e229`; the proof rebuild, seven audit harnesses, complete proof matrix, O2/O3 optimized replay,
 and accepted/rejected matrix all passed. This is a targeted compiler optimization only; the bounded
 full-source audit remains incomplete and is not represented as a full proof result.
+
+The exact pinned state was then run through the complete dogfood suite. All proof fixtures,
+stage0 bootstrap harnesses, kernel runtime adversarial checks, tactic scripts, nested branch and
+quantifier certificates, stale/forged certificate rejection, and the final replay-complete audit
+summary passed under stage1 `41d1e229`.
