@@ -6282,3 +6282,17 @@ The full dogfood run also exposed two self-contained executable fixtures that in
 `unknown struct/type ProofFinding`. The fixtures now include the findings module in the same order
 as `src/main.elisa`; both compile, and the previously blocked tactic and summary-replay harnesses
 pass in the full dogfood run.
+
+### Verify Boolean contradiction and conjunction recognizers (2026-09-21)
+
+The inconsistency path copied full nodes through `proof_kernel_replay_node_at` just to recognize a
+false Boolean literal, `not true`, or an `and` node. These are now three small bounded recognizers
+that pattern-match the guarded root and return only a Boolean or child indices. All three verify in
+the standalone audit. `proof_kernel_replay_facts_inconsistent` now delegates those exact cases to
+the helpers; its fact-snapshot budget finding is gone. Its bounded recursion now uses a remaining
+depth counter, and omits a recursive call at one remaining level because that call would return
+false immediately. This also removes the separate recursive-decreases obligation. The checker
+still reports the recursive resource-summary limitation, so this does not claim that the
+ex-falso rule itself is fully verified. The full proof test matrix passed, including O2/O3 replay,
+and dogfood passed through standalone certificate replay, malformed-arena rejection, stage0 runtime
+harnesses, and portable tactic scripts.
