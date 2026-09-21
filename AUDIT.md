@@ -6341,3 +6341,17 @@ verification passed: source-length/diff checks, the full proof test matrix (incl
 standalone trust-boundary validation), and the complete dogfood suite all pass. The control-flow and
 resource-analysis budget findings remain open; passing regressions do not turn this routine into a
 verified declaration.
+
+### Refine bounded equality work items (2026-09-21)
+
+Equality work items now distinguish call-argument pairs, so their wrapper kind is checked when the
+pair is popped rather than by eagerly indexing an untrusted child node. Verified leaf, node-pair,
+ordinary-enqueue, call-argument-enqueue, and child-enqueue helpers keep the driver smaller; all five
+are required by the standalone audit. At the original 64-step cap, the standalone report has 603
+proven certificates, 603/603 replayed, zero gaps, and no trusted assumptions. The comparator no
+longer reports recursive borrow opacity or index-safety findings, but remains unverified because it
+needs 65 control-flow steps (limit 64). Raising that shared cap to 128 exposed additional index
+obligations and more failed goals without verifying equality, so the global limit was restored to
+64. The comparator and its downstream fact-denial routines remain open.
+The full proof test matrix (O2/O3 replay included) and complete dogfood suite pass on this exact
+worklist/helper state; source-length and diff checks also pass.
