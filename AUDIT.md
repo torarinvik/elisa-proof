@@ -6091,3 +6091,13 @@ standalone self-audit now emits 1,996 obligations and 438 replayed certificates 
 and 436), with zero replay gaps and no semantic errors. The recursive component itself remains
 unverified for the same resource-summary and fact-snapshot-budget findings; this refactor is
 modular verification progress, not closure of that gap.
+
+The string-kind dispatch was also rewritten as an explicit `match` to reduce branch-state
+complexity, without changing the evaluator's admission rules. The standalone audit is unchanged at
+1,996 obligations and 438 replayed certificates; the same recursive borrow-summary and
+fact-snapshot-budget findings remain. To separate return-shape concerns from that gap, the
+`shared_borrow_calls` regression now includes self-recursion over a shared collection returning a
+scalar-only aggregate. It proves and replays all 23 obligations, while the existing adversarial
+fixture still rejects escaping references, moved arguments, and a shared lend that overlaps a live
+mutable borrow. The unresolved evaluator failure therefore requires more than merely allowing a
+recursive shared borrow or aggregate result.
