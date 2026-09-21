@@ -6312,3 +6312,14 @@ compound-term comparison remains unverified and is not claimed closed. Verificat
 source-length and diff checks, the full proof test matrix (including O2/O3 replay), and the complete
 dogfood suite. The standalone dogfood report currently proves 583 of 2,086 obligations with zero
 replay gaps and no trusted assumptions; this does not close the remaining compound equality path.
+
+### Simplify structural equality arena reads (2026-09-21)
+
+`proof_kernel_replay_expr_equal` now reads the two roots directly from the arena after its validity
+checks, and reads call-argument wrapper nodes only after recursive equality succeeds and explicit
+index bounds checks pass. This removes the tuple-returning `node_at` calls from the comparison path,
+whose resource summaries could not be encoded. Standalone replay coverage increased from 583 to
+585 certificates (2,084 obligations, zero replay gaps, no trusted assumptions); the comparator is
+still unverified because recursive borrow-call summaries remain opaque and its fact budget is still
+exceeded (94 observed, 64 limit). This is not a soundness-closure claim. Source-length and diff
+checks, the full proof test matrix including O2/O3 replay, and the complete dogfood suite all pass.
