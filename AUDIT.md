@@ -6067,3 +6067,16 @@ primitive-type witnesses, and its width decoder depends on the recursive, unveri
 recursive summary as trusted. An experiment using the pre-existing 256-fact small-function cap
 emitted 365 certificates, but the dogfood probe consumed about 6.3 GB RSS; that cap was rejected
 and is not part of the implementation. Full self-verification remains open.
+
+## Rejected allocation-heavy constant-evaluator work stack (2026-09-21)
+
+The standalone replay report identifies `proof_kernel_replay_constant_int` as an unverified
+recursive component, so an experiment replaced its recursion with an explicit `darray` frame
+stack. The Stage1 build succeeded, but the standalone replay audit then crossed its 2,000,000-KiB
+RSS watchdog after 7.51 seconds without emitting JSON. The previous recursive implementation
+emitted its normal report with 1,994 obligations, 436 replayed certificates, and zero replay gaps.
+The experiment was reverted and the product rebuilt from the restored source. A per-call dynamic
+work stack is not viable here: it adds arena allocations in a heavily reused kernel helper. Any
+future iterative evaluator must reuse bounded caller-owned scratch rather than allocate a fresh
+stack per evaluation; the recursive helper remains unverified and no new proof authority was
+introduced.
