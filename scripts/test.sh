@@ -1468,6 +1468,12 @@ old_call_status=$?
 quantifier_rejected_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_collection_quantifier.elisa" >/dev/null
 collection_quantifier_rejected_status=$?
+run_json_report "$ROOT_DIR/examples/rejected_quantifier_capture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not any(goal["rule"] == "quantifier-forall" and goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "ensure-unproven" and finding["name"] == "dictionary_key_name_must_not_be_captured" for finding in report["findings"])'
+quantifier_capture_statuses=("${PIPESTATUS[@]}")
+if [[ "${quantifier_capture_statuses[0]}" -ne 1 || "${quantifier_capture_statuses[1]}" -ne 0 ]]; then
+    printf 'proof test matrix failed: dictionary quantifier binder capture was not rejected cleanly\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_void_postcondition.elisa" >/dev/null
 void_postcondition_rejected_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_named_arguments.elisa" >/dev/null
