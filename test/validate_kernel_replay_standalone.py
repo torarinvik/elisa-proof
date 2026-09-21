@@ -61,6 +61,16 @@ def main() -> None:
         if finding["kind"] in budget_kinds and finding["status"] != "unsupported"
     ]
     require(not bad_budget_findings, f"budget exhaustion was misclassified: {bad_budget_findings}")
+    evaluator_budget_findings = [
+        finding
+        for finding in report["findings"]
+        if finding["name"] == "proof_kernel_replay_constant_int"
+        and finding["kind"] in budget_kinds
+    ]
+    require(
+        all(finding["line"] > 0 for finding in evaluator_budget_findings),
+        f"constant evaluator budget finding lost its source location: {evaluator_budget_findings}",
+    )
     unsigned_findings = [
         finding
         for finding in report["findings"]

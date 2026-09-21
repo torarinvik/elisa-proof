@@ -6162,3 +6162,14 @@ assertions. The stage1 build passed, and the standalone replay validator still r
 certificates replayed, zero gaps, and zero semantic errors. This cleanup does not resolve the
 recursive component's fact-snapshot budget finding; the unchanged audit result confirms it was not
 the source of that budget exhaustion.
+
+### Locate control-flow snapshot budget failures (2026-09-21)
+
+`proof_return_analysis_budget_available` previously emitted every control-flow budget finding at
+line 0, even when a particular return-analysis statement or captured-block entry triggered it.
+Threaded the statement position into the budget check and added a standalone-validator assertion
+that a budget finding for `proof_kernel_replay_constant_int` retains a nonzero location. The
+stage1-built standalone report now locates its existing `control-flow-analysis-budget` finding at
+line 368 in the compiler's expanded-source coordinates. The evaluator remains
+`recursive-component-unverified`; coverage stays at 448 replayed certificates with zero replay
+gaps and zero semantic errors. This improves diagnosis, not proof coverage.
