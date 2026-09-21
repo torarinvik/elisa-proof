@@ -6355,3 +6355,12 @@ obligations and more failed goals without verifying equality, so the global limi
 64. The comparator and its downstream fact-denial routines remain open.
 The full proof test matrix (O2/O3 replay included) and complete dogfood suite pass on this exact
 worklist/helper state; source-length and diff checks also pass.
+
+Follow-up analyzer-shape experiments on this state did not close the remaining 65/64 limit and were
+discarded. Moving child enqueueing into a separate helper made that helper itself unverified: its
+direct child-arena reads were not discharged, and replacing them with checked child access still
+exceeded the helper's bounded fact snapshot (129 observed, 64 limit). Recasting the inline dispatch
+as grouped string-pattern arms also failed to help: the comparator retained the 65/64 control-flow
+finding and acquired a 129/128 resource-analysis finding. The committed worklist remains unchanged;
+the next useful approach must reduce analyzer state/cost without creating opaque or over-budget
+callee summaries. In particular, these experiments do not justify raising shared analysis limits.
