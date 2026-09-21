@@ -6403,3 +6403,15 @@ validator requires that declaration to remain verified. The corpus remains `unsu
 still have unverified resource-summary dependencies. The run produced 605 certificates, replayed
 all 605 with zero gaps, had zero semantic errors, and passed the standalone trust validator. Existing
 kernel arena runtime probes exercise positive equality and reject unequal hidden node payloads.
+
+### Admit all-shared aggregate lends (2026-09-22)
+
+The resource checker now recognizes the narrow case where every callee formal is an immutable
+shared reference and the return is already proven reference-free. Nested capability storage cannot
+escape through an immutable formal, and the existing return-region/reference guards remain in
+force; mixed, by-value, mutable, or reference-returning calls retain the stricter target-storage
+check. This lets read-only kernel helpers compose without an unnecessarily opaque summary. The
+standalone report improved from 605 to 607 proven certificates, removed three `borrow-call-opaque`
+and three `region-call-opaque` findings, lost no verified declaration, retained zero semantic errors,
+and replayed all 607 certificates with zero gaps. The fact-denial caller remains independently
+unverified because its formal metadata is not in this all-shared class.
