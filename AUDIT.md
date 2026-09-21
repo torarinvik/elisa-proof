@@ -6153,6 +6153,27 @@ function itself is now required verified by the standalone validator. The recurs
 still fails only with `control-flow-analysis-budget`; this split does not claim that evaluator is
 verified.
 
+### Verify the recursive constant evaluator with a remaining-depth measure (2026-09-21)
+
+The fact-budget diagnostic showed the recursive evaluator grew from 64 to 85 facts after eagerly
+adding 51 scalar-operator witnesses for a local copy of `ProofKernelNode`. A trial 96-fact cap was
+rejected: the standalone audit reached about 1.3 GiB RSS after 2:47 without completing. Instead,
+the evaluator now keeps the guarded arena node as a place and copies only the child indices and
+operator needed before recursive calls; it no longer creates the unused local-record witness set.
+
+The depth argument is normalized once to `remaining = DEPTH_LIMIT - depth`. A private recursive
+worker counts that value down, retaining the same boundary behavior: leaf nodes are still
+evaluated at zero remaining depth, while unary/binary nodes return unknown there. Purity analysis
+now admits only literal/range/wildcard and recursively composed or-patterns in matches, with pure
+guards and bodies; binding/constructor patterns stay excluded. That certifies the worker's
+read-only recursive calls and preserves the branch fact needed for both binary children.
+
+The standalone stage1 audit now verifies both `proof_kernel_replay_constant_int` and its recursive
+worker. It reports 2,032 obligations, 476 certificates replayed, zero replay gaps, and zero
+semantic errors. The standalone validator now requires both declarations to remain verified. This
+replaces the earlier 448-certificate state and closes the fact-budget/recursive-summary gap without
+raising the analysis cap.
+
 ### Constant evaluator: remove an unreachable depth branch (2026-09-21)
 
 `proof_kernel_replay_constant_int` has the precondition `depth <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT`.

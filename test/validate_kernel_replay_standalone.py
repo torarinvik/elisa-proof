@@ -13,6 +13,8 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_child_at",
     "proof_kernel_replay_child_range_valid",
     "proof_kernel_replay_constant_leaf",
+    "proof_kernel_replay_constant_int",
+    "proof_kernel_replay_constant_int_remaining",
     "proof_kernel_replay_scalar_kind",
     "proof_kernel_replay_arena_shape_valid",
     "proof_kernel_replay_arena_child_kind_valid",
@@ -71,6 +73,13 @@ def main() -> None:
         all(finding["line"] > 0 for finding in evaluator_budget_findings),
         f"constant evaluator budget finding lost its source location: {evaluator_budget_findings}",
     )
+    for finding in evaluator_budget_findings:
+        budget = finding.get("budget")
+        require(isinstance(budget, dict), f"constant evaluator budget finding lacks measured state: {finding}")
+        require(
+            budget.get("dimension") == "facts" and budget.get("observed", 0) > budget.get("limit", 0),
+            f"constant evaluator fact budget finding has inconsistent measurements: {finding}",
+        )
     unsigned_findings = [
         finding
         for finding in report["findings"]
