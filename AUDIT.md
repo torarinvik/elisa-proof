@@ -6205,3 +6205,16 @@ bound or changing an `unsupported` result. The standalone validator rejects budg
 measurement does not actually exceed the configured limit. The stage1-built standalone audit and
 the full proof test suite passed, including O2/O3 optimized replay; all source files remain below
 600 lines.
+
+### Make the constant evaluator wrapper total (2026-09-21)
+
+`proof_kernel_replay_constant_comparison` was blocked from verification by its calls to
+`proof_kernel_replay_constant_int(..., 0)`: the source checker did not normalize the imported depth
+limit enough to discharge the wrapper's `0 <= limit` precondition. Calling the recursive
+remaining-depth worker directly removed that obligation but exposed its recursive resource-call
+graph to resource replay and caused one certificate gap; that approach was rejected. The wrapper
+now has no caller precondition and returns unknown when `depth > limit`, before subtracting. At the
+limit boundary it retains the prior zero-remaining semantics. This lets the comparison helper
+verify without creating a new recursive resource boundary. The standalone validator now requires
+the comparison helper to verify; the standalone audit replays every certificate without gaps, and
+the full test suite including O2/O3 replay passes.
