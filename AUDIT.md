@@ -6364,3 +6364,18 @@ as grouped string-pattern arms also failed to help: the comparator retained the 
 finding and acquired a 129/128 resource-analysis finding. The committed worklist remains unchanged;
 the next useful approach must reduce analyzer state/cost without creating opaque or over-budget
 callee summaries. In particular, these experiments do not justify raising shared analysis limits.
+
+### Use total child lookups in structural equality (2026-09-21)
+
+The worklist comparator's variable-arity branch now reads each serialized child through the total
+`proof_kernel_replay_child_at` accessor and refuses comparison if either lookup is unknown. The
+existing overflow-safe whole-range guard remains; its second range predicate was redundant, while
+the per-element accessor independently checks every actual read. The standalone report for this
+exact source remains at 603/603 certificates replayed with zero gaps, and the trust-boundary
+validator passes. `proof_kernel_replay_expr_equal` is still unverified at 65/64 control-flow steps;
+this hardening does not claim to close it. A direct root-bound rewrite was rejected because it
+introduced lower-bound obligations, so the explicit `proof_kernel_replay_valid` checks and
+assertion remain. A statement-only reinterpretation of the shared budget was also reverted: it did
+not verify equality and made the malformed arena-cycle fixture take over 2½ minutes before
+interruption. Under the original budget, that fixture completes as failed with 605/605 certificates
+replayed and zero gaps.
