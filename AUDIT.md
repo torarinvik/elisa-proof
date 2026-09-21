@@ -6218,3 +6218,13 @@ limit boundary it retains the prior zero-remaining semantics. This lets the comp
 verify without creating a new recursive resource boundary. The standalone validator now requires
 the comparison helper to verify; the standalone audit replays every certificate without gaps, and
 the full test suite including O2/O3 replay passes.
+
+### Verify direct literal comparison admission (2026-09-21)
+
+The next standalone declaration audit found that `proof_kernel_replay_direct_literal_comparison`
+was unverified only because its two calls to the tuple-returning `proof_kernel_replay_node_at`
+produced `borrow-call-summary-unsupported` at the left and right node reads. The helper now checks
+both requested roots against `nodes.count` first, then reads only each guarded node's `kind` in
+place. It still declines non-integer nodes and delegates admitted comparisons to the verified
+constant comparison helper. The standalone validator now requires this helper to verify. The
+standalone audit has zero replay gaps, and the full suite passes, including O2/O3 replay.
