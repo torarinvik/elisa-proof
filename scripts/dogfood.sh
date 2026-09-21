@@ -2942,9 +2942,13 @@ assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_prov
 assert binding["fingerprint_match"] is True
 assert report["tactic"]["status"] == "proved"
 assert report["tactic"]["certificate_replayed"] is True
-assert len(report["state"]["initial_facts"]) == 2
+assert len(report["state"]["initial_facts"]) == 3
 assert any(
     fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_primitive_scalar_type"
+    for fact in report["state"]["initial_facts"]
+)
+assert any(
+    fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_signed_type_bound"
     for fact in report["state"]["initial_facts"]
 )
 assert report["state"]["initial_goal"] == report["state"]["goal"]
