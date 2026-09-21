@@ -6415,3 +6415,18 @@ standalone report improved from 605 to 607 proven certificates, removed three `b
 and three `region-call-opaque` findings, lost no verified declaration, retained zero semantic errors,
 and replayed all 607 certificates with zero gaps. The fact-denial caller remains independently
 unverified because its formal metadata is not in this all-shared class.
+
+### Admit mixed immutable shared/value formals in read-only frames (2026-09-22)
+
+The previous lend predicate was too narrow: it required every callee formal to be an immutable
+shared reference, so a helper with shared aggregate inputs plus scalar indexes or depth bounds was
+still treated as opaque. The predicate now checks each formal independently: immutable shared
+references are permitted, while non-reference formals must be target-reference-free and mutable
+references are rejected. To preserve the kernel's zero-gap invariant, summary-free mixed lends are
+still refused when the *caller* has a mutable reference capability; ordinary verified summary
+composition remains responsible for those frames. This closes the resource-summary gap for
+`proof_kernel_replay_fact_denies` without trusting a body summary or weakening replay. The
+standalone report now proves 638 certificates, replays 638/638 with zero gaps, and reports zero
+semantic errors; the writable-lend adversarial matrix also remains fully replay-covered. The
+mutable `proof_kernel_replay_add_signed_type_bounds` frame remains explicitly unsupported until
+mixed lend composition through mutable caller state is independently replayable.
