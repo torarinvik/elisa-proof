@@ -6292,7 +6292,11 @@ the standalone audit. `proof_kernel_replay_facts_inconsistent` now delegates tho
 the helpers; its fact-snapshot budget finding is gone. Its bounded recursion now uses a remaining
 depth counter, and omits a recursive call at one remaining level because that call would return
 false immediately. This also removes the separate recursive-decreases obligation. The checker
-still reports the recursive resource-summary limitation, so this does not claim that the
-ex-falso rule itself is fully verified. The full proof test matrix passed, including O2/O3 replay,
-and dogfood passed through standalone certificate replay, malformed-arena rejection, stage0 runtime
-harnesses, and portable tactic scripts.
+now verifies both the remaining-depth worker and `proof_kernel_replay_facts_inconsistent`. Removing
+the unused `children` arena from this traversal allowed the resource summary to converge. The
+depth precondition at its call from `proof_kernel_replay_facts_propositionally_inconsistent` is
+explicitly established. The broader wrapper remains unverified because its general structural
+fact-denial path calls the recursive expression-equality helper. The standalone report now replays
+all 582 certificates with zero gaps and no trusted assumptions. The full proof test matrix passes,
+including O2/O3 replay, and the complete dogfood suite passes its malformed-arena, runtime-kernel,
+stage0-bootstrap, and tactic-script checks.

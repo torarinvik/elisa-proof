@@ -27,6 +27,8 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_false_boolean_literal",
     "proof_kernel_replay_negated_true_boolean_literal",
     "proof_kernel_replay_conjunction_operands",
+    "proof_kernel_replay_facts_inconsistent_remaining",
+    "proof_kernel_replay_facts_inconsistent",
     "proof_kernel_replay_constant_int",
     "proof_kernel_replay_constant_int_remaining",
     "proof_kernel_replay_scalar_kind",
