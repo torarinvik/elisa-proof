@@ -6300,3 +6300,15 @@ fact-denial path calls the recursive expression-equality helper. The standalone 
 all 582 certificates with zero gaps and no trusted assumptions. The full proof test matrix passes,
 including O2/O3 replay, and the complete dogfood suite passes its malformed-arena, runtime-kernel,
 stage0-bootstrap, and tactic-script checks.
+
+### Verify expression-equality leaf cases (2026-09-21)
+
+The next equality-path refinement extracts its nonrecursive leaf cases into
+`proof_kernel_replay_expr_leaf_equal`: absent nodes compare equal after the caller's shape checks;
+integer and Boolean leaves compare values; float/string/character/identifier/shorthand leaves
+compare names. The helper is verified in the standalone audit and the main structural comparator
+dispatches to it only after matching kind/operator and validating both node shapes. The recursive
+compound-term comparison remains unverified and is not claimed closed. Verification passed the
+source-length and diff checks, the full proof test matrix (including O2/O3 replay), and the complete
+dogfood suite. The standalone dogfood report currently proves 583 of 2,086 obligations with zero
+replay gaps and no trusted assumptions; this does not close the remaining compound equality path.
