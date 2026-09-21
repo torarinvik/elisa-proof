@@ -6238,3 +6238,14 @@ and field nodes, which produced unsupported resource-summary obligations. They n
 the guarded root discriminator and access only the needed fields in place; field bases are bounds
 checked before the second node read. The standalone validator requires both helpers to verify.
 The standalone replay audit and the full suite pass, with no replay gaps and O2/O3 checks green.
+
+### Verify sign-kernel literal and product destructors (2026-09-21)
+
+The sign-reasoning module had two more body-unverified helpers,
+`proof_kernel_replay_zero_literal` and `proof_kernel_replay_product_operands`. They copied an
+entire node through the tuple-returning arena accessor to inspect only a kind, scalar value, or
+operator. Both now reject an out-of-range root first and use pattern matching on the guarded node
+kind, reading only the fields needed in each branch. This preserves the rule that product sign
+reasoning applies only to a primitive `*` node and zero recognition applies only to integer zero.
+The standalone validator now requires both declarations verified. The standalone audit and full
+suite pass, with all certificates replayed and O2/O3 checks green.
