@@ -146,6 +146,17 @@ run_probe rejected_include_trailing examples/rejected_include_trailing.elisa 1
 run_probe include_alias_diamond examples/include_alias_diamond.elisa 0
 run_probe include_macro examples/include_macro.elisa 0
 run_probe rejected_include_cycle examples/rejected_include_cycle_a.elisa 1
+python3 - "$REPORT_DIR/rejected_include_cycle.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "failed"
+assert report["verification_state"] == "unsupported"
+assert any(finding["kind"] == "import-error" and finding["status"] == "unsupported" for finding in report["findings"])
+assert report["replay"]["gaps"] == 0
+PY
 
 # Embedded NUL bytes must not be truncated at the proof importer's C-string file API.
 # Before the guard, this source imported `included.elisa` and proved although the compiler
