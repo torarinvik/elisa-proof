@@ -1,5 +1,32 @@
 extend ElisaProof:
     private:
+        # Return-contract model search abstracts the body to its checked facts. A satisfying
+        # assignment to a free local omitted from that state is only an abstract countermodel,
+        # not a concrete function input. Keep `disproved` for return failures only when every
+        # assigned symbol is an actual formal parameter (constant, closed counterexamples need
+        # no assignments and remain concrete).
+        def proof_return_counterexample_parameters_only(report: ProofReport&, functions: ProofFunctionTable&, owner: sview) -> bool:
+            return false if report.findings.count == 0
+            finding: ProofFinding = report.findings[report.findings.count - 1]
+            return false if not finding.counterexample_found
+            return true if finding.counterexample_count == 0
+            function_index: usize = proof_function_index(functions, owner)
+            return false if function_index >= functions.names.count or function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
+            parameter_start: usize = functions.param_starts[function_index]
+            parameter_count: usize = functions.param_counts[function_index]
+            return false if parameter_start > functions.all_params.count or parameter_count > functions.all_params.count - parameter_start
+            return false if finding.counterexample_start > report.counterexample_facts.count or finding.counterexample_count > report.counterexample_facts.count - finding.counterexample_start
+            for offset in 0..<finding.counterexample_count |offset, finding, report, functions, parameter_start, parameter_count|:
+                match report.counterexample_facts[finding.counterexample_start + offset]:
+                    Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, Ast::Expr.IntLit(_, _), _):
+                        parameter_found: mutable bool = false
+                        for parameter_index in parameter_start..<parameter_start + parameter_count |parameter_index, functions, symbol, parameter_found|:
+                            parameter_found <- true if functions.all_params[parameter_index] == symbol
+                        return false if not parameter_found
+                    _:
+                        return false
+            return true
+
         def proof_check_return_contracts(statement: Ast::Stmt, moved_roots: darray[sview], names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
             match statement:
                 Ast::Stmt.Contract(kind, expression, position):
@@ -126,7 +153,12 @@ extend ElisaProof:
                             proof_add_pure_call_witnesses(goal, facts, functions, report, position.line, name, 0) if proof_expr_has_call(goal)
                             proven: bool = proof_certify_return_goal(facts, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
                             report.proof_obligation(proven)
-                            proof_add_goal_failure(report, "ensure-unproven", position.line, name, "return value does not establish ensure", facts, goal) if not proven
+                            if not proven:
+                                proof_add_goal_failure(report, "ensure-unproven", position.line, name, "return value does not establish ensure", facts, goal)
+                                if report.findings.count > 0 and report.findings[report.findings.count - 1].counterexample_found and not proof_return_counterexample_parameters_only(report, functions, name):
+                                    report.findings[report.findings.count - 1].status <- "unknown"
+                                    report.findings[report.findings.count - 1].counterexample_found <- false
+                                    report.findings[report.findings.count - 1].counterexample_count <- 0
                     else:
                         # A void return still completes normally and must establish its
                         # postconditions. There is no result binding to substitute, so a
