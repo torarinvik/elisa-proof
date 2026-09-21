@@ -2254,7 +2254,7 @@ fi
 # A strict conclusion needs strict premises, a mixed pair is not nonnegative, one known sign is not
 # two, a bound other than zero is not a sign, and sign facts about other terms say nothing here.
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_product_sign.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not any(goal["proven"] and goal["rule"] != "resource-safety" for goal in report["goals"]); refused = {finding["name"] for finding in report["findings"] if finding["kind"] == "ensure-unproven"}; assert {"strict_from_nonstrict", "mixed_claimed_nonnegative", "one_operand_known", "nonzero_bound", "signs_of_other_terms"} <= refused'
+run_json_report "$ROOT_DIR/examples/rejected_product_sign.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not any(goal["proven"] and goal["rule"] != "resource-safety" for goal in report["goals"]); refused = {finding["name"] for finding in report["findings"] if finding["kind"] == "ensure-unproven"}; assert {"strict_from_nonstrict", "mixed_claimed_nonnegative", "one_operand_known", "nonzero_bound", "signs_of_other_terms", "signed_square_can_overflow_negative"} <= refused'
 rejected_product_sign_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_product_sign_status" -ne 0 ]]; then
