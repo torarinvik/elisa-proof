@@ -6080,3 +6080,14 @@ work stack is not viable here: it adds arena allocations in a heavily reused ker
 future iterative evaluator must reuse bounded caller-owned scratch rather than allocate a fresh
 stack per evaluation; the recursive helper remains unverified and no new proof authority was
 introduced.
+
+## Constant evaluator operator decomposition (2026-09-21)
+
+The evaluator's unary and binary arithmetic dispatch is now isolated in small pure helpers. This
+keeps the recursive traversal responsible only for validating and descending the arena tree, and
+lets the arithmetic dispatch obligations be checked independently. The Stage1 build, literal
+constant positive/negative regression suite, and optimized replay suites at O2 and O3 pass. The
+standalone self-audit now emits 1,996 obligations and 438 replayed certificates (up from 1,994
+and 436), with zero replay gaps and no semantic errors. The recursive component itself remains
+unverified for the same resource-summary and fact-snapshot-budget findings; this refactor is
+modular verification progress, not closure of that gap.
