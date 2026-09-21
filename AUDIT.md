@@ -6111,3 +6111,13 @@ stopped. Raising the cap to 256 was worse: the same audit reached about 1.7 GiB 
 Both increases are rejected, and the committed cap remains 128. The next sound avenue is to
 reduce unnecessary entry witnesses or the recursive helper's live symbolic state, not widen this
 resource bound.
+
+### Rejected whole-body field-name witness filter (2026-09-21)
+
+An experimental prepass collected field names mentioned anywhere in each function body and
+omitted parameter-field witnesses whose names were absent. The standalone report fell from 438
+to 422 replayed certificates, while peak RSS rose to 4,181,426,176 bytes; the recursive evaluator
+remained unverified with the same findings. The experiment was reverted. A body-only name set does
+not account for witness dependencies introduced through call summaries and contracts, and
+running a recursive AST scan for every function is itself too costly. A viable reduction needs
+dependency-aware field selection and should run only for types whose eager witness set is large.
