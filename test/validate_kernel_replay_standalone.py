@@ -32,6 +32,7 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_expr_leaf_equal",
     "proof_kernel_replay_expr_call_argument_enqueue",
     "proof_kernel_replay_expr_child_enqueue",
+    "proof_kernel_replay_expr_child_span_enqueue",
     "proof_kernel_replay_expr_pair_enqueue",
     "proof_kernel_replay_expr_pair_nodes_valid",
     "proof_kernel_replay_constant_int",

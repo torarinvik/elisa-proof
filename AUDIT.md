@@ -6379,3 +6379,14 @@ assertion remain. A statement-only reinterpretation of the shared budget was als
 not verify equality and made the malformed arena-cycle fixture take over 2½ minutes before
 interruption. Under the original budget, that fixture completes as failed with 605/605 certificates
 replayed and zero gaps.
+
+### Verify bounded child-span enqueueing (2026-09-21)
+
+The variable-arity traversal is now a focused `proof_kernel_replay_expr_child_span_enqueue` helper.
+It validates the count and both child-span starts before subtracting or indexing, reads each child
+through the total accessor, checks both lookup results, and preserves call-argument wrapper tagging
+when enqueuing. The helper is required verified by the standalone trust validator. Its caller keeps
+the structural arity equality check and delegates span bounds to the helper, avoiding duplicate
+range-state in the main comparator. The standalone audit proves 604 certificates, replays 604/604
+with zero gaps, and reports zero semantic errors. The comparator itself remains unverified at
+65/64 control-flow steps; this narrows the remaining gap but does not close it.
