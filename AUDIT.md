@@ -6152,3 +6152,13 @@ The standalone report now contains 2,004 obligations and 448 certificates (previ
 function itself is now required verified by the standalone validator. The recursive component
 still fails only with `control-flow-analysis-budget`; this split does not claim that evaluator is
 verified.
+
+### Constant evaluator: remove an unreachable depth branch (2026-09-21)
+
+`proof_kernel_replay_constant_int` has the precondition `depth <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT`.
+Its additional `depth > limit` fallback was therefore unreachable for a valid call. Removed that
+branch while retaining both pre-descent `depth >= limit` refusals and the `depth + 1 <= limit`
+assertions. The stage1 build passed, and the standalone replay validator still reports 448/448
+certificates replayed, zero gaps, and zero semantic errors. This cleanup does not resolve the
+recursive component's fact-snapshot budget finding; the unchanged audit result confirms it was not
+the source of that budget exhaustion.
