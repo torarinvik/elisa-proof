@@ -751,7 +751,7 @@ if [[ "$continue_decreases_probe_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_getelse_recovery.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "getelse-recovery-nonterminating" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/rejected_getelse_recovery.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert any(finding["kind"] == "getelse-recovery-nonterminating" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_getelse_recovery_probe_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_getelse_recovery_probe_status" -ne 0 ]]; then
