@@ -6194,3 +6194,14 @@ stage1-built standalone report now locates its existing `control-flow-analysis-b
 line 368 in the compiler's expanded-source coordinates. The evaluator remains
 `recursive-component-unverified`; coverage stays at 448 replayed certificates with zero replay
 gaps and zero semantic errors. This improves diagnosis, not proof coverage.
+
+### Measure every bounded analysis cutoff (2026-09-21)
+
+Control-flow, frame, and resource-state analysis budget findings now include structured
+`dimension`, `observed`, and `limit` fields in JSON and repair output. For step limits, `observed`
+counts the step that was refused (the completed-work counter remains capped); for fact snapshots,
+it reports the actual snapshot size. This makes diagnostics actionable without weakening any
+bound or changing an `unsupported` result. The standalone validator rejects budget findings whose
+measurement does not actually exceed the configured limit. The stage1-built standalone audit and
+the full proof test suite passed, including O2/O3 optimized replay; all source files remain below
+600 lines.

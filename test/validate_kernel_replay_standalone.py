@@ -63,6 +63,16 @@ def main() -> None:
         if finding["kind"] in budget_kinds and finding["status"] != "unsupported"
     ]
     require(not bad_budget_findings, f"budget exhaustion was misclassified: {bad_budget_findings}")
+    for finding in report["findings"]:
+        if finding["kind"] in budget_kinds | {"frame-analysis-budget"}:
+            budget = finding.get("budget")
+            require(isinstance(budget, dict), f"budget finding lacks measured state: {finding}")
+            require(
+                isinstance(budget.get("observed"), int)
+                and isinstance(budget.get("limit"), int)
+                and budget["observed"] > budget["limit"],
+                f"budget finding has inconsistent measurements: {finding}",
+            )
     evaluator_budget_findings = [
         finding
         for finding in report["findings"]
@@ -73,13 +83,6 @@ def main() -> None:
         all(finding["line"] > 0 for finding in evaluator_budget_findings),
         f"constant evaluator budget finding lost its source location: {evaluator_budget_findings}",
     )
-    for finding in evaluator_budget_findings:
-        budget = finding.get("budget")
-        require(isinstance(budget, dict), f"constant evaluator budget finding lacks measured state: {finding}")
-        require(
-            budget.get("dimension") == "facts" and budget.get("observed", 0) > budget.get("limit", 0),
-            f"constant evaluator fact budget finding has inconsistent measurements: {finding}",
-        )
     unsigned_findings = [
         finding
         for finding in report["findings"]
