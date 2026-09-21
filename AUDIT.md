@@ -6323,3 +6323,21 @@ whose resource summaries could not be encoded. Standalone replay coverage increa
 still unverified because recursive borrow-call summaries remain opaque and its fact budget is still
 exceeded (94 observed, 64 limit). This is not a soundness-closure claim. Source-length and diff
 checks, the full proof test matrix including O2/O3 replay, and the complete dogfood suite all pass.
+
+### Make structural equality iterative (2026-09-21)
+
+Replaced recursive expression descent with a bounded worklist of `(left, right, depth)` pairs.
+Every pair rechecks the depth limit, both arena indices, and both node shapes before comparing;
+compound cases enqueue exactly the child pairs used by the former recursive cases. Call arguments
+retain their wrapper-kind/name check. Worklist growth is capped by the named
+`PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK` limit, and exhaustion returns false (conservative
+unknown equality), never equality. The enqueue helper verifies and is now required by the standalone
+audit. This removed the recursive `borrow-call-opaque` findings from `expr_equal`, and standalone
+coverage is 593 proven certificates with zero replay gaps and no trusted assumptions. However,
+`expr_equal` remains unverified: its current branch structure exceeds the control-flow fact budget
+(67/64) and resource-analysis step budget (129/128), so callers `proof_kernel_replay_fact_denies`
+and `proof_kernel_replay_facts_propositionally_inconsistent` also remain unverified. Full regression
+verification passed: source-length/diff checks, the full proof test matrix (including O2/O3 and
+standalone trust-boundary validation), and the complete dogfood suite all pass. The control-flow and
+resource-analysis budget findings remain open; passing regressions do not turn this routine into a
+verified declaration.

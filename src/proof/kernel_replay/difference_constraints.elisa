@@ -1,7 +1,13 @@
 const PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS: usize = 4096
+const PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK: usize = 4000000
 
 extend ElisaProofKernelReplay:
     private:
+        struct ProofKernelReplayExprPair:
+            left: usize
+            right: usize
+            depth: usize
+
         def proof_kernel_replay_interval_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize]) -> bool:
             return false if operator != "==" and operator != "!=" and operator != "<" and operator != "<=" and operator != ">" and operator != ">="
             return false if not proof_kernel_replay_primitive_comparison(nodes, children, facts, left_root, right_root)
@@ -237,76 +243,67 @@ extend ElisaProofKernelReplay:
                 _:
                     return (false, false)
 
+        def proof_kernel_replay_expr_pair_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, left: usize, right: usize, depth: usize) -> bool:
+            return false if pending.count >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
+            pending.push(ProofKernelReplayExprPair{left: left, right: right, depth: depth})
+            return true
+
         def proof_kernel_replay_expr_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
-            # The recursive descent is bounded by the same depth contract used by the arena
-            # validator. Keeping an explicit ranking here lets the verifier audit this helper's
-            # recursive edges instead of classifying them as opaque implementation recursion.
-            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
-            return false if not ElisaProofKernelCore::depth_valid(depth)
+            # Compare with an explicit worklist: serialized AST arenas are untrusted input, and
+            # recursion on caller-owned arenas prevents resource-summary convergence in our
+            # verifier. Each pending pair retains the original per-path depth bound.
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-            return false if not proof_kernel_replay_valid(nodes, left_root) or not proof_kernel_replay_valid(nodes, right_root)
-            left: ElisaProofKernelCore::ProofKernelNode = nodes[left_root]
-            right: ElisaProofKernelCore::ProofKernelNode = nodes[right_root]
-            # Structural equality is also used at the public provenance boundary. Validate the
-            # two nodes as they are visited so ignored payload fields cannot make malformed terms
-            # compare equal. Descendant edges are checked by the recursive cases below; the
-            # explicit depth budget rejects cycles without requiring a second whole-arena pass.
-            return false if not proof_kernel_replay_arena_shape_valid(left) or not proof_kernel_replay_arena_shape_valid(right)
-            return false if left.kind != right.kind or left.operator != right.operator
-            return false if left.kind == "unsupported"
-            leaf: (handled: bool, equal: bool) = proof_kernel_replay_expr_leaf_equal(left.kind, left.value, right.value, left.name, right.name)
-            return leaf.equal if leaf.handled
-            if left.kind == "field" or left.kind == "scope":
-                return left.name == right.name and proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
-            if left.kind == "unary" or left.kind == "move":
-                return proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
-            if left.kind == "call_arg":
-                return left.name == right.name and proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
-            if left.kind == "field-init":
-                return left.name == right.name and proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
-            if left.kind == "binary" or left.kind == "index" or left.kind == "dict_entry":
-                return proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.right, right.right, depth + 1)
-            if left.kind == "slice":
-                return proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.right, right.right, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.auxiliary, right.auxiliary, depth + 1)
-            if left.kind == "index-n":
-                return false if left.children_count == 0 or left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
-                return false if not proof_kernel_replay_child_range_valid(left.children_start, left.children_count, children.count) or not proof_kernel_replay_child_range_valid(right.children_start, right.children_count, children.count)
-                return false if not proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
-                for index in 0..<left.children_count |index, left, right, children, nodes, depth|:
-                    return false if not proof_kernel_replay_expr_equal(nodes, children, children[left.children_start + index], children[right.children_start + index], depth + 1)
-                return true
-            if left.kind == "if":
-                return proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.right, right.right, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.auxiliary, right.auxiliary, depth + 1)
-            if left.kind == "call":
-                return false if left.auxiliary != right.auxiliary or left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
-                return false if not proof_kernel_replay_child_range_valid(left.children_start, left.children_count, children.count) or not proof_kernel_replay_child_range_valid(right.children_start, right.children_count, children.count)
-                return false if not proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
-                for index in 0..<left.children_count |index, left, right, children, nodes, depth|:
-                    left_argument: usize = children[left.children_start + index]
-                    right_argument: usize = children[right.children_start + index]
-                    return false if not proof_kernel_replay_expr_equal(nodes, children, left_argument, right_argument, depth + 1)
-                    return false if left_argument >= nodes.count or right_argument >= nodes.count
-                    left_argument_node: ElisaProofKernelCore::ProofKernelNode = nodes[left_argument]
-                    right_argument_node: ElisaProofKernelCore::ProofKernelNode = nodes[right_argument]
-                    return false if left_argument_node.kind != "call_arg" or right_argument_node.kind != "call_arg" or left_argument_node.name != right_argument_node.name
-                return true
-            if left.kind == "array" or left.kind == "tuple" or left.kind == "set" or left.kind == "dict":
-                return false if left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
-                return false if not proof_kernel_replay_child_range_valid(left.children_start, left.children_count, children.count) or not proof_kernel_replay_child_range_valid(right.children_start, right.children_count, children.count)
-                for index in 0..<left.children_count |index, left, right, children, nodes, depth|:
-                    return false if not proof_kernel_replay_expr_equal(nodes, children, children[left.children_start + index], children[right.children_start + index], depth + 1)
-                return true
-            if left.kind == "construct" or left.kind == "record-update":
-                return false if left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
-                return false if not proof_kernel_replay_child_range_valid(left.children_start, left.children_count, children.count) or not proof_kernel_replay_child_range_valid(right.children_start, right.children_count, children.count)
-                return false if not proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1)
-                for index in 0..<left.children_count |index, left, right, children, nodes, depth|:
-                    return false if not proof_kernel_replay_expr_equal(nodes, children, children[left.children_start + index], children[right.children_start + index], depth + 1)
-                return true
-            if left.kind == "quantifier":
-                return left.name == right.name and left.secondary_name == right.secondary_name and proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, depth + 1) and proof_kernel_replay_expr_equal(nodes, children, left.right, right.right, depth + 1)
-            return false
+            pending: mutable darray[ProofKernelReplayExprPair] = [ProofKernelReplayExprPair{left: left_root, right: right_root, depth: depth}]
+            cursor: mutable usize = 0
+            while cursor < pending.count |cursor, pending, nodes, children|:
+                invariant true
+                pair: ProofKernelReplayExprPair = pending[cursor]
+                return false if pair.depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+                return false if not proof_kernel_replay_valid(nodes, pair.left) or not proof_kernel_replay_valid(nodes, pair.right)
+                left: ElisaProofKernelCore::ProofKernelNode = nodes[pair.left]
+                right: ElisaProofKernelCore::ProofKernelNode = nodes[pair.right]
+                return false if not proof_kernel_replay_arena_shape_valid(left) or not proof_kernel_replay_arena_shape_valid(right)
+                return false if left.kind != right.kind or left.operator != right.operator or left.kind == "unsupported"
+                leaf: (handled: bool, equal: bool) = proof_kernel_replay_expr_leaf_equal(left.kind, left.value, right.value, left.name, right.name)
+                return false if leaf.handled and not leaf.equal
+                if not leaf.handled:
+                    child_depth: usize = pair.depth + 1
+                    match left.kind:
+                        "field" | "scope" | "call_arg" | "field-init":
+                            return false if left.name != right.name
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
+                        "unary" | "move":
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
+                        "binary" | "index" | "dict_entry":
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.right, right.right, child_depth)
+                        "slice" | "if":
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.right, right.right, child_depth)
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.auxiliary, right.auxiliary, child_depth)
+                        "index-n" | "call" | "array" | "tuple" | "set" | "dict" | "construct" | "record-update":
+                            return false if left.children_count != right.children_count or left.children_count > children.count or right.children_count > children.count or left.children_start > children.count - left.children_count or right.children_start > children.count - right.children_count
+                            return false if left.kind == "index-n" and left.children_count == 0
+                            return false if left.kind == "call" and left.auxiliary != right.auxiliary
+                            if left.kind == "call" or left.kind == "index-n" or left.kind == "construct" or left.kind == "record-update":
+                                return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
+                            for index in 0..<left.children_count |index, left, right, children, nodes, pending, child_depth|:
+                                left_child: usize = children[left.children_start + index]
+                                right_child: usize = children[right.children_start + index]
+                                if left.kind == "call":
+                                    return false if left_child >= nodes.count or right_child >= nodes.count
+                                    left_argument: ElisaProofKernelCore::ProofKernelNode = nodes[left_child]
+                                    right_argument: ElisaProofKernelCore::ProofKernelNode = nodes[right_child]
+                                    return false if left_argument.kind != "call_arg" or right_argument.kind != "call_arg" or left_argument.name != right_argument.name
+                                return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left_child, right_child, child_depth)
+                        "quantifier":
+                            return false if left.name != right.name or left.secondary_name != right.secondary_name
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
+                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.right, right.right, child_depth)
+                        _:
+                            return false
+                cursor <- cursor + 1
+            return true
 
         def proof_kernel_replay_definitionally_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
             # This normalization follows only a finite chain of explicit identity rewrites. The

@@ -30,6 +30,7 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_facts_inconsistent_remaining",
     "proof_kernel_replay_facts_inconsistent",
     "proof_kernel_replay_expr_leaf_equal",
+    "proof_kernel_replay_expr_pair_enqueue",
     "proof_kernel_replay_constant_int",
     "proof_kernel_replay_constant_int_remaining",
     "proof_kernel_replay_scalar_kind",
