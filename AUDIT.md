@@ -6264,3 +6264,21 @@ The adjacent name-equality closure remains intentionally unverified for separate
 recursive collector still has unresolved resource-summary calls and crosses the fact-snapshot cap.
 This change does not claim equality-closure coverage; that collector needs its own bounded recursive
 proof-state treatment.
+
+### Verify equality-pinned arithmetic constants (2026-09-21)
+
+`proof_kernel_replay_pinned_constant` was unverified because its tuple-returning node lookups copied
+whole arena records at each step, leaving unsupported borrow-summary obligations. It now delegates
+to two exact-shape helpers: one accepts only a direct integer literal, and one accepts only an
+equality whose left side is the requested identifier and whose right side is a direct integer
+literal. The outer lookup preserves first-matching-fact order and still rejects every other shape.
+All three helpers are now verified by the standalone report; the replay count is 551/551 with zero
+gaps and no trusted assumptions. The full test matrix passes, including the optimized replay checks
+at O2 and O3, and the complete dogfood suite passes through the executable kernel, tactic, replay,
+and portable-script harnesses.
+
+The full dogfood run also exposed two self-contained executable fixtures that included
+`model.elisa` without its separate `model/findings.elisa` declaration. Stage1 rejected both with
+`unknown struct/type ProofFinding`. The fixtures now include the findings module in the same order
+as `src/main.elisa`; both compile, and the previously blocked tactic and summary-replay harnesses
+pass in the full dogfood run.
