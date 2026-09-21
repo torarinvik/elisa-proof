@@ -6101,3 +6101,13 @@ scalar-only aggregate. It proves and replays all 23 obligations, while the exist
 fixture still rejects escaping references, moved arguments, and a shared lend that overlaps a live
 mutable borrow. The unresolved evaluator failure therefore requires more than merely allowing a
 recursive shared borrow or aggregate result.
+
+### Rejected entry-fact cap increases (2026-09-21)
+
+For diagnosis, the entry-state-only fact cap was raised from 128 to 192. This raised the
+standalone report from 438 to 449 replayed certificates, but did not clear the evaluator's
+fact-snapshot-budget finding. A timed repeat peaked at 3,768,320,000 bytes RSS before it was
+stopped. Raising the cap to 256 was worse: the same audit reached about 1.7 GiB in five seconds.
+Both increases are rejected, and the committed cap remains 128. The next sound avenue is to
+reduce unnecessary entry witnesses or the recursive helper's live symbolic state, not widen this
+resource bound.
