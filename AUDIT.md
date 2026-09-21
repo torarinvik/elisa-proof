@@ -6249,3 +6249,18 @@ kind, reading only the fields needed in each branch. This preserves the rule tha
 reasoning applies only to a primitive `*` node and zero recognition applies only to integer zero.
 The standalone validator now requires both declarations verified. The standalone audit and full
 suite pass, with all certificates replayed and O2/O3 checks green.
+
+### Verify arithmetic binary operand destructors (2026-09-21)
+
+`proof_kernel_replay_binary_operands` and `proof_kernel_replay_negated_operand` were also
+body-unverified because they copied full records through `proof_kernel_replay_node_at` for small
+kind/operator tests. They now reject an invalid root before matching the arena node kind and
+return only the operand indices from the matching branch. The accepted shapes are unchanged:
+binary nodes must still match the requested operator, and unary nodes must still be `not`. Both
+helpers are now required verified by the standalone validator. The standalone audit and full suite
+pass with no replay gaps, including the optimized replay checks.
+
+The adjacent name-equality closure remains intentionally unverified for separate reasons: its
+recursive collector still has unresolved resource-summary calls and crosses the fact-snapshot cap.
+This change does not claim equality-closure coverage; that collector needs its own bounded recursive
+proof-state treatment.

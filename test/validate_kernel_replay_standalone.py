@@ -19,6 +19,8 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_peer_is_nameable",
     "proof_kernel_replay_zero_literal",
     "proof_kernel_replay_product_operands",
+    "proof_kernel_replay_binary_operands",
+    "proof_kernel_replay_negated_operand",
     "proof_kernel_replay_constant_int",
     "proof_kernel_replay_constant_int_remaining",
     "proof_kernel_replay_scalar_kind",
