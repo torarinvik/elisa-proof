@@ -6121,3 +6121,18 @@ remained unverified with the same findings. The experiment was reverted. A body-
 not account for witness dependencies introduced through call summaries and contracts, and
 running a recursive AST scan for every function is itself too costly. A viable reduction needs
 dependency-aware field selection and should run only for types whose eager witness set is large.
+
+### Constant evaluator: remove a redundant checked lookup (2026-09-21)
+
+`proof_kernel_replay_valid(nodes, root)` is exactly `root < nodes.count` (its implementation and
+postcondition both state that equivalence). `proof_kernel_replay_constant_int` already checked
+that bound before reading the node, so calling the predicate again and then calling
+`proof_kernel_replay_node_at` duplicated the same condition and introduced another borrow-bearing
+call. The evaluator now keeps the explicit early rejection and assert, then reads `nodes[root]`.
+This preserves malformed-root rejection and keeps the indexed read dominated by its guard.
+
+On the standalone replay fixture, coverage rose from 438/1,994 to 440/1,997 obligations; all 440
+certificates replay, with zero gaps and no semantic errors. The unsupported borrow-summary findings
+for this function fell from two to one. The recursive component is still not verified: the
+remaining borrow-summary finding and the fact-snapshot budget remain. Literal-constant and
+shared-borrow positive/adversarial regressions pass, as do optimized replay checks at O2 and O3.
