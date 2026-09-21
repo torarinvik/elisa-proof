@@ -12,6 +12,7 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_bool_set",
     "proof_kernel_replay_child_at",
     "proof_kernel_replay_child_range_valid",
+    "proof_kernel_replay_constant_leaf",
     "proof_kernel_replay_scalar_kind",
     "proof_kernel_replay_arena_shape_valid",
     "proof_kernel_replay_arena_child_kind_valid",

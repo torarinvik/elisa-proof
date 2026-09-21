@@ -6136,3 +6136,19 @@ certificates replay, with zero gaps and no semantic errors. The unsupported borr
 for this function fell from two to one. The recursive component is still not verified: the
 remaining borrow-summary finding and the fact-snapshot budget remain. Literal-constant and
 shared-borrow positive/adversarial regressions pass, as do optimized replay checks at O2 and O3.
+
+### Constant evaluator: isolate nonrecursive leaf cases (2026-09-21)
+
+The integer-literal and empty-array-`count` cases now live in
+`proof_kernel_replay_constant_leaf`. The recursive function dispatches only unary/binary nodes
+recursively and delegates all other kinds to this nonrecursive leaf checker. The leaf helper
+passes the arena and scalar node fields explicitly; its `nodes[left]` access remains guarded by
+`left < nodes.count`. This split verifies the leaf semantics independently and avoids carrying a
+node aggregate through the shared-borrow call.
+
+The standalone report now contains 2,004 obligations and 448 certificates (previously 1,997 and
+441); all 448 replay with zero gaps and no semantic errors. There is no remaining
+`borrow-call-summary-unsupported` finding for `proof_kernel_replay_constant_int`, and the leaf
+function itself is now required verified by the standalone validator. The recursive component
+still fails only with `control-flow-analysis-budget`; this split does not claim that evaluator is
+verified.
