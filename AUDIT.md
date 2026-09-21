@@ -6228,3 +6228,13 @@ both requested roots against `nodes.count` first, then reads only each guarded n
 place. It still declines non-integer nodes and delegates admitted comparisons to the verified
 constant comparison helper. The standalone validator now requires this helper to verify. The
 standalone audit has zero replay gaps, and the full suite passes, including O2/O3 replay.
+
+### Verify unsigned-order atom recognizers (2026-09-21)
+
+The standalone audit next identified two unverified replay helpers,
+`proof_kernel_replay_order_atom` and `proof_kernel_replay_peer_is_nameable`. Both copied full
+arena records through `proof_kernel_replay_node_at` merely to distinguish integer, identifier,
+and field nodes, which produced unsupported resource-summary obligations. They now pattern-match
+the guarded root discriminator and access only the needed fields in place; field bases are bounds
+checked before the second node read. The standalone validator requires both helpers to verify.
+The standalone replay audit and the full suite pass, with no replay gaps and O2/O3 checks green.

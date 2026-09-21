@@ -15,6 +15,8 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_constant_leaf",
     "proof_kernel_replay_constant_comparison",
     "proof_kernel_replay_direct_literal_comparison",
+    "proof_kernel_replay_order_atom",
+    "proof_kernel_replay_peer_is_nameable",
     "proof_kernel_replay_constant_int",
     "proof_kernel_replay_constant_int_remaining",
     "proof_kernel_replay_scalar_kind",
