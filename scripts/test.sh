@@ -2262,6 +2262,18 @@ if [[ "$rejected_product_sign_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A full-width unsigned literal is stored in the signed AST integer slot as its bit pattern. It
+# must not contradict the unsigned lower bound and make the bounded model vacuously prove a false
+# conclusion; ordinary unsigned reflexivity should remain provable.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; assert not functions["u64_max_does_not_imply_zero"]["verified"]; assert functions["u64_reflexive_equality_remains_provable"]["verified"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "u64_max_does_not_imply_zero" and f["status"] == "unknown" for f in report["findings"])'
+rejected_u64_max_conflict_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_u64_max_conflict_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a reinterpreted u64 maximum created a vacuous proof\n' >&2
+    exit 1
+fi
+
 # A lifetime parameter may be pinned to the caller's own frame: a caller local outlives any call
 # that borrows it. The frame is not a region with an extent, so both sides check the same thing in
 # its place — the actual is a place the caller holds outright.

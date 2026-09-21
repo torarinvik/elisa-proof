@@ -120,6 +120,36 @@ extend ElisaProofKernelReplay:
             for fact_root in facts:
                 orders.push(fact_root) if proof_kernel_replay_type_marker_callee(nodes, children, fact_root)
 
+        # The source parser preserves a full-width unsigned literal in the signed AST integer
+        # slot by reinterpreting its bits (for example, u64.max is stored as -1). The kernel term
+        # arena does not yet carry enough literal-sort information to distinguish that value from
+        # a signed integer. Never let that encoding mismatch create an empty signed interval and
+        # thereby a vacuous bounded-model proof for a machine-word unsigned expression.
+        def proof_kernel_replay_has_negative_integer_bit_pattern(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return true if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or root >= nodes.count
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return true if not located.known or not proof_kernel_replay_arena_shape_valid(located.node)
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return node.value < 0 if node.kind == "int"
+            if node.kind == "unary" or node.kind == "field" or node.kind == "index" or node.kind == "checked-index" or node.kind == "checked-get" or node.kind == "paren" or node.kind == "call_arg" or node.kind == "field-init":
+                return proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.left, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.right, depth + 1)
+            if node.kind == "binary":
+                return proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.left, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.right, depth + 1)
+            if node.kind == "if":
+                return proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.left, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.right, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.auxiliary, depth + 1)
+            if node.kind == "call" or node.kind == "index-n" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "construct":
+                return true if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                found: mutable bool = proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.left, depth + 1)
+                return true if found
+                for offset in 0..<node.children_count |offset, node, children, nodes, depth|:
+                    child: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start + offset)
+                    found <- true if not child.known or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, child.value, depth + 1)
+                    return true if found
+                return false
+            return false
+
         def proof_kernel_replay_unsigned_expression_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
@@ -128,6 +158,8 @@ extend ElisaProofKernelReplay:
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
             return false if not located.known
             node: ElisaProofKernelCore::ProofKernelNode = located.node
+            width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, depth + 1)
+            return false if width == ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS and proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, root, depth + 1)
             if node.kind == "unary":
                 return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
                 if node.operator == "-":
