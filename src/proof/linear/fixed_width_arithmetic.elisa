@@ -57,6 +57,53 @@ extend ElisaProof:
                 proof_add_lower(bounds, name, proof_signed_width_min(marker.width))
                 proof_add_upper(bounds, name, proof_signed_width_max(marker.width))
 
+        def proof_signed_guarded_subtraction_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&) -> bool:
+            match expression:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Minus
+                    width: i64 = proof_signed_width_in_expression(expression, facts)
+                    return false if width == 0 or proof_signed_width_in_expression(left, facts) != width or proof_signed_width_in_expression(right, facts) != width
+                    right_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
+                    return right_interval.has_lower and right_interval.lower >= 0 and proof_has_order_fact(right, left, false, facts)
+                _:
+                    return false
+
+        def proof_signed_nonnegative_sum_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            match expression:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus
+                    width: i64 = proof_signed_width_in_expression(expression, facts)
+                    return false if width == 0 or proof_signed_width_in_expression(left, facts) != width or proof_signed_width_in_expression(right, facts) != width
+                    left_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(left, bounds)
+                    right_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
+                    return false if not left_interval.has_lower or left_interval.lower < 0 or not right_interval.has_lower or right_interval.lower < 0
+                    witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(left, right, facts)
+                    bound_width: i64 = proof_signed_width_in_expression(witness.bound, facts)
+                    return witness.known and bound_width > 0 and bound_width <= width
+                _:
+                    return false
+
+        def proof_signed_increment_has_strict_peer(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            match expression:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus
+                    unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base(left, right)
+                    return false if not unit.known
+                    width: i64 = proof_signed_width_in_expression(unit.base, facts)
+                    return false if width == 0
+                    for fact in facts |unit, width, facts|:
+                        order: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_readable_order(fact, facts)
+                        continue if not order.known
+                        if order.operator == TokenKind.Lt and proof_expr_equal(order.left, unit.base):
+                            peer_width: i64 = proof_signed_width_in_expression(order.right, facts)
+                            return true if peer_width > 0 and peer_width <= width
+                        if order.operator == TokenKind.Gt and proof_expr_equal(order.right, unit.base):
+                            peer_width: i64 = proof_signed_width_in_expression(order.left, facts)
+                            return true if peer_width > 0 and peer_width <= width
+                _:
+                    pass
+            return false
+
         def proof_signed_expression_safe_with_bounds(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
@@ -85,7 +132,11 @@ extend ElisaProof:
                         # independently excluded by their witness/dispatch gates.
                         return not proof_scalar_term_witnessed(expression, facts, depth + 1)
                     interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
-                    return interval.has_lower and interval.has_upper and interval.lower >= proof_signed_width_min(width) and interval.upper <= proof_signed_width_max(width)
+                    return true if interval.has_lower and interval.has_upper and interval.lower >= proof_signed_width_min(width) and interval.upper <= proof_signed_width_max(width)
+                    return true if proof_signed_guarded_subtraction_safe(expression, facts, bounds)
+                    return true if proof_signed_nonnegative_sum_safe(expression, facts, bounds)
+                    return proof_signed_increment_has_strict_peer(expression, facts) if width > 0
+                    return false
                 Ast::Expr.If(condition, then_expression, else_expression, _):
                     return proof_signed_expression_safe_with_bounds(condition, facts, bounds, depth + 1) and proof_signed_expression_safe_with_bounds(then_expression, facts, bounds, depth + 1) and proof_signed_expression_safe_with_bounds(else_expression, facts, bounds, depth + 1)
                 Ast::Expr.Call(callee, arguments, _, _):

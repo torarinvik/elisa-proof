@@ -968,7 +968,7 @@ if [[ "$kernel_core_self_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: kernel core does not verify itself\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] for goal in report["goals"]); assert any(not goal["proven"] for goal in report["goals"])'
+run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] for goal in report["goals"]); assert any(not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_cycle_arena" for finding in report["findings"])'
 arena_cycle_probe_status=${PIPESTATUS[1]}
 if [[ "$arena_cycle_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: cyclic source-neutral arena was not rejected fail-closed\n' >&2
@@ -1189,6 +1189,14 @@ overloaded_counterexample_status=${PIPESTATUS[1]}
 set -e
 if [[ "$overloaded_counterexample_status" -ne 0 ]]; then
     printf 'proof test matrix failed: overloaded equality was evaluated with built-in counterexample semantics\n' >&2
+    exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_signed_overflow_model.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; assert not functions["signed_increment_is_strict"]["verified"]; assert functions["signed_increment_is_strict_when_safe"]["verified"]; assert any(f["name"] == "signed_increment_is_strict" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"])'
+signed_overflow_model_status=${PIPESTATUS[1]}
+set -e
+if [[ "$signed_overflow_model_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: signed machine-integer overflow was proved using mathematical arithmetic\n' >&2
     exit 1
 fi
 set +e
@@ -1962,7 +1970,7 @@ if [[ "$source_nested_branch_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound nested branch tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 2; assert any(fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_primitive_scalar_type" for fact in report["state"]["initial_facts"])'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 3; assert any(fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_primitive_scalar_type" for fact in report["state"]["initial_facts"]); assert any(fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_signed_type_bound" for fact in report["state"]["initial_facts"])'
 source_bound_script_status=${PIPESTATUS[0]}
 if [[ "$source_bound_script_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic script\n' >&2
@@ -1980,14 +1988,14 @@ if [[ "$source_bound_struct_rewrite_status" -ne 1 || "$source_bound_struct_rewri
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]; assert binding["goal_fingerprint"]["value"] == 3193966897 and binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert any(fact["kind"] == "call" and not fact.get("argument_names") for fact in report["state"]["initial_facts"])'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]; assert binding["goal_fingerprint"]["value"] == 2903951783 and binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert any(fact["kind"] == "call" and not fact.get("argument_names") for fact in report["state"]["initial_facts"])'
 repair_target_status=${PIPESTATUS[0]}
 if [[ "$repair_target_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic could not repair an open target\n' >&2
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_shifted.json" "$ROOT_DIR/examples/tactic_repair_target_shifted.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["goal_id"] == 2; assert binding["goal_fingerprint"]["value"] == 3193966897; assert binding["fingerprint_match"] is True'
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_shifted.json" "$ROOT_DIR/examples/tactic_repair_target_shifted.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["goal_id"] == 2; assert binding["goal_fingerprint"]["value"] == 2903951783; assert binding["fingerprint_match"] is True'
 shifted_repair_target_status=${PIPESTATUS[0]}
 if [[ "$shifted_repair_target_status" -ne 0 ]]; then
     printf 'proof test matrix failed: stable target proof did not survive unrelated source insertion\n' >&2
@@ -2066,7 +2074,7 @@ fi
 # Expression-level type witnesses: struct fields, container counts and elements to the declared
 # depth, const-enum values, and verified total-pure call results are witnessed by exact term.
 set +e
-run_json_report "$ROOT_DIR/examples/expression_witness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 43; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"range_binder_reflexive", "element_binder_reflexive", "field_element_binder_reflexive", "element_binder_congruence", "asserted_opaque_binding", "field_reflexive", "nested_field_reflexive", "field_through_reference", "element_reflexive", "count_reflexive", "multi_index_reflexive", "nested_index_reflexive", "field_congruence", "element_congruence", "local_field_reflexive", "const_enum_reflexive", "pure_call_reflexive", "bound_opaque_call"} <= names; witnesses = [fact for certificate in report["certificates"] for fact in certificate["facts"] if fact["kind"] == "call" and fact["callee"]["name"] in ("__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element")]; assert any(fact["arguments"][0]["kind"] == "field" for fact in witnesses); assert any(fact["callee"]["name"] == "__elisa_primitive_scalar_element" for fact in witnesses)'
+run_json_report "$ROOT_DIR/examples/expression_witness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 43; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"range_binder_reflexive", "element_binder_reflexive", "field_element_binder_reflexive", "element_binder_congruence", "asserted_opaque_binding", "field_reflexive", "nested_field_reflexive", "field_through_reference", "element_reflexive", "count_reflexive", "multi_index_reflexive", "nested_index_reflexive", "field_congruence", "element_equality_symmetry", "local_field_reflexive", "const_enum_reflexive", "pure_call_reflexive", "bound_opaque_call"} <= names; witnesses = [fact for certificate in report["certificates"] for fact in certificate["facts"] if fact["kind"] == "call" and fact["callee"]["name"] in ("__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element")]; assert any(fact["arguments"][0]["kind"] == "field" for fact in witnesses); assert any(fact["callee"]["name"] == "__elisa_primitive_scalar_element" for fact in witnesses)'
 expression_witness_status=${PIPESTATUS[1]}
 set -e
 if [[ "$expression_witness_status" -ne 0 ]]; then
@@ -2510,6 +2518,15 @@ sum_bound_status=${PIPESTATUS[1]}
 set -e
 if [[ "$sum_bound_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a guarded subtraction did not bound its own sum\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_signed_sum_wrap.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {(g["name"], g["rule"]): g["proven"] for g in report["goals"]}; assert goals[("negative_count_can_wrap_above_bound", "resource-safety")] is True; assert goals[("negative_count_can_wrap_above_bound", "goal")] is False; assert {finding["kind"] for finding in report["findings"]} == {"ensure-unproven"}'
+rejected_signed_sum_wrap_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_signed_sum_wrap_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: signed sum overflow escaped the guarded-sum rule\n' >&2
     exit 1
 fi
 

@@ -23,6 +23,8 @@ extend ElisaProofKernelReplay:
             node: ElisaProofKernelCore::ProofKernelNode = located.node
             if node.kind == "ident":
                 return proof_kernel_replay_signed_marker_width_for_term(nodes, children, facts, root)
+            if node.kind == "field":
+                return proof_kernel_replay_signed_marker_width_for_term(nodes, children, facts, root)
             if node.kind == "paren" or node.kind == "unary":
                 return proof_kernel_replay_signed_width_in_expression(nodes, children, facts, node.left, depth + 1)
             if node.kind == "binary":
@@ -40,6 +42,48 @@ extend ElisaProofKernelReplay:
                 continue if not marker.known
                 proof_kernel_replay_add_lower(bounds, marker.name, proof_kernel_replay_signed_width_min(marker.width))
                 proof_kernel_replay_add_upper(bounds, marker.name, proof_kernel_replay_signed_width_max(marker.width))
+
+        def proof_kernel_replay_signed_increment_has_strict_peer(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, width: i64, facts: darray[usize]) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known or located.node.kind != "binary" or located.node.operator != "+"
+            unit: (known: bool, base: usize) = proof_kernel_replay_unsigned_unit_increment_base(nodes, located.node.left, located.node.right)
+            return false if not unit.known or proof_kernel_replay_signed_width_in_expression(nodes, children, facts, unit.base, 0) != width
+            for fact in facts |unit, width, nodes, children, facts|:
+                fact_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+                continue if not fact_located.known or fact_located.node.kind != "binary"
+                relation: ElisaProofKernelCore::ProofKernelNode = fact_located.node
+                continue if relation.operator != "<" and relation.operator != ">"
+                continue if not proof_kernel_replay_primitive_comparison(nodes, children, facts, relation.left, relation.right)
+                peer: mutable usize = relation.right
+                matches: mutable bool = relation.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, relation.left, unit.base, 0)
+                if relation.operator == ">":
+                    matches <- proof_kernel_replay_expr_equal(nodes, children, relation.right, unit.base, 0)
+                    peer <- relation.left
+                continue if not matches
+                peer_width: i64 = proof_kernel_replay_signed_width_in_expression(nodes, children, facts, peer, 0)
+                return true if peer_width > 0 and peer_width <= width
+            return false
+
+        def proof_kernel_replay_signed_guarded_subtraction_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known or located.node.kind != "binary" or located.node.operator != "-"
+            width: i64 = proof_kernel_replay_signed_width_in_expression(nodes, children, facts, root, 0)
+            return false if width == 0 or proof_kernel_replay_signed_width_in_expression(nodes, children, facts, located.node.left, 0) != width or proof_kernel_replay_signed_width_in_expression(nodes, children, facts, located.node.right, 0) != width
+            right_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, located.node.right, bounds, 0)
+            return right_interval.has_lower and right_interval.lower >= 0 and proof_kernel_replay_has_order_fact(nodes, children, located.node.right, located.node.left, false, facts)
+
+        def proof_kernel_replay_signed_nonnegative_sum_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known or located.node.kind != "binary" or located.node.operator != "+"
+            width: i64 = proof_kernel_replay_signed_width_in_expression(nodes, children, facts, root, 0)
+            return false if width == 0 or proof_kernel_replay_signed_width_in_expression(nodes, children, facts, located.node.left, 0) != width or proof_kernel_replay_signed_width_in_expression(nodes, children, facts, located.node.right, 0) != width
+            left_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, located.node.left, bounds, 0)
+            right_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, located.node.right, bounds, 0)
+            return false if not left_interval.has_lower or left_interval.lower < 0 or not right_interval.has_lower or right_interval.lower < 0
+            witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness(nodes, children, located.node.left, located.node.right, facts)
+            return false if not witness.known
+            bound_width: i64 = proof_kernel_replay_signed_width_in_expression(nodes, children, facts, witness.bound, 0)
+            return bound_width > 0 and bound_width <= width
 
         def proof_kernel_replay_signed_expression_safe_with_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
@@ -68,7 +112,11 @@ extend ElisaProofKernelReplay:
                     return constant.known and constant.value >= ElisaProofKernelCore::PROOF_KERNEL_I64_MIN and constant.value <= ElisaProofKernelCore::PROOF_KERNEL_I64_MAX if constant.known
                     return not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, root, depth + 1)
                 interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, root, bounds, depth + 1)
-                return interval.has_lower and interval.has_upper and interval.lower >= proof_kernel_replay_signed_width_min(width) and interval.upper <= proof_kernel_replay_signed_width_max(width)
+                return true if interval.has_lower and interval.has_upper and interval.lower >= proof_kernel_replay_signed_width_min(width) and interval.upper <= proof_kernel_replay_signed_width_max(width)
+                return true if proof_kernel_replay_signed_guarded_subtraction_safe(nodes, children, root, facts, bounds)
+                return true if proof_kernel_replay_signed_nonnegative_sum_safe(nodes, children, root, facts, bounds)
+                return proof_kernel_replay_signed_increment_has_strict_peer(nodes, children, root, width, facts) if width > 0
+                return false
             if node.kind == "if":
                 return proof_kernel_replay_signed_expression_safe_with_bounds(nodes, children, node.left, facts, bounds, depth + 1) and proof_kernel_replay_signed_expression_safe_with_bounds(nodes, children, node.right, facts, bounds, depth + 1) and proof_kernel_replay_signed_expression_safe_with_bounds(nodes, children, node.auxiliary, facts, bounds, depth + 1)
             return true

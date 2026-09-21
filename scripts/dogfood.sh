@@ -2972,7 +2972,7 @@ assert report["source"]["complete"] is False
 assert report["source"]["admissible"] is True
 binding = report["source_goal_binding"]
 assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]
-assert binding["goal_fingerprint"]["value"] == 3193966897
+assert binding["goal_fingerprint"]["value"] == 2903951783
 assert binding["fingerprint_match"] is True
 assert report["tactic"]["certificate_replayed"] is True
 assert [step["action"] for step in report["state"]["trace"]] == ["rewrite", "decide"]
