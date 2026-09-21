@@ -6390,3 +6390,16 @@ the structural arity equality check and delegates span bounds to the helper, avo
 range-state in the main comparator. The standalone audit proves 604 certificates, replays 604/604
 with zero gaps, and reports zero semantic errors. The comparator itself remains unverified at
 65/64 control-flow steps; this narrows the remaining gap but does not close it.
+
+### Verify bounded structural equality (2026-09-21)
+
+The return-analysis work budget is now selected per function: the ordinary limit remains 64, while
+`proof_kernel_replay_expr_equal` gets a named 128-step analysis allowance. Lower tested limits of
+65 and 66 still refused at 66/65 and 67/66 respectively. This changes only
+verification-analysis completeness, not runtime/kernel behavior or proof rules; budget exhaustion
+still reports `unsupported`. The standalone report now verifies the comparator, and the trust
+validator requires that declaration to remain verified. The corpus remains `unsupported` overall;
+`proof_kernel_replay_fact_denies` and `proof_kernel_replay_facts_propositionally_inconsistent`
+still have unverified resource-summary dependencies. The run produced 605 certificates, replayed
+all 605 with zero gaps, had zero semantic errors, and passed the standalone trust validator. Existing
+kernel arena runtime probes exercise positive equality and reject unequal hidden node payloads.
