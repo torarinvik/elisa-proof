@@ -6483,3 +6483,14 @@ and the fallback for symbolic index expressions are unchanged; malformed roots s
 
 The stage1 build and full seven-test suite pass after the change. No resource-place shape was
 broadened and no replay shortcut was introduced.
+### Guard resource-parameter decoding (2026-09-22)
+
+`proof_kernel_replay_resource_parameters` now guards the root and each decoded child index before
+reading the arena directly. The old tuple lookups were replaced with one guarded root record and
+one guarded child record per loop iteration. The decoder still requires a resource-safety root,
+preserves the region-prefix/formal-binding ordering, rejects duplicate or malformed formals, and
+rejects region parameters after the formal prefix. Its output clearing and slot-count checks are
+unchanged.
+
+The stage1 build and full seven-test suite pass after this change; malformed child roots remain
+rejected before any arena read.
