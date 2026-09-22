@@ -6693,6 +6693,16 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Reduce simplifier lookup opacity (2026-09-22)
+
+`proof_kernel_replay_simplify` now reads its root directly after the existing depth and validity
+guard, then applies the unchanged arena-shape check. The simplifier's bounded rewrites, generated
+node construction, and conservative unknown result for malformed input are unchanged.
+
+The standalone audit increased from 770 to 772 proven certificates, replayed all 772 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Guard affine-peer roots before direct reads (2026-09-22)
 
 `proof_kernel_replay_affine_peer_safe_from_facts` now validates its candidate root before reading
