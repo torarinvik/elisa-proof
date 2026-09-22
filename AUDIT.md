@@ -6693,6 +6693,17 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Reduce resource-place lookup opacity (2026-09-22)
+
+`proof_kernel_replay_resource_place` now reads its root directly after the existing depth, bounds,
+and arena-validity guard. The prior tuple lookup was redundant; identifier, field, index, and
+indexed-container place recognition remain unchanged, and malformed roots still return an empty
+unknown place.
+
+The standalone audit increased from 767 to 769 proven certificates, replayed all 769 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Reduce fixed-width safety lookup opacity (2026-09-22)
 
 `proof_kernel_replay_signed_expression_safe_with_bounds` now reads its root directly after the
