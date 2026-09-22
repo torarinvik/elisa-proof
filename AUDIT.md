@@ -6693,6 +6693,16 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Guard signed increment-peer roots (2026-09-22)
+
+`proof_kernel_replay_signed_increment_has_strict_peer` now validates its candidate root before
+reading it directly. The increment shape, signed-width agreement, primitive peer comparisons, and
+strict-peer requirements are unchanged.
+
+The standalone audit increased from 811 to 813 proven certificates, replayed all 813 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
+
 ### Reduce interval lookup opacity (2026-09-22)
 
 `proof_kernel_replay_interval` now reads its nonconstant root directly after the existing depth,
