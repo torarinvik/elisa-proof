@@ -6693,6 +6693,16 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Guard signed subtraction roots (2026-09-22)
+
+`proof_kernel_replay_signed_guarded_subtraction_safe` now validates its root before reading it
+directly. The signed-width agreement, nonnegative-right-interval, and strict ordering-premise
+requirements are unchanged; malformed roots still return false.
+
+The standalone audit increased from 813 to 816 proven certificates, replayed all 816 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
+
 ### Guard signed increment-peer roots (2026-09-22)
 
 `proof_kernel_replay_signed_increment_has_strict_peer` now validates its candidate root before
