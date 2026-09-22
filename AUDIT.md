@@ -6693,6 +6693,16 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Reduce signed-fact lookup opacity (2026-09-22)
+
+`proof_kernel_replay_fact_contains_signed` now reads its already-validated fact root directly.
+Goal negation handling still uses its guarded lookup, while recursive negation, conjunction, and
+disjunction descent retain the same conservative semantics.
+
+The standalone audit increased from 774 to 776 proven certificates, replayed all 776 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Reduce bounds-collector lookup opacity (2026-09-22)
 
 `proof_kernel_replay_collect_bounds` now reads its root directly after the existing depth, bounds,
