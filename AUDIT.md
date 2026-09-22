@@ -6682,3 +6682,13 @@ shapes, recursive depth limits, or the unsupported-node fallbacks.
 The standalone audit increased from 748 to 750 proven certificates, replayed all 750 with zero
 gaps, and retained fail-closed malformed-input behavior. The full proof matrix and optimized O2/O3
 replay checks pass.
+
+### Reduce congruence disjunction lookup opacity (2026-09-22)
+
+`proof_kernel_replay_find_disjunction` now reads its root directly after the existing depth and
+validity guards. The disjunction search, conjunction descent, and malformed-root rejection are
+unchanged; this only removes a redundant bounded tuple copy from the congruence kernel path.
+
+The standalone audit increased from 750 to 753 proven certificates, replayed all 753 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
