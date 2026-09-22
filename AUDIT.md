@@ -6562,3 +6562,15 @@ compiler; it independently reached 1,518,720 KiB and stopped without a report.
 This confirms that the incomplete whole-source self-audit predates the latest replay cleanup. No
 full-source proof claim is made; the bounded kernel and optimized replay gates remain the
 authoritative evidence for the committed changes.
+### Verify recursive boolean constant folding with a bounded worker (2026-09-22)
+
+`proof_kernel_replay_constant_bool` exceeded the verifier's 64-fact snapshot budget because its
+recursive body carried a full `ProofKernelNode` record through the tuple lookup path. It now uses a
+small boolean leaf recognizer and a remaining-depth worker. The worker carries only the guarded
+node kind, operator, child index, and value needed for boolean literals and `not`, and rejects
+unknown roots or exhausted depth before descent. The public depth wrapper preserves the original
+limit and result semantics.
+
+The standalone kernel audit improved from 700 to 713 replayed certificates, with all 713 replayed
+and zero gaps; the boolean helper, worker, and leaf no longer emit audit findings. The stage1 build,
+full seven-test suite, and optimized O2/O3 replay checks pass.
