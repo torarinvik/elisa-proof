@@ -7072,3 +7072,14 @@ unchanged.
 The standalone audit increased from 850 to 853 proven certificates, replayed all 853 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Validate fact-summary equality operands before direct reads (2026-09-22)
+
+`proof_kernel_replay_fact_proves_call_summary` now validates both equality operands before reading
+them directly. This makes the arena dependency explicit while preserving the prior conservative
+behavior for malformed summaries and keeping call-summary matching limited to canonical call
+roots.
+
+The standalone audit increased from 853 to 857 proven certificates, replayed all 857 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
