@@ -6541,3 +6541,12 @@ proof-tier ordering are unchanged; child-specific lookups remain independently g
 
 The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass. No goal
 root can reach a direct arena read without the existing validity guard.
+### Guard boolean child dispatch in goal replay (2026-09-22)
+
+The unary-negation and conditional-case-split paths in `proof_kernel_replay_goal_depth` now check
+child indices before reading their arena nodes directly. Unknown children previously arrived at the
+same fail-closed result through tuple lookups; the explicit guards make that boundary visible while
+preserving boolean handling, conditional fact construction, recursive depth accounting, and the
+existing no-proof fallback.
+
+The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass.
