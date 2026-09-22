@@ -6584,3 +6584,14 @@ result that prevents an unsafe unsigned proof; no malformed term is treated as s
 The standalone kernel audit increased from 713 to 716 replayed certificates, all 716 replayed with
 zero gaps. The remaining control-flow budget finding is retained as an explicit incomplete audit,
 and the stage1 build, full seven-test suite, and optimized O2/O3 replay checks pass.
+### Guard bounded model evaluator roots (2026-09-22)
+
+`proof_kernel_replay_model_int` and `proof_kernel_replay_model_bool` already established depth,
+arena-root, and canonical validity guards before reading their roots. They now reuse those guarded
+entries directly instead of copying a full node through `proof_kernel_replay_node_at`. Integer
+overflow/division behavior, symbolic-name lookup, marker handling, partial Boolean truth tables,
+and unknown-result behavior are unchanged.
+
+The clean standalone audit improved from 716 to 720 replayed certificates, with all 720 replayed
+and zero gaps. The evaluators still have separate recursive resource/control-flow findings and are
+not claimed fully verified. Stage1, the seven-test suite, and optimized O2/O3 replay checks pass.
