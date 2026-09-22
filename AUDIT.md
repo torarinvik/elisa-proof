@@ -6474,3 +6474,12 @@ marked as a reference, with all slot bounds still checked before the flag read.
 
 The stage1 build and full seven-test suite pass after this change; malformed roots and untracked
 identifiers remain rejected.
+### Guard resource path-component replay (2026-09-22)
+
+`proof_kernel_replay_resource_path_component` already validated its path root and depth before
+reading it, but then copied the complete arena node through `proof_kernel_replay_node_at`. It now
+uses the guarded node directly. Field and constant-index components, recursive prefix traversal,
+and the fallback for symbolic index expressions are unchanged; malformed roots still fail closed.
+
+The stage1 build and full seven-test suite pass after the change. No resource-place shape was
+broadened and no replay shortcut was introduced.
