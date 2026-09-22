@@ -6442,3 +6442,15 @@ now replays all 6/6 certificates. Removing the temporary mixed-lend caller guard
 standalone corpus to 647 certificates, replays 647/647 with zero gaps, and removes the need for
 that conservative restriction. The guard and its now-unused helper were removed; malformed or
 region-bearing call arguments remain rejected by the recursive argument traversal.
+### Centralize bounded arena child admission (2026-09-22)
+
+`proof_kernel_replay_arena_push_children` repeated the same child-range validation, child-root
+lookup, and bounded work insertion in four node families. That duplication made the worklist
+admission logic harder to audit and increased the control-flow burden on the verifier. The shared
+operation now lives in the private `proof_kernel_replay_arena_push_child_range` helper. It retains
+the exact fail-closed order: validate the serialized range, reject an unknown child entry, then
+reject any work-budget overflow before accepting each child. The parent-specific branches still
+push their scalar operands in their original order and use the same depth.
+
+The stage1 build, seven-test Python suite, optimized replay checks, focused fixtures, and complete
+dogfood suite pass after the refactor. No proof verdict is relaxed and no replay gap is accepted.
