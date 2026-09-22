@@ -6693,6 +6693,16 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Reduce unsigned safety lookup opacity (2026-09-22)
+
+`proof_kernel_replay_unsigned_expression_safe` now reads its root directly after the existing
+depth, bounds, and validity guards. Recursive operand safety, machine-word negative-pattern
+rejection, interval reasoning, and conservative unsupported-operation fallbacks are unchanged.
+
+The standalone audit increased from 803 to 805 proven certificates, replayed all 805 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
+
 ### Guard shifted-unit roots and repin the installed stage1 frontend (2026-09-22)
 
 `proof_kernel_replay_shifted_unit_base` now validates its root before reading it directly. The
