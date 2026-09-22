@@ -6550,3 +6550,15 @@ preserving boolean handling, conditional fact construction, recursive depth acco
 existing no-proof fallback.
 
 The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass.
+### Revalidate bounded whole-source self-audit (2026-09-22)
+
+After the goal-depth replay cleanup, `scripts/audit_full_source.sh` was run from a clean process
+with the standard 1,500,000 KiB RSS watchdog. It reached 1,507,728 KiB after 49.21 seconds without
+emitting a JSON report. A controlled rerun with a 3,000,000 KiB ceiling reached 3,024,304 KiB after
+86.77 seconds and also emitted no report. To distinguish a new regression, the immediately
+preceding committed tree (`4cbb3b6`) was built in an isolated worktree with the same stage1
+compiler; it independently reached 1,518,720 KiB and stopped without a report.
+
+This confirms that the incomplete whole-source self-audit predates the latest replay cleanup. No
+full-source proof claim is made; the bounded kernel and optimized replay gates remain the
+authoritative evidence for the committed changes.
