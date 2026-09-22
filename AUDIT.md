@@ -7041,3 +7041,13 @@ unchanged.
 The standalone audit increased from 843 to 846 proven certificates, replayed all 846 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce fact-summary goal lookup opacity (2026-09-22)
+
+`proof_kernel_replay_fact_proves_call_summary` now reads its goal directly after the existing
+validity guard. The previous tuple lookup duplicated that arena proof; malformed goals still fail
+closed, and call-summary matching remains limited to canonical equality facts.
+
+The standalone audit increased from 846 to 848 proven certificates, replayed all 848 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
