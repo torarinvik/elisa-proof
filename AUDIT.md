@@ -6947,3 +6947,14 @@ redundant; invalid roots and nonmatching shapes still return the conservative un
 The standalone audit increased from 825 to 826 proven certificates, replayed all 826 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce quantifier replay lookup opacity (2026-09-22)
+
+`proof_kernel_replay_quantifier` now reads the quantifier root and its range directly after
+explicit validity checks. The previous bounded tuple lookups duplicated those arena proofs;
+invalid roots and non-quantifier shapes still fail closed, and quantifier witness handling is
+unchanged.
+
+The standalone audit increased from 826 to 828 proven certificates, replayed all 828 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
