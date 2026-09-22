@@ -6693,6 +6693,16 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Guard congruence seed scans before direct reads (2026-09-22)
+
+`proof_kernel_replay_congruence_has_seed` now validates each scanned root before reading it
+directly. The conjunction descent, inequality-under-negation handling, depth limit, and malformed
+root rejection remain unchanged.
+
+The standalone audit increased from 776 to 778 proven certificates, replayed all 778 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Reduce signed-fact lookup opacity (2026-09-22)
 
 `proof_kernel_replay_fact_contains_signed` now reads its already-validated fact root directly.
