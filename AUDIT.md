@@ -7051,3 +7051,13 @@ closed, and call-summary matching remains limited to canonical equality facts.
 The standalone audit increased from 846 to 848 proven certificates, replayed all 848 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce element-marker lookup opacity (2026-09-22)
+
+`proof_kernel_replay_element_marker` now reads its root directly after the existing bounds and
+validity guards. The previous tuple lookup duplicated that arena proof; malformed marker roots
+still fail closed, and scalar-element depth and width validation remain unchanged.
+
+The standalone audit increased from 848 to 850 proven certificates, replayed all 850 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
