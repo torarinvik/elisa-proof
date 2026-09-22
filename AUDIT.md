@@ -7061,3 +7061,14 @@ still fail closed, and scalar-element depth and width validation remain unchange
 The standalone audit increased from 848 to 850 proven certificates, replayed all 850 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce indexed-container path lookup opacity (2026-09-22)
+
+`proof_kernel_replay_indexed_container_path` now reads its expression directly after the existing
+depth and validity guards, then applies the arena-shape check to that node. The prior tuple lookup
+duplicated the arena proof; malformed paths still fail closed, and subscript collection remains
+unchanged.
+
+The standalone audit increased from 850 to 853 proven certificates, replayed all 853 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
