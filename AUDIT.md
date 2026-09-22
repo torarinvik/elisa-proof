@@ -6978,3 +6978,14 @@ fail closed, and the finite identity-normalization rules are unchanged.
 The standalone audit increased from 829 to 832 proven certificates, replayed all 832 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce resource-value lookup opacity (2026-09-22)
+
+`proof_kernel_replay_resource_value_term_has_no_region` now reads its root directly after the
+existing depth and bounds guards. The previous bounded tuple lookup duplicated that arena fact;
+malformed roots still fail closed, and the ownership/resource-region rejection rules are
+unchanged.
+
+The standalone audit increased from 832 to 835 proven certificates, replayed all 835 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
