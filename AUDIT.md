@@ -6420,13 +6420,25 @@ unverified because its formal metadata is not in this all-shared class.
 
 The previous lend predicate was too narrow: it required every callee formal to be an immutable
 shared reference, so a helper with shared aggregate inputs plus scalar indexes or depth bounds was
-still treated as opaque. The predicate now checks each formal independently: immutable shared
+still treated as opaque. At that point, the predicate checked each formal independently: immutable shared
 references are permitted, while non-reference formals must be target-reference-free and mutable
-references are rejected. To preserve the kernel's zero-gap invariant, summary-free mixed lends are
-still refused when the *caller* has a mutable reference capability; ordinary verified summary
-composition remains responsible for those frames. This closes the resource-summary gap for
+references were rejected. To preserve the kernel's zero-gap invariant, summary-free mixed lends
+were still refused when the *caller* had a mutable reference capability; ordinary verified summary
+composition was responsible for those frames. This closed the resource-summary gap for
 `proof_kernel_replay_fact_denies` without trusting a body summary or weakening replay. The
 standalone report now proves 638 certificates, replays 638/638 with zero gaps, and reports zero
 semantic errors; the writable-lend adversarial matrix also remains fully replay-covered. The
-mutable `proof_kernel_replay_add_signed_type_bounds` frame remains explicitly unsupported until
-mixed lend composition through mutable caller state is independently replayable.
+mutable `proof_kernel_replay_add_signed_type_bounds` frame was explicitly unsupported until the
+kernel traversal fix documented below.
+
+### Replay nested scalar calls in resource arguments (2026-09-22)
+
+The remaining replay gap was not an ownership failure. The kernel's no-region value traversal
+treated a call's callee head as a runtime value, so a scalar argument such as
+`proof_kernel_signed_width_min(marker.width)` looked up the function name as a resource binding
+and failed closed. Call arguments are the runtime values; the callee expression is syntax and is
+now skipped by that traversal. A focused bounds-composition fixture reproduces the former gap and
+now replays all 6/6 certificates. Removing the temporary mixed-lend caller guard then raises the
+standalone corpus to 647 certificates, replays 647/647 with zero gaps, and removes the need for
+that conservative restriction. The guard and its now-unused helper were removed; malformed or
+region-bearing call arguments remain rejected by the recursive argument traversal.
