@@ -6514,3 +6514,13 @@ permission, lifetime, and move checks remain unchanged.
 
 The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass. Invalid
 child roots remain rejected before any field is inspected.
+### Guard effect-row replay entries (2026-09-22)
+
+`proof_kernel_replay_effect_row_contains` and `proof_kernel_replay_effect_row_within` now use
+explicit root and member-index guards before direct arena reads. Their previous tuple lookups had
+the same bounds semantics, but obscured the proof obligations and copied full node records. The
+containment rule still skips unknown members, the nested-row rule still rejects them, and only
+`effect` nodes with matching names can satisfy containment.
+
+The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass. No effect
+row is admitted from an invalid root or malformed member.
