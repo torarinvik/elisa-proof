@@ -6693,6 +6693,17 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Reduce fixed-width safety lookup opacity (2026-09-22)
+
+`proof_kernel_replay_signed_expression_safe_with_bounds` now reads its root directly after the
+existing depth, validity, and bounds guard. The previous tuple lookup duplicated that established
+arena proof; recursive safety checks, interval checks, and unsupported-operation fallbacks remain
+unchanged, and malformed roots still return false.
+
+The standalone audit increased from 764 to 767 proven certificates, replayed all 767 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Reduce fixed-width arithmetic lookup opacity (2026-09-22)
 
 `proof_kernel_replay_signed_width_in_expression` now reads its root directly after the existing
