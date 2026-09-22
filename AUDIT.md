@@ -6659,3 +6659,16 @@ immutable snapshot used by this project; `ELISA_COMPILER_REV` now matches `9053f
 
 Rebuilding Elisa-Proof against the new snapshot passed the full proof matrix and optimized O2/O3
 replay checks. The standalone audit remains 731/731 replayed certificates with zero gaps.
+
+### Reduce difference-collector replay opacity (2026-09-22)
+
+`proof_kernel_replay_collect_differences` now reads its already-bounded root directly and checks
+the unary negation child bound before reading it. The previous lookup helper was semantically
+equivalent but forced full-node borrow summaries through this recursive arithmetic collector.
+No arithmetic rule or accepted arena shape changed; malformed or unknown children still fail
+closed.
+
+The standalone audit increased from 731 to 748 proven certificates, with all 748 certificates
+replayed and zero gaps. The remaining collector diagnostics are explicit conservative index and
+analysis-budget findings. The full proof matrix, stage1 build, and optimized O2/O3 replay checks
+pass.
