@@ -6693,6 +6693,17 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Reduce fixed-width arithmetic lookup opacity (2026-09-22)
+
+`proof_kernel_replay_signed_width_in_expression` now reads its root directly after the existing
+depth, validity, and bounds guard. The previous tuple lookup duplicated that established arena
+proof; recursive width propagation and disagreement rejection are unchanged, and malformed roots
+still return the conservative zero width.
+
+The standalone audit increased from 761 to 764 proven certificates, replayed all 764 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Guard congruence seed roots before direct reads (2026-09-22)
 
 `proof_kernel_replay_congruence_seed` now validates the root before reading it directly. The
