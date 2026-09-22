@@ -7030,3 +7030,14 @@ unchanged.
 The standalone audit increased from 840 to 843 proven certificates, replayed all 843 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce unsigned-width lookup opacity (2026-09-22)
+
+`proof_kernel_replay_unsigned_width_in_expression` now reads its root directly after the existing
+depth, bounds, and validity guards. The previous tuple lookup duplicated that arena proof;
+malformed expressions still return the conservative zero width, and width propagation is
+unchanged.
+
+The standalone audit increased from 843 to 846 proven certificates, replayed all 846 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
