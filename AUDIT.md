@@ -6649,3 +6649,13 @@ direct read, then rejects non-`dict_entry` nodes. This preserves the previous fa
 and lookup semantics while making the serialized-index boundary explicit. The standalone audit
 remains at 731 replayed certificates with zero gaps. Stage1, the full matrix, and optimized O2/O3
 replay checks pass.
+
+### Pin and verify the current stage1 compiler (2026-09-22)
+
+The compiler fixes in `Elisa-compiler` commit `9053f876` were verified by its field-access
+stage0/stage1 parity smoke and 388-case adversarial differential suite (zero mismatches and zero
+permissive stage1-only acceptances). Stage1 was rebuilt from that commit and installed as the
+immutable snapshot used by this project; `ELISA_COMPILER_REV` now matches `9053f876`.
+
+Rebuilding Elisa-Proof against the new snapshot passed the full proof matrix and optimized O2/O3
+replay checks. The standalone audit remains 731/731 replayed certificates with zero gaps.
