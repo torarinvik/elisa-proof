@@ -6532,3 +6532,12 @@ validation, effect-call kind check, and nested-row containment rule remain in th
 the change. Invalid roots therefore cannot reach a field access or become an admitted effect goal.
 
 The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass.
+### Reuse guarded goal roots during depth replay (2026-09-22)
+
+`proof_kernel_replay_goal_depth` already validates `goal_root` before searching facts and entering
+its proof tiers. It now reuses that guarded arena entry for the initial dispatch and later boolean
+connective handling instead of copying it through two tuple lookups. The recursive case-split and
+proof-tier ordering are unchanged; child-specific lookups remain independently guarded.
+
+The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass. No goal
+root can reach a direct arena read without the existing validity guard.
