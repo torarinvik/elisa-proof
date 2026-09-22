@@ -6692,3 +6692,14 @@ unchanged; this only removes a redundant bounded tuple copy from the congruence 
 The standalone audit increased from 750 to 753 proven certificates, replayed all 753 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
+
+### Reduce scalar congruence lookup opacity (2026-09-22)
+
+`proof_kernel_replay_scalar_term_witnessed` now reads its root directly after the existing
+depth, bounds, and validity guards. The previous tuple lookup was redundant and obscured the
+arena proof already established by `proof_kernel_replay_valid`; malformed roots still fail closed
+before any read, and the node-shape guard remains unchanged.
+
+The standalone audit increased from 753 to 756 proven certificates, replayed all 756 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
