@@ -7083,3 +7083,15 @@ roots.
 The standalone audit increased from 853 to 857 proven certificates, replayed all 857 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+## Monolithic self-audit scalability remains open (2026-09-22)
+
+The guarded full-source audit of `src/main.elisa` remains incomplete. The standard watchdog
+stopped the proof process at 1,521,504 KB RSS after 46.71 seconds without a JSON report. A
+diagnostic rerun with a 4,000,000 KB RSS ceiling reached 4,111,168 KB after 77.50 seconds and
+was again stopped before report emission. These are watchdog/resource outcomes, not proof
+verdicts; no self-verification claim is made from either run.
+
+The independent kernel replay matrix, adversarial malformed-arena checks, and deterministic dogfood
+probes remain the authoritative completed gates. The retained whole-program importer/summary
+scalability issue is still an explicit audit target.
