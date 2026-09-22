@@ -7009,3 +7009,13 @@ marker roots still fail closed, and the explicit protocol-marker shape checks re
 The standalone audit increased from 837 to 839 proven certificates, replayed all 839 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce bounds collector lookup opacity (2026-09-22)
+
+`proof_kernel_replay_collect_bounds` now reads a validated negated-comparison child directly after
+its explicit validity check. The previous tuple lookup duplicated that arena proof; malformed
+children still fail closed, and bound collection and negation handling remain unchanged.
+
+The standalone audit increased from 839 to 840 proven certificates, replayed all 840 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
