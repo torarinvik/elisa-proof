@@ -6595,3 +6595,13 @@ and unknown-result behavior are unchanged.
 The clean standalone audit improved from 716 to 720 replayed certificates, with all 720 replayed
 and zero gaps. The evaluators still have separate recursive resource/control-flow findings and are
 not claimed fully verified. Stage1, the seven-test suite, and optimized O2/O3 replay checks pass.
+### Guard bounded-model name collection roots (2026-09-22)
+
+`proof_kernel_replay_model_collect_names` now reuses its existing root validity guard for direct
+arena access instead of copying a full node through `proof_kernel_replay_node_at`. The collector
+still records only non-empty identifiers, deduplicates names, and descends only through unary and
+binary terms at the same bounded depth.
+
+The clean standalone audit improved from 720 to 723 replayed certificates, with all 723 replayed
+and zero gaps. Its recursive fact-budget finding remains explicit and unresolved. Stage1, the full
+seven-test suite, and optimized O2/O3 replay checks pass.
