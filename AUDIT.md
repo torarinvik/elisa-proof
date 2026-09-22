@@ -6605,3 +6605,13 @@ binary terms at the same bounded depth.
 The clean standalone audit improved from 720 to 723 replayed certificates, with all 723 replayed
 and zero gaps. Its recursive fact-budget finding remains explicit and unresolved. Stage1, the full
 seven-test suite, and optimized O2/O3 replay checks pass.
+### Guard negated-fact replay roots (2026-09-22)
+
+`proof_kernel_replay_fact_contains_negated` now reuses its existing root bounds and validity guards
+for direct arena access instead of copying a node through `proof_kernel_replay_node_at`. Its
+accepted shapes are unchanged: only `not` terms and conjunctions are traversed, and all recursive
+depth checks remain in force.
+
+The clean standalone audit improved from 723 to 726 replayed certificates, with all 726 replayed
+and zero gaps. The recursive fact-budget finding remains explicit and unresolved. Stage1, the full
+seven-test suite, and optimized O2/O3 replay checks pass.
