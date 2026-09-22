@@ -6968,3 +6968,13 @@ return the unchanged root conservatively, and substitution remains structurally 
 The standalone audit increased from 828 to 829 proven certificates, replayed all 829 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce definitional equality lookup opacity (2026-09-22)
+
+`proof_kernel_replay_definitionally_equal` now reads each operand directly after its corresponding
+validity guard. The previous tuple lookups duplicated those arena proofs; malformed operands still
+fail closed, and the finite identity-normalization rules are unchanged.
+
+The standalone audit increased from 829 to 832 proven certificates, replayed all 832 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
