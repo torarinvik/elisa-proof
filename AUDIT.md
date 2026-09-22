@@ -7107,6 +7107,22 @@ The dogfood suite also completed under the exact installed Stage0 revision pinne
 `ELISA_STAGE0_REV`. It passed deterministic standalone replay, cyclic-arena rejection, all
 malformed-input/resource tests, and the runtime kernel boundary harnesses.
 
+### Index source-kernel type declarations for proposition formation (2026-09-22)
+
+A current sampled profile showed repeated linear scans in `proof_source_kernel_alias_lookup` and
+`proof_source_kernel_named_type_lookup` during source-to-kernel proposition typing. The collected
+alias/struct/enum declarations now retain an FNV-1a name hash and are linked into the existing
+power-of-two bucket scheme. Hash matches are still confirmed by exact name equality; duplicates
+remain ambiguous, and incomplete/corrupt bucket chains fail closed. Empty declaration indexes
+remain valid and report names as absent.
+
+The full `scripts/test.sh` matrix passes, including accepted and rejected fixtures, the adversarial
+cyclic-arena case, and O2/O3 replay checks with no gaps. A final default build also proves
+`examples/verified.elisa` (8/8 obligations, zero semantic diagnostics). This change targets a
+profiled lookup hotspot; a controlled before/after timing or full-source RSS improvement has not
+yet been measured, so no performance magnitude is claimed. The separate monolithic audit remains
+above its RSS watchdog ceiling as recorded below.
+
 ## Monolithic self-audit scalability remains open (2026-09-22)
 
 The guarded full-source audit of `src/main.elisa` remains incomplete. The standard watchdog

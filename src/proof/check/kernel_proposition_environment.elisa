@@ -10,10 +10,14 @@ extend ElisaProof:
             name: sview
             target: Ast::Expr
             identity: usize
+            name_hash: u32
             is_alias: bool
 
         struct ProofSourceKernelTypeIndex:
             entries: mutable darray[ProofSourceKernelTypeEntry]
+            bucket_heads: mutable darray[usize]
+            next_indices: mutable darray[usize]
+            complete: mutable bool
 
         struct ProofSourceKernelFormationWorkspace:
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]
@@ -65,13 +69,13 @@ extend ElisaProof:
                 match declaration:
                     Ast::Decl.Alias(name, target, _):
                         return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
-                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: target, identity: 0, is_alias: true})
+                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: target, identity: 0, name_hash: proof_name_hash(name), is_alias: true})
                     Ast::Decl.Struct(name, _, _, _, _, _, position):
                         return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
-                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: Ast::Expr.Invalid, identity: position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, is_alias: false})
+                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: Ast::Expr.Invalid, identity: position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, name_hash: proof_name_hash(name), is_alias: false})
                     Ast::Decl.Enum(name, _, _, _, position):
                         return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
-                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: Ast::Expr.Invalid, identity: position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, is_alias: false})
+                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: Ast::Expr.Invalid, identity: position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, name_hash: proof_name_hash(name), is_alias: false})
                     Ast::Decl.Module(_, body, _):
                         return false if not proof_source_kernel_collect_type_index(&body, entries, depth + 1)
                     Ast::Decl.Scoped(body, _):
@@ -80,24 +84,71 @@ extend ElisaProof:
                         pass
             return true
 
+        def proof_source_kernel_build_type_index(entries: mutable darray[ProofSourceKernelTypeEntry]&) -> ProofSourceKernelTypeIndex:
+            index: mutable ProofSourceKernelTypeIndex = ProofSourceKernelTypeIndex{entries: entries, bucket_heads: [], next_indices: [], complete: false}
+            count: usize = entries.count
+            capacity: usize = proof_index_capacity(count)
+            if capacity == 0:
+                index.complete <- true
+                return index
+            index.bucket_heads.resize(capacity)
+            index.next_indices.resize(count)
+            for slot in 0..<capacity |slot, count|:
+                index.bucket_heads[slot] <- count
+            for entry in 0..<count |entry, index, capacity, count|:
+                hash: u32 = index.entries[entry].name_hash
+                slot: usize = (hash.i64() % capacity.i64()).usize()
+                index.next_indices[entry] <- index.bucket_heads[slot]
+                index.bucket_heads[slot] <- entry
+            index.complete <- true
+            return index
+
         def proof_source_kernel_alias_lookup(index: ProofSourceKernelTypeIndex, name: sview) -> (count: usize, target: Ast::Expr):
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if not index.complete
             count: mutable usize = 0
             target: mutable Ast::Expr = Ast::Expr.Invalid
-            for entry in index.entries |name, count, target|:
-                continue if not entry.is_alias or entry.name != name
-                count <- count + 1
-                target <- entry.target
+            capacity: usize = index.bucket_heads.count
+            return (0, Ast::Expr.Invalid) if capacity == 0 and index.entries.count == 0
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if capacity == 0 or index.next_indices.count != index.entries.count
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry_index: mutable usize = index.bucket_heads[slot]
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry_index > index.entries.count
+            steps: mutable usize = 0
+            while entry_index < index.entries.count and steps < index.entries.count |entry_index, steps, index, hash, name, count, target|:
+                entry: ProofSourceKernelTypeEntry = index.entries[entry_index]
+                if entry.name_hash == hash and entry.is_alias and entry.name == name:
+                    count <- count + 1
+                    target <- entry.target
+                entry_index <- index.next_indices[entry_index]
+                steps <- steps + 1
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry_index > index.entries.count
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if steps >= index.entries.count and entry_index < index.entries.count
             return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if count > 1
             return (count, target)
 
         def proof_source_kernel_named_type_lookup(index: ProofSourceKernelTypeIndex, name: sview) -> (count: usize, identity: usize):
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not index.complete
             count: mutable usize = 0
             identity: mutable usize = 0
-            for entry in index.entries |name, count, identity|:
-                continue if entry.is_alias or entry.name != name
-                count <- count + 1
-                identity <- entry.identity
-            return (2, 0) if count > 1
+            capacity: usize = index.bucket_heads.count
+            return (0, 0) if capacity == 0 and index.entries.count == 0
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if capacity == 0 or index.next_indices.count != index.entries.count
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry_index: mutable usize = index.bucket_heads[slot]
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index > index.entries.count
+            steps: mutable usize = 0
+            while entry_index < index.entries.count and steps < index.entries.count |entry_index, steps, index, hash, name, count, identity|:
+                entry: ProofSourceKernelTypeEntry = index.entries[entry_index]
+                if entry.name_hash == hash and not entry.is_alias and entry.name == name:
+                    count <- count + 1
+                    identity <- entry.identity
+                entry_index <- index.next_indices[entry_index]
+                steps <- steps + 1
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index > index.entries.count
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if steps >= index.entries.count and entry_index < index.entries.count
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if count > 1
             return (count, identity)
 
         def proof_source_kernel_type_head_name(expression: Ast::Expr, index: ProofSourceKernelTypeIndex, depth: usize) -> sview:
