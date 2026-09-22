@@ -6693,6 +6693,21 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Guard shifted-unit roots and repin the installed stage1 frontend (2026-09-22)
+
+`proof_kernel_replay_shifted_unit_base` now validates its root before reading it directly. The
+previous bounded lookup already rejected invalid roots; the explicit guard preserves fail-closed
+behavior while retaining the unit-increment and binary-addition rules unchanged.
+
+During the full gate, the provenance check also found that the installed immutable stage1 snapshot
+had advanced to compiler revision `c27443bf` while `ELISA_COMPILER_REV` still named `9053f876`.
+The compiler checkout was clean at the installed revision, so the proof frontend pin was advanced
+to `c27443bf` and the matched build was reverified.
+
+The standalone audit increased from 792 to 803 proven certificates, replayed all 803 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
+
 ### Guard unsigned nonnegative shape roots (2026-09-22)
 
 `proof_kernel_replay_unsigned_nonnegative_shape` now validates its goal root before reading it
