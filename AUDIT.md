@@ -7084,6 +7084,20 @@ The standalone audit increased from 853 to 857 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
 
+### Remove duplicate executable declaration storage (2026-09-22)
+
+`ProofFunctionTable` no longer retains a second `Ast::Decl` value for every executable function.
+Function collection records compact integer paths into the authoritative source declaration tree;
+the verification scheduler follows the checked path by nesting depth and retrieves the original
+body. Invalid paths fail closed, and the path includes module/scoped declaration indices rather
+than relying on a potentially ambiguous name-only lookup.
+
+The standalone report remains identical in proof content: 1,678 obligations, 857 proven
+certificates, 857 replayed certificates, zero replay gaps, and zero semantic errors. The complete
+proof matrix, including adversarial arena cases and optimized O2/O3 replay checks, passes under
+the matched stage1 snapshot. This reduces retained whole-program AST duplication without
+weakening verification or dropping report data.
+
 ## Monolithic self-audit scalability remains open (2026-09-22)
 
 The guarded full-source audit of `src/main.elisa` remains incomplete. The standard watchdog
