@@ -6615,3 +6615,13 @@ depth checks remain in force.
 The clean standalone audit improved from 723 to 726 replayed certificates, with all 726 replayed
 and zero gaps. The recursive fact-budget finding remains explicit and unresolved. Stage1, the full
 seven-test suite, and optimized O2/O3 replay checks pass.
+### Guard negative-fact replay roots and negated children (2026-09-22)
+
+`proof_kernel_replay_negative_fact` now reuses its existing root validity guard for direct arena
+access and explicitly bounds the child before reading a negated binary term. The recursive
+conjunction traversal, negation/operator matching, and pinned-operand comparisons are unchanged;
+unknown or malformed children still reject the fact.
+
+The clean standalone audit improved from 726 to 729 replayed certificates, with all 729 replayed
+and zero gaps. The larger recursive fact-budget finding remains explicit and unresolved. Stage1,
+the full seven-test suite, and optimized O2/O3 replay checks pass.
