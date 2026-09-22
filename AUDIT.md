@@ -6999,3 +6999,13 @@ fail closed, and the canonical compiler-generated marker shape checks remain unc
 The standalone audit increased from 835 to 837 proven certificates, replayed all 837 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce untrusted-operator marker lookup opacity (2026-09-22)
+
+`proof_kernel_replay_untrusted_operator_marker` now reads its root directly after the existing
+bounds and validity guards. The previous tuple lookup duplicated that arena proof; malformed
+marker roots still fail closed, and the explicit protocol-marker shape checks remain unchanged.
+
+The standalone audit increased from 837 to 839 proven certificates, replayed all 839 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
