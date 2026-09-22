@@ -6937,3 +6937,13 @@ classification remains unchanged.
 The standalone audit increased from 822 to 825 proven certificates, replayed all 825 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce tactic binary lookup opacity (2026-09-22)
+
+`proof_kernel_replay_tactic_binary` now reads its root directly after the existing validity guard
+and returns the explicitly known node on a matching binary operator. The prior tuple lookup was
+redundant; invalid roots and nonmatching shapes still return the conservative unknown result.
+
+The standalone audit increased from 825 to 826 proven certificates, replayed all 826 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
