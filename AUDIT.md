@@ -6574,3 +6574,13 @@ limit and result semantics.
 The standalone kernel audit improved from 700 to 713 replayed certificates, with all 713 replayed
 and zero gaps; the boolean helper, worker, and leaf no longer emit audit findings. The stage1 build,
 full seven-test suite, and optimized O2/O3 replay checks pass.
+### Guard negative-integer bit-pattern replay roots (2026-09-22)
+
+`proof_kernel_replay_has_negative_integer_bit_pattern` now uses the already-checked root index to
+read the arena node directly, then applies the same canonical shape validation before inspecting
+its value or descending. Invalid roots and malformed shapes still return the conservative `true`
+result that prevents an unsafe unsigned proof; no malformed term is treated as safe.
+
+The standalone kernel audit increased from 713 to 716 replayed certificates, all 716 replayed with
+zero gaps. The remaining control-flow budget finding is retained as an explicit incomplete audit,
+and the stage1 build, full seven-test suite, and optimized O2/O3 replay checks pass.
