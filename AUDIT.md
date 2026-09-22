@@ -6454,3 +6454,13 @@ push their scalar operands in their original order and use the same depth.
 
 The stage1 build, seven-test Python suite, optimized replay checks, focused fixtures, and complete
 dogfood suite pass after the refactor. No proof verdict is relaxed and no replay gap is accepted.
+### Guard resource type terms before recursive descent (2026-09-22)
+
+`proof_kernel_replay_resource_type_term` now checks the root index before reading the arena and
+matches the guarded node discriminator in place. It recursively follows only a non-empty `field`
+type qualifier; plain non-empty identifiers remain the only leaf form. This removes an unnecessary
+whole-record tuple lookup from a recursive kernel predicate without broadening the accepted shapes
+or weakening malformed-root rejection.
+
+The stage1 build and full seven-test suite pass after the change. Replay remains fail-closed for
+unknown roots and qualified type terms.
