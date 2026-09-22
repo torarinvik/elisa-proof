@@ -6693,6 +6693,17 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Guard unsigned-term classification roots (2026-09-22)
+
+`proof_kernel_replay_term_is_unsigned` now validates its root before the structural classification
+read. The prior lookup already rejected invalid roots; the explicit guard preserves that
+fail-closed behavior while retaining unsigned-marker, arithmetic-recursion, and place-marker
+semantics.
+
+The standalone audit increased from 778 to 781 proven certificates, replayed all 781 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Guard congruence seed scans before direct reads (2026-09-22)
 
 `proof_kernel_replay_congruence_has_seed` now validates each scanned root before reading it
