@@ -6625,3 +6625,13 @@ unknown or malformed children still reject the fact.
 The clean standalone audit improved from 726 to 729 replayed certificates, with all 729 replayed
 and zero gaps. The larger recursive fact-budget finding remains explicit and unresolved. Stage1,
 the full seven-test suite, and optimized O2/O3 replay checks pass.
+### Guard bounded-model fragment roots (2026-09-22)
+
+`proof_kernel_replay_bounded_model_fragment` now reuses its existing depth and arena-validity
+guards for direct root access after marker admission. The Boolean, connective, and scalar-witness
+fragment rules are unchanged. The audit now exposes a direct index-bound obligation rather than
+silently carrying the previous opaque borrow-summary path; both outcomes remain fail-closed and no
+new proof rule is admitted.
+
+The clean standalone audit improved from 729 to 731 replayed certificates, with all 731 replayed
+and zero gaps. Stage1, the full seven-test suite, and optimized O2/O3 replay checks pass.
