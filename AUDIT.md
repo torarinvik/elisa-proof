@@ -7019,3 +7019,14 @@ children still fail closed, and bound collection and negation handling remain un
 The standalone audit increased from 839 to 840 proven certificates, replayed all 840 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce unsigned indexed-path lookup opacity (2026-09-22)
+
+`proof_kernel_replay_unsigned_indexed_element_path` now reads its root directly after the existing
+depth and validity guards, then applies the arena-shape check to that node. The prior tuple lookup
+duplicated the arena proof; malformed paths still fail closed, and subscript accounting is
+unchanged.
+
+The standalone audit increased from 840 to 843 proven certificates, replayed all 843 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
