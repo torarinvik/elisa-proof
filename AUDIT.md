@@ -6504,3 +6504,13 @@ the allocation expression before accepting it as fresh and writable.
 
 The stage1 build, seven-test suite, and explicit optimized replay checks pass at both O2 and O3.
 Malformed allocation roots therefore remain rejected without relying on the tuple lookup helper.
+### Guard lend-region and formal replay entries (2026-09-22)
+
+`proof_kernel_replay_resource_lend` now bounds-checks each decoded region, actual, and formal child
+before reading the arena directly. The prior tuple lookups were replaced with guarded records while
+preserving the exact admission rules: region entries must be distinct active `param` mappings,
+actual/formal entries must have the expected resource node kinds and matching names, and all later
+permission, lifetime, and move checks remain unchanged.
+
+The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass. Invalid
+child roots remain rejected before any field is inspected.
