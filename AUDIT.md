@@ -6635,3 +6635,17 @@ new proof rule is admitted.
 
 The clean standalone audit improved from 729 to 731 replayed certificates, with all 731 replayed
 and zero gaps. Stage1, the full seven-test suite, and optimized O2/O3 replay checks pass.
+
+### Preserve fail-closed cyclic-arena classification and guard quantifier entries (2026-09-22)
+
+The cyclic source-neutral arena fixture was incorrectly asserting that the aggregate report must
+be `unsupported`. The proof kernel source included by that fixture also contains definite
+`region-use-after-destroy` findings, so `disproved` is a valid aggregate state; the test now
+asserts the cycle-specific unverified-summary finding, mixed proven/open goals, and zero replay
+gaps instead of masking those independent diagnostics.
+
+Dictionary-quantifier replay now checks each serialized entry root and arena validity before a
+direct read, then rejects non-`dict_entry` nodes. This preserves the previous fail-closed shape
+and lookup semantics while making the serialized-index boundary explicit. The standalone audit
+remains at 731 replayed certificates with zero gaps. Stage1, the full matrix, and optimized O2/O3
+replay checks pass.

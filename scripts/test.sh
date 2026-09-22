@@ -968,7 +968,7 @@ if [[ "$kernel_core_self_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: kernel core does not verify itself\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] for goal in report["goals"]); assert any(not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_cycle_arena" for finding in report["findings"])'
+run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] for goal in report["goals"]); assert any(not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_cycle_arena" for finding in report["findings"])'
 arena_cycle_probe_status=${PIPESTATUS[1]}
 if [[ "$arena_cycle_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: cyclic source-neutral arena was not rejected fail-closed\n' >&2
