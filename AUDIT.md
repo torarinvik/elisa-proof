@@ -7098,6 +7098,15 @@ proof matrix, including adversarial arena cases and optimized O2/O3 replay check
 the matched stage1 snapshot. This reduces retained whole-program AST duplication without
 weakening verification or dropping report data.
 
+The full-source watchdog still stops at its 1,500,000 KB RSS ceiling before report emission:
+88.37 seconds, measured peak 1,540,096 KB, and no JSON verdict. The measurement does not show a
+scalability improvement from this storage reduction; it remains a correct standalone memory
+reduction, while the dominant monolithic peak requires further profiling and a different fix.
+
+The dogfood suite also completed under the exact installed Stage0 revision pinned in
+`ELISA_STAGE0_REV`. It passed deterministic standalone replay, cyclic-arena rejection, all
+malformed-input/resource tests, and the runtime kernel boundary harnesses.
+
 ## Monolithic self-audit scalability remains open (2026-09-22)
 
 The guarded full-source audit of `src/main.elisa` remains incomplete. The standard watchdog
