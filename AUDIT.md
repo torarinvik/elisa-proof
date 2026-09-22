@@ -6693,6 +6693,16 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Guard unsigned nonnegative shape roots (2026-09-22)
+
+`proof_kernel_replay_unsigned_nonnegative_shape` now validates its goal root before reading it
+directly. The prior bounded lookup already rejected invalid roots; the explicit guard preserves
+fail-closed behavior while retaining the comparison-shape and unsigned-result rules unchanged.
+
+The standalone audit increased from 781 to 792 proven certificates, replayed all 792 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Guard unsigned-term classification roots (2026-09-22)
 
 `proof_kernel_replay_term_is_unsigned` now validates its root before the structural classification
