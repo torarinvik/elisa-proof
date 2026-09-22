@@ -6915,3 +6915,14 @@ before any read, and the node-shape guard remains unchanged.
 The standalone audit increased from 753 to 756 proven certificates, replayed all 756 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
+
+### Guard proposition-shape roots before direct reads (2026-09-22)
+
+`proof_kernel_replay_proposition_shape` now reads its root directly after the existing depth,
+bounds, and validity guards. The previous tuple lookup duplicated that established arena proof;
+malformed roots still fail closed before any read, and proposition-shape classification is
+unchanged.
+
+The standalone audit increased from 819 to 822 proven certificates, replayed all 822 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
