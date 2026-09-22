@@ -6958,3 +6958,13 @@ unchanged.
 The standalone audit increased from 826 to 828 proven certificates, replayed all 828 with zero
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass under the matched stage1 snapshot.
+
+### Reduce exact substitution lookup opacity (2026-09-22)
+
+`proof_kernel_replay_replace_exact` now reads its root directly after the existing depth, bounds,
+and validity guards. The prior tuple lookup duplicated that arena proof; malformed roots still
+return the unchanged root conservatively, and substitution remains structurally identical.
+
+The standalone audit increased from 828 to 829 proven certificates, replayed all 829 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass under the matched stage1 snapshot.
