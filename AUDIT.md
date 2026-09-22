@@ -7159,3 +7159,29 @@ hit its 10-minute timeout in the runtime package while the proof adversarial tes
 were concurrently consuming resources; the isolated rerun passed. The full-source self-audit still
 does not complete: the latest token-arena run hit the 1,500,000 KB watchdog at 75.78 seconds without
 a report, so full-source scalability remains open.
+
+### Give source-proposition scratch storage an explicit region (2026-09-22)
+
+The installed Stage0 compiler rejected the standalone `tactic_runtime.elisa` harness at the call
+to `proof_validate_propositions_in_declarations`, unable to infer the region for the nested
+formation workspace. Stage1 accepted the same harness. The checker now gives temporary
+source-kernel bindings, indexes, and formation arenas one explicit lexical region, with its size
+declared as `PROOF_SOURCE_KERNEL_WORKSPACE_ARENA_BYTES`; the region ends before source checking
+returns and none of that scratch storage is retained in the report. The workspace lifetime is
+threaded explicitly through recursive declaration, function, statement, and proposition
+validators. This makes the lifetime boundary visible instead of relying on Stage1's stronger
+inference.
+
+With the installed, provenance-checked Stage0, the proof executable rebuilt and proved
+`examples/verified.elisa` (8/8 obligations, all certificates replayed, zero gaps). The previously
+declined tactic runtime harness compiled, linked with its generated runtime, and exited successfully.
+The cyclic-arena dogfood report's first deterministic run completed far enough for the script to
+start its repeat; I interrupted the full matrix during that slow repeat, so the complete Stage0
+dogfood matrix is not claimed as passed. The proof-side unit/adversarial and O2/O3 matrix passed
+before this scratch-lifetime change; rerun the full dogfood matrix separately when its repeated
+large fixtures can complete.
+
+The underlying difference in automatic region inference between Stage0 and Stage1 is not yet fixed
+in the compiler; this proof-side change uses explicit, sound lifetime boundaries as a compatible
+workaround. A minimized compiler regression case for the broader inference discrepancy remains an
+open compiler audit item.
