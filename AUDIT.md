@@ -6464,3 +6464,13 @@ or weakening malformed-root rejection.
 
 The stage1 build and full seven-test suite pass after the change. Replay remains fail-closed for
 unknown roots and qualified type terms.
+### Guard direct resource-reference replay (2026-09-22)
+
+`proof_kernel_replay_resource_value_term_is_direct_reference` now rejects an out-of-range root or
+non-identifier directly from the guarded arena entry, then performs the existing resource lookup.
+It no longer copies a complete node through the tuple-returning accessor when only the identifier
+kind and name are needed. The accepted result is unchanged: the name must resolve to a binding
+marked as a reference, with all slot bounds still checked before the flag read.
+
+The stage1 build and full seven-test suite pass after this change; malformed roots and untracked
+identifiers remain rejected.
