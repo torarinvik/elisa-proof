@@ -7134,3 +7134,28 @@ verdicts; no self-verification claim is made from either run.
 The independent kernel replay matrix, adversarial malformed-arena checks, and deterministic dogfood
 probes remain the authoritative completed gates. The retained whole-program importer/summary
 scalability issue is still an explicit audit target.
+
+### Bound temporary parser-token lifetime and repair Stage0 scalar or-pattern lowering (2026-09-22)
+
+The CLI now allocates lexer tokens in a dedicated arena and releases that arena immediately after
+parsing. The parser-produced AST owns its nodes and borrows source text, not the temporary token
+array; the source buffer remains alive for the full proof run. Length-aware tokenization is
+preserved so embedded NUL bytes are not silently truncated. The kernel typing API also now carries
+the cached typing workspace's region explicitly, and the type-index builder takes its darray by
+value as required by Stage0's struct-literal rules.
+
+The installed Stage0 compiler previously rejected grouped scalar string alternatives, even though
+Stage1 accepts them and the proof assistant uses them. Stage0 now lowers `MatchOrPattern` as an
+ordered sequence of alternatives with a distinct next-failure block, including nested alternatives;
+empty alternatives branch to failure. Its regression test checks emitted IR. Compiler commit
+`8a50a9c174577789edaeb40498cc4e51493d577c` is the newly installed Stage0 revision and is pinned in
+`ELISA_STAGE0_REV`.
+
+Validation: Stage0 compiled the complete proof assistant and proved `examples/verified.elisa`
+(8/8 obligations, all 8 certificates replayed, zero gaps). The proof `scripts/test.sh` matrix passed,
+including accepted/rejected fixtures and O2/O3 replay checks. Compiler backend tests passed, and the
+slow compiler runtime package passed in isolation (423 seconds). An initial all-package compiler run
+hit its 10-minute timeout in the runtime package while the proof adversarial test and other builds
+were concurrently consuming resources; the isolated rerun passed. The full-source self-audit still
+does not complete: the latest token-arena run hit the 1,500,000 KB watchdog at 75.78 seconds without
+a report, so full-source scalability remains open.
