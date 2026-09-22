@@ -6524,3 +6524,11 @@ containment rule still skips unknown members, the nested-row rule still rejects 
 
 The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass. No effect
 row is admitted from an invalid root or malformed member.
+### Guard effect-goal replay roots (2026-09-22)
+
+`proof_kernel_replay_effect_goal` now bounds-checks the containment goal, declared effect row, and
+each effect-call entry before direct arena reads. The existing arena-shape validation, child-range
+validation, effect-call kind check, and nested-row containment rule remain in the same order after
+the change. Invalid roots therefore cannot reach a field access or become an admitted effect goal.
+
+The stage1 build, full seven-test suite, and optimized replay checks at O2 and O3 pass.
