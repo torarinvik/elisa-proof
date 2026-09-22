@@ -6693,6 +6693,17 @@ The standalone audit increased from 750 to 753 proven certificates, replayed all
 gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
 pass.
 
+### Reduce congruence collection lookup opacity (2026-09-22)
+
+`proof_kernel_replay_congruence_collect` now reads its root directly after the existing depth,
+bounds, and validity guards. The prior tuple lookup duplicated that established arena proof;
+malformed roots still fail closed before any read, while the shape check and term-closure rules
+remain unchanged.
+
+The standalone audit increased from 756 to 759 proven certificates, replayed all 759 with zero
+gaps, and retained fail-closed behavior. The full proof matrix and optimized O2/O3 replay checks
+pass.
+
 ### Reduce scalar congruence lookup opacity (2026-09-22)
 
 `proof_kernel_replay_scalar_term_witnessed` now reads its root directly after the existing
