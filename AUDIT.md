@@ -6672,3 +6672,13 @@ The standalone audit increased from 731 to 748 proven certificates, with all 748
 replayed and zero gaps. The remaining collector diagnostics are explicit conservative index and
 analysis-budget findings. The full proof matrix, stage1 build, and optimized O2/O3 replay checks
 pass.
+
+### Guard substitution roots before direct replay reads (2026-09-22)
+
+`proof_kernel_replay_substitute` now folds its depth, bounds, and validity checks before directly
+reading the root node. This removes a redundant bounded tuple lookup without changing substitution
+shapes, recursive depth limits, or the unsupported-node fallbacks.
+
+The standalone audit increased from 748 to 750 proven certificates, replayed all 750 with zero
+gaps, and retained fail-closed malformed-input behavior. The full proof matrix and optimized O2/O3
+replay checks pass.
