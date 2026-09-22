@@ -6494,3 +6494,13 @@ unchanged.
 
 The stage1 build and full seven-test suite pass after this change; malformed child roots remain
 rejected before any arena read.
+### Guard fresh region-allocation actual replay (2026-09-22)
+
+The `region-new` branch of `proof_kernel_replay_resource_call_actual` now bounds-checks its
+allocation root and reads the guarded allocation node directly. It retains every existing
+admission condition: the node must be a matching `resource-region-call-alloc`, the allocation must
+be recorded in the resource state, the region must be active, and an unadmitted arena must replay
+the allocation expression before accepting it as fresh and writable.
+
+The stage1 build, seven-test suite, and explicit optimized replay checks pass at both O2 and O3.
+Malformed allocation roots therefore remain rejected without relying on the tuple lookup helper.
