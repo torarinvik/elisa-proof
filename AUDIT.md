@@ -7185,3 +7185,27 @@ The underlying difference in automatic region inference between Stage0 and Stage
 in the compiler; this proof-side change uses explicit, sound lifetime boundaries as a compatible
 workaround. A minimized compiler regression case for the broader inference discrepancy remains an
 open compiler audit item.
+
+### Reuse source proposition-admission scratch and recheck the monolithic audit (2026-09-23)
+
+`ProofSourceKernelFormationWorkspace` now owns one replay-validation workspace for the complete
+source-formation pass instead of allocating one per function. Each proposition still calls the
+same validator, which resets every node's visitation, validity, and depth state before checking;
+only reusable allocation capacity crosses proposition boundaries. The Stage1 full proof matrix
+passes after this change, including the standalone replay audit, cyclic-arena rejection, and O2/O3
+replay checks. The focused float-alias/aggregate rejection fixtures and `examples/verified.elisa`
+also retain their prior results.
+
+The subsequent complete-source watchdog attempt used a 600-second time limit and a 4,000,000 KB
+RSS ceiling. It stopped at 230.18 seconds and 4,092,752 KB peak RSS before writing any JSON, so it
+is incomplete and supplies no self-verification result. A live sample earlier in that run showed
+semantic-table checking and the allocator dominating; `arena_take_free_block_chain` accounted for
+487 of 731 main-thread samples, with `Semantic.record_tuple_binding_spelling` and the or-pattern
+binding checks among the source-level frames. The sample was taken before the RSS peak, so it does
+not identify the later peak's exact allocation site. No controlled before/after performance claim
+is made.
+
+This run used the installed Stage1 binary and the proof build's pinned compiler snapshot at
+`c27443bf`, which matches the compiler repository's committed HEAD. The compiler worktree contains
+many uncommitted edits from concurrent work; they were not included in the proof build and were
+left untouched. Full-source scalability and complete assistant self-verification remain open.
