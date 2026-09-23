@@ -78,12 +78,19 @@ if sys.platform == "darwin":
         proc_pidinfo = None
 
 def sample_rss_kb(pid):
+    global proc_pidinfo, rss_monitor
     if proc_pidinfo is not None:
         task = ProcTaskInfo()
-        received = proc_pidinfo(pid, 4, 0, ctypes.byref(task), proc_taskinfo_size)
-        if received != proc_taskinfo_size:
-            return None
-        return task.resident_size // 1024
+        try:
+            received = proc_pidinfo(pid, 4, 0, ctypes.byref(task), proc_taskinfo_size)
+        except OSError:
+            received = -1
+        if received == proc_taskinfo_size:
+            return task.resident_size // 1024
+        # proc_pidinfo may be present but unavailable for this process under a sandbox.
+        # Fall back to ps instead of misclassifying a measurable process as unmonitorable.
+        proc_pidinfo = None
+        rss_monitor = "ps"
     try:
         rss_text = subprocess.check_output(
             ["ps", "-o", "rss=", "-p", str(pid)],
@@ -132,6 +139,13 @@ with open(stdout_path, "w", encoding="utf-8") as stdout, open(stderr_path, "w", 
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # Some macOS execution environments deny process-group signals even for a
+            # session leader; the directly spawned child remains ours to terminate.
+            try:
+                process.terminate()
+            except ProcessLookupError:
+                pass
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -139,6 +153,8 @@ with open(stdout_path, "w", encoding="utf-8") as stdout, open(stderr_path, "w", 
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                process.kill()
             process.wait()
     else:
         process.wait()
