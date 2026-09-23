@@ -7209,3 +7209,20 @@ This run used the installed Stage1 binary and the proof build's pinned compiler 
 `c27443bf`, which matches the compiler repository's committed HEAD. The compiler worktree contains
 many uncommitted edits from concurrent work; they were not included in the proof build and were
 left untouched. Full-source scalability and complete assistant self-verification remain open.
+
+### Traverse constructor type expressions in proof policy checks (2026-09-23)
+
+An AST-edge audit found that several proof-policy visitors matched `Expr.Construct` but discarded
+its `type_expression` child. This was inconsistent with expression equality and substitution,
+which already preserve that child, and could let nested syntax bypass conservative scans. The
+`old(...)`, supported-expression, executable-call, call, move, free-name, and call-graph visitors
+now inspect the constructor type expression. This keeps admission fail-closed for unsupported
+nested terms and ensures call-graph analysis does not silently omit a nested callable. Runtime
+effect walkers remain separate where the type expression is not executable.
+
+The installed Stage1 build succeeded. `old_state` and `verified` proved with all certificates
+replayed; constructor/aggregate/pattern-focused examples proved 53/53 obligations with no replay
+gaps; the audit harness passed 7/7 tests. The complete `scripts/test.sh` matrix also passed,
+including standalone replay validation, cyclic-arena rejection, and optimized O2/O3 replay checks.
+This targeted AST-edge fix does not close the monolithic full-source scalability or assistant
+self-verification gaps described above.
