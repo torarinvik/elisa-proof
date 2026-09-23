@@ -1006,6 +1006,10 @@ fi
 set -e
 if [[ "$optional_semantic_status" -eq 0 ]] || ! rg -F -q "$optional_semantic_diagnostic" "$optional_semantic_report"; then
     printf 'proof test matrix failed: optional payload comparison was not rejected by the frontend\n' >&2
+    if [[ -s "$optional_semantic_report" ]]; then
+        printf 'compiler output for the rejected-optional-result probe:\n' >&2
+        cat "$optional_semantic_report" >&2
+    fi
     exit 1
 fi
 set +e
