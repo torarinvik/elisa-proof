@@ -306,7 +306,7 @@ def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofRepo
 # One goal's bounded search, shared by the single-goal and whole-file repair modes. It reports only
 # what was tried and which candidate the *checked engine* accepted; it never reaches a verdict of
 # its own.
-def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool, searched: usize, actions: sview) can[Memory.Allocate, Abort.Panic]:
+def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool, searched: usize, actions: sview) can[Memory.Allocate, Memory.Release, Abort.Panic]:
     repair_state: mutable darray[u8] = []
     if goal_id < report.goal_attempts.count:
         repair_attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
@@ -322,7 +322,8 @@ def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool
     repaired: mutable bool = false
     searched: mutable usize = 0
     winning: mutable sview = ""
-    region repair_region(1048576):
+    candidate_arena: mutable Arena = zeroed
+    region repair_region(PROOF_TACTIC_WORKSPACE_ARENA_BYTES):
         repair_store: Ast::Node.Store[Local] = Ast::Node.Store(repair_region)
         in repair_store:
             if repair_state.count > 0:
@@ -331,26 +332,25 @@ def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool
                     candidate: sview = candidates[candidate_index]
                     script_text: mutable darray[u8] = []
                     proof_repair_push_script_json(&script_text, goal_id, candidate)
-                    candidate_arena: mutable Arena = zeroed
-                    parsed_candidate: JsonParseResult[candidate_arena] = json_parse_checked(&candidate_arena, sview(&script_text[0], 0, script_text.count.i64()))
+                    parsed_candidate: JsonParseResult[candidate_arena] = json_parse_checked(&candidate_arena, ElisaProofJson::bytes_range_ref(&script_text, 0, script_text.count))
                     continue if parsed_candidate.code != JsonErrorCode.OK
-                    parsed_state: JsonParseResult[candidate_arena] = json_parse_checked(&candidate_arena, sview(&repair_state[0], 0, repair_state.count.i64()))
+                    parsed_state: JsonParseResult[candidate_arena] = json_parse_checked(&candidate_arena, ElisaProofJson::bytes_range_ref(&repair_state, 0, repair_state.count))
                     continue if parsed_state.code != JsonErrorCode.OK
-                    candidate_empty: mutable darray[Ast::Expr] = []
-                    candidate_state: mutable ProofTacticState = proof_tactic_state(&candidate_empty, Ast::Expr.Invalid)
-                    candidate_scratch_empty: mutable darray[Ast::Expr] = []
-                    candidate_scratch: mutable darray[ProofTacticState] = []
+                    candidate_state: mutable ProofTacticState& @candidate_arena = proof_tactic_state_in_arena(&candidate_arena)
+                    candidate_scratch_empty: mutable darray[Ast::Expr] @candidate_arena = []
+                    candidate_scratch: mutable darray[ProofTacticState] @candidate_arena = []
                     for scratch_index in 0..<PROOF_REPAIR_SCRATCH_SLOT_COUNT |scratch_index, candidate_scratch_empty, candidate_scratch|:
                         candidate_scratch.push(proof_tactic_state(&candidate_scratch_empty, Ast::Expr.Invalid))
-                    candidate_tree: mutable ProofTacticJsonTree = ProofTacticJsonTree{states: [], left: [], right: [], has_branch: []}
-                    candidate_annotations: mutable darray[Ast::EnumAnnotation] = []
-                    candidate_result: ProofTacticJsonResult = proof_tactic_json_run_source(json_handle_from_result(parsed_candidate), json_handle_from_result(parsed_state), &candidate_annotations, &candidate_state, &candidate_tree, &candidate_scratch, report, goal_id)
+                    candidate_tree: mutable ProofTacticJsonTree& @candidate_arena = proof_tactic_tree_in_arena(&candidate_arena)
+                    candidate_annotations: mutable darray[Ast::EnumAnnotation] @candidate_arena = []
+                    candidate_result: ProofTacticJsonResult = proof_tactic_json_run_source(ElisaProofJson::from_result(parsed_candidate), ElisaProofJson::from_result(parsed_state), &candidate_annotations, candidate_state, candidate_tree, &candidate_scratch, report, goal_id)
                     searched <- searched + 1
                     # Solved by the engine is not enough: the certificate it produced must also
                     # replay against the kernel, exactly as a hand-written script must.
                     if candidate_result.valid and candidate_result.solved and candidate_result.kernel_replayed and candidate_result.certificate_replayed:
                         repaired <- true
                         winning <- candidate
+    arena_free(&candidate_arena)
     return (repaired, searched, winning)
 
 # One goal's entry in a whole-file repair report: what it is, whether a proposal survived the

@@ -331,10 +331,11 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         # JSON expression interchange used by --json and reparse it below in the fresh store.
         source_target_state: mutable darray[u8] = []
         source_script_arena: mutable Arena = zeroed
+        tactic_exit_status: mutable i64 = 1
         if script_source.count > 0:
-            source_script: JsonParseResult[source_script_arena] = json_parse_checked(&source_script_arena, sview(&script_source[0], 0, script_source.count.i64()))
+            source_script: JsonParseResult[source_script_arena] = json_parse_checked(&source_script_arena, ElisaProofJson::bytes_range_ref(&script_source, 0, script_source.count))
             if source_script.code == JsonErrorCode.OK:
-                source_target: (present: bool, valid: bool, goal_id: usize) = proof_tactic_json_target(json_handle_from_result(source_script))
+                source_target: (present: bool, valid: bool, goal_id: usize) = proof_tactic_json_target(ElisaProofJson::from_result(source_script))
                 if source_target.present and source_target.valid and source_target.goal_id < report.goal_attempts.count:
                     source_attempt: ProofGoalAttempt = report.goal_attempts[source_target.goal_id]
                     if source_attempt.facts_start <= report.certificate_facts.count and source_attempt.facts_count <= report.certificate_facts.count - source_attempt.facts_start:
@@ -345,11 +346,10 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
                         proof_push(&source_target_state, "],\"goal\":")
                         proof_push_json_expr(&source_target_state, source_attempt.goal)
                         proof_push(&source_target_state, "}")
-        region tactic_region(1048576):
+        region tactic_region(PROOF_TACTIC_WORKSPACE_ARENA_BYTES):
             store: Ast::Node.Store[Local] = Ast::Node.Store(tactic_region)
             in store:
-                empty: mutable darray[Ast::Expr] = []
-                tactic_state: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.Invalid)
+                tactic_state: mutable ProofTacticState& @source_script_arena = proof_tactic_state_in_arena(&source_script_arena)
                 tactic_result: mutable ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "proof script could not be read", tree_node: 0}
                 source_match: mutable bool = false
                 target_bound: mutable bool = false
@@ -358,17 +358,16 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
                 target_fingerprint_valid: mutable bool = false
                 target_fingerprint_match: mutable bool = true
                 target_previously_proven: mutable bool = false
-                script_arena: mutable Arena = zeroed
-                scratch_empty: mutable darray[Ast::Expr] = []
-                scratch_states: mutable darray[ProofTacticState] = []
+                scratch_empty: mutable darray[Ast::Expr] @source_script_arena = []
+                scratch_states: mutable darray[ProofTacticState] @source_script_arena = []
                 for scratch_index in 0..<PROOF_CLI_SCRATCH_SLOT_COUNT |scratch_index, scratch_empty, scratch_states|:
                     scratch_states.push(proof_tactic_state(&scratch_empty, Ast::Expr.Invalid))
-                tactic_tree: mutable ProofTacticJsonTree = ProofTacticJsonTree{states: [], left: [], right: [], has_branch: []}
+                tactic_tree: mutable ProofTacticJsonTree& @source_script_arena = proof_tactic_tree_in_arena(&source_script_arena)
                 if script_source.count > 0:
-                    parsed_script: JsonParseResult[script_arena] = json_parse_checked(&script_arena, sview(&script_source[0], 0, script_source.count.i64()))
+                    parsed_script: JsonParseResult[source_script_arena] = json_parse_checked(&source_script_arena, ElisaProofJson::bytes_range_ref(&script_source, 0, script_source.count))
                     if parsed_script.code == JsonErrorCode.OK:
-                        annotations: mutable darray[Ast::EnumAnnotation] = []
-                        target: (present: bool, valid: bool, goal_id: usize) = proof_tactic_json_target(json_handle_from_result(parsed_script))
+                        annotations: mutable darray[Ast::EnumAnnotation] @source_script_arena = []
+                        target: (present: bool, valid: bool, goal_id: usize) = proof_tactic_json_target(ElisaProofJson::from_result(parsed_script))
                         target_bound <- target.present
                         target_goal_id <- target.goal_id
                         target_previously_proven <- report.goal_attempts[target.goal_id].proven if target.present and target.valid and target.goal_id < report.goal_attempts.count
@@ -379,14 +378,14 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
                         if target.present:
                             if target.valid:
                                 if source_target_state.count > 0:
-                                    parsed_source_state: JsonParseResult[script_arena] = json_parse_checked(&script_arena, sview(&source_target_state[0], 0, source_target_state.count.i64()))
-                                    tactic_result <- proof_tactic_json_run_source(json_handle_from_result(parsed_script), json_handle_from_result(parsed_source_state), &annotations, &tactic_state, &tactic_tree, &scratch_states, report, target.goal_id) if parsed_source_state.code == JsonErrorCode.OK
+                                    parsed_source_state: JsonParseResult[source_script_arena] = json_parse_checked(&source_script_arena, ElisaProofJson::bytes_range_ref(&source_target_state, 0, source_target_state.count))
+                                    tactic_result <- proof_tactic_json_run_source(ElisaProofJson::from_result(parsed_script), ElisaProofJson::from_result(parsed_source_state), &annotations, tactic_state, tactic_tree, &scratch_states, report, target.goal_id) if parsed_source_state.code == JsonErrorCode.OK
                             else:
                                 tactic_result.valid <- false
                                 tactic_result.reason <- "target.goal_id must be an exact nonnegative integer"
                         else:
-                            tactic_result <- proof_tactic_json_run(json_handle_from_result(parsed_script), &annotations, &tactic_state, &tactic_tree, &scratch_states)
-                        declared_target_fingerprint: (present: bool, valid: bool, value: u32) = proof_tactic_json_target_fingerprint(json_handle_from_result(parsed_script))
+                            tactic_result <- proof_tactic_json_run(ElisaProofJson::from_result(parsed_script), &annotations, tactic_state, tactic_tree, &scratch_states)
+                        declared_target_fingerprint: (present: bool, valid: bool, value: u32) = proof_tactic_json_target_fingerprint(ElisaProofJson::from_result(parsed_script))
                         if declared_target_fingerprint.present:
                             target_fingerprint_match <- declared_target_fingerprint.valid and target.present and target.valid and target_fingerprint_valid and declared_target_fingerprint.value == target_goal_fingerprint
                             if not declared_target_fingerprint.valid:
@@ -395,7 +394,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
                             elif not target_fingerprint_match:
                                 tactic_result.valid <- false
                                 tactic_result.reason <- "target.goal_fingerprint does not match the imported kernel goal and hypotheses"
-                        declared: (present: bool, valid: bool, value: u32) = proof_tactic_json_source_fingerprint(json_handle_from_result(parsed_script))
+                        declared: (present: bool, valid: bool, value: u32) = proof_tactic_json_source_fingerprint(ElisaProofJson::from_result(parsed_script))
                         source_match <- not declared.present or declared.valid and declared.value == source_fingerprint
                         if declared.present and not declared.valid:
                             source_match <- false
@@ -409,10 +408,12 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
                         source_match <- false
                         tactic_result.reason <- "proof script is not valid JSON"
                 output: mutable darray[u8] = []
-                proof_push_json_tactic_result(&output, tactic_result, &tactic_state, &tactic_tree, source_bytes, source_fingerprint, source_status, source_admissible, source_match, target_bound, target_goal_id, target_goal_fingerprint, target_fingerprint_valid, target_fingerprint_match, target_previously_proven)
+                proof_push_json_tactic_result(&output, tactic_result, tactic_state, tactic_tree, source_bytes, source_fingerprint, source_status, source_admissible, source_match, target_bound, target_goal_id, target_goal_fingerprint, target_fingerprint_valid, target_fingerprint_match, target_previously_proven)
                 proof_write(output)
                 admitted: bool = proof_tactic_result_admitted(tactic_result, source_status, source_admissible, source_match, target_bound)
-                return 0 if admitted else 1
+                tactic_exit_status <- 0 if admitted else 1
+        arena_free(&source_script_arena)
+        return tactic_exit_status
     if json_output:
         json: mutable darray[u8] = []
         proof_push_json_report(&json, report, semantic_diagnostics, semantic_visible, semantic_errors, source_bytes, source_fingerprint)
