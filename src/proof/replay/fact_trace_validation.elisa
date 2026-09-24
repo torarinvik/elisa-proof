@@ -98,20 +98,22 @@ extend ElisaProof:
         def proof_replay_fact_trace_is_valid(report: mutable ProofReport&, trace: ProofFactTrace, owner: sview, depth: usize) -> bool:
             dependency_stack: mutable darray[sview] = [owner]
             active_certificates: mutable darray[usize] = []
-            return proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, depth, dependency_stack, active_certificates)
+            validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
+            return proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, depth, dependency_stack, active_certificates, validation_workspace)
 
-        def proof_replay_fact_is_traced_with_stack(report: mutable ProofReport&, fact: Ast::Expr, owner: sview, dependency_stack: darray[sview]&, active_certificates: darray[usize]&) -> bool:
+        def proof_replay_fact_is_traced_with_stack(report: mutable ProofReport&, fact: Ast::Expr, owner: sview, dependency_stack: darray[sview]&, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
             trace_index: mutable usize = proof_replay_fact_trace_head(report, owner)
-            while trace_index < report.fact_traces.count |trace_index, report, fact, owner, dependency_stack, active_certificates|:
+            while trace_index < report.fact_traces.count |trace_index, report, fact, owner, dependency_stack, active_certificates, validation_workspace|:
                 trace: ProofFactTrace = report.fact_traces[trace_index]
-                return true if proof_replay_expr_equal(trace.expression, fact) and proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack, active_certificates)
+                return true if proof_replay_expr_equal(trace.expression, fact) and proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack, active_certificates, validation_workspace)
                 trace_index <- proof_replay_trace_chain_next(report, trace_index)
             return false
 
         def proof_replay_fact_is_traced(report: mutable ProofReport&, fact: Ast::Expr, owner: sview) -> bool:
             dependency_stack: mutable darray[sview] = [owner]
             active_certificates: mutable darray[usize] = []
-            return proof_replay_fact_is_traced_with_stack(report, fact, owner, dependency_stack, active_certificates)
+            validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
+            return proof_replay_fact_is_traced_with_stack(report, fact, owner, dependency_stack, active_certificates, validation_workspace)
 
         # Certificates are not standalone propositions: each one must be the exact root emitted
         # for a successful goal attempt. Check both source-level fields and arena ranges before
@@ -143,7 +145,7 @@ extend ElisaProof:
                 return true if proof_replay_attempt_matches_certificate(report, attempt, certificate, certificate_index)
             return false
 
-        def proof_replay_certificate_with_stack[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate, certificate_index: usize, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&) -> bool:
+        def proof_replay_certificate_with_stack[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate, certificate_index: usize, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
             return false if not proof_replay_certificate_rule_valid(certificate.rule)
             return false if proof_replay_certificate_in_stack(active_certificates, certificate_index)
             return false if not report.kernel_arena_validated
@@ -165,25 +167,25 @@ extend ElisaProof:
                 fact: usize = report.kernel_certificate_facts[certificate.kernel_facts_start + index]
                 return false if fact >= report.kernel_nodes.count
                 facts.push(fact)
-            for fact in facts |fact, report, certificate, dependency_stack, next_active_certificates|:
-                return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, certificate.name, dependency_stack, false, next_active_certificates)
-            return false if certificate.rule == "resource-safety" and not proof_replay_resource_event_facts_with_owner(report, certificate.kernel_goal, certificate.name, dependency_stack, 0, next_active_certificates)
+            for fact in facts |fact, report, certificate, dependency_stack, next_active_certificates, validation_workspace|:
+                return false if not proof_replay_kernel_fact_root_is_traced_with_stack(report, fact, certificate.name, dependency_stack, false, next_active_certificates, validation_workspace)
+            return false if certificate.rule == "resource-safety" and not proof_replay_resource_event_facts_with_owner(report, certificate.kernel_goal, certificate.name, dependency_stack, 0, next_active_certificates, validation_workspace)
             # These public entry points independently admit every fact and the goal's reachable
             # graph. The report pass already admitted the complete arena before replay began;
             # its final pass re-admits any nodes appended by quantifier/rewrite replay. Using the
             # complete-arena entry points here would rescan every unrelated node for every
             # certificate, turning a large report into quadratic work.
-            return ElisaProofKernelReplay::proof_kernel_replay_resource_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "resource-safety"
-            return ElisaProofKernelReplay::proof_kernel_replay_structural_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "structural-safety"
-            return ElisaProofKernelReplay::proof_kernel_replay_effect_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "effect-containment"
-            return ElisaProofKernelReplay::proof_kernel_replay_checked_index_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-index"
-            return ElisaProofKernelReplay::proof_kernel_replay_checked_get_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal) if certificate.rule == "checked-get"
-            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, "forall", facts, certificate.kernel_goal) if certificate.rule == "quantifier-forall"
-            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, "exists", facts, certificate.kernel_goal) if certificate.rule == "quantifier-exists"
-            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report(&report.kernel_nodes, &report.kernel_children, report.kernel_nodes[certificate.kernel_goal].operator, facts, certificate.kernel_goal) if report.kernel_nodes[certificate.kernel_goal].kind == "quantifier"
-            return ElisaProofKernelReplay::proof_kernel_replay_goal_report(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal)
+            return ElisaProofKernelReplay::proof_kernel_replay_resource_report_with_workspace(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal, validation_workspace) if certificate.rule == "resource-safety"
+            return ElisaProofKernelReplay::proof_kernel_replay_structural_report_with_workspace(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal, validation_workspace) if certificate.rule == "structural-safety"
+            return ElisaProofKernelReplay::proof_kernel_replay_effect_report_with_workspace(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal, validation_workspace) if certificate.rule == "effect-containment"
+            return ElisaProofKernelReplay::proof_kernel_replay_checked_index_report_with_workspace(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal, validation_workspace) if certificate.rule == "checked-index"
+            return ElisaProofKernelReplay::proof_kernel_replay_checked_get_report_with_workspace(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal, validation_workspace) if certificate.rule == "checked-get"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_with_workspace(&report.kernel_nodes, &report.kernel_children, "forall", facts, certificate.kernel_goal, validation_workspace) if certificate.rule == "quantifier-forall"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_with_workspace(&report.kernel_nodes, &report.kernel_children, "exists", facts, certificate.kernel_goal, validation_workspace) if certificate.rule == "quantifier-exists"
+            return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_with_workspace(&report.kernel_nodes, &report.kernel_children, report.kernel_nodes[certificate.kernel_goal].operator, facts, certificate.kernel_goal, validation_workspace) if report.kernel_nodes[certificate.kernel_goal].kind == "quantifier"
+            return ElisaProofKernelReplay::proof_kernel_replay_goal_report_with_workspace(&report.kernel_nodes, &report.kernel_children, facts, certificate.kernel_goal, validation_workspace)
 
-        def proof_replay_certificate[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate, certificate_index: usize) -> bool:
+        def proof_replay_certificate[@r](report: mutable ProofReport& @r, certificate: ProofGoalCertificate, certificate_index: usize, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
             dependency_stack: mutable darray[sview] = [certificate.name]
             active_certificates: mutable darray[usize] = []
-            return proof_replay_certificate_with_stack(report, certificate, certificate_index, dependency_stack, 0, active_certificates)
+            return proof_replay_certificate_with_stack(report, certificate, certificate_index, dependency_stack, 0, active_certificates, validation_workspace)
