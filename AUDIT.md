@@ -7250,3 +7250,30 @@ showed repeated semantic-front-end walks and `Semantic.pma_selective_imports` as
 hotspots, rather than an unbounded return-checker snapshot allocation. This is not a completed
 self-audit or a controlled before/after timing result. Full-source verification remains open, and
 the compiler semantic-import hotspot is a separate optimization/fix candidate.
+
+### Revalidate string-view region dependencies on the current Stage1 (2026-09-25)
+
+The region rule for string views is that `sview` is always non-null and backed by a valid
+string, while `sview?` represents absence. A present view also carries a dependency on the
+region that owns its bytes; that region must remain alive through every possible use of the
+view. Destroying the region after the view's last use is valid. This is a lifetime guarantee,
+not a promise that the backing storage remains alive indefinitely.
+
+The Stage1 freshness guard passed before testing. The Stage0/Stage1
+`runtime_string_view_safety_smoke.sh` passed: both compilers reject null-backed views and
+mutable lengths, fail closed on malformed lengths, reject a copied view used after its region
+is destroyed, and accept a view whose last use precedes destruction. The broader
+`destroyed_view_lifetime_smoke.sh` passed on Stage1 at both O0 and O2. It exercises direct and
+optional views, generic wrappers, JSON and region-pool handles, copied and rebound arena
+aliases, branch joins, closures/callbacks, nested value expressions, resets/frees, and live,
+last-use-before-destroy, and shadowed-region controls. No stale use was accepted, and no
+unexpected diagnostic or optimizer-only discrepancy was observed in these regressions.
+
+The proof build remains pinned to compiler revision `b05fef415da0f29351314b9b68d70be61c254784`;
+the Stage0 freshness check identifies bootstrap revision
+`c447c2ce0c68d1aacd64fa8c4a1d6deece01f344`. Focused proof fixtures on that pinned build
+continue to pass with zero replay gaps. The latest complete-source watchdog still timed out
+after 600 seconds without producing a report (peak RSS 2,423,664 KB), so this verifies these
+region-lifetime cases, not all proof-assistant code or the assistant's ability to verify itself.
+Full-source scalability and end-to-end self-verification remain open. Concurrent uncommitted
+compiler edits were not changed or included in the proof project's pinned source snapshot.
