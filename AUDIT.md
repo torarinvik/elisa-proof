@@ -7226,3 +7226,27 @@ gaps; the audit harness passed 7/7 tests. The complete `scripts/test.sh` matrix 
 including standalone replay validation, cyclic-arena rejection, and optimized O2/O3 replay checks.
 This targeted AST-edge fix does not close the monolithic full-source scalability or assistant
 self-verification gaps described above.
+
+### Bound control-flow exploration before branch snapshots (2026-09-24)
+
+The return checker could exhaust its per-function control-flow budget only after copying match,
+if, recovery, or loop states. Some paths also kept cloning branch state or attempted postconditions
+after a recursive walk had already been abandoned. The checker now preflights branch/loop
+snapshots, charges match-arm expansion to the work budget, and stops branch joins and postcondition
+attempts as soon as the budget is reported. Every cutoff leaves the flow invalid/unsupported; it
+cannot turn the placeholder terminal state into a verified return.
+
+The proof build is pinned to compiler commit `b65ca3f75bbf6d396f0bfcf4dc566182342339e3`. Its
+Stage1 product was rebuilt from the fresh, provenance-matched Stage0 revision
+`c447c2ce0c68d1aacd64fa8c4a1d6deece01f344`; the Stage1 freshness gate and the Stage0/Stage1
+string-view lifetime, representation, and runtime-safety smokes passed. Focused proof examples
+retained their expected outcomes, including `indexed_frame` now proving 11/11 obligations with no
+replay gaps; negative loop, impure-match, and stale-branch fixtures still fail with zero replay
+gaps. Source-length and diff checks also pass.
+
+The complete-source watchdog ran for 600 seconds with a 6,000,000 KB ceiling and emitted no JSON;
+peak RSS was 2,272,560 KB. A separate 240-second profile run peaked at 1,307,904 KB. Its samples
+showed repeated semantic-front-end walks and `Semantic.pma_selective_imports` as the active
+hotspots, rather than an unbounded return-checker snapshot allocation. This is not a completed
+self-audit or a controlled before/after timing result. Full-source verification remains open, and
+the compiler semantic-import hotspot is a separate optimization/fix candidate.

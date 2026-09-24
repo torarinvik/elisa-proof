@@ -3,6 +3,14 @@ extend ElisaProof:
         def proof_check_return_loops(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[sview]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
             match statement:
                 Ast::Stmt.While(condition, while_body, position):
+                    # The containing statement has consumed one analysis step already. If that
+                    # reaches the function budget, refuse the loop here, before any iteration
+                    # state is cloned or any loop-body work is launched.
+                    if not proof_return_analysis_budget_available(facts, names, values, report, name, position.line):
+                        report.proof_obligation(false)
+                        flow.normal <- true
+                        flow.valid <- false
+                        return true
                     # A loop without an invariant is not treated as verified. With one,
                     # establish and check preservation on the one symbolic iteration.
                     invariants: darray[Ast::Expr] = proof_contracts(while_body, "invariant")
@@ -43,6 +51,10 @@ extend ElisaProof:
                             for entry_condition in entry_conditions |unchecked_loop_facts, unchecked_loop_names, unchecked_loop_values, report, name, position|:
                                 proof_add_traced_fact(&unchecked_loop_facts, report, proof_substitute(entry_condition, unchecked_loop_names, unchecked_loop_values), "loop-condition", position.line, name)
                             proof_check_returns(while_body, &unchecked_loop_names, &unchecked_loop_values, &unchecked_loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &loop_body_flow)
+                        if report.return_analysis_budget_reported:
+                            flow.normal <- true
+                            flow.valid <- false
+                            return true
                     else:
                         established_invariants: mutable darray[Ast::Expr] = []
                         for invariant in invariants |report, name, facts, names, values, condition, while_body, position, established_invariants|:
@@ -76,6 +88,10 @@ extend ElisaProof:
                             proof_replace_names(&loop_end_names, loop_names)
                             proof_replace_exprs(&loop_end_values, loop_values)
                             proof_replace_exprs(&loop_end_facts, loop_facts)
+                        if report.return_analysis_budget_reported:
+                            flow.normal <- true
+                            flow.valid <- false
+                            return true
                         loop_exit_valid <- false if not loop_body_flow.valid
                         if loop_body_flow.normal:
                             for invariant in invariants |report, name, loop_end_facts, loop_end_names, loop_end_values|:
@@ -146,6 +162,10 @@ extend ElisaProof:
                             proof_replace_exprs(&termination_facts, termination_end_facts)
                         else:
                             proof_check_returns(while_body, &termination_names, &termination_values, &termination_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", empty_control_invariants, loop_scope_count, &termination_flow)
+                        if report.return_analysis_budget_reported:
+                            flow.normal <- true
+                            flow.valid <- false
+                            return true
                         termination_paths_valid: mutable bool = true
                         if loop_body_flow.continues:
                             # The termination pass must expose one exact state for every
@@ -199,6 +219,13 @@ extend ElisaProof:
                         proof_forget_values(names, values, position)
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                 Ast::Stmt.For(bind, variables, iterable, for_body, position):
+                    # `for` and `parallel for` both snapshot symbolic state below. Enforce the
+                    # same budget before either path allocates those snapshots.
+                    if not proof_return_analysis_budget_available(facts, names, values, report, name, position.line):
+                        report.proof_obligation(false)
+                        flow.normal <- true
+                        flow.valid <- false
+                        return true
                     # `parallel for` is not an ordinary sequential loop. The compiler checks
                     # its pool grant and cross-thread capture rules, but this proof state does
                     # not yet model worker isolation, reduction ownership, or the join. Check
@@ -222,6 +249,10 @@ extend ElisaProof:
                         parallel_body_flow: mutable ProofFlow = proof_empty_flow()
                         empty_parallel_invariants: mutable darray[Ast::Expr] = []
                         proof_check_returns(for_body, &parallel_names, &parallel_values, &parallel_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", empty_parallel_invariants, 0, &parallel_body_flow)
+                        if report.return_analysis_budget_reported:
+                            flow.normal <- true
+                            flow.valid <- false
+                            return true
                         flow.valid <- false if not parallel_body_flow.valid
                         if not parallel_body_flow.normal or parallel_body_flow.breaks or parallel_body_flow.continues:
                             flow.valid <- false
@@ -269,6 +300,10 @@ extend ElisaProof:
                         else:
                             proof_forget_loop_entry(for_names, &for_values, &for_facts, for_body, functions, frame_parameters, report, name, position)
                             proof_check_returns(for_body, &for_names, &for_values, &for_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", empty_for_invariants, 0, &for_body_flow)
+                        if report.return_analysis_budget_reported:
+                            flow.normal <- true
+                            flow.valid <- false
+                            return true
                         flow.valid <- false if not for_body_flow.valid
                         if proof_body_may_modify(for_body):
                             proof_forget_values(names, values, Ast::expr_pos(iterable))
@@ -313,6 +348,10 @@ extend ElisaProof:
                             proof_replace_names(&loop_end_names, for_names)
                             proof_replace_exprs(&loop_end_values, for_values)
                             proof_replace_exprs(&loop_end_facts, loop_facts)
+                        if report.return_analysis_budget_reported:
+                            flow.normal <- true
+                            flow.valid <- false
+                            return true
                         loop_exit_valid <- false if not for_body_flow.valid
                         if invariant_scope_valid and for_body_flow.normal:
                             for invariant in invariants |report, name, loop_end_facts, loop_end_names, loop_end_values, frame_parameters, old_values, position, loop_exit_valid|:
