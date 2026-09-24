@@ -18,6 +18,24 @@ if [[ -z "$COMPILER" ]]; then
     printf 'dogfood failed: set ELISA_COMPILER_BIN to an Elisa compiler\n' >&2
     exit 1
 fi
+# Later probes invoke the compiler from temporary working directories. Resolve
+# relative paths now so a missing executable cannot masquerade as an expected
+# compiler rejection in those probes.
+if [[ "$COMPILER" != */* ]]; then
+    COMPILER="$(command -v "$COMPILER" 2>/dev/null || true)"
+fi
+if [[ -z "$COMPILER" ]]; then
+    printf 'dogfood failed: configured Elisa compiler could not be resolved\n' >&2
+    exit 1
+fi
+if [[ "$COMPILER" != /* ]]; then
+    compiler_dir="$(cd "$(dirname "$COMPILER")" && pwd -P)"
+    COMPILER="$compiler_dir/$(basename "$COMPILER")"
+fi
+if [[ ! -x "$COMPILER" ]]; then
+    printf 'dogfood failed: resolved Elisa compiler is not executable: %s\n' "$COMPILER" >&2
+    exit 1
+fi
 if elisa_compiler_is_stage0 "$COMPILER"; then
     elisa_verify_stage0_provenance "$COMPILER" "$ROOT_DIR" || exit $?
 fi
@@ -440,7 +458,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 assert report["status"] == "proved"
 assert report["summary"]["semantic_errors"] == 0
 assert report["replay"]["gaps"] == 0
-print("dogfood include_stale_pwd: compiler and prover reject stale cwd metadata")
+print("dogfood include_stale_pwd: compiler and prover ignore stale PWD metadata")
 PY
 run_probe rejected_float_reflexivity examples/rejected_float_reflexivity.elisa 1
 run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
