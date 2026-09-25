@@ -7503,3 +7503,31 @@ to the JSON validator. A direct 1-KB-cap probe confirms the watchdog returns exi
 6,000,000-KB process-tree cap at 6,932,501 KB after 7.98 seconds before it could write a capture;
 this is not profiling evidence about a specific hot function. The verifier's scalability defect,
 complete test matrix, and proof-system self-verification remain open.
+
+### Check the pinned verifier at O2 and test scratch-region isolation (2026-09-25)
+
+The installed `elisac-stage1` had advanced to frontend `c27443bf`, which does not match this
+tree's pinned frontend `4f3f7354`; it was not used. An O2 prover was built with the clean pinned
+Stage1 product and matching runtime object under `build/toolchain/elisa-compiler-4f3f7354`.
+The small positive example still proves 8/8 obligations and replays all 8 certificates; the
+negative affine example remains failed with 2 proven, 2 failed, and both emitted certificates
+replayed. This confirms those focused outcomes at O2, not whole-project correctness.
+
+O2 did not make the full audit resource-safe: the full `src/main.elisa` audit stopped at a
+6,000,000-KB physical-footprint ceiling after 38.98 seconds, and the standalone replay audit
+stopped at the same ceiling after 9.76 seconds. Both emitted no report and are incomplete, not
+proof failures. A smaller bounded sample of the same standalone target reached 3,571,683 KB in
+2.67 seconds. The earlier native profile's `proof_check_function` / return-analysis hot frames
+remain a lead only; this O2 comparison establishes that changing optimization level alone does
+not close the memory problem.
+
+A trial that wrapped each source-function check in a local `Store[Local]` region compiled, but
+the O2 binary immediately trapped in `ctx_aos_store_record` while checking even
+`examples/verified.elisa`. LLDB identified the trap; the scratch-region edit was fully reverted.
+This shows that switching the active AST store around a checker call is not a safe scratch
+allocation strategy for imported AST nodes. No production source change from that experiment is
+retained. String-view semantics remain unchanged: a plain `sview` is always valid, and the
+backing region must remain live through the view's last use but may then be destroyed.
+
+The standalone audit and full matrix remain open. No O2 result is treated as a completed
+self-verification, and no claim is made that the sampled function is the sole allocation source.
