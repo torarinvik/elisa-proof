@@ -7550,3 +7550,35 @@ AST store and passed focused O2 cases, but the same term-arithmetic prefix still
 3,454,354 KB in 12.55 seconds—no meaningful memory reduction. Neither experiment remains in
 production source. The current evidence narrows where to instrument next but does not identify a
 single responsible function or establish an optimization that preserves report/source lifetimes.
+
+### Measure allocator churn with bounded probes (2026-09-25)
+
+A diagnostic-only allocation-hook build was made with the clean pinned Stage1 revision
+`4f3f7354`; no production source changes remain. On the same deliberately incomplete
+`kernel_core` + `kernel_replay/term_arithmetic` input, an O0 run completed in 44.67 seconds at a
+3,469,122-KB physical-footprint peak. Its report had 215 obligations, 180 proven, 39 failed, and
+zero replay gaps. Those failures are expected from omitted dependency modules, so this is resource
+evidence only, not a semantic verdict.
+
+The hook counted 63,427,119 allocator events: 3,644,204 ordinary allocations (27,274,241,295
+requested bytes), 3,399,191 region creations (3,564,311,527,936 bytes of cumulative reported
+capacity), and 56,367,107 region frees. The capacity sum is churn across the run, not live or
+resident memory. The earlier O2 hook run produced essentially the same counts and completed in
+8.78 seconds at 3,458,018 KB, consistent with the baseline O2 run. Thus optimization level changes
+runtime but does not materially reduce the observed arena churn or peak footprint.
+
+The hook’s bounded frame walk did not yield reliable checker attribution: O0 samples usually
+stopped at the allocation callback or mapped only to broad `proof_main`/`main` frames, while the
+O2 build did not retain a useful caller chain. The Elisa profiler’s function mode was also tried
+against the exact pinned compiler, but its `-g -ftrace-functions` compile reached a 4,058,052-KB
+process-tree physical-footprint ceiling in 8.7 seconds before producing an instrumented target.
+That run was stopped and yielded no profile. No sampled address is treated as proof that a
+particular checker function owns the churn, and no source optimization is justified by these
+measurements yet.
+
+Region lifetime remains a hard constraint for the next experiment: imported AST nodes and all
+`sview`s into source-owned text must stay alive through every checker, report, and replay use. A
+scratch arena may own only values proven not to escape it; the failed active-`Store[Local]` swap
+and ineffective broad plain-region wrapper do not establish such a safe boundary. Next profiling
+should add low-overhead phase/function markers or otherwise preserve useful call-site identity,
+then compare both semantic outputs and peak memory before any lifetime refactor is retained.
