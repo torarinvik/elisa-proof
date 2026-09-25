@@ -7301,3 +7301,29 @@ physical footprint while the host had 8.4 GB of 9.2 GB swap in use. I interrupte
 avoid worsening system memory pressure before the integration matrix began. This is a resource
 limit, not a test failure; current full-matrix validation and end-to-end self-verification remain
 open.
+
+### Require consistent obligation and import status in proof reports (2026-09-25)
+
+A second report-boundary audit found that replay completion alone did not independently verify
+`report.proven == report.obligations`. The report could therefore be presented as complete if a
+future checker path accidentally omitted both an open attempt and a failure finding. The derived
+report invariants now live in `src/proof/model/report_invariants.elisa` (keeping the model file
+below 600 lines), and source completion requires every counted obligation to be proven, no open
+attempts, no reported failures, no semantic errors or failed imports, and complete certificate
+replay. Text and JSON verification states use the same unresolved-check predicate.
+
+That consolidation exposed a display inconsistency: CLI exit/admission already accounted for
+`import_failed`, but the JSON compatibility verdict did not receive that flag. JSON could say
+`proved` while also carrying an `import-error` finding. Import failure is now an explicit input
+to both JSON and text status rendering and produces a non-proved verdict. The adversarial runtime
+harness checks baseline counts, both upward and downward counter corruption, failed-import
+status, and the restored complete state.
+
+The refreshed Stage0 passed freshness checking and compiled, linked, and ran the updated harness
+successfully (exit 0). Source-length and diff checks passed. Stage1 validation is pending: the
+guard correctly refused its product because the compiler source
+`src/semantic/check_struct_field_construct_unproven.elisa` changed after that binary was built.
+An attempted reseed reported region-tied return/type errors in that concurrent compiler change;
+another seed is now rebuilding it, so no stale Stage1 result is claimed. The full proof-main
+Stage1 `-emit ir` semantic check was also stopped at the ten-minute bound without output or a
+diagnostic; this is incomplete scalability validation, not a pass or a semantic failure.
