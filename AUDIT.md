@@ -7320,10 +7320,15 @@ harness checks baseline counts, both upward and downward counter corruption, fai
 status, and the restored complete state.
 
 The refreshed Stage0 passed freshness checking and compiled, linked, and ran the updated harness
-successfully (exit 0). Source-length and diff checks passed. Stage1 validation is pending: the
-guard correctly refused its product because the compiler source
-`src/semantic/check_struct_field_construct_unproven.elisa` changed after that binary was built.
-An attempted reseed reported region-tied return/type errors in that concurrent compiler change;
-another seed is now rebuilding it, so no stale Stage1 result is claimed. The full proof-main
-Stage1 `-emit ir` semantic check was also stopped at the ten-minute bound without output or a
-diagnostic; this is incomplete scalability validation, not a pass or a semantic failure.
+successfully (exit 0). Stage1 initially failed its freshness guard because the compiler source
+`src/semantic/check_struct_field_construct_unproven.elisa` was changing during concurrent
+compiler work. A later seed, launched after the source change, completed successfully. Stage1's
+freshness guard passed both before and after the proof harness, and a SHA-256 fingerprint over all
+compiler `.elisa`/`.elisai` sources was identical before and after that seed and test. The fresh
+Stage1 harness also compiled, linked, and ran successfully (exit 0). The compiler worktree still
+contains separate uncommitted struct-field-refinement changes; they were not modified or committed
+here. Source-length and diff checks passed.
+
+The full proof-main Stage1 `-emit ir` semantic check was stopped at the ten-minute bound without
+output or a diagnostic; this is incomplete scalability validation, not a pass or a semantic
+failure. The full test matrix and end-to-end proof-system self-verification remain open.
