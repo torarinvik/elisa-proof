@@ -7432,3 +7432,23 @@ null backing, invalid lengths, lifetime erasure/mismatch, stale aliases, last-us
 and O0/O2 behavior. The proof pin now records this validated compiler revision. Full integration
 and proof-system self-verification remain open; the earlier standalone replay audit still has the
 documented resource/scalability failure and was not silently treated as passing.
+
+### Revalidate against the newer Stage1 compiler (2026-09-25)
+
+The compiler advanced again to committed revision `97e2af39ea03f656deff116dcb69c536230ced8d`
+while this audit was in progress. The Stage0 provenance/freshness guard and Stage1 source-freshness
+guard both passed immediately before validation. The compiler worktree also contained uncommitted
+backend edits; they were left untouched. The proof importer itself is archived from the committed
+`97e2af39` revision, while its build used the fresh Stage1 worktree product through
+`scripts/elisac_stage1.sh`. This records the exact frontend pin and the fact that the compiled
+Stage1 product included the then-current worktree edits; the Stage1 result is not claimed to be a
+clean-repository rebuild.
+
+On that toolchain, the region-tie, runtime string-view safety, representation safety, and complete
+destroyed-view lifetime smokes all pass. Runtime lifetime/null/length checks agree between fresh
+Stage0 and Stage1, while representation and alias checks pass at O0/O2. The proof executable
+builds with the `97e2af39` frontend pin; `examples/verified.elisa` proves 8/8 obligations and
+replays 8/8 certificates with no gaps. `examples/rejected_negative_affine_goal.elisa` is rejected
+with exit 1, zero semantic errors, and 2/2 certificates replayed without gaps. The Python audit
+harness passes 7/7. The pin now names `97e2af39`; full integration and self-verification remain
+open.
