@@ -7389,3 +7389,26 @@ An edit to `check_struct_field_construct_unproven.elisa` made the previous Stage
 subsequent guarded seed rebuilt Stage1 and its runtime from the current compiler worktree using the
 fresh, pinned Stage0; the absolute Stage1 freshness guard now passes. The compiler worktree's
 existing edits were preserved and not included in the proof-repository commit.
+
+### Pin the proof importer to the current compiled compiler source (2026-09-25)
+
+The proof project was pinned at `b05fef41` while the compiler had advanced through eighteen
+commits containing soundness checks for refined-field writes and zeroed values through branches,
+calls, patterns, and returns, plus validation records and regressions. The Stage1 snapshot used for
+this validation records `b19a9db6`; its included compiler `.elisa` sources match the committed
+compiler source through `9b5d799f`, the last source-changing commit present when the snapshot was
+taken. Later commits through `9ee6c86d` add compiler test coverage and implementation-plan notes,
+not compiled source. The proof pin now names the actual Stage1 snapshot revision rather than the
+newer, unrelated compiler worktree state. Current uncommitted compiler edits were left untouched
+and are not part of this proof snapshot.
+
+The absolute Stage1 freshness guard passed before snapshot installation, and the Stage1 build of
+the proof executable plus runtime link succeeded against this snapshot. The Python audit harness
+passed 7/7 tests in both test-matrix attempts. Full integration remains incomplete: the first
+attempt's 4-GiB Stage1 process guard stopped the O2 rebuild at 4.20 GiB; a retry with a 6-GiB guard
+reached the standalone kernel-replay source audit, where the verifier's process footprint rose to
+about 25 GiB while system swap was 9.2/10.2 GiB used. The process was terminated to protect the
+host. Native sampling showed arena validation and repeated short-lived region allocation among the
+hot paths. This is a resource/scalability finding, not a semantic test failure or a successful full
+matrix run. The focused build validates compiler compatibility; optimized replay, the remaining
+integration matrix, and proof-system self-verification remain unverified.
