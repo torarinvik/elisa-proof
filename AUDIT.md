@@ -7478,3 +7478,28 @@ and legacy-variable coverage; shell syntax and `git diff --check` pass. A bounde
 after 13.27 seconds. The small overshoot is consistent with the 100-ms sampling interval.
 Because it was intentionally stopped, it emitted no completed verification report. Full-source
 scalability and proof-system self-verification remain open.
+
+### Pin to a clean latest committed Stage1 and bound the standalone matrix run (2026-09-25)
+
+The compiler repository had advanced from `97e2af39` to committed revision
+`4f3f735487203c797db69718f4c9e33bd0fb8a5b`. Its shared worktree had concurrent uncommitted
+backend changes and an attempted seed whose pre/post source hashes differed, so that mutable
+product was not used. A detached clean worktree at `4f3f7354` was seeded with the fresh Stage0;
+the isolated checkout stayed clean, its Stage1 freshness guard passed, and its matching runtime
+object was used to build this prover. The proof frontend pin now names the exact `4f3f7354` commit.
+
+On that build, `examples/verified.elisa` proves and replays all 8 obligations with zero gaps.
+`examples/rejected_negative_affine_goal.elisa` remains failed/unsupported, with zero semantic
+errors and all 2 emitted certificates replayed. The audit harness passes 9/9; source-length,
+shell-syntax, and diff checks pass.
+
+The full `scripts/test.sh` run is not complete. Its direct, unbounded invocation of
+`examples/kernel_replay_standalone.elisa` reached 21,943,584 KB macOS physical footprint at
+3,129,328 KB resident after 23 seconds. The exact child was terminated; exit 143 and the absent
+JSON report mean no test verdict. The test entry now routes this case through
+`audit_full_source.sh` and reports watchdog cutoff as incomplete instead of feeding an empty file
+to the JSON validator. A direct 1-KB-cap probe confirms the watchdog returns exit 3 with
+`stop_reason=memory-limit` and `memory_metric=phys_footprint`. A separate profiler attempt hit a
+6,000,000-KB process-tree cap at 6,932,501 KB after 7.98 seconds before it could write a capture;
+this is not profiling evidence about a specific hot function. The verifier's scalability defect,
+complete test matrix, and proof-system self-verification remain open.

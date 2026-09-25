@@ -259,9 +259,37 @@ fi
 # The replay checker deliberately bounds branch-state retention to keep the self-hosting corpus
 # deterministic. Keep a coverage floor, require the important summaries, and require every
 # budget exhaustion to be classified as unsupported rather than silently unknown.
-run_json_report "$ROOT_DIR/examples/kernel_replay_standalone.elisa" | python3 "$ROOT_DIR/test/validate_kernel_replay_standalone.py"
-kernel_replay_standalone_probe_status=${PIPESTATUS[1]}
-if [[ "$kernel_replay_standalone_probe_status" -ne 0 ]]; then
+kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
+kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
+ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \
+    ELISA_FULL_AUDIT_BINARY="$ROOT_DIR/build/elisa-proof" \
+    ELISA_FULL_AUDIT_DIR="$kernel_replay_audit_dir" \
+    "$ROOT_DIR/scripts/audit_full_source.sh" >"$kernel_replay_audit_summary"
+kernel_replay_audit_status=$?
+if [[ "$kernel_replay_audit_status" -eq 3 ]]; then
+    python3 - "$kernel_replay_audit_summary" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    audit = json.load(handle)
+print(
+    "proof test matrix incomplete: standalone replay was stopped by the "
+    f"{audit['stop_reason']} watchdog at {audit['peak_memory_kb']}/"
+    f"{audit['memory_limit_kb']} KB ({audit['memory_metric']}) after "
+    f"{audit['elapsed_seconds']}s; no complete proof report was emitted",
+    file=sys.stderr,
+)
+PY
+    exit 1
+fi
+if [[ "$kernel_replay_audit_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: bounded standalone audit harness failed (exit=%s)\n' \
+        "$kernel_replay_audit_status" >&2
+    exit 1
+fi
+if ! python3 "$ROOT_DIR/test/validate_kernel_replay_standalone.py" \
+    <"$kernel_replay_audit_dir/proof-report.json"; then
     printf 'proof test matrix failed: standalone replay audit coverage or trust boundary regressed\n' >&2
     exit 1
 fi
