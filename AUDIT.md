@@ -7335,3 +7335,27 @@ failure. A parser-only Stage1 `-emit ast` run on the refreshed full `src/main.el
 did succeed, producing a 523-KB AST with 2,092 declarations. This confirms include expansion and
 parsing, but does not replace the still-incomplete semantic gate. The full test matrix and
 end-to-end proof-system self-verification remain open.
+
+### Confirm string-view validity and region-lifetime contract (2026-09-25)
+
+The intended rule is precise: a plain `sview` always has non-null backing, and its `[data, data +
+len)` extent must be valid. An empty view still points at valid empty-string storage. `sview?`
+represents absence separately; it does not make the backing pointer of a present `sview` nullable.
+A view borrows its storage rather than owning or extending its region: the backing must remain
+alive through the view's last possible use, but the region may be destroyed after that last use.
+Using the view after region destruction or after a relocating container growth is rejected.
+
+No compiler change was needed: `StringView.data` is a non-null `u8&`, the runtime's empty/null
+normalization and extent checks preserve that representation, and the region analysis tracks
+destruction and relocation. The focused `runtime_string_view_safety_smoke.sh` passed on both
+fresh Stage0 and the post-edit Stage1: null backing and mutable lengths are rejected, malformed
+lengths fail closed, use after destroy is rejected, and last-use-before-destroy is accepted. Both
+freshness guards passed before and after; the compiler-source fingerprint was unchanged across
+the run. These tests verify the view/region contract, not ownership transfer or lifetime
+extension.
+
+The companion `sview_relocation_smoke.sh` also passed on both fresh compilers. It rejects stale
+plain and present-optional views after backing growth, while accepting unrelated growth; Stage1's
+O0/O2 checks also cover aliasing, closure captures, scalar captures, and parameter/body-local
+shadows. Both freshness guards passed, and the compiler-source fingerprint remained
+`bf6cd155be8acd114e00802680ce4e26b5b8ede1c585acb5493f5dfe6a740b2f` across the two runs.
