@@ -7452,3 +7452,29 @@ replays 8/8 certificates with no gaps. `examples/rejected_negative_affine_goal.e
 with exit 1, zero semantic errors, and 2/2 certificates replayed without gaps. The Python audit
 harness passes 7/7. The pin now names `97e2af39`; full integration and self-verification remain
 open.
+
+### Make the full-source audit watchdog enforce the intended macOS memory bound (2026-09-25)
+
+The watchdog previously called its limit an RSS cap and sampled `proc_pidinfo`'s resident
+size on macOS. That undercounted the resource actually charged to the process: a bounded
+standalone kernel-replay attempt had a sampled physical footprint of about 3.5 GiB while
+`ps` showed resident memory around 0.5 GiB. The run was stopped before it emitted a report;
+this was an incomplete scalability probe, not a proof verdict. Native samples showed
+`proof_check_function` / `proof_check_return_matches` and short-lived region allocation among
+active frames. Sampling does not by itself establish which path dominates total cost, so no
+performance root cause is claimed here.
+
+On macOS the audit harness now reads `phys_footprint` through `proc_pid_rusage`, and fails
+closed if that metric cannot be sampled instead of silently reverting to resident size. Other
+platforms retain the `ps` resident-size monitor. The new
+`ELISA_FULL_AUDIT_MEMORY_LIMIT_KB` setting is preferred; the prior RSS variable remains a
+compatibility alias. Result JSON identifies the metric and monitor, and a watchdog stop remains
+an incomplete audit.
+
+Validation: the audit-harness suite passes 9/9, including timeout, memory-cap, invalid-setting,
+and legacy-variable coverage; shell syntax and `git diff --check` pass. A bounded run of
+`examples/kernel_replay_standalone.elisa` with a 1,500,000-KB limit stopped with
+`stop_reason=memory-limit`, `memory_metric=phys_footprint`, and a sampled peak of 1,510,273 KB
+after 13.27 seconds. The small overshoot is consistent with the 100-ms sampling interval.
+Because it was intentionally stopped, it emitted no completed verification report. Full-source
+scalability and proof-system self-verification remain open.

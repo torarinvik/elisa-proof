@@ -206,9 +206,11 @@ bounded audit. For direct use, first build the proof binary and run
 directory and prints a machine-readable summary. Exit `0` means the process exit status agrees
 with a structurally valid report and consistent counters (inspect `report_status` and
 `report_verification_state`); this transport check does not itself verify a proof. Exit `3` means the watchdog
-stopped it for its time or RSS limit, which is an incomplete audit rather than a proof verdict;
+stopped it for its time or memory limit, which is an incomplete audit rather than a proof verdict;
 exit `2` means the harness or report format failed. Configure the bounds with
-`ELISA_FULL_AUDIT_TIME_LIMIT` and `ELISA_FULL_AUDIT_RSS_LIMIT_KB`.
+`ELISA_FULL_AUDIT_TIME_LIMIT` and `ELISA_FULL_AUDIT_MEMORY_LIMIT_KB`. On macOS the memory cap
+uses the process physical footprint (including compressed memory); other platforms use resident
+size. `ELISA_FULL_AUDIT_RSS_LIMIT_KB` remains a compatibility alias for the memory-cap setting.
 Each dogfood probe is executed twice and must produce byte-identical JSON, making nondeterministic
 proof IDs, certificate ordering, or report serialization a gate failure.
 

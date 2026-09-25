@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUDIT_SOURCE="${ELISA_FULL_AUDIT_SOURCE:-src/main.elisa}"
 PROOF_BINARY="${ELISA_FULL_AUDIT_BINARY:-$ROOT_DIR/build/elisa-proof}"
 TIME_LIMIT="${ELISA_FULL_AUDIT_TIME_LIMIT:-180}"
-RSS_LIMIT_KB="${ELISA_FULL_AUDIT_RSS_LIMIT_KB:-1500000}"
+MEMORY_LIMIT_KB="${ELISA_FULL_AUDIT_MEMORY_LIMIT_KB:-${ELISA_FULL_AUDIT_RSS_LIMIT_KB:-1500000}}"
 
 if [[ ! -x "$PROOF_BINARY" ]]; then
     printf 'full-source audit failed: proof binary is missing or not executable: %s\n' "$PROOF_BINARY" >&2
@@ -34,7 +34,7 @@ PROOF_STDERR="$AUDIT_DIR/proof-report.stderr"
 #   3 = the watchdog stopped it before a complete report was emitted
 #   2 = launcher, configuration, or report-format failure
 set +e
-python3 - "$ROOT_DIR" "$PROOF_BINARY" "$AUDIT_SOURCE" "$TIME_LIMIT" "$RSS_LIMIT_KB" "$PROOF_STDOUT" "$PROOF_STDERR" "$AUDIT_DIR" <<'PY'
+python3 - "$ROOT_DIR" "$PROOF_BINARY" "$AUDIT_SOURCE" "$TIME_LIMIT" "$MEMORY_LIMIT_KB" "$PROOF_STDOUT" "$PROOF_STDERR" "$AUDIT_DIR" <<'PY'
 import json
 import ctypes
 import math
@@ -45,52 +45,62 @@ import sys
 import time
 
 
-root, proof_binary, source, time_limit_text, rss_limit_text, stdout_path, stderr_path, audit_dir = sys.argv[1:]
+root, proof_binary, source, time_limit_text, memory_limit_text, stdout_path, stderr_path, audit_dir = sys.argv[1:]
 try:
     time_limit = float(time_limit_text)
-    rss_limit_kb = int(rss_limit_text)
+    memory_limit_kb = int(memory_limit_text)
 except ValueError:
     print("full-source audit failed: limits must be numeric", file=sys.stderr)
     raise SystemExit(2)
-if not math.isfinite(time_limit) or time_limit <= 0 or rss_limit_kb <= 0:
+if not math.isfinite(time_limit) or time_limit <= 0 or memory_limit_kb <= 0:
     print("full-source audit failed: limits must be finite and positive", file=sys.stderr)
     raise SystemExit(2)
 
 command = [proof_binary, "--json", source]
 started = time.monotonic()
-peak_rss_kb = 0
+peak_memory_kb = 0
 stop_reason = None
-rss_monitor = "ps"
-proc_pidinfo = None
-proc_taskinfo_size = 0
+memory_monitor = "ps"
+memory_metric = "resident_size"
+proc_pid_rusage = None
 if sys.platform == "darwin":
-    class ProcTaskInfo(ctypes.Structure):
-        _fields_ = [(name, ctypes.c_uint64) for name in ("virtual_size", "resident_size", "total_user", "total_system", "threads_user", "threads_system")] + [(f"counter_{index}", ctypes.c_int32) for index in range(12)]
+    class RUsageInfoV0(ctypes.Structure):
+        # Match struct rusage_info_v0 in the macOS SDK. Unlike resident_size,
+        # phys_footprint includes compressed and other charged process memory.
+        _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [
+            (name, ctypes.c_uint64)
+            for name in (
+                "user_time", "system_time", "pkg_idle_wkups", "interrupt_wkups",
+                "pageins", "wired_size", "resident_size", "phys_footprint",
+                "proc_start_abstime", "proc_exit_abstime",
+            )
+        ]
 
     try:
         libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-        proc_pidinfo = libproc.proc_pidinfo
-        proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
-        proc_pidinfo.restype = ctypes.c_int
-        proc_taskinfo_size = ctypes.sizeof(ProcTaskInfo)
-        rss_monitor = "proc_pidinfo"
+        proc_pid_rusage = libproc.proc_pid_rusage
+        proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        proc_pid_rusage.restype = ctypes.c_int
+        memory_monitor = "proc_pid_rusage"
+        memory_metric = "phys_footprint"
     except (OSError, AttributeError):
-        proc_pidinfo = None
+        # Do not silently fall back to resident RSS on macOS: compressed memory
+        # was the reason the previous watchdog undercounted this process.
+        memory_monitor = "unavailable"
+        memory_metric = "phys_footprint"
 
-def sample_rss_kb(pid):
-    global proc_pidinfo, rss_monitor
-    if proc_pidinfo is not None:
-        task = ProcTaskInfo()
+def sample_process_memory_kb(pid):
+    if sys.platform == "darwin":
+        if proc_pid_rusage is None:
+            return None
+        usage = RUsageInfoV0()
         try:
-            received = proc_pidinfo(pid, 4, 0, ctypes.byref(task), proc_taskinfo_size)
+            status = proc_pid_rusage(pid, 0, ctypes.byref(usage))
         except OSError:
-            received = -1
-        if received == proc_taskinfo_size:
-            return task.resident_size // 1024
-        # proc_pidinfo may be present but unavailable for this process under a sandbox.
-        # Fall back to ps instead of misclassifying a measurable process as unmonitorable.
-        proc_pidinfo = None
-        rss_monitor = "ps"
+            status = -1
+        if status == 0 and usage.phys_footprint > 0:
+            return usage.phys_footprint // 1024
+        return None
     try:
         rss_text = subprocess.check_output(
             ["ps", "-o", "rss=", "-p", str(pid)],
@@ -115,22 +125,22 @@ with open(stdout_path, "w", encoding="utf-8") as stdout, open(stderr_path, "w", 
         raise SystemExit(2)
 
     while process.poll() is None:
-        rss_kb = sample_rss_kb(process.pid)
-        if rss_kb is None:
-            # The process can exit between poll() and the RSS query. Its terminal
+        memory_kb = sample_process_memory_kb(process.pid)
+        if memory_kb is None:
+            # The process can exit between poll() and the memory query. Its terminal
             # status and report below decide completion in that ordinary race.
             if process.poll() is not None:
                 break
-            stop_reason = "rss-monitor-unavailable"
+            stop_reason = "memory-monitor-unavailable"
             break
-        peak_rss_kb = max(peak_rss_kb, rss_kb)
+        peak_memory_kb = max(peak_memory_kb, memory_kb)
 
         elapsed = time.monotonic() - started
         if elapsed >= time_limit:
             stop_reason = "time-limit"
             break
-        if peak_rss_kb >= rss_limit_kb:
-            stop_reason = "rss-limit"
+        if peak_memory_kb >= memory_limit_kb:
+            stop_reason = "memory-limit"
             break
         time.sleep(0.1)
 
@@ -217,15 +227,16 @@ result = {
     "complete": stop_reason is None and report_valid,
     "elapsed_seconds": round(elapsed, 2),
     "exit_code": process.returncode,
-    "peak_rss_kb": peak_rss_kb,
-    "rss_monitor": rss_monitor,
+    "peak_memory_kb": peak_memory_kb,
+    "memory_metric": memory_metric,
+    "memory_monitor": memory_monitor,
     "report": stdout_path,
     "report_stderr": stderr_path,
     "report_status": parsed.get("status") if isinstance(parsed, dict) else None,
     "report_verification_state": parsed.get("verification_state") if isinstance(parsed, dict) else None,
     "stop_reason": stop_reason,
     "time_limit_seconds": time_limit,
-    "rss_limit_kb": rss_limit_kb,
+    "memory_limit_kb": memory_limit_kb,
 }
 if isinstance(parsed, dict):
     summary = parsed.get("summary")
