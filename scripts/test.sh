@@ -92,6 +92,12 @@ if [[ "$kernel_proposition_admission_compile_status" -ne 0 ]]; then
     printf 'proof test matrix failed: native proposition-admission harness did not compile\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/examples/report_invariants_runtime.elisa" >/dev/null 2>&1
+report_invariants_compile_status=$?
+if [[ "$report_invariants_compile_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: report invariant boundary harness did not compile\n' >&2
+    exit 1
+fi
 kernel_runtime_inputs=()
 kernel_runtime_obj="${ELISA_RUNTIME_OBJ:-}"
 if [[ -z "$kernel_runtime_obj" ]]; then
@@ -127,6 +133,13 @@ fi
 kernel_proposition_admission_status=$?
 if [[ "$kernel_proposition_admission_status" -ne 0 ]]; then
     printf 'proof test matrix failed: native proposition-admission boundary tests failed (%s)\n' "$kernel_proposition_admission_status" >&2
+    exit 1
+fi
+"${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/report-invariants" "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
+"$standalone_probe_dir/report-invariants"
+report_invariants_status=$?
+if [[ "$report_invariants_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: report invariant boundary tests failed (%s)\n' "$report_invariants_status" >&2
     exit 1
 fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-allocation.o" "$ROOT_DIR/examples/region_allocation.elisa" >/dev/null 2>&1

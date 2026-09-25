@@ -7359,3 +7359,31 @@ plain and present-optional views after backing growth, while accepting unrelated
 O0/O2 checks also cover aliasing, closure captures, scalar captures, and parameter/body-local
 shadows. Both freshness guards passed, and the compiler-source fingerprint remained
 `bf6cd155be8acd114e00802680ce4e26b5b8ede1c585acb5493f5dfe6a740b2f` across the two runs.
+
+### Require finding/counter agreement at verdict and tactic boundaries (2026-09-25)
+
+The report's failure count and finding list are produced together by `proof_add_finding`, but
+completion previously trusted only the count. A missed increment or a corrupted aggregate could
+therefore make the displayed verdict disagree with the concrete diagnostics. A shared invariant
+now requires `report.failed` to equal the exact finding-list length. It is checked both when
+deciding source completion and before admitting a source-bound tactic state; open goals remain
+admissible for repair as before.
+
+An isolated native harness imports the production `report_invariants.elisa` module and tests both
+mismatch directions (failure count without a finding, and finding without its failure count) plus
+an open goal; all are rejected as unresolved. It compiled, linked, and ran successfully using the
+fresh Stage1 product/runtime rebuilt from the current compiler worktree, and its absolute-path
+freshness guard passed before and after. This small harness uses a structurally equivalent report
+type so the invariant module can be checked without building the full kernel. It is now included in
+`scripts/test.sh` as a focused regression.
+
+The larger adversarial harness using the full `ProofReport` and checker/replay modules exceeded a
+ten-minute Stage1 compile bound without producing an object; it was interrupted and is not a test
+pass. A separate full-entry AST-mode parse also exceeded ten minutes without output. The seven
+Python audit-harness tests, source-length check, and `git diff --check` passed. Full model-integrated
+semantic compilation, the complete test matrix, and end-to-end proof-system self-verification
+remain open.
+
+After the isolated pass, the compiler worktree changed again. The current Stage1 product is now
+older than `src/semantic/check_struct_field_construct_unproven.elisa`, and a guarded seed is
+running; no further Stage1 validation should use that product until its freshness guard passes.
