@@ -7648,3 +7648,26 @@ regression coverage only. The existing region rule remains unchanged: a plain `s
 valid and backed by a live region through its last use, absence is represented separately by
 `sview?`, and the region may be destroyed after that last use. Full standalone/self-audit
 scalability remains open, and these results do not constitute self-verification of the prover.
+
+### Reuse lexical context storage and honor shadowing (2026-09-25)
+
+Proposition import validation previously cloned all three lexical-context arrays at each branch,
+loop, match arm, and nested block. It now records array-count marks and truncates back to each
+scope boundary, reusing the same buffers while retaining the source AST as the owner of all names
+and source-type expressions. This is a storage optimization only: branch/arm/loop-local bindings
+must not escape their lexical scope.
+
+The same audit found that proposition formation flattened shadowed local bindings into the kernel
+typing environment, where two source-visible bindings with the same name appeared ambiguous. The
+environment builder now retains only the nearest binding for each name and collects tuple fields
+only from that visible binding's source type. The kernel still rejects genuine ambiguity; the
+adapter now models Elisa's lexical resolution instead of weakening kernel admission.
+
+`examples/source_context_scope.elisa` checks a Boolean parameter shadowed by an `i64` local in both
+branches and in a range loop, then used again after each scope. The exact pinned Stage1 O0 build
+passed this regression with one obligation, one independently replayed certificate, and zero
+replay gaps. Twenty-four existing scope/shadow/global fixtures remained semantically identical to
+the prior committed executable. Source-length validation and all nine audit-harness tests passed.
+An additional O2 rebuild was blocked by Stage1's 4-GiB memory guard, so this change has no new O2
+build evidence. This fixture validates scope restoration and proposition typing; it does not
+establish full proof-assistant correctness or a measurable performance improvement.

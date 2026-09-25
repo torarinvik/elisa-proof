@@ -57,6 +57,10 @@ PY
     return "$expected_status"
 }
 
+# A shadowed local has its inner type only within the branch/loop; the parameter's
+# source-backed view and type must remain valid after each nested scope closes.
+run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] > 0; assert report["summary"]["proven"] == report["summary"]["obligations"]; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0'
+
 set +e
 SELF_HOST_COMPILER="${ELISA_COMPILER_BIN:-}"
 if [[ -z "$SELF_HOST_COMPILER" ]]; then

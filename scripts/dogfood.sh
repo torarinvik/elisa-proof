@@ -147,6 +147,7 @@ PY
 # to its own typed symbol) prove and replay independently.
 run_probe kernel_core src/proof/kernel_core.elisa 0
 run_probe kernel_core_fixture examples/dogfood_kernel_core.elisa 0
+run_probe source_context_scope examples/source_context_scope.elisa 0
 python3 - "$REPORT_DIR/kernel_core.json" "$REPORT_DIR/kernel_core_fixture.json" <<'PY'
 import json
 import sys
@@ -158,6 +159,20 @@ for path, proven in zip(sys.argv[1:], (15, 28)):
     assert report["summary"]["proven"] == proven
     assert report["summary"]["obligations"] == proven
     assert report["findings"] == []
+PY
+python3 - "$REPORT_DIR/source_context_scope.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+assert report["status"] == "proved"
+assert report["summary"]["semantic_errors"] == 0
+assert report["summary"]["obligations"] > 0
+assert report["summary"]["proven"] == report["summary"]["obligations"]
+assert report["findings"] == []
+assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0
+assert report["replay"]["gaps"] == 0
 PY
 run_probe quantifier_hypothesis examples/quantifier_hypothesis.elisa 0
 run_probe rejected_include_trailing examples/rejected_include_trailing.elisa 1
