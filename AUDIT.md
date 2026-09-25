@@ -7371,19 +7371,21 @@ admissible for repair as before.
 
 An isolated native harness imports the production `report_invariants.elisa` module and tests both
 mismatch directions (failure count without a finding, and finding without its failure count) plus
-an open goal; all are rejected as unresolved. It compiled, linked, and ran successfully using the
-fresh Stage1 product/runtime rebuilt from the current compiler worktree, and its absolute-path
-freshness guard passed before and after. This small harness uses a structurally equivalent report
-type so the invariant module can be checked without building the full kernel. It is now included in
-`scripts/test.sh` as a focused regression.
+an open goal; all are rejected as unresolved. It compiled, linked, and ran successfully using a
+Stage1 product/runtime freshly rebuilt from the compiler worktree; absolute-path freshness checks
+passed before and after. It was rerun after the latest seed and passed again. This small harness
+uses a structurally equivalent report type so the invariant module can be checked without building
+the full kernel. It is now included in `scripts/test.sh` as a focused regression.
 
 The larger adversarial harness using the full `ProofReport` and checker/replay modules exceeded a
 ten-minute Stage1 compile bound without producing an object; it was interrupted and is not a test
-pass. A separate full-entry AST-mode parse also exceeded ten minutes without output. The seven
-Python audit-harness tests, source-length check, and `git diff --check` passed. Full model-integrated
+pass. The full-entry AST-mode attempt also exceeded ten minutes; its Stage1 product was later found
+stale against compiler worktree edits, so it is not current-compiler evidence. The seven Python
+audit-harness tests, source-length check, and `git diff --check` passed. Full model-integrated
 semantic compilation, the complete test matrix, and end-to-end proof-system self-verification
 remain open.
 
-After the isolated pass, the compiler worktree changed again. The current Stage1 product is now
-older than `src/semantic/check_struct_field_construct_unproven.elisa`, and a guarded seed is
-running; no further Stage1 validation should use that product until its freshness guard passes.
+An edit to `check_struct_field_construct_unproven.elisa` made the previous Stage1 product stale. A
+subsequent guarded seed rebuilt Stage1 and its runtime from the current compiler worktree using the
+fresh, pinned Stage0; the absolute Stage1 freshness guard now passes. The compiler worktree's
+existing edits were preserved and not included in the proof-repository commit.
