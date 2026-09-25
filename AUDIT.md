@@ -7331,4 +7331,7 @@ here. Source-length and diff checks passed.
 
 The full proof-main Stage1 `-emit ir` semantic check was stopped at the ten-minute bound without
 output or a diagnostic; this is incomplete scalability validation, not a pass or a semantic
-failure. The full test matrix and end-to-end proof-system self-verification remain open.
+failure. A parser-only Stage1 `-emit ast` run on the refreshed full `src/main.elisa` include graph
+did succeed, producing a 523-KB AST with 2,092 declarations. This confirms include expansion and
+parsing, but does not replace the still-incomplete semantic gate. The full test matrix and
+end-to-end proof-system self-verification remain open.
