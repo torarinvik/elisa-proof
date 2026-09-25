@@ -615,6 +615,7 @@ run_probe strict_shift examples/strict_shift.elisa 0
 run_probe rejected_strict_shift examples/rejected_strict_shift.elisa 1
 run_probe sum_bound examples/sum_bound.elisa 0
 run_probe rejected_sum_bound examples/rejected_sum_bound.elisa 1
+run_probe replay_safety_context examples/replay_safety_context.elisa 0
 run_probe settled_operand examples/settled_operand.elisa 0
 run_probe rejected_settled_operand examples/rejected_settled_operand.elisa 1
 run_probe negated_guard_order examples/negated_guard_order.elisa 0

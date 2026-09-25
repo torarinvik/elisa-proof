@@ -7612,3 +7612,39 @@ stopped at 1,550,097 KB against the configured 1,500,000-KB physical-footprint l
 run with a 3,000,000-KB ceiling also hit that ceiling without a report, so the optimization does
 not resolve the standalone audit's peak-footprint problem. The broader dogfood run did complete
 the same standalone fixture, but under no memory watchdog; no bounded-memory claim is made.
+
+### Revalidate compiler provenance and nested replay coverage (2026-09-25)
+
+An earlier freshness check relied on file timestamps. Embedded Go build metadata showed that the
+Stage0 product then under consideration was actually from revision `06bb1c0f` and had
+`vcs.modified=true`, so it was not used as a trusted bootstrap. Stage0 was rebuilt in a clean,
+detached Core worktree at `a3f3ea3d2d9459aea0bd6080f54f65bca15ad3a7`; its embedded revision matches
+`ELISA_STAGE0_REV` and `vcs.modified=false`. The pinned Stage1 product was then seeded from that
+bootstrap at compiler revision `f7edb529f37ed94e9b022225a01ab0c72331c66f`; its snapshot freshness
+guard passed. The compiler repository had advanced to `103730c5`, but the commits after `f7edb529`
+changed tests and documentation only, not product source, so `f7edb529` remains the newest compiled
+compiler implementation in this validation. The Stage1 runtime object was taken from that same
+snapshot.
+
+With this exact toolchain, the O2 proof executable built successfully. Its complete JSON output was
+byte-identical to the prior committed proof build on six existing accepted/rejected fixtures, and
+both executables produced identical output for the new `replay_safety_context` conjunction case.
+All seven reports had complete certificate replay and zero replay gaps. The nested-conjunction
+fixture checks that each arithmetic child goal retains its premises and passes fixed-width safety
+checks; it does not claim or depend on sharing safety contexts across distinct goals. Source-length
+validation and all nine audit-harness tests passed.
+
+The complete bounded dogfood matrix passed on the fresh Stage1 product with the fresh Stage0
+explicitly selected as its bootstrap oracle. This includes deterministic standalone replay
+(1,768 obligations; expected overall rejection; 871 proven; zero replay gaps), cyclic-arena
+rejection (1,773 obligations; expected rejection; zero replay gaps), the malformed-input/resource
+cases, proof tactic and report runtimes, and Stage0 runtime boundary harnesses.
+
+A follow-up experiment to share fixed-width safety contexts across sibling conjunction goals was
+not retained. Its reports matched the baseline, but neither O2 standalone audit completed under a
+6,000,000-KB physical-footprint ceiling: baseline stopped at 6,012,772 KB and the candidate at
+6,130,020 KB, both without a report. This establishes no memory improvement; the fixture above is
+regression coverage only. The existing region rule remains unchanged: a plain `sview` is always
+valid and backed by a live region through its last use, absence is represented separately by
+`sview?`, and the region may be destroyed after that last use. Full standalone/self-audit
+scalability remains open, and these results do not constitute self-verification of the prover.
