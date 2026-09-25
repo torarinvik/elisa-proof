@@ -22,6 +22,19 @@ const MALFORMED_PROVENANCE_INDEX_CRASHED: i64 = 13
 const CYCLIC_PROVENANCE_INDEX_HUNG: i64 = 14
 const DEEP_REPLAY_INPUT_REJECTED: i64 = 18
 const DEEP_REPLAY_INPUT_LIMIT: usize = 128
+const INCOMPLETE_REPLAY_COUNT_ACCEPTED: i64 = 36
+const REPLAY_WITH_GAPS_ACCEPTED: i64 = 37
+const UNREPLAYED_CERTIFICATE_ACCEPTED: i64 = 38
+const UNBOUND_PROVEN_ATTEMPT_ACCEPTED: i64 = 39
+const PROVEN_ATTEMPT_NOT_FOUND: i64 = 40
+const ATTEMPT_WITHOUT_REPLAYED_CERTIFICATE_ACCEPTED: i64 = 41
+const RESTORED_REPLAY_COMPLETENESS_REJECTED: i64 = 42
+const BATCH_SKIP_GAPS_NOT_RECORDED: i64 = 43
+const SKIPPED_BATCH_ACCEPTED: i64 = 44
+const BATCH_SKIP_NOT_REPORTED_AS_FAILURE: i64 = 45
+const BASELINE_REPLAY_COMPLETENESS_REJECTED: i64 = 46
+const REPLAY_CERTIFICATE_BATCH_SKIP_COUNT: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET + 1
+const REPLAY_COMPLETENESS_SINGLE_ITEM: u32 = 1
 
 def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     position: Ast::Pos = Ast::pos_at_line(1)
@@ -188,4 +201,42 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 16 if report.replay_gaps != 0 or report.replayed != report.certificates.count
     proof_replay_certificates(&report)
     return 17 if report.replay_gaps != 0 or report.replayed != report.certificates.count
+    return BASELINE_REPLAY_COMPLETENESS_REJECTED if not proof_replay_certificates_complete(report)
+
+    # Replay completeness is a derived invariant, not a caller-controlled counter. A missing
+    # counter increment, cleared gap field, or stale per-certificate bit must never turn an
+    # incomplete replay into a complete source result.
+    complete_replayed: u32 = report.replayed
+    report.replayed <- report.replayed - REPLAY_COMPLETENESS_SINGLE_ITEM if report.replayed > 0
+    return INCOMPLETE_REPLAY_COUNT_ACCEPTED if proof_replay_certificates_complete(report)
+    report.replayed <- complete_replayed
+    report.replay_gaps <- REPLAY_COMPLETENESS_SINGLE_ITEM
+    return REPLAY_WITH_GAPS_ACCEPTED if proof_replay_certificates_complete(report)
+    report.replay_gaps <- 0
+    complete_certificate_flag: bool = report.certificates[0].replayed
+    report.certificates[0].replayed <- false
+    return UNREPLAYED_CERTIFICATE_ACCEPTED if proof_replay_certificates_complete(report)
+    report.certificates[0].replayed <- complete_certificate_flag
+
+    proven_attempt_index: mutable usize = report.goal_attempts.count
+    for index in 0..<report.goal_attempts.count |index, report, proven_attempt_index|:
+        if report.goal_attempts[index].proven:
+            proven_attempt_index <- index
+            break
+    return PROVEN_ATTEMPT_NOT_FOUND if proven_attempt_index >= report.goal_attempts.count
+    complete_attempt: ProofGoalAttempt = report.goal_attempts[proven_attempt_index]
+    report.goal_attempts[proven_attempt_index] <- ProofGoalAttempt{goal: complete_attempt.goal, budget_exhausted: complete_attempt.budget_exhausted, facts_start: complete_attempt.facts_start, facts_count: complete_attempt.facts_count, kernel_goal: complete_attempt.kernel_goal, kernel_facts_start: complete_attempt.kernel_facts_start, kernel_facts_count: complete_attempt.kernel_facts_count, line: complete_attempt.line, name: complete_attempt.name, rule: complete_attempt.rule, proven: true, has_certificate: false, certificate_index: complete_attempt.certificate_index}
+    return UNBOUND_PROVEN_ATTEMPT_ACCEPTED if proof_replay_certificates_complete(report)
+    report.goal_attempts[proven_attempt_index] <- complete_attempt
+    return RESTORED_REPLAY_COMPLETENESS_REJECTED if not proof_replay_certificates_complete(report)
+
+    # Exercise the real bounded preflight failure: a certificate batch over the report cap is
+    # not replayed, and must be represented as gaps rather than leaving the reset zero counter.
+    skipped_report: mutable ProofReport = proof_empty_report()
+    for index in 0..<REPLAY_CERTIFICATE_BATCH_SKIP_COUNT |index, skipped_report, position|:
+        skipped_report.certificates.push(ProofGoalCertificate{goal: Ast::Expr.BoolLit(true, position), facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: index.u32(), name: "budget", rule: "goal", replayed: false})
+    proof_replay_certificates(&skipped_report)
+    return BATCH_SKIP_GAPS_NOT_RECORDED if skipped_report.replay_gaps != REPLAY_CERTIFICATE_BATCH_SKIP_COUNT.u32()
+    return SKIPPED_BATCH_ACCEPTED if skipped_report.replayed != 0 or proof_replay_certificates_complete(skipped_report)
+    return BATCH_SKIP_NOT_REPORTED_AS_FAILURE if skipped_report.failed == 0
     return 0

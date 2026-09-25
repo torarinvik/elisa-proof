@@ -7277,3 +7277,27 @@ after 600 seconds without producing a report (peak RSS 2,423,664 KB), so this ve
 region-lifetime cases, not all proof-assistant code or the assistant's ability to verify itself.
 Full-source scalability and end-to-end self-verification remain open. Concurrent uncommitted
 compiler edits were not changed or included in the proof project's pinned source snapshot.
+
+### Require complete replay at every proof-success boundary (2026-09-25)
+
+A replay-batch budget preflight can reject before visiting any certificate. The budget checker
+already marks that report failed, so this did not produce a successful verdict, but replay
+counters had just been reset and `replay_gaps` remained zero. Report/source-admission consumers
+that checked only that counter could therefore disagree with the failure and treat the replay
+portion as complete. A shared derived invariant now requires zero gaps, exact replayed/certificate
+counts, every certificate's replay bit, and an exactly bound replayed certificate for each proven
+attempt. Preflight refusal records all skipped certificates as gaps (saturating at `u32` max), and
+any unexplained incomplete batch receives a fail-closed sentinel gap. CLI, report, source-admission,
+and tactic boundaries all use the same invariant.
+
+The adversarial runtime harness corrupts the count, gap counter, certificate replay bit, and
+proven-attempt binding, then exercises the actual over-budget batch path with one more certificate
+than the kernel node budget. Both the clean Stage0 (`c447c2ce0c68d1aacd64fa8c4a1d6deece01f344`,
+`vcs.modified=false`) and freshly seeded Stage1 products compiled, linked, and ran that harness
+successfully (exit 0); their freshness checks passed, and source-length plus diff checks passed.
+The Stage1 CLI/full test matrix is not complete: `scripts/test.sh` passed its 7/7 audit-harness
+tests, then its proof-main LLVM register-allocation compile reached an approximately 7.9-GB
+physical footprint while the host had 8.4 GB of 9.2 GB swap in use. I interrupted that run to
+avoid worsening system memory pressure before the integration matrix began. This is a resource
+limit, not a test failure; current full-matrix validation and end-to-end self-verification remain
+open.
