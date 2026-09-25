@@ -7412,3 +7412,23 @@ host. Native sampling showed arena validation and repeated short-lived region al
 hot paths. This is a resource/scalability finding, not a semantic test failure or a successful full
 matrix run. The focused build validates compiler compatibility; optimized replay, the remaining
 integration matrix, and proof-system self-verification remain unverified.
+
+### Pin to the latest validated Stage1 and verify string-view region guarantees (2026-09-25)
+
+The compiler advanced to `1f86aaf25766971a07aa4ae050f53428de32b5b3` after the prior pin. Its
+Stage1 product and runtime were rebuilt from that committed source; the product freshness guard
+passed. A new immutable Stage1 snapshot was installed from this exact revision, and the proof
+executable compiled and linked against its frontend and runtime. `examples/verified.elisa` reports
+8/8 obligations proven, 8/8 certificates replayed, and zero gaps. The Python audit harness passes
+7/7 tests.
+
+The string-view lifetime contract is explicit: plain `sview` has a non-null, valid bounded backing
+view; absence uses `sview?`, and a present optional payload remains subject to the same backing
+and region-liveness checks. A view may be used while its backing region is alive and after its
+last use the region may be destroyed; use after destroy is rejected. On the exact Stage1 snapshot,
+the region-tie, representation-safety, and comprehensive destroyed-view lifetime smokes pass. The
+runtime safety smoke passes under both the fresh Stage0 and this Stage1 snapshot. Tests cover
+null backing, invalid lengths, lifetime erasure/mismatch, stale aliases, last-use-before-destroy,
+and O0/O2 behavior. The proof pin now records this validated compiler revision. Full integration
+and proof-system self-verification remain open; the earlier standalone replay audit still has the
+documented resource/scalability failure and was not silently treated as passing.
