@@ -7582,3 +7582,33 @@ scratch arena may own only values proven not to escape it; the failed active-`St
 and ineffective broad plain-region wrapper do not establish such a safe boundary. Next profiling
 should add low-overhead phase/function markers or otherwise preserve useful call-site identity,
 then compare both semantic outputs and peak memory before any lifetime refactor is retained.
+
+### Reuse arithmetic safety contexts per replay goal (2026-09-25)
+
+Temporary allocation phase markers isolated the largest replay allocation source to fixed-width
+safety checks in generic goal replay. Before evaluating a goal, the checker called the same safety
+helper once for every premise and again for the goal. Each call rebuilt unsigned bounds and the
+signed bounds/difference closure from the same unchanged fact list. The checker now builds those
+contexts once per goal and runs the same per-root unsigned and signed expression predicates for
+every premise and the goal. It retains the original order: all premise guards still precede
+inconsistency and call-summary rules; the goal guard still follows them. `sview`s in the local
+bound records refer only to the admitted kernel arena, which remains live for the entire call;
+neither a view nor the local contexts escape into replay state.
+
+On the same intentionally incomplete O2 prefix used by the previous allocation probes, the
+before/after JSON reports are structurally identical: 215 obligations, 180 proven, 39 expected
+failures from omitted dependencies, 180/180 certificates replayed, and zero replay gaps. The
+unsigned/signed guard phase fell from 2,567,087 allocations / 19,321,369,216 requested bytes to
+63,323 allocations / 485,366,080 requested bytes (about 97.5% fewer allocations and bytes in that
+phase). Across the full probe run, ordinary allocation events fell from 3,644,204 to 1,140,439.
+These are cumulative allocation counts, not live-memory or peak-footprint measurements.
+
+Validation after removing all probe code from the source: the O2/O3 optimized replay matrix
+passed; 18 targeted signed/unsigned arithmetic fixtures retained their expected verdicts and
+complete replay; the full dogfood harness passed, including its two deterministic standalone
+replay runs (1,768 obligations, 871 proven, zero replay gaps); source-length and audit-harness
+checks passed. The default `scripts/test.sh` remains incomplete: its standalone replay watchdog
+stopped at 1,550,097 KB against the configured 1,500,000-KB physical-footprint limit. A diagnostic
+run with a 3,000,000-KB ceiling also hit that ceiling without a report, so the optimization does
+not resolve the standalone audit's peak-footprint problem. The broader dogfood run did complete
+the same standalone fixture, but under no memory watchdog; no bounded-memory claim is made.
