@@ -7531,3 +7531,22 @@ backing region must remain live through the view's last use but may then be dest
 
 The standalone audit and full matrix remain open. No O2 result is treated as a completed
 self-verification, and no claim is made that the sampled function is the sole allocation source.
+
+### Localize the replay audit's high-memory checker pass (2026-09-25)
+
+Temporary include-prefix probes at O2 narrowed the high allocation to proof-checking replay
+source, not to the common CLI/parser baseline. `kernel_core.elisa` alone completed in 0.11
+seconds with 15/15 obligations replayed. Adding
+`kernel_replay/term_arithmetic.elisa` completed in 10.2 seconds at a 3,462,354-KB peak for
+101 declarations and 215 obligations. Because that deliberately incomplete prefix omits helper
+modules, its 39 failed obligations are not a semantic verdict about `term_arithmetic`; the useful
+observation is its memory/time cost. A prefix of the first five replay implementation modules
+hit the 3,500,000-KB watchdog at 2.77 seconds without producing a report.
+
+Two scratch-region experiments were removed. A local `Store[Local]` around a checker call
+compiled but trapped in `ctx_aos_store_record` when reading the parser-owned AST, so the active
+node store cannot be swapped at that boundary. A plain short-lived region preserved the active
+AST store and passed focused O2 cases, but the same term-arithmetic prefix still peaked at
+3,454,354 KB in 12.55 seconds—no meaningful memory reduction. Neither experiment remains in
+production source. The current evidence narrows where to instrument next but does not identify a
+single responsible function or establish an optimization that preserves report/source lifetimes.
