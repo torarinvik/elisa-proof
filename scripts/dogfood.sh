@@ -324,10 +324,13 @@ report = json.loads(checked.stdout)
 assert report["status"] == "failed"
 assert report["verification_state"] == "unsupported"
 assert report["summary"]["semantic_errors"] == 1
+assert report["summary"]["obligations"] == 0
 assert any(
     "safe semantic-analysis limit" in item["message"]
     for item in report["semantic_diagnostics"]
 )
+assert any(item["kind"] == "semantic-analysis-depth" for item in report["findings"])
+assert not any(item["kind"] == "resource-expression-depth" for item in report["findings"])
 assert report["replay"]["gaps"] == 0
 assert report["kernel"]["independent_replay"] is True
 print("dogfood deep_expression: semantic depth exhaustion is rejected without a crash")
