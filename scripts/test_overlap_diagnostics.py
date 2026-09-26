@@ -9,6 +9,9 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 BINARY = ROOT / "build/elisa-proof"
 CASES = {
+    "unknown_widened_borrow_move": ("borrow-overlap-unproven", "unknown"),
+    "rejected_borrow_move": ("borrow-move-conflict", "disproved"),
+    "rejected_borrow_move_parent": ("borrow-move-conflict", "disproved"),
     "unknown_widened_borrow_write": ("borrow-overlap-unproven", "unknown"),
     "rejected_borrow_symbolic_alias": ("borrow-overlap-unproven", "unknown"),
     "rejected_borrow_dynamic_alias": ("borrow-overlap-unproven", "unknown"),
@@ -30,7 +33,7 @@ def main():
         report = json.loads(process.stdout)
         assert process.returncode == 1, name
         assert report["status"] == "failed", name
-        if name in {"unknown_widened_borrow_write", "rejected_exact_index_borrow_write"}:
+        if name in {"unknown_widened_borrow_write", "unknown_widened_borrow_move", "rejected_exact_index_borrow_write"}:
             assert report["summary"]["semantic_errors"] == 0, name
         findings = {(f["kind"], f["status"]) for f in report["findings"]}
         assert expected in findings, (name, findings)

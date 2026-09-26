@@ -34,3 +34,15 @@ expected verdicts with zero replay gaps; twenty existing detailed borrow-report
 assertions also passed. The standalone replay-system audit completed in 56.55
 seconds at 1,180,417 KB: 1,807 obligations, 860 certificates replayed, zero gaps,
 and an `unsupported` verdict. This is not a self-verification claim.
+
+## Move follow-up
+
+The move-expression checker had a separate copy of the same diagnostic mistake.
+`unknown_widened_borrow_move.elisa` constrains the selected borrowed element to
+index one and moves index zero, yet previously reported a definite conflict after
+widening the borrow. Moves now use the same evidence classifier. Moving a live
+borrow handle remains a direct conflict, as do exact borrowed roots/descendants.
+The conservative move refusal and resource-state transition rules are unchanged.
+
+The pinned Stage0 rebuild and all twelve overlap regressions passed. Admission,
+obligation counts, and replay summaries were identical across 42 borrow fixtures.
