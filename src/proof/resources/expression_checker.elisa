@@ -1,0 +1,254 @@
+extend ElisaProof:
+    private:
+        const PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT: usize = 64
+
+        def proof_resource_check_expression[@s, @r](expression: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, functions: ProofFunctionTable&) -> void:
+            state.expression_depth <- state.expression_depth + 1
+            if state.expression_depth > PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
+                rejected_depth: usize = state.expression_depth
+                state.expression_depth <- state.expression_depth - 1
+                position: Ast::Pos = Ast::expr_pos(expression)
+                proof_add_budget_finding(report, "resource-expression-depth", position.line, function_name, "resource expression exceeds the bounded AST recursion depth", "depth", rejected_depth, PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT)
+                return
+            match expression:
+                Ast::Expr.Ident(name, position):
+                    slot: usize = proof_resource_lookup(state, name)
+                    if slot < state.binding_names.count:
+                        region: sview = proof_resource_binding_region(state, slot)
+                        stale_region: bool = region != "" and (not proof_resource_binding_region_is_live(state, slot) or not proof_resource_region_is_active(state, region))
+                        proof_resource_report_unavailable_region(state, slot, report, position, function_name) if stale_region
+                        proof_resource_add_failing_obligation(report, "resource-use-after-move", position, function_name, "a moved resource is used again") if proof_resource_binding_is_moved(state, slot)
+                        access_root: usize = proof_resource_encode_access_place(expression, report)
+                        proof_resource_record_event(state, report, "resource-use", "", access_root, name, "", 0) if not stale_region
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    proof_resource_check_expression(callee, state, report, function_name, functions)
+                    resource_expression_argument: mutable bool = false
+                    resource_argument: mutable bool = false
+                    region_argument: mutable bool = false
+                    normalized_arguments: mutable darray[Ast::Expr] = []
+                    allocation_roots: mutable darray[usize] = []
+                    for argument in arguments |argument, state, report, function_name, functions, position, resource_argument, region_argument, normalized_arguments, allocation_roots|:
+                        new_parts: (known: bool, operand: Ast::Expr, region: sview) = proof_resource_region_new_parts(argument)
+                        if new_parts.known:
+                            proof_resource_check_expression(new_parts.operand, state, report, function_name, functions)
+                            allocation_root: usize = proof_resource_add_region_call_allocation(state, report, new_parts.operand, new_parts.region, position, function_name)
+                            normalized_arguments.push(Ast::Expr.RegionNew(new_parts.operand, new_parts.region, Ast::expr_pos(argument)))
+                            allocation_roots.push(allocation_root)
+                            region_argument <- true
+                        else:
+                            proof_resource_check_expression(argument, state, report, function_name, functions)
+                            normalized_arguments.push(argument)
+                            allocation_roots.push(0)
+                            resource_expression_argument <- true if proof_resource_expr_carries_resource(argument, state, report)
+                            region_argument <- true if proof_resource_expr_contains_region_value(argument, state)
+                    callee_name: sview = proof_callable_name(callee)
+                    callee_index: usize = proof_resource_function_index(functions, callee_name)
+                    resource_argument <- resource_expression_argument
+                    resource_lend_summary_safe: mutable bool = true
+                    resource_summary_for_safety: mutable (known: bool, root: usize) = (false, report.kernel_nodes.count)
+                    if callee_index < functions.names.count and resource_expression_argument:
+                        resource_summary_for_safety <- proof_resource_summary_is_ready(functions, report, function_name, callee_name)
+                        resource_mapped: mutable darray[Ast::Expr] = []
+                        if proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &resource_mapped):
+                            resource_argument <- false
+                            for parameter_index in 0..<resource_mapped.count |parameter_index, resource_mapped, functions, callee_index, state, report, resource_argument, resource_lend_summary_safe|:
+                                carries_resource: bool = proof_resource_call_argument_requires_resource(functions, callee_index, parameter_index, resource_mapped[parameter_index], state, report)
+                                resource_argument <- true if carries_resource
+                                # A summary records writes to formal places, but not references
+                                # nested inside an aggregate stored in one of those places. Do not
+                                # compose such a summary when this resource argument could escape
+                                # through another reference-capable formal or through the result.
+                                resource_lend_summary_safe <- false if carries_resource and (not resource_summary_for_safety.known or not proof_resource_call_summary_storage_is_confined(functions, callee_index, parameter_index, resource_summary_for_safety.root, report))
+                    region_polymorphic_call: bool = callee_index < functions.region_param_counts.count and functions.region_param_counts[callee_index] > 0
+                    # A collection builtin is not a declared function and has no summary, so every
+                    # such call on a reference-rooted place was reported opaque. Its effect is
+                    # exactly a write to the receiver and a read of each argument: it mutates the
+                    # receiver's storage, it reads what it is given, and it moves nothing, because
+                    # Elisa spells a transfer `move` and an argument without one is not consumed.
+                    # The arguments have already been checked above, which is where their reads are
+                    # recorded, so only the receiver write is added here -- through the ordinary
+                    # write path, so an immutable reference, an overlapping live borrow and a
+                    # read-only binding are all refused exactly as they are for `place <- value`.
+                    #
+                    # The receiver of a method-shaped call is not among the callee's arguments, so
+                    # no argument mapping describes what the call does to it. Either the effect is
+                    # modelled above by name, or the call may write a place nothing in this state
+                    # saw -- which is what every builtin call did before the model existed. A width
+                    # conversion is the one method with no storage to write. Everything else is
+                    # refused rather than passed over in silence.
+                    method_call: (known: bool, receiver: Ast::Expr, method: sview) = proof_resource_method_receiver(callee)
+                    # Method-shaped AST nodes do not have a callable leaf for
+                    # `proof_callable_name` to return. Check the method member itself so a declared
+                    # `push`, `clear`, or similar UFCS function cannot be mistaken for a compiler
+                    # collection builtin and receive an incomplete effect model.
+                    builtin: (known: bool, receiver: Ast::Expr) = proof_resource_collection_builtin(callee)
+                    builtin_admitted: bool = builtin.known and method_call.known and proof_resource_function_name_count(functions, method_call.method) == 0 and not region_argument and not region_polymorphic_call and not proof_resource_argument_moves(arguments)
+                    is_builtin_conversion: bool = method_call.known and proof_resource_function_name_count(functions, method_call.method) == 0 and proof_resource_pure_conversion(method_call.method)
+                    unmodelled_receiver: bool = method_call.known and not builtin_admitted and not is_builtin_conversion
+                    if builtin_admitted:
+                        proof_resource_check_write(builtin.receiver, state, report, function_name, position, functions)
+                    elif unmodelled_receiver:
+                        proof_resource_add_failing_obligation(report, "borrow-call-opaque", position, function_name, "a method-shaped call may write its receiver, and no summary maps a receiver")
+                    elif resource_argument or region_argument or region_polymorphic_call:
+                        summary: (known: bool, root: usize) = proof_resource_summary_is_ready(functions, report, function_name, callee_name)
+                        mapped: mutable darray[Ast::Expr] = []
+                        mapped_allocation_roots: mutable darray[usize] = []
+                        mapped_ok: bool = summary.known and callee_index < functions.names.count and proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &mapped) and proof_resource_map_call_allocation_roots(functions, callee_index, normalized_arguments, argument_names, allocation_roots, &mapped_allocation_roots)
+                        # A call that only lends shared references leaves the caller's state
+                        # alone, so it is admitted from the callee's declared modes without a body
+                        # summary. This is the only path open to a recursive component, which by
+                        # construction cannot consume one of its own summaries.
+                        lend_mapped: mutable darray[Ast::Expr] = []
+                        confined_lend: mutable bool = false
+                        if not (summary.known and mapped_ok) and callee_index < functions.names.count and proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &lend_mapped):
+                            confined_lend <- proof_resource_call_is_confined_lend(functions, callee_index, lend_mapped, state, report) and proof_resource_record_lend_call(state, report, callee_name, callee_index, lend_mapped, functions)
+                        if confined_lend:
+                            pass
+                        elif summary.known and mapped_ok:
+                            pairwise_alias: bool = proof_resource_call_source_has_pairwise_alias(state, report, summary.root, mapped)
+                            recorded: mutable bool = false
+                            recorded <- proof_resource_record_call(state, report, callee_name, summary.root, callee_index, mapped, mapped_allocation_roots, functions) if not pairwise_alias and resource_lend_summary_safe
+                            # A summary that maps its arguments can still fail to be *encoded* for
+                            # this call -- most often because a region-owned actual reaches a
+                            # formal that declares no lifetime, which the summary path places from
+                            # the callee's own trace and therefore refuses. That call may still be
+                            # a confined lend, which is admitted from the callee's declared modes
+                            # and needs no body summary at all, and the lend rule already tolerates
+                            # exactly this actual. The path was only ever tried when the summary
+                            # did not map, so the two admissions never composed. `record_call`
+                            # returns before it mutates anything when it refuses, so falling
+                            # through to the lend leaves no half-written call behind.
+                            if not recorded and not pairwise_alias and callee_index < functions.names.count:
+                                fallback_mapped: mutable darray[Ast::Expr] = []
+                                if proof_resource_map_call_arguments(functions, callee_index, normalized_arguments, argument_names, &fallback_mapped):
+                                    recorded <- proof_resource_call_is_confined_lend(functions, callee_index, fallback_mapped, state, report) and proof_resource_record_lend_call(state, report, callee_name, callee_index, fallback_mapped, functions)
+                            proof_resource_add_failing_obligation(report, "borrow-call-alias", position, function_name, "mutable call arguments overlap while the callee is running") if pairwise_alias
+                            proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call is not mapped to a verified caller region") if (region_argument or region_polymorphic_call) and not recorded
+                            proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "the checked callee resource summary could not be encoded for this call") if resource_argument and not recorded and not pairwise_alias
+                        elif summary.known:
+                            proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call requires an exact verified region summary") if region_argument or region_polymorphic_call
+                            proof_resource_add_failing_obligation(report, "borrow-call-summary-unsupported", position, function_name, "borrow-carrying call requires an exact argument mapping with no unresolved defaults") if resource_argument
+                        else:
+                            proof_resource_add_failing_obligation(report, "region-call-opaque", position, function_name, "a region-polymorphic call has no converged lifetime summary") if region_argument or region_polymorphic_call
+                            proof_resource_add_failing_obligation(report, "borrow-call-opaque", position, function_name, "a call argument carries a resource, but no converged callee resource summary is available") if resource_argument
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, position):
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    proof_resource_check_expression(lowered.call, state, report, function_name, functions) if lowered.known
+                    proof_resource_add_failing_obligation(report, "borrow-call-opaque", position, function_name, "a static effect call has no unique compiler-selected resource transition") if not lowered.known
+                Ast::Expr.Move(operand, position):
+                    root: sview = proof_resource_place_root(operand)
+                    slot: usize = proof_resource_lookup(state, root)
+                    access: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(operand, report)
+                    proof_resource_check_expression(operand, state, report, function_name, functions)
+                    moved: bool = slot < state.binding_names.count and proof_resource_binding_is_moved(state, slot)
+                    conflict: bool = moved or (slot < state.binding_names.count and ((slot < state.borrow_present.count and state.borrow_present[slot]) or proof_resource_has_borrow_overlap(state, report, access.place, state.binding_names.count)))
+                    if conflict:
+                        if not moved:
+                            if slot < state.borrow_present.count and state.borrow_present[slot]:
+                                proof_resource_add_failing_obligation(report, "borrow-move-conflict", position, function_name, "a live borrow prevents moving its borrow handle")
+                            else:
+                                proof_resource_report_borrow_conflict(state, report, access.place, state.binding_names.count, false, "borrow-move-conflict", position, function_name, "a live borrow prevents moving the borrowed place")
+                    elif root != "" and slot < state.binding_names.count:
+                        access_root: usize = proof_resource_encode_access_place(operand, report)
+                        proof_resource_record_event(state, report, "resource-move", "", access_root, root, "", 0)
+                        proof_resource_mark_binding_moved(state, slot)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_resource_check_expression(operand, state, report, function_name, functions)
+                Ast::Expr.Paren(inner, _):
+                    proof_resource_check_expression(inner, state, report, function_name, functions)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_resource_check_expression(left, state, report, function_name, functions)
+                    proof_resource_check_expression(right, state, report, function_name, functions)
+                Ast::Expr.Field(object, _, _):
+                    proof_resource_check_expression(object, state, report, function_name, functions)
+                Ast::Expr.Scope(base, _, _):
+                    proof_resource_check_expression(base, state, report, function_name, functions)
+                Ast::Expr.Index(object, index, _):
+                    proof_resource_check_expression(object, state, report, function_name, functions)
+                    proof_resource_check_expression(index, state, report, function_name, functions)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_resource_check_expression(object, state, report, function_name, functions)
+                    for argument in arguments |argument, state, report, function_name, functions|:
+                        proof_resource_check_expression(argument, state, report, function_name, functions)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_resource_check_expression(object, state, report, function_name, functions)
+                    proof_resource_check_expression(low, state, report, function_name, functions)
+                    proof_resource_check_expression(high, state, report, function_name, functions)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_resource_check_expression(operand, state, report, function_name, functions)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |element, state, report, function_name, functions|:
+                        proof_resource_check_expression(element, state, report, function_name, functions)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |element, state, report, function_name, functions|:
+                        proof_resource_check_expression(element, state, report, function_name, functions)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, state, report, function_name, functions|:
+                        proof_resource_check_expression(element, state, report, function_name, functions)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |entry, state, report, function_name, functions|:
+                        proof_resource_check_expression(entry.key, state, report, function_name, functions)
+                        proof_resource_check_expression(entry.value, state, report, function_name, functions)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |field, state, report, function_name, functions|:
+                        proof_resource_check_expression(field.value, state, report, function_name, functions)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_resource_check_expression(base, state, report, function_name, functions)
+                    for field in fields |field, state, report, function_name, functions|:
+                        proof_resource_check_expression(field.value, state, report, function_name, functions)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_resource_check_expression(condition, state, report, function_name, functions)
+                    proof_resource_check_expression(then_expr, state, report, function_name, functions)
+                    proof_resource_check_expression(else_expr, state, report, function_name, functions)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_resource_check_expression(iterable, state, report, function_name, functions)
+                    proof_resource_check_expression(condition, state, report, function_name, functions)
+                    proof_resource_check_expression(body, state, report, function_name, functions)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_resource_check_expression(base, state, report, function_name, functions)
+                    proof_resource_check_expression(predicate, state, report, function_name, functions)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    proof_resource_check_expression(scrutinee, state, report, function_name, functions)
+                    for arm in arms |arm, state, report, function_name, functions|:
+                        arm_state: mutable ProofResourceState = proof_resource_empty()
+                        proof_resource_copy_into(state, &arm_state)
+                        proof_resource_mark_scope_inherited(state, &arm_state)
+                        proof_resource_check_pattern_names(arm.pattern, &arm_state, report, functions)
+                        proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions)
+                        proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions)
+                        proof_resource_close_child(state, arm_state, report, true)
+                Ast::Expr.Catch(guarded, arms, _):
+                    proof_resource_check_expression(guarded, state, report, function_name, functions)
+                    for arm in arms |arm, state, report, function_name, functions|:
+                        arm_state: mutable ProofResourceState = proof_resource_empty()
+                        proof_resource_copy_into(state, &arm_state)
+                        proof_resource_mark_scope_inherited(state, &arm_state)
+                        proof_resource_check_pattern_names(arm.pattern, &arm_state, report, functions)
+                        proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions)
+                        proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions)
+                        proof_resource_close_child(state, arm_state, report, true)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_resource_check_expression(guarded, state, report, function_name, functions)
+                    recovery_state: mutable ProofResourceState = proof_resource_empty()
+                    proof_resource_copy_into(state, &recovery_state)
+                    proof_resource_mark_scope_inherited(state, &recovery_state)
+                    proof_resource_check_statements(recovery, &recovery_state, report, function_name, functions)
+                    proof_resource_close_child(state, recovery_state, report, false)
+                Ast::Expr.Lambda(parameters, body, _):
+                    lambda_state: mutable ProofResourceState = proof_resource_empty()
+                    proof_resource_copy_into(state, &lambda_state)
+                    proof_resource_mark_scope_inherited(state, &lambda_state)
+                    for parameter in parameters |parameter, lambda_state|:
+                        proof_resource_add_binding_traced(&lambda_state, report, parameter, false, false, false, lambda_state.binding_names.count, false, "", proof_resource_empty_place(), 0)
+                    proof_resource_check_statements(body, &lambda_state, report, function_name, functions)
+                    proof_resource_close_child(state, lambda_state, report, false)
+                Ast::Expr.Block(statements, value, _, _):
+                    child: mutable ProofResourceState = proof_resource_empty()
+                    proof_resource_copy_into(state, &child)
+                    proof_resource_mark_scope_inherited(state, &child)
+                    proof_resource_check_statements(statements, &child, report, function_name, functions)
+                    proof_resource_check_expression(value, &child, report, function_name, functions)
+                    proof_resource_close_child(state, child, report, true)
+                _:
+                    pass
+            state.expression_depth <- state.expression_depth - 1
