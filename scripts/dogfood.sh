@@ -6,13 +6,15 @@ COMPILER="${ELISA_COMPILER_BIN:-}"
 # shellcheck source=scripts/compiler_provenance.sh
 source "$ROOT_DIR/scripts/compiler_provenance.sh"
 if [[ -z "$COMPILER" ]]; then
-    # `elisac` was a symlink to the Go compiler and is gone; the stage names are
-    # explicit now. Prefer the self-hosted compiler. Its objects need the runtime
-    # object discovered below; stage0 remains a supported fallback.
-    for candidate in elisac-stage1 elisac-stage0 elisac; do
-        COMPILER="$(command -v "$candidate" 2>/dev/null || true)"
-        [[ -n "$COMPILER" ]] && break
-    done
+    # Prefer the current source checkout's freshness-guarded stage1 wrapper;
+    # installed stage1 snapshots can lag compiler changes in the sibling checkout.
+    COMPILER="$(elisa_default_stage1 "$ROOT_DIR" || true)"
+    if [[ -z "$COMPILER" ]]; then
+        COMPILER="$(elisa_default_stage0 "$ROOT_DIR" || true)"
+    fi
+    if [[ -z "$COMPILER" ]]; then
+        COMPILER="$(command -v elisac 2>/dev/null || true)"
+    fi
 fi
 if [[ -z "$COMPILER" ]]; then
     printf 'dogfood failed: set ELISA_COMPILER_BIN to an Elisa compiler\n' >&2
@@ -48,7 +50,7 @@ if [[ -z "$BOOTSTRAP_COMPILER" ]]; then
     if elisa_compiler_is_stage0 "$COMPILER"; then
         BOOTSTRAP_COMPILER="$COMPILER"
     else
-        BOOTSTRAP_COMPILER="$(command -v elisac-stage0 2>/dev/null || true)"
+        BOOTSTRAP_COMPILER="$(elisa_default_stage0 "$ROOT_DIR" || true)"
     fi
 fi
 if [[ -n "$BOOTSTRAP_COMPILER" ]]; then

@@ -13,12 +13,15 @@ COMPILER="${ELISA_COMPILER_BIN:-}"
 source "$ROOT_DIR/scripts/compiler_provenance.sh"
 
 if [[ -z "$COMPILER" ]]; then
-    # The compilers are installed under explicit stage names; `elisac` no longer
-    # exists. Prefer the self-hosted one, fall back to the Go bootstrap.
-    for candidate in elisac-stage1 elisac-stage0 elisac; do
-        COMPILER="$(command -v "$candidate" 2>/dev/null || true)"
-        [[ -n "$COMPILER" ]] && break
-    done
+    # Prefer the source checkout's freshness-guarded stage1 wrapper over an
+    # installed snapshot, then use the pinned/current Go bootstrap as fallback.
+    COMPILER="$(elisa_default_stage1 "$ROOT_DIR" || true)"
+    if [[ -z "$COMPILER" ]]; then
+        COMPILER="$(elisa_default_stage0 "$ROOT_DIR" || true)"
+    fi
+    if [[ -z "$COMPILER" ]]; then
+        COMPILER="$(command -v elisac 2>/dev/null || true)"
+    fi
 fi
 
 if [[ -z "$COMPILER" || ! -x "$COMPILER" ]]; then

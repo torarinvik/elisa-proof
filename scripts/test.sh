@@ -100,20 +100,23 @@ else:
 done
 
 set +e
+# Shared compiler identity checks and freshness-aware default selection.
+# shellcheck source=scripts/compiler_provenance.sh
+source "$ROOT_DIR/scripts/compiler_provenance.sh"
 SELF_HOST_COMPILER="${ELISA_COMPILER_BIN:-}"
 if [[ -z "$SELF_HOST_COMPILER" ]]; then
-    # `elisac` was a symlink to the Go compiler and is gone; the stage names are
-    # explicit now. Prefer the self-hosted compiler. The probe below only checks
-    # compilation, so it deliberately uses the object mode shared by both stages.
-    for candidate in elisac-stage1 elisac-stage0 elisac; do
-        SELF_HOST_COMPILER="$(command -v "$candidate" 2>/dev/null || true)"
-        [[ -n "$SELF_HOST_COMPILER" ]] && break
-    done
+    # The standalone probes should use the same freshest compiler selection as
+    # build.sh, with the checked-out stage1 wrapper preferred over PATH snapshots.
+    SELF_HOST_COMPILER="$(elisa_default_stage1 "$ROOT_DIR" || true)"
+    if [[ -z "$SELF_HOST_COMPILER" ]]; then
+        SELF_HOST_COMPILER="$(elisa_default_stage0 "$ROOT_DIR" || true)"
+    fi
+    if [[ -z "$SELF_HOST_COMPILER" ]]; then
+        SELF_HOST_COMPILER="$(command -v elisac 2>/dev/null || true)"
+    fi
 fi
 # The standalone probes below invoke the selected compiler directly, so repeat the
 # same stage0 identity check that protects the main proof build.
-# shellcheck source=scripts/compiler_provenance.sh
-source "$ROOT_DIR/scripts/compiler_provenance.sh"
 if elisa_compiler_is_stage0 "$SELF_HOST_COMPILER"; then
     elisa_verify_stage0_provenance "$SELF_HOST_COMPILER" "$ROOT_DIR" || exit $?
 fi
