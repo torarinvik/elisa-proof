@@ -136,6 +136,7 @@ class AuditHarnessTests(unittest.TestCase):
             )
             binary.chmod(0o700)
             env = dict(os.environ)
+            env.pop("ELISA_FULL_AUDIT_MEMORY_LIMIT_KB", None)
             env.update(
                 ELISA_FULL_AUDIT_BINARY=str(binary),
                 ELISA_FULL_AUDIT_SOURCE="examples/verified.elisa",

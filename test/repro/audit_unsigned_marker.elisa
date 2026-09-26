@@ -1,0 +1,278 @@
+# Isolated self-verification stress case: unsigned marker decoding.
+# This is a diagnostic input, not a claim that the declarations are proved.
+include "../../src/proof/kernel_core.elisa"
+module ElisaProofKernelReplay:
+    private:
+        const PROOF_KERNEL_SCALAR_ELEMENT_DEPTH_LIMIT: i64 = 64
+
+        struct ProofKernelReplayInt:
+            known: bool
+            value: i64
+
+        struct ProofKernelReplayBool:
+            known: bool
+            value: bool
+
+        # Result of the independent `simp` normalizer. `changed` records whether the source
+        # tactic's bottom-up pass performed one of its closed rewrites; `root` is the canonical
+        # arena term that pass produces. Keeping this separate from goal entailment is important:
+        # a stronger proposition such as `p and true` is not a simplification of `p` merely because
+        # it contains the old goal as a conjunct.
+        struct ProofKernelReplaySimplified:
+            known: bool
+            changed: bool
+            root: usize
+
+        struct ProofKernelReplayBound:
+            name: sview
+            lower: mutable i64
+            upper: mutable i64
+            has_lower: mutable bool
+            has_upper: mutable bool
+
+        struct ProofKernelReplayAffine:
+            base: sview
+            offset: i64
+            known: bool
+            negative: bool
+
+        struct ProofKernelReplayDifference:
+            left: sview
+            right: sview
+            bound: i64
+
+    public:
+        # Arena admission uses an explicit DFS work item rather than the host call stack. The
+        # depth is still part of the certificate invariant, so iterative traversal does not turn
+        # an unbounded serialized graph into an accepted term merely because it avoids recursion.
+        struct ProofKernelReplayArenaWork:
+            root: usize
+            depth: usize
+            exiting: bool
+
+        # Reusable scratch for kernel arena admission. Each check clears and reinitializes every
+        # logical slot before use; caller-provided contents are never trusted across calls.
+        struct ProofKernelReplayValidationWorkspace:
+            visiting: mutable darray[bool]
+            visited: mutable darray[bool]
+            validity: mutable darray[bool]
+            visited_depth: mutable darray[usize]
+            work: mutable darray[ProofKernelReplayArenaWork]
+            work_used: mutable usize
+
+        def proof_kernel_replay_validation_workspace_new() -> ProofKernelReplayValidationWorkspace:
+            return ProofKernelReplayValidationWorkspace{visiting: [], visited: [], validity: [], visited_depth: [], work: [], work_used: 0}
+
+    private:
+
+        def proof_kernel_replay_i64_max() -> i64:
+            return ElisaProofKernelCore::PROOF_KERNEL_I64_MAX
+
+        def proof_kernel_replay_i64_min() -> i64:
+            return ElisaProofKernelCore::PROOF_KERNEL_I64_MIN
+
+        def proof_kernel_replay_add_safe(left: i64, right: i64) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if right > 0 and left > proof_kernel_replay_i64_max() - right
+            return ProofKernelReplayInt{known: false, value: 0} if right < 0 and left < proof_kernel_replay_i64_min() - right
+            return ProofKernelReplayInt{known: true, value: left + right}
+
+        def proof_kernel_replay_sub_safe(left: i64, right: i64) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if right > 0 and left < proof_kernel_replay_i64_min() + right
+            return ProofKernelReplayInt{known: false, value: 0} if right < 0 and left > proof_kernel_replay_i64_max() + right
+            return ProofKernelReplayInt{known: true, value: left - right}
+
+        def proof_kernel_replay_mul_safe(left: i64, right: i64) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: true, value: 0} if left == 0 or right == 0
+            return ProofKernelReplayInt{known: true, value: right} if left == 1
+            return ProofKernelReplayInt{known: true, value: left} if right == 1
+            if left == -1:
+                return ProofKernelReplayInt{known: false, value: 0} if right == proof_kernel_replay_i64_min()
+                return ProofKernelReplayInt{known: true, value: 0 - right}
+            if right == -1:
+                return ProofKernelReplayInt{known: false, value: 0} if left == proof_kernel_replay_i64_min()
+                return ProofKernelReplayInt{known: true, value: 0 - left}
+            if left > 0:
+                return ProofKernelReplayInt{known: false, value: 0} if right > 0 and left > proof_kernel_replay_i64_max() / right
+                return ProofKernelReplayInt{known: false, value: 0} if right < 0 and right < proof_kernel_replay_i64_min() / left
+            else:
+                return ProofKernelReplayInt{known: false, value: 0} if right > 0 and left < proof_kernel_replay_i64_min() / right
+                return ProofKernelReplayInt{known: false, value: 0} if right < 0 and left < proof_kernel_replay_i64_max() / right
+            return ProofKernelReplayInt{known: true, value: left * right}
+
+        def proof_kernel_replay_div_safe(left: i64, right: i64) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if right == 0 or (left == proof_kernel_replay_i64_min() and right == -1)
+            return ProofKernelReplayInt{known: true, value: left / right}
+
+        def proof_kernel_replay_mod_safe(left: i64, right: i64) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if right == 0 or (left == proof_kernel_replay_i64_min() and right == -1)
+            return ProofKernelReplayInt{known: true, value: left % right}
+
+        def proof_kernel_replay_shift_safe(value: i64, amount: i64, left: bool) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if amount < 0 or amount > ElisaProofKernelCore::PROOF_KERNEL_MAX_SHIFT_AMOUNT
+            return ProofKernelReplayInt{known: true, value: value << amount} if left
+            return ProofKernelReplayInt{known: true, value: value >> amount}
+
+        def proof_kernel_replay_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            ensure result == (root < nodes.count)
+            return ElisaProofKernelCore::root_valid(nodes.count, root)
+
+        # A bounded lookup keeps the replay implementation honest about serialized arena
+        # indices. The loop index is intrinsically in range, while the requested index may be
+        # hostile input. Callers must check `known` before consuming the returned node.
+        def proof_kernel_replay_node_at(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, node: ElisaProofKernelCore::ProofKernelNode):
+            empty: ElisaProofKernelCore::ProofKernelNode = ElisaProofKernelCore::ProofKernelNode{kind: "", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
+            return (false, empty) if root >= nodes.count
+            assert root < nodes.count
+            return (true, nodes[root])
+
+        def proof_kernel_replay_bool_at(values: darray[bool]&, requested: usize) -> (known: bool, value: bool):
+            return (false, false) if requested >= values.count
+            assert requested < values.count
+            return (true, values[requested])
+
+        def proof_kernel_replay_bool_set(values: mutable darray[bool]&, requested: usize, value: bool) -> bool:
+            return false if requested >= values.count
+            assert requested < values.count
+            values[requested] <- value
+            return true
+
+        def proof_kernel_replay_child_at(children: darray[usize]&, requested: usize) -> (known: bool, value: usize):
+            return (false, 0) if requested >= children.count
+            assert requested < children.count
+            return (true, children[requested])
+
+        # Keep the hostile serialized-slice check free of a precondition. The compiler core's
+        # range_valid predicate is intentionally specified with a precondition for ordinary
+        # callers; replay admission instead needs a total predicate that can inspect malformed
+        # starts and counts before invoking any indexed operation.
+        def proof_kernel_replay_child_range_valid(start: usize, count: usize, total: usize) -> bool:
+            # Both conjuncts are needed by a caller indexing `children[start + index]`: the sum
+            # rule bounds `start + index` by `total` only when the guard on the subtraction is
+            # stated beside the bound it guards.
+            ensure not result or start <= total and count <= total - start
+            return false if start > total
+            return false if count > total - start
+            return true
+
+        def proof_kernel_replay_constant_unary(operator: sview, inner: ProofKernelReplayInt) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if not inner.known
+            return inner if operator == "+"
+            if operator == "-":
+                return ProofKernelReplayInt{known: false, value: 0} if inner.value == proof_kernel_replay_i64_min()
+                return ProofKernelReplayInt{known: true, value: 0 - inner.value}
+            return ProofKernelReplayInt{known: false, value: 0}
+
+        def proof_kernel_replay_constant_binary(operator: sview, left: ProofKernelReplayInt, right: ProofKernelReplayInt) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if not left.known or not right.known
+            return proof_kernel_replay_add_safe(left.value, right.value) if operator == "+"
+            return proof_kernel_replay_sub_safe(left.value, right.value) if operator == "-"
+            return proof_kernel_replay_mul_safe(left.value, right.value) if operator == "*"
+            return proof_kernel_replay_div_safe(left.value, right.value) if operator == "/"
+            return proof_kernel_replay_mod_safe(left.value, right.value) if operator == "%"
+            return ProofKernelReplayInt{known: true, value: left.value & right.value} if operator == "&"
+            return ProofKernelReplayInt{known: true, value: left.value | right.value} if operator == "|"
+            return ProofKernelReplayInt{known: true, value: left.value ^ right.value} if operator == "^"
+            return proof_kernel_replay_shift_safe(left.value, right.value, true) if operator == "<<"
+            return proof_kernel_replay_shift_safe(left.value, right.value, false) if operator == ">>"
+            return ProofKernelReplayInt{known: false, value: 0}
+
+        def proof_kernel_replay_constant_leaf(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, kind: sview, name: sview, left: usize, value: i64) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            match kind:
+                "int":
+                    return ProofKernelReplayInt{known: true, value: value}
+                "field":
+                    return empty if name != "count"
+                    # Mirror: the empty literal is empty. A non-empty length would need a `usize`
+                    # to `i64` conversion, which is outside the fragment this module is verified in.
+                    return empty if left >= nodes.count
+                    object: ElisaProofKernelCore::ProofKernelNode = nodes[left]
+                    return empty if object.kind != "array" or object.children_count != 0
+                    return ProofKernelReplayInt{known: true, value: 0}
+                _:
+                    return empty
+
+        def proof_kernel_replay_constant_int(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if depth > ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            remaining: usize = ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return proof_kernel_replay_constant_int_remaining(nodes, root, remaining)
+
+        def proof_kernel_replay_constant_int_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize) -> ProofKernelReplayInt:
+            decreases remaining
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if root >= nodes.count
+            # Keep the indexed node as a place rather than copying the whole record into a local:
+            # local struct copies eagerly acquire scalar-operator witnesses for every field,
+            # including fields this evaluator never operates on.
+            match nodes[root].kind:
+                "unary":
+                    return empty if remaining < 1
+                    inner: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining(nodes, nodes[root].left, remaining - 1)
+                    return proof_kernel_replay_constant_unary(nodes[root].operator, inner)
+                "binary":
+                    return empty if remaining < 1
+                    left: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining(nodes, nodes[root].left, remaining - 1)
+                    right: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining(nodes, nodes[root].right, remaining - 1)
+                    return proof_kernel_replay_constant_binary(nodes[root].operator, left, right)
+                _:
+                    return proof_kernel_replay_constant_leaf(nodes, nodes[root].kind, nodes[root].name, nodes[root].left, nodes[root].value)
+
+        def proof_kernel_replay_constant_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
+            left: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left_root, 0)
+            right: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right_root, 0)
+            return false if not left.known or not right.known
+            return left.value == right.value if operator == "=="
+            return left.value != right.value if operator == "!="
+            return left.value < right.value if operator == "<"
+            return left.value > right.value if operator == ">"
+            return left.value <= right.value if operator == "<="
+            return left.value >= right.value if operator == ">="
+            return false
+
+        # Direct nonnegative integer literals cannot overflow under any admitted primitive
+        # integer type. Replay these ground comparisons before inspecting unrelated premises;
+        # otherwise one irrelevant wrapping expression can block a tautological kernel check.
+        # Keep this narrower than constant evaluation, since compound constant arithmetic may
+        # wrap in a contextually inferred unsigned type.
+        def proof_kernel_replay_direct_literal_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
+            return false if left_root >= nodes.count or right_root >= nodes.count
+            # Read only the discriminator from each already-guarded arena place. Routing these
+            # scalar checks through the tuple-returning node helper creates irrelevant borrow
+            # summary obligations for copies of the full node record.
+            return false if nodes[left_root].kind != "int" or nodes[right_root].kind != "int"
+            return proof_kernel_replay_constant_comparison(nodes, left_root, operator, right_root)
+
+        # Mirror the exact closed rewrites performed by `proof_tactic_simplify_expression`.
+        # This is deliberately narrower than logical entailment: only literals and Boolean
+        # connectives may fold, and arithmetic folds use the replay kernel's checked evaluator.
+        # Non-binary formers are opaque to the source tactic too, so their children are not
+        # traversed here. The caller validates the complete input state before this bounded walk.
+        def proof_kernel_replay_ident_name(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> sview:
+            return "" if root >= nodes.count
+            return "" if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return node.name if node.kind == "ident" else ""
+
+        def proof_kernel_replay_unsigned_marker_info(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> (known: bool, name: sview, width: i64):
+            return (false, "", 0) if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth)
+            return (false, "", 0) if root >= nodes.count
+            marker_call_valid: bool = nodes[root].kind == "call" and nodes[root].operator == "" and nodes[root].auxiliary == 0 and nodes[root].children_count == 2 and proof_kernel_replay_child_range_valid(nodes[root].children_start, nodes[root].children_count, children.count) and proof_kernel_replay_ident_name(nodes, nodes[root].left) == "__elisa_unsigned_type_bound"
+            return (false, "", 0) if not marker_call_valid
+            first: (known: bool, value: usize) = proof_kernel_replay_child_at(children, nodes[root].children_start)
+            second: (known: bool, value: usize) = proof_kernel_replay_child_at(children, nodes[root].children_start + 1)
+            # The child slice is validated against the actual children arena by callers before
+            # this helper is used. The extra root checks here keep the helper fail-closed when it
+            # is used from a standalone replay entry point.
+            argument_indexes_valid: bool = first.known and second.known and first.value < nodes.count and second.value < nodes.count
+            return (false, "", 0) if not argument_indexes_valid
+            first_index: usize = first.value
+            second_index: usize = second.value
+            return (false, "", 0) if first_index >= nodes.count or second_index >= nodes.count
+            argument_nodes_valid: bool = nodes[first_index].kind == "call_arg" and nodes[second_index].kind == "call_arg" and nodes[first_index].name == "" and nodes[first_index].secondary_name == "" and nodes[second_index].name == "" and nodes[second_index].secondary_name == ""
+            return (false, "", 0) if not argument_nodes_valid
+            second_value: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, nodes[second_index].left, depth + 1)
+            return (false, "", 0) if not second_value.known
+            name: sview = proof_kernel_replay_ident_name(nodes, nodes[first_index].left)
+            return (second_value.value >= ElisaProofKernelCore::PROOF_KERNEL_FIXED_WIDTH_MIN and second_value.value <= ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS and name != "", name, second_value.value)
+
