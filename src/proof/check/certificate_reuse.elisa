@@ -1,0 +1,67 @@
+extend ElisaProof:
+    private:
+        const PROOF_GOAL_MEMO_LOOKBACK: usize = 128
+
+        # Memoize only an identical goal in an identical, fully traced premise state. This is
+        # deliberately stricter than logical subsumption: it preserves both completeness and
+        # provenance, while avoiding repeated model searches and duplicate kernel encodings.
+        # Keep the cache scoped to the arithmetic index checks that dominate replay analysis;
+        # quantifier/assertion goals may depend on declaration annotations not in this key.
+        def proof_reuse_goal_attempt(facts: darray[Ast::Expr]&, goal: Ast::Expr, line: u32, name: sview, rule: sview, report: mutable ProofReport&) -> (found: bool, proven: bool):
+            return (false, false) if report.kernel_budget_exhausted or report.goal_attempts.count == 0
+            return (false, false) if rule != "index-lower" and rule != "index-upper"
+            match goal:
+                Ast::Expr.Binary(_, _, _, _):
+                    pass
+                _:
+                    return (false, false)
+            return (false, false) if report.goal_attempts[report.goal_attempts.count - 1].name != name
+            lookback: usize = PROOF_GOAL_MEMO_LOOKBACK if report.goal_attempts.count >= PROOF_GOAL_MEMO_LOOKBACK else report.goal_attempts.count
+            start: mutable usize = report.goal_attempts.count - lookback
+            # Bound the function-boundary scan too; scanning the complete function
+            # before applying the lookback made repeated goals quadratic in its size.
+            cursor: mutable usize = report.goal_attempts.count
+            while cursor > start |cursor, start, report, name|:
+                cursor <- cursor - 1
+                if report.goal_attempts[cursor].name != name:
+                    start <- cursor + 1
+                    break
+            for candidate_index in start..<report.goal_attempts.count |candidate_index, facts, goal, name, rule, report, line|:
+                candidate: ProofGoalAttempt = report.goal_attempts[candidate_index]
+                continue if candidate.name != name or candidate.rule != rule or candidate.budget_exhausted
+                continue if not proof_expr_equal(candidate.goal, goal) or candidate.kernel_goal >= report.kernel_nodes.count
+                continue if candidate.facts_start > report.certificate_facts.count or candidate.facts_count > report.certificate_facts.count - candidate.facts_start
+                continue if candidate.kernel_facts_start > report.kernel_certificate_facts.count or candidate.kernel_facts_count > report.kernel_certificate_facts.count - candidate.kernel_facts_start
+                continue if candidate.facts_count != facts.count or candidate.kernel_facts_count != facts.count
+                exact_state: mutable bool = true
+                for offset in 0..<facts.count |offset, facts, candidate, report, name, exact_state|:
+                    current_fact: Ast::Expr = facts[offset]
+                    if not proof_kernel_expression_supported(current_fact) or not proof_expr_equal(current_fact, report.certificate_facts[candidate.facts_start + offset]):
+                        exact_state <- false
+                        break
+                    trace_index: usize = proof_certificate_fact_trace_index(report, current_fact, name)
+                    if trace_index >= report.fact_traces.count:
+                        exact_state <- false
+                        break
+                    trace: ProofFactTrace = report.fact_traces[trace_index]
+                    if trace.kernel_expression != report.kernel_certificate_facts[candidate.kernel_facts_start + offset]:
+                        exact_state <- false
+                        break
+                if not exact_state:
+                    continue
+                if candidate.proven:
+                    continue if not candidate.has_certificate or candidate.certificate_index >= report.certificates.count
+                    source_certificate: ProofGoalCertificate = report.certificates[candidate.certificate_index]
+                    continue if source_certificate.name != name or source_certificate.rule != rule or not proof_expr_equal(source_certificate.goal, candidate.goal)
+                    continue if source_certificate.facts_start != candidate.facts_start or source_certificate.facts_count != candidate.facts_count
+                    continue if source_certificate.kernel_goal != candidate.kernel_goal or source_certificate.kernel_facts_start != candidate.kernel_facts_start or source_certificate.kernel_facts_count != candidate.kernel_facts_count
+                    continue if not proof_kernel_report_append_allowed(report, report.certificates.count, 1, name)
+                    continue if not proof_kernel_report_append_allowed(report, report.goal_attempts.count, 1, name)
+                    certificate_index: usize = report.certificates.count
+                    report.certificates.push(ProofGoalCertificate{goal: goal, facts_start: candidate.facts_start, facts_count: candidate.facts_count, kernel_goal: candidate.kernel_goal, kernel_facts_start: candidate.kernel_facts_start, kernel_facts_count: candidate.kernel_facts_count, line: line, name: name, rule: rule, replayed: false})
+                    report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: candidate.facts_start, facts_count: candidate.facts_count, kernel_goal: candidate.kernel_goal, kernel_facts_start: candidate.kernel_facts_start, kernel_facts_count: candidate.kernel_facts_count, line: line, name: name, rule: rule, proven: true, has_certificate: true, certificate_index: certificate_index})
+                    return (true, true)
+                if not candidate.has_certificate and proof_kernel_report_append_allowed(report, report.goal_attempts.count, 1, name):
+                    report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: candidate.facts_start, facts_count: candidate.facts_count, kernel_goal: candidate.kernel_goal, kernel_facts_start: candidate.kernel_facts_start, kernel_facts_count: candidate.kernel_facts_count, line: line, name: name, rule: rule, proven: false, has_certificate: false, certificate_index: report.certificates.count})
+                    return (true, false)
+            return (false, false)

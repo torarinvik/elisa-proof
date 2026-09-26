@@ -72,6 +72,7 @@ run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'im
 
 # Missing lifetime/place information is unsupported, not a demonstrated violation.
 python3 "$ROOT_DIR/scripts/test_overlap_diagnostics.py"
+python3 "$ROOT_DIR/scripts/test_certificate_reuse.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -176,10 +177,22 @@ if ! elisa_compiler_is_stage0 "$SELF_HOST_COMPILER"; then
     field_runtime_inputs=("${kernel_runtime_inputs[@]}")
 fi
 for ast_probe in field_equality_runtime marker_dispatch_runtime; do
-    "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/snapshot/elisa-proof/examples/$ast_probe.elisa" >/dev/null 2>&1 &&
-        "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/$ast_probe" "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}" &&
-        "$standalone_probe_dir/$ast_probe"
-    if [[ "$?" -ne 0 ]]; then
+    if ! "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/snapshot/elisa-proof/examples/$ast_probe.elisa" >/dev/null 2>&1; then
+        printf 'proof test matrix failed: AST allocation optimization differential test %s did not compile\n' "$ast_probe" >&2
+        exit 1
+    fi
+    if [[ "${#field_runtime_inputs[@]}" -gt 0 ]]; then
+        if ! "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/$ast_probe" "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}"; then
+            printf 'proof test matrix failed: AST allocation differential test %s did not link\n' "$ast_probe" >&2
+            exit 1
+        fi
+    else
+        if ! "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/$ast_probe" "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/profile_hooks.o"; then
+            printf 'proof test matrix failed: AST allocation differential test %s did not link\n' "$ast_probe" >&2
+            exit 1
+        fi
+    fi
+    if ! "$standalone_probe_dir/$ast_probe"; then
         printf 'proof test matrix failed: AST allocation optimization differential test %s failed\n' "$ast_probe" >&2
         exit 1
     fi
