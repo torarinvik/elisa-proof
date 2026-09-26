@@ -103,3 +103,22 @@ The main-source audit still exceeds 1,500,000 KB. The expanded native query orac
 passed, 45 earlier fixture reports were unchanged, 20 additional arithmetic,
 operator-effect, and string-view fixtures had their expected verdicts and complete
 replay, and all nine watchdog tests passed.
+
+### Resource diagnostic follow-up
+
+The 29 apparent violations above were diagnostic classification bugs, not
+demonstrated resource violations. Unsupported aggregate-copy provenance reused a
+false region-liveness bit; reads and writes mistook that unknown lifetime for
+proven destruction. Opaque mutable-reference write targets likewise became
+definite borrow conflicts without a tracked place. Explicit destruction evidence
+now distinguishes the former, and opaque writes report unsupported provenance.
+Neither change admits a new proof or weakens certificate replay.
+
+The rerun completed in 36.99 seconds at 1,179,761 KB, with the same 1,807
+obligations, 860 proven obligations and zero replay gaps. Its verdict is now
+`failed` / `unsupported`, with no `disproved` findings. This is still not
+self-verification: unsupported summaries and analysis limits remain unresolved.
+Three new regression fixtures cover both unsupported cases and actual destruction
+followed by a branch-local write. All 45 baseline reports were unchanged, and 22
+additional region/string-view fixtures retained their expected verdicts and
+complete replay.

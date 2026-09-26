@@ -70,6 +70,32 @@ PY
 # source-backed view and type must remain valid after each nested scope closes.
 run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] > 0; assert report["summary"]["proven"] == report["summary"]["obligations"]; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0'
 
+# Missing lifetime/place information is unsupported, not a demonstrated violation.
+# Keep a true destruction case beside the two unknown-provenance regressions.
+for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
+    set +e
+    run_json_report "$ROOT_DIR/examples/$diagnostic_fixture.elisa" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+destroyed = sys.argv[1] == "rejected_region_destroyed_write"
+assert report["status"] == "failed"
+assert report["verification_state"] == ("disproved" if destroyed else "unsupported")
+assert report["summary"]["semantic_errors"] == 0
+assert report["replay"]["gaps"] == 0
+assert report["replay"]["certificates"] == report["replay"]["replayed"]
+if destroyed:
+    assert any(f["kind"] == "region-use-after-destroy" and f["status"] == "disproved" for f in report["findings"])
+else:
+    assert all(f["status"] != "disproved" for f in report["findings"])
+' "$diagnostic_fixture"
+    diagnostic_statuses=("${PIPESTATUS[@]}")
+    set -e
+    if [[ "${diagnostic_statuses[0]}" -ne 1 || "${diagnostic_statuses[1]}" -ne 0 ]]; then
+        printf 'proof test matrix failed: resource diagnostic classification failed for %s\n' "$diagnostic_fixture" >&2
+        exit 1
+    fi
+done
+
 set +e
 SELF_HOST_COMPILER="${ELISA_COMPILER_BIN:-}"
 if [[ -z "$SELF_HOST_COMPILER" ]]; then

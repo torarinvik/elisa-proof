@@ -30,6 +30,8 @@ extend ElisaProof:
             # the spelling `r`. Keep a separate liveness bit so an old binding cannot become live
             # merely because a same-named region was opened again.
             binding_region_live: mutable darray[bool]
+            # Diagnostic evidence only: false liveness can also mean unsupported provenance.
+            binding_region_destroyed: mutable darray[bool]
             # A direct `new[r]` binding carries the exclusive owner token for its allocation.
             # This is distinct from a borrowed or externally supplied reference: only the former
             # may be re-exposed as a mutable reference when the source type lacks that marker.
@@ -75,7 +77,7 @@ extend ElisaProof:
             trace_events: mutable darray[usize]
 
         def proof_resource_empty() -> ProofResourceState:
-            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], binding_scalar: [], binding_borrowable: [], binding_extent: [], active_regions: [], protected_regions: [], external_regions: [], region_wide_borrows: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
+            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_destroyed: [], binding_region_owner: [], binding_scalar: [], binding_borrowable: [], binding_extent: [], active_regions: [], protected_regions: [], external_regions: [], region_wide_borrows: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
 
         # Copy into an already-created state. Returning a struct that owns several darrays would
         # hide their allocation region from the self-hosting compiler, so all branch snapshots
@@ -88,6 +90,7 @@ extend ElisaProof:
             target.binding_moved.clear()
             target.binding_region.clear()
             target.binding_region_live.clear()
+            target.binding_region_destroyed.clear()
             target.binding_region_owner.clear()
             target.binding_scalar.clear()
             target.binding_borrowable.clear()
@@ -109,6 +112,7 @@ extend ElisaProof:
             target.binding_moved.extend(source.binding_moved)
             target.binding_region.extend(source.binding_region)
             target.binding_region_live.extend(source.binding_region_live)
+            target.binding_region_destroyed.extend(source.binding_region_destroyed)
             target.binding_region_owner.extend(source.binding_region_owner)
             target.binding_scalar.extend(source.binding_scalar)
             target.binding_borrowable.extend(source.binding_borrowable)
@@ -247,6 +251,12 @@ extend ElisaProof:
         def proof_resource_binding_region_is_live(state: ProofResourceState&, slot: usize) -> bool:
             return slot < state.binding_region_live.count and state.binding_region_live[slot]
 
+        def proof_resource_report_unavailable_region(state: ProofResourceState&, slot: usize, report: mutable ProofReport&, position: Ast::Pos, function_name: sview) -> void:
+            if slot < state.binding_region_destroyed.count and state.binding_region_destroyed[slot]:
+                proof_resource_add_failing_obligation(report, "region-use-after-destroy", position, function_name, "a region-owned binding is accessed after its region was destroyed")
+            else:
+                proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "the binding's backing-region lifetime was not established; destruction has not been demonstrated")
+
         def proof_resource_region_has_live_borrow(state: ProofResourceState&, region: sview) -> bool:
             return true if any borrowed in state.region_wide_borrows where borrowed == region
             for slot in 0..<state.borrow_present.count |slot, state, region|:
@@ -261,6 +271,8 @@ extend ElisaProof:
         def proof_resource_invalidate_region_bindings(state: mutable ProofResourceState&, region: sview) -> void:
             for index in 0..<state.binding_region.count |index, state, region|:
                 if index < state.binding_region_live.count and state.binding_region[index] == region:
+                    if state.binding_region_live[index] and index < state.binding_region_destroyed.count:
+                        state.binding_region_destroyed[index] <- true
                     state.binding_region_live[index] <- false
 
         # Close a named region in the same state in which it was opened. The compiler's flat
@@ -353,6 +365,7 @@ extend ElisaProof:
             if valid:
                 state.binding_region[target_slot] <- region
                 state.binding_region_live[target_slot] <- true
+                state.binding_region_destroyed[target_slot] <- false
                 state.binding_region_owner[target_slot] <- true
                 proof_resource_record_event(state, report, "resource-region-rebind-alloc", "", encoded, target_name, region, 0)
 
