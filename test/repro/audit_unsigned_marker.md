@@ -78,3 +78,28 @@ against the complete fact list and every singleton, so an early matching marker
 cannot mask later cases. This native test passed, the 45 earlier fixture reports
 were unchanged, and eight additional signed/difference/overflow fixtures retained
 their expected verdicts with complete certificate replay.
+
+### Operator-witness and type-bound scans
+
+Exact-name filtering now also covers operator-witness queries, retained type-bound
+names, signed-context classification, and signed-bound collection. The read-only
+operator queries live in the private `check/operator_witness_queries.elisa` module;
+witness construction remains in `operator_witnesses.elisa`, keeping both under the
+600-line source limit. The differential oracle corpus includes builtin, untrusted,
+and indexed operator markers, including malformed protocol arguments.
+
+The complete standalone replay audit now finishes under the unchanged watchdog:
+38.45 seconds, sampled peak 1,179,697 KB, 1,807 obligations, 860 proved obligations,
+and zero replay gaps. **Completion is not verification of the replay system.** Its
+top-level verdict is `failed` / `disproved`: there are 1,065 findings, dominated by
+unsupported borrow/call summaries and analysis budgets, plus 29 resource-violation
+findings. Those findings need source-level investigation; they are not yet
+independently confirmed bugs. In particular, inspect region-use findings in
+`proof_kernel_replay_resource_lend` and borrow-write findings in
+`proof_kernel_replay_arena_valid_with_workspace` and
+`proof_kernel_replay_resource_parameters`.
+
+The main-source audit still exceeds 1,500,000 KB. The expanded native query oracle
+passed, 45 earlier fixture reports were unchanged, 20 additional arithmetic,
+operator-effect, and string-view fixtures had their expected verdicts and complete
+replay, and all nine watchdog tests passed.
