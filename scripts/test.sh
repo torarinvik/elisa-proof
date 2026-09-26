@@ -6,6 +6,15 @@ python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 "$ROOT_DIR/scripts/build.sh"
 
+# The marker-decoder regression must finish under the normal watchdog. Completion
+# is not proof: unresolved obligations remain visible in the report.
+if ! ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/test/repro/audit_unsigned_marker.elisa" \
+    ELISA_FULL_AUDIT_BINARY="$ROOT_DIR/build/elisa-proof" \
+    "$ROOT_DIR/scripts/audit_full_source.sh" | python3 -c 'import json, sys; audit=json.load(sys.stdin); assert audit["complete"]; assert audit["replay_gaps"] == 0'; then
+    printf 'proof test matrix failed: unsigned-marker audit did not complete with clean replay\n' >&2
+    exit 1
+fi
+
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
 # The downstream assertions still check the report's expected shape; this adapter checks that the
 # whole JSON document parsed and that the verifier's process exit agrees with its top-level verdict.
@@ -132,6 +141,19 @@ if [[ -z "$kernel_runtime_obj" ]] && elisa_compiler_is_stage0 "$SELF_HOST_COMPIL
     fi
 fi
 [[ -n "$kernel_runtime_obj" ]] && kernel_runtime_inputs+=("$kernel_runtime_obj")
+# This AST-level test uses the same immutable frontend export as the proof build.
+# Stage0's frontend-linked object already contains the runtime definitions.
+field_runtime_inputs=()
+if ! elisa_compiler_is_stage0 "$SELF_HOST_COMPILER"; then
+    field_runtime_inputs=("${kernel_runtime_inputs[@]}")
+fi
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/field-equality.o" "$ROOT_DIR/build/snapshot/elisa-proof/examples/field_equality_runtime.elisa" >/dev/null 2>&1 &&
+    "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/field-equality" "$standalone_probe_dir/field-equality.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}" &&
+    "$standalone_probe_dir/field-equality"
+if [[ "$?" -ne 0 ]]; then
+    printf 'proof test matrix failed: allocation-free field comparison disagrees with AST equality\n' >&2
+    exit 1
+fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/examples/kernel_sview_lifetimes_runtime.elisa" >/dev/null 2>&1 &&
     "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-sview-lifetimes" "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
     "$standalone_probe_dir/kernel-sview-lifetimes"
