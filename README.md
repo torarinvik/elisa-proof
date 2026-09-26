@@ -583,6 +583,18 @@ the caller's live region. Scalar-only calls to a region-polymorphic function rem
 because an ambient arena is not a proof of a lifetime mapping.
 Nested control-flow snapshots also protect inherited region identities: a child cannot destroy and
 reopen the same spelling and then make the parent's older lifetime appear live at the join.
+
+An `sview` represents a valid borrowed string, including a valid empty string; absence requires
+an explicitly optional type. The region checker tracks views created from region-backed byte
+arrays, their direct aliases, and exact `sview @r` parameters and returns. Copying a view retains
+its backing lifetime. Explicit region destruction is rejected while a view remains in scope,
+even if no later expression reads it. Writes overlapping its backing place are rejected too.
+A by-value `sview @r` formal has an unknown pointee within `@r`, so it conservatively prevents
+all writes through tracked places in that region for the duration of the function. Calls must
+map each such formal to the actual argument's live region. These transitions and mappings are
+checked again by independent resource replay. Aliased types, aggregates containing views, and
+other unmodeled provenance remain unsupported where an exact lifetime witness is required.
+
 The proof checker now carries a separate lexical resource state for a useful ownership slice:
 bounded named places (`&x`, `&box.inner`, and arbitrary named-field paths within the kernel depth
 bound) have stable structural identities,

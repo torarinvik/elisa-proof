@@ -14,6 +14,8 @@ extend ElisaProofKernelReplay:
         const PROOF_KERNEL_REPLAY_REFERENCE_FLAG: usize = 2
         const PROOF_KERNEL_REPLAY_MUTABLE_REFERENCE_FLAG: usize = 4
         const PROOF_KERNEL_REPLAY_BORROWABLE_FLAG: usize = 8
+        const PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG: usize = 16
+        const PROOF_KERNEL_REPLAY_EXPLICIT_REGION_DESTROY: usize = 1
         const PROOF_KERNEL_REPLAY_MUTABLE_REGION_FLAG: usize = 2
         const PROOF_KERNEL_REPLAY_RETURN_REGION_FLAG: usize = 4
         const PROOF_KERNEL_REPLAY_MAX_RESOURCE_JOIN_MOVES: usize = 65536
@@ -160,6 +162,8 @@ extend ElisaProofKernelReplay:
             return (false, false)
 
         def proof_kernel_replay_arena_resource_binding_shape(node: ElisaProofKernelCore::ProofKernelNode) -> (known: bool, valid: bool):
+            if node.kind == "resource-sview-param":
+                return (true, node.operator == "" and node.right == 0 and node.auxiliary == PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name != "")
             if node.kind == "resource-bind":
                 valid_operator: bool = node.operator == "value" or node.operator == "shared" or node.operator == "mutable" or node.operator == "external-shared" or node.operator == "external-mutable"
                 has_source: bool = node.operator == "shared" or node.operator == "mutable"
@@ -170,20 +174,24 @@ extend ElisaProofKernelReplay:
             if node.kind == "resource-region-param":
                 return (true, node.operator == "external" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name == "")
             if node.kind == "resource-region-return":
-                return (true, node.operator == "param" and node.right == 0 and node.auxiliary <= 1 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name == "")
+                reference_return: bool = node.operator == "param" and node.right == 0 and node.auxiliary <= 1
+                sview_return: bool = node.operator == "sview" and node.right != 0 and node.auxiliary == PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG
+                return (true, (reference_return or sview_return) and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name == "")
             return (false, false)
 
         def proof_kernel_replay_arena_resource_region_flags_valid(flags: usize) -> bool:
-            return false if flags > PROOF_KERNEL_REPLAY_MAX_RESOURCE_EXTENT_FLAGS
+            return false if flags > PROOF_KERNEL_REPLAY_MAX_RESOURCE_EXTENT_FLAGS + PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG
             return false if (flags & PROOF_KERNEL_REPLAY_BORROWABLE_FLAG) != 0 and (flags & PROOF_KERNEL_REPLAY_REFERENCE_FLAG) != 0
             return false if (flags & PROOF_KERNEL_REPLAY_RETURN_REGION_FLAG) != 0 and (flags & PROOF_KERNEL_REPLAY_MUTABLE_REGION_FLAG) == 0
             return true
 
         def proof_kernel_replay_arena_resource_region_extent_shape(node: ElisaProofKernelCore::ProofKernelNode) -> bool:
-            return node.operator == "" and node.right == 0 and proof_kernel_replay_arena_resource_region_flags_valid(node.auxiliary) and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name != ""
+            has_sview_borrow: bool = (node.auxiliary & PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG) != 0
+            return node.operator == "" and (node.right != 0 if has_sview_borrow else node.right == 0) and proof_kernel_replay_arena_resource_region_flags_valid(node.auxiliary) and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name != ""
 
         def proof_kernel_replay_arena_resource_region_named_shape(node: ElisaProofKernelCore::ProofKernelNode) -> bool:
-            return node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name == ""
+            valid_close_mode: bool = node.auxiliary == 0 or node.kind == "resource-region-close" and node.auxiliary == PROOF_KERNEL_REPLAY_EXPLICIT_REGION_DESTROY
+            return node.operator == "" and node.left == 0 and node.right == 0 and valid_close_mode and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name == ""
 
         def proof_kernel_replay_arena_resource_region_discard_shape(node: ElisaProofKernelCore::ProofKernelNode) -> bool:
             return node.operator == "" and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name == "" and node.secondary_name != ""
@@ -195,7 +203,9 @@ extend ElisaProofKernelReplay:
             match node.kind:
                 "resource-region-open" or "resource-region-close":
                     return (true, proof_kernel_replay_arena_resource_region_named_shape(node))
-                "resource-region-alloc" or "resource-region-bind":
+                "resource-region-alloc":
+                    return (true, proof_kernel_replay_arena_resource_region_extent_shape(node) and (node.auxiliary & PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG) == 0)
+                "resource-region-bind":
                     return (true, proof_kernel_replay_arena_resource_region_extent_shape(node))
                 "resource-region-alloc-discard" or "resource-region-return-alloc" or "resource-region-call-alloc":
                     return (true, proof_kernel_replay_arena_resource_region_discard_shape(node))
@@ -223,7 +233,9 @@ extend ElisaProofKernelReplay:
             if node.kind == "resource-call-region":
                 return (true, node.operator == "param" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name != "")
             if node.kind == "resource-call-result":
-                return (true, node.operator == "" and node.right == 0 and node.auxiliary <= PROOF_KERNEL_REPLAY_MAX_RESOURCE_FLAGS and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name != "")
+                reference_result: bool = node.operator == "" and node.right == 0 and node.auxiliary <= PROOF_KERNEL_REPLAY_MAX_RESOURCE_FLAGS
+                sview_result: bool = node.operator == "sview" and node.right != 0 and node.auxiliary == PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG + PROOF_KERNEL_REPLAY_BORROWABLE_FLAG
+                return (true, (reference_result or sview_result) and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name != "" and node.secondary_name != "")
             return (false, false)
 
         def proof_kernel_replay_arena_resource_summary_shape(node: ElisaProofKernelCore::ProofKernelNode) -> (known: bool, valid: bool):

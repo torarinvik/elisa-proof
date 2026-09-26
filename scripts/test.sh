@@ -132,6 +132,13 @@ if [[ -z "$kernel_runtime_obj" ]] && elisa_compiler_is_stage0 "$SELF_HOST_COMPIL
     fi
 fi
 [[ -n "$kernel_runtime_obj" ]] && kernel_runtime_inputs+=("$kernel_runtime_obj")
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/examples/kernel_sview_lifetimes_runtime.elisa" >/dev/null 2>&1 &&
+    "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-sview-lifetimes" "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
+    "$standalone_probe_dir/kernel-sview-lifetimes"
+if [[ "$?" -ne 0 ]]; then
+    printf 'proof test matrix failed: native sview lifetime replay boundary tests failed\n' >&2
+    exit 1
+fi
 "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-proposition-admission" "$standalone_probe_dir/kernel-proposition-admission.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
 "$standalone_probe_dir/kernel-proposition-admission"
 kernel_proposition_admission_status=$?
@@ -681,6 +688,96 @@ if [[ "$rejected_region_use_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-region-use.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-use-after-destroy" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: rejected region use report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_sview_after_region_destroy.elisa" >/tmp/elisa-proof-rejected-sview-region-use.json
+rejected_sview_region_use_status=$?
+set -e
+if [[ "$rejected_sview_region_use_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: sview use after backing-region destruction was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-region-use.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-use-after-destroy" or f["kind"] == "region-destroy-live-borrow" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+    printf 'proof test matrix failed: rejected sview lifetime report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_sview_destroy_while_live.elisa" >/tmp/elisa-proof-rejected-sview-live-destroy.json
+rejected_sview_live_destroy_status=$?
+set -e
+if [[ "$rejected_sview_live_destroy_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: backing region was destroyed while an sview remained live\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-live-destroy.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-destroy-live-borrow" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+    printf 'proof test matrix failed: live sview destroy report was incomplete\n' >&2
+    exit 1
+fi
+run_json_report "$ROOT_DIR/examples/sview_region_live_use.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/sview_region_reference_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/sview_region_return_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0'
+run_json_report "$ROOT_DIR/examples/sview_region_value_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0'
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_sview_return_after_region_destroy.elisa" >/tmp/elisa-proof-rejected-sview-return-destroy.json
+rejected_sview_return_destroy_status=$?
+set -e
+if [[ "$rejected_sview_return_destroy_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: sview returned through a helper outlived its backing region\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-return-destroy.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-destroy-live-borrow" or f["kind"] == "region-use-after-destroy" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+    printf 'proof test matrix failed: helper-returned sview lifetime report was incomplete\n' >&2
+    exit 1
+fi
+for sview_escape_fixture in rejected_sview_alias_region_escape rejected_sview_aggregate_region_escape; do
+    set +e
+    run_json_report "$ROOT_DIR/examples/$sview_escape_fixture.elisa" >"/tmp/elisa-proof-$sview_escape_fixture.json"
+    sview_escape_status=$?
+    set -e
+    if [[ "$sview_escape_status" -ne 1 ]]; then
+        printf 'proof test matrix failed: sview lifetime escaped through %s\n' "$sview_escape_fixture" >&2
+        exit 1
+    fi
+    if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "region-alias-unsupported" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "/tmp/elisa-proof-$sview_escape_fixture.json"; then
+        printf 'proof test matrix failed: sview escape report was incomplete for %s\n' "$sview_escape_fixture" >&2
+        exit 1
+    fi
+done
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_sview_region_reference_write.elisa" >/tmp/elisa-proof-rejected-sview-reference-write.json
+rejected_sview_reference_write_status=$?
+set -e
+if [[ "$rejected_sview_reference_write_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: write through the mutable backing reference was accepted while an sview was live\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-reference-write.json")); assert report["status"] == "failed"; assert any(f["kind"] == "borrow-write-conflict" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
+    printf 'proof test matrix failed: rejected sview-backed write report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_sview_region_parameter_write.elisa" >/tmp/elisa-proof-rejected-sview-parameter-write.json
+rejected_sview_parameter_write_status=$?
+set -e
+if [[ "$rejected_sview_parameter_write_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: write in a region borrowed by an sview parameter was accepted\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-parameter-write.json")); assert report["status"] == "failed"; assert any(f["kind"] == "borrow-write-conflict" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+    printf 'proof test matrix failed: rejected sview parameter write report was incomplete\n' >&2
+    exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_region_call_binding_mismatch.elisa" >/tmp/elisa-proof-rejected-region-call-binding.json
+rejected_region_call_binding_status=$?
+set -e
+if [[ "$rejected_region_call_binding_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: a returned reference changed its backing region at binding\n' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-region-call-binding.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-alias-unsupported" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
+    printf 'proof test matrix failed: mismatched reference result lifetime report was incomplete\n' >&2
     exit 1
 fi
 set +e

@@ -1,7 +1,7 @@
 extend ElisaProofKernelReplay:
     private:
         def proof_kernel_replay_resource_empty() -> ProofKernelReplayResourceState:
-            return ProofKernelReplayResourceState{binding_names: [], binding_scope_depth: [], scope_depth: 0, binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_borrowable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], active_regions: [], protected_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], resource_call_events: [], resource_call_allocations: [], resource_call_allocations_used: [], resource_call_results: [], resource_return_alloc_regions: [], resource_return_witnesses: [], resource_return_witnesses_used: [], pending_join_moves: [], binding_origin_places: []}
+            return ProofKernelReplayResourceState{binding_names: [], binding_scope_depth: [], scope_depth: 0, binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_borrowable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], active_regions: [], protected_regions: [], external_regions: [], region_wide_borrows: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], disjoint_left: [], disjoint_right: [], resource_call_events: [], resource_call_allocations: [], resource_call_allocations_used: [], resource_call_results: [], resource_return_alloc_regions: [], resource_return_witnesses: [], resource_return_witnesses_used: [], pending_join_moves: [], binding_origin_places: []}
 
         def proof_kernel_replay_resource_copy(source: ProofKernelReplayResourceState&, target: mutable ProofKernelReplayResourceState&) -> void:
             target.binding_names.clear()
@@ -17,6 +17,7 @@ extend ElisaProofKernelReplay:
             target.active_regions.clear()
             target.protected_regions.clear()
             target.external_regions.clear()
+            target.region_wide_borrows.clear()
             target.borrow_target_slots.clear()
             target.borrow_target_places.clear()
             target.borrow_mutable.clear()
@@ -46,6 +47,7 @@ extend ElisaProofKernelReplay:
             target.active_regions.extend(source.active_regions)
             target.protected_regions.extend(source.protected_regions)
             target.external_regions.extend(source.external_regions)
+            target.region_wide_borrows.extend(source.region_wide_borrows)
             target.borrow_target_slots.extend(source.borrow_target_slots)
             target.borrow_target_places.extend(source.borrow_target_places)
             target.borrow_mutable.extend(source.borrow_mutable)
@@ -225,6 +227,17 @@ extend ElisaProofKernelReplay:
                 if index < state.binding_region_live.count and state.binding_region[index] == region:
                     state.binding_region_live[index] <- false
 
+        def proof_kernel_replay_resource_region_has_live_borrow(state: ProofKernelReplayResourceState&, region: sview) -> bool:
+            return true if any borrowed in state.region_wide_borrows where borrowed == region
+            for slot in 0..<state.borrow_present.count |slot, state, region|:
+                if state.borrow_present[slot]:
+                    return true if slot >= state.binding_region.count or slot >= state.binding_moved.count or slot >= state.borrow_target_slots.count
+                    if not state.binding_moved[slot] and state.binding_region[slot] == region:
+                        target_slot: usize = state.borrow_target_slots[slot]
+                        return true if target_slot >= state.binding_region.count or target_slot >= state.binding_region_live.count
+                        return true if state.binding_region[target_slot] == region and state.binding_region_live[target_slot]
+            return false
+
         def proof_kernel_replay_resource_has_borrow(state: ProofKernelReplayResourceState&, target_slot: usize, except_slot: usize) -> bool:
             for index in 0..<state.borrow_target_slots.count |index, state, target_slot, except_slot|:
                 return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and state.borrow_target_slots[index] == target_slot
@@ -239,6 +252,9 @@ extend ElisaProofKernelReplay:
             return false if not proof_kernel_replay_resource_place_root_valid(nodes, target)
             for index in 0..<state.borrow_target_places.count |index, state, target, except_slot|:
                 return true if index != except_slot and index < state.borrow_present.count and state.borrow_present[index] and proof_kernel_replay_resource_places_overlap(state, nodes, state.borrow_target_places[index], target)
+            target_slot: usize = proof_kernel_replay_resource_lookup_place(state, nodes, target)
+            target_region: sview = proof_kernel_replay_resource_binding_region(state, target_slot)
+            return true if target_region != "" and any borrowed in state.region_wide_borrows where borrowed == target_region
             return false
 
         def proof_kernel_replay_resource_has_mutable_borrow_overlap(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, state: ProofKernelReplayResourceState&, target: ProofKernelReplayResourcePlace, except_slot: usize) -> bool:
@@ -302,6 +318,16 @@ extend ElisaProofKernelReplay:
                     mutable_references.push(bind.operator == "external-mutable")
                     regions.push(bind.secondary_name if bind.operator == "external-shared" or bind.operator == "external-mutable" else "")
                     scan <- scan + 1
+                    # A view lifetime decorates exactly the immediately preceding value formal.
+                    # Consume it before looking for the next formal, including after the last one.
+                    if scan < node.children_count:
+                        next_root: usize = children[node.children_start + scan]
+                        return false if next_root >= nodes.count
+                        marker: ElisaProofKernelCore::ProofKernelNode = nodes[next_root]
+                        if marker.kind == "resource-sview-param":
+                            return false if bind.operator != "value" or marker.name != bind.name or marker.secondary_name == ""
+                            regions[regions.count - 1] <- marker.secondary_name
+                            scan <- scan + 1
                     continue
                 break
             # Once the formal prefix ends, a region parameter is body data and therefore
@@ -309,7 +335,8 @@ extend ElisaProofKernelReplay:
             while scan < node.children_count |scan, node, children, nodes|:
                 child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + scan)
                 return false if not child.known
-                return false if child.value >= nodes.count or nodes[child.value].kind == "resource-region-param"
+                return false if child.value >= nodes.count
+                return false if nodes[child.value].kind == "resource-region-param" or nodes[child.value].kind == "resource-sview-param"
                 scan <- scan + 1
             return false if names.count != node.auxiliary
             return true

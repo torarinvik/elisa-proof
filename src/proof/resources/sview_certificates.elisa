@@ -1,0 +1,76 @@
+# Certificate constructors for the by-value sview borrowing rule. Keeping event serialization
+# separate from resource state transitions makes the exact witnesses auditable in one place.
+extend ElisaProof:
+    private:
+        # A by-value `sview @r` formal has no source place to borrow from in the callee. Record
+        # the exact type and external region so replay can establish the incoming lifetime and
+        # conservatively prohibit writes anywhere in that region.
+        def proof_resource_record_sview_parameter[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, type_expression: Ast::Expr, name: sview, region: sview, position: Ast::Pos, function_name: sview) -> void:
+            encoded_type: (known: bool, root: usize) = proof_resource_encode_expression(type_expression, report)
+            type_valid: mutable bool = false
+            if encoded_type.known and encoded_type.root < report.kernel_nodes.count:
+                type_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[encoded_type.root]
+                type_valid <- type_node.kind == "ident" and type_node.name == "sview"
+            slot: usize = proof_resource_lookup(state, name)
+            valid: bool = name != "" and region != "" and proof_resource_region_is_external(state, region) and proof_resource_region_is_active(state, region) and type_valid and slot < state.binding_names.count and slot < state.binding_reference.count and not state.binding_reference[slot]
+            if not valid:
+                proof_resource_add_failing_obligation(report, "region-parameter-unsupported", position, function_name, "a by-value sview lifetime parameter requires an exact sview type and a declared external region")
+                return
+            if not proof_resource_kernel_capacity(report, 1, 0, name):
+                proof_kernel_budget_note(report, name)
+                return
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-sview-param", "", encoded_type.root, 0, PROOF_RESOURCE_SVIEW_BORROW_FLAG, 0, 0, 0, name, region)
+            if event >= report.kernel_nodes.count:
+                proof_kernel_budget_note(report, name)
+                return
+            state.binding_region[slot] <- region
+            state.binding_region_live[slot] <- true
+            state.region_wide_borrows.push(region) if not any existing in state.region_wide_borrows where existing == region
+            state.trace_events.push(event)
+
+        # A string-view alias is a shared borrow, not a transfer of the region owner's token.
+        # Carry its exact type term so independent replay validates this rule.
+        def proof_resource_record_sview_binding[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, source: usize, type_root: usize, name: sview, region: sview, flags: usize) -> void:
+            if not proof_resource_kernel_capacity(report, 1, 0, name):
+                proof_kernel_budget_note(report, name)
+                return
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-region-bind", "", source, type_root, flags + PROOF_RESOURCE_SVIEW_BORROW_FLAG, 0, 0, 0, name, region)
+            if event >= report.kernel_nodes.count:
+                proof_kernel_budget_note(report, name)
+                return
+            state.trace_events.push(event)
+
+        # A region-tied sview return is by value, but its provenance is still a shared borrow.
+        # The kernel checks both the exact type term and the callee's returned-place witness.
+        def proof_resource_record_sview_return[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, witness: usize, position: Ast::Pos, function_name: sview, region: sview) -> void:
+            encoded_type: (known: bool, root: usize) = proof_resource_encode_expression(Ast::Expr.Ident("sview", position), report)
+            if not encoded_type.known:
+                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "the sview return type has no kernel type witness")
+                return
+            if encoded_type.root >= report.kernel_nodes.count:
+                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "the sview return type has no kernel type witness")
+                return
+            type_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[encoded_type.root]
+            if type_node.kind != "ident" or type_node.name != "sview":
+                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "the kernel type witness is not the canonical non-optional sview type")
+                return
+            if not proof_resource_kernel_capacity(report, 1, 0, region):
+                proof_kernel_budget_note(report, region)
+                return
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-region-return", "sview", witness, encoded_type.root, PROOF_RESOURCE_SVIEW_BORROW_FLAG, 0, 0, 0, region, "")
+            if event >= report.kernel_nodes.count:
+                proof_kernel_budget_note(report, region)
+                return
+            state.trace_events.push(event)
+
+        # A returned sview borrows the argument selected by the callee's checked summary. Replay
+        # validates the exact type root and that argument-to-region relationship independently.
+        def proof_resource_record_sview_call_result[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, call: usize, type_root: usize, name: sview, region: sview) -> void:
+            if not proof_resource_kernel_capacity(report, 1, 0, name):
+                proof_kernel_budget_note(report, name)
+                return
+            event: usize = proof_kernel_add_node(&report.kernel_nodes, "resource-call-result", "sview", call, type_root, PROOF_RESOURCE_SVIEW_BORROW_FLAG + PROOF_RESOURCE_BORROWABLE_FLAG, 0, 0, 0, name, region)
+            if event >= report.kernel_nodes.count:
+                proof_kernel_budget_note(report, name)
+                return
+            state.trace_events.push(event)

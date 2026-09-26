@@ -19,6 +19,9 @@ extend ElisaProof:
             if is_reference and not is_mutable_reference:
                 conflict <- true
                 proof_resource_add_failing_obligation(report, "borrow-readonly-write", position, function_name, "a write through an immutable reference is not permitted by the proof resource state")
+            elif is_mutable_reference and (not access.known or proof_resource_has_borrow_overlap(state, report, access.place, slot)):
+                conflict <- true
+                proof_resource_add_failing_obligation(report, "borrow-write-conflict", position, function_name, "a write through a mutable reference overlaps a live borrow or has no tracked target place")
             elif not is_reference and proof_resource_has_borrow_overlap(state, report, access.place, state.binding_names.count):
                 conflict <- true
                 proof_resource_add_failing_obligation(report, "borrow-write-conflict", position, function_name, "a write to a place overlapping a live borrow is not permitted by the proof resource state")
@@ -55,16 +58,22 @@ extend ElisaProof:
                     return ""
             return ""
 
-        # A call returning `T& @r` carries the caller's concrete region only when the callee has
-        # a verified resource summary and its explicit `@r` witness is mapped at this call site.
-        # This is intentionally separate from proof_resource_expr_region: that helper handles
-        # direct tracked paths, while this one is the summary-backed result rule.
+        # A call returning `T& @r` or `sview @r` carries the caller's concrete region only when
+        # the callee has a verified resource summary and its explicit `@r` witness is mapped at
+        # this call site. By-value sviews additionally need a matching return marker in that
+        # summary; the source-level return annotation alone cannot manufacture provenance.
         def proof_resource_call_result_region(expression: Ast::Expr, state: ProofResourceState&, functions: ProofFunctionTable&, report: ProofReport&) -> sview:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, _):
                     callee_name: sview = proof_callable_name(callee)
                     function_index: usize = proof_resource_function_index(functions, callee_name)
-                    return "" if function_index >= functions.return_references.count or not functions.return_references[function_index]
+                    is_reference_result: mutable bool = false
+                    is_sview_result: mutable bool = false
+                    if function_index < functions.return_references.count:
+                        is_reference_result <- functions.return_references[function_index]
+                    if function_index < functions.return_sviews.count:
+                        is_sview_result <- functions.return_sviews[function_index]
+                    return "" if not is_reference_result and not is_sview_result
                     return_region: sview = proof_resource_function_return_region(functions, function_index)
                     return "" if return_region == ""
                     region_count: usize = proof_resource_function_region_param_count(functions, function_index)
@@ -78,6 +87,18 @@ extend ElisaProof:
                         candidate: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[candidate_root]
                         summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.secondary_name == "resource-v1"
                     return "" if summary_root >= report.kernel_nodes.count
+                    if is_sview_result:
+                        summary: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[summary_root]
+                        return "" if summary.children_start > report.kernel_children.count or summary.children_count > report.kernel_children.count - summary.children_start
+                        found_sview_return: mutable bool = false
+                        for child_offset in 0..<summary.children_count |child_offset, summary, report, return_region, found_sview_return|:
+                            child: usize = report.kernel_children[summary.children_start + child_offset]
+                            continue if child >= report.kernel_nodes.count
+                            marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[child]
+                            continue if marker.kind != "resource-region-return"
+                            return "" if marker.operator != "sview" or marker.name != return_region
+                            found_sview_return <- true
+                        return "" if not found_sview_return
                     mapped: mutable darray[Ast::Expr] = []
                     return "" if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
                     formal_regions: mutable darray[sview] = []
@@ -92,6 +113,66 @@ extend ElisaProof:
                 _:
                     pass
             return ""
+
+        # Recover the exact formal whose checked return witness backs an sview. Only a unique,
+        # direct resource-use witness is admitted: conditional returns from different formals,
+        # opaque transformations, and fresh allocations remain unsupported until they have an
+        # equally explicit replay rule.
+        def proof_resource_sview_return_formal(report: ProofReport&, callee_name: sview) -> sview:
+            summary_root: mutable usize = report.kernel_nodes.count
+            for candidate_root in 0..<report.kernel_nodes.count |candidate_root, report, callee_name, summary_root|:
+                candidate: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[candidate_root]
+                summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.secondary_name == "resource-v1"
+            return "" if summary_root >= report.kernel_nodes.count
+            summary: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[summary_root]
+            return "" if summary.children_start > report.kernel_children.count or summary.children_count > report.kernel_children.count - summary.children_start
+            returned_formal: mutable sview = ""
+            found_return: mutable bool = false
+            for child_offset in 0..<summary.children_count |child_offset, summary, report, returned_formal, found_return|:
+                child: usize = report.kernel_children[summary.children_start + child_offset]
+                continue if child >= report.kernel_nodes.count
+                marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[child]
+                continue if marker.kind != "resource-region-return"
+                return "" if marker.operator != "sview" or marker.left >= report.kernel_nodes.count
+                witness: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[marker.left]
+                return "" if witness.kind != "resource-use" or witness.name == ""
+                return "" if returned_formal != "" and returned_formal != witness.name
+                returned_formal <- witness.name
+                found_return <- true
+            return returned_formal if found_return
+            return ""
+
+        # Map the summary's returned formal to the actual caller place. Region identity and
+        # borrow conflicts are checked by the caller-side producer and then independently again
+        # by resource-call-result replay.
+        def proof_resource_call_result_sview_source_actual(expression: Ast::Expr, state: ProofResourceState&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool):
+            empty: ProofResourcePlace = proof_resource_empty_place()
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    callee_name: sview = proof_callable_name(callee)
+                    function_index: usize = proof_resource_function_index(functions, callee_name)
+                    return (false, empty, state.binding_names.count, false, false) if function_index >= functions.return_sviews.count
+                    return (false, empty, state.binding_names.count, false, false) if not functions.return_sviews[function_index]
+                    return (false, empty, state.binding_names.count, false, false) if function_index >= functions.verified.count or not functions.verified[function_index]
+                    formal_name: sview = proof_resource_sview_return_formal(report, callee_name)
+                    return (false, empty, state.binding_names.count, false, false) if formal_name == ""
+                    return (false, empty, state.binding_names.count, false, false) if function_index >= functions.param_counts.count or function_index >= functions.param_starts.count
+                    param_start: usize = functions.param_starts[function_index]
+                    param_count: usize = functions.param_counts[function_index]
+                    formal_index: mutable usize = param_count
+                    for candidate in 0..<param_count |candidate, functions, param_start, formal_name, formal_index|:
+                        formal_index <- candidate if param_start + candidate < functions.all_params.count and functions.all_params[param_start + candidate] == formal_name
+                    return (false, empty, state.binding_names.count, false, false) if formal_index >= param_count
+                    mapped: mutable darray[Ast::Expr] = []
+                    return (false, empty, state.binding_names.count, false, false) if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
+                    return (false, empty, state.binding_names.count, false, false) if formal_index >= mapped.count
+                    actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_source_actual(mapped[formal_index], state, report)
+                    return (actual.known and actual.place.root != "" and actual.place.whole, actual.place, actual.slot, actual.is_reference, actual.mutable_reference)
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_call_result_sview_source_actual(inner, state, functions, report)
+                _:
+                    pass
+            return (false, empty, state.binding_names.count, false, false)
 
         # Recover the provenance of a region-carrying reference result. A direct reference
         # formal returns the caller's place (and therefore must remain an alias); a
@@ -144,11 +225,19 @@ extend ElisaProof:
                     pass
             return (false, false, empty, state.binding_names.count, false, false, false)
 
+        def proof_resource_local_binding_region(functions: ProofFunctionTable&, name: sview, line: u32) -> sview:
+            for index in 0..<functions.local_region_binding_names.count |index, functions, name, line|:
+                if index < functions.local_region_binding_regions.count and index < functions.local_region_binding_lines.count and functions.local_region_binding_names[index] == name and functions.local_region_binding_lines[index] == line:
+                    return functions.local_region_binding_regions[index]
+            return ""
+
         def proof_resource_expr_result_region(expression: Ast::Expr, state: ProofResourceState&, functions: ProofFunctionTable&, report: ProofReport&) -> sview:
             direct: sview = proof_resource_expr_region(expression, state)
             return direct if direct != ""
             match expression:
-                Ast::Expr.Call(_, _, _, _):
+                Ast::Expr.Call(callee, _, _, _):
+                    sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(expression, functions)
+                    return proof_resource_expr_region(sview_conversion.receiver, state) if sview_conversion.known
                     result: sview = proof_resource_call_result_region(expression, state, functions, report)
                     return result
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):

@@ -1,0 +1,100 @@
+extend ElisaProof:
+    private:
+        # Keep the proof-side ABI classifier exact. Aliases and unresolved qualified types
+        # remain conservative in the aggregate scanner below, but only this exact source type
+        # is admitted as the current first-class string-view return shape.
+        def proof_resource_type_is_sview(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name == "sview"
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_type_is_sview(inner)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_resource_type_is_sview(base)
+                _:
+                    return false
+
+        # Fast classification for a value whose entire type is an sview (possibly through an
+        # alias). Aggregate-field traversal is more expensive and is reserved for region-bound
+        # storage and source paths that actually carry a tracked lifetime.
+        def proof_resource_type_may_be_sview_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, depth: usize) -> bool:
+            match expression:
+                Ast::Expr.Absent:
+                    return false
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Ident(name, _):
+                    return true if name == "sview"
+                    return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_index(index, name)
+                    return true if alias.count > 1
+                    return proof_resource_type_may_be_sview_depth(alias.target, index, depth + 1) if alias.count == 1
+                    return false
+                Ast::Expr.Scope(_, name, _):
+                    return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_index(index, name)
+                    return true if alias.count > 1
+                    return proof_resource_type_may_be_sview_depth(alias.target, index, depth + 1) if alias.count == 1
+                    return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_type_may_be_sview_depth(inner, index, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_resource_type_may_be_sview_depth(base, index, depth + 1)
+                Ast::Expr.Unary(_, inner, _):
+                    return proof_resource_type_may_be_sview_depth(inner, index, depth + 1)
+                _:
+                    return false
+
+        def proof_resource_type_may_be_sview(expression: Ast::Expr, index: ProofTypeAuditIndex) -> bool:
+            return proof_resource_type_may_be_sview_depth(expression, index, 0)
+
+        # Region-tracked aggregates must not hide a view borrow. Follow aliases and named
+        # aggregate fields through the import index. Unknown, ambiguous, or excessively
+        # recursive type shapes are treated as possibly view-bearing and rejected by the exact
+        # kernel type witness rather than being mistaken for owned region values.
+        def proof_resource_type_may_contain_sview_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, depth: usize, visited: mutable darray[sview]&) -> bool:
+            match expression:
+                Ast::Expr.Absent:
+                    return false
+                Ast::Expr.Invalid:
+                    return false
+                _:
+                    pass
+            return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            type_names: mutable darray[sview] = []
+            unknown: mutable bool = false
+            proof_collect_type_names(expression, &type_names, &unknown, 0)
+            return true if unknown
+            return true if any referenced in type_names where referenced == "sview"
+            return false if type_names.count == 0
+            return true if index.entries.count > 0 and index.bucket_heads.count == 0
+            for referenced in type_names |referenced, index, depth, visited|:
+                continue if any seen in visited where seen == referenced
+                hash: u32 = proof_name_hash(referenced)
+                slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize() if index.bucket_heads.count > 0 else 0
+                entry: mutable usize = index.bucket_heads[slot] if slot < index.bucket_heads.count else index.entries.count
+                declaration_count: mutable usize = 0
+                visited_count: usize = visited.count
+                visited.push(referenced)
+                while entry < index.entries.count |entry, referenced, hash, index, depth, visited, declaration_count|:
+                    return true if entry >= index.next_indices.count
+                    row: ProofTypeAuditDeclaration = index.entries[entry]
+                    declaration: Ast::Decl = row.declaration
+                    if row.name_hash == hash and proof_type_audit_declaration_name(declaration) == referenced:
+                        declaration_count <- declaration_count + 1
+                        match declaration:
+                            Ast::Decl.Alias(_, target, _):
+                                return true if proof_resource_type_may_contain_sview_depth(target, index, depth + 1, visited)
+                            Ast::Decl.Struct(_, fields, _, _, _, _, _):
+                                for field in fields |index, depth, visited|:
+                                    return true if proof_resource_type_may_contain_sview_depth(field.type_expression, index, depth + 1, visited)
+                            _:
+                                pass
+                    entry <- index.next_indices[entry]
+                return true if declaration_count > 1
+                visited.resize(visited_count)
+            return false
+
+        def proof_resource_type_may_contain_sview(expression: Ast::Expr, index: ProofTypeAuditIndex) -> bool:
+            visited: mutable darray[sview] = []
+            return proof_resource_type_may_contain_sview_depth(expression, index, 0, &visited)

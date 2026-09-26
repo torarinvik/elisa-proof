@@ -4,6 +4,8 @@ extend ElisaProof:
         const PROOF_RESOURCE_REFERENCE_FLAG: usize = 2
         const PROOF_RESOURCE_MUTABLE_REFERENCE_FLAG: usize = 4
         const PROOF_RESOURCE_BORROWABLE_FLAG: usize = 8
+        const PROOF_RESOURCE_SVIEW_BORROW_FLAG: usize = 16
+        const PROOF_RESOURCE_EXPLICIT_REGION_DESTROY: usize = 1
 
         struct ProofResourcePlace:
             root: sview
@@ -56,6 +58,10 @@ extend ElisaProof:
             # Region parameters are caller-owned capabilities. They remain active across the
             # callee's return and therefore must not be closed by proof_resource_finish.
             external_regions: mutable darray[sview]
+            # A by-value `sview @r` formal borrows an unknown place within the region. Until
+            # the language carries a finer pointee-place witness, this shared borrow conservatively
+            # conflicts with every write in @r for the duration of the function.
+            region_wide_borrows: mutable darray[sview]
             borrow_target_slots: mutable darray[usize]
             borrow_target_places: mutable darray[ProofResourcePlace]
             borrow_mutable: mutable darray[bool]
@@ -69,7 +75,7 @@ extend ElisaProof:
             trace_events: mutable darray[usize]
 
         def proof_resource_empty() -> ProofResourceState:
-            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], binding_scalar: [], binding_borrowable: [], binding_extent: [], active_regions: [], protected_regions: [], external_regions: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
+            return ProofResourceState{binding_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_owner: [], binding_scalar: [], binding_borrowable: [], binding_extent: [], active_regions: [], protected_regions: [], external_regions: [], region_wide_borrows: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
 
         # Copy into an already-created state. Returning a struct that owns several darrays would
         # hide their allocation region from the self-hosting compiler, so all branch snapshots
@@ -89,6 +95,7 @@ extend ElisaProof:
             target.active_regions.clear()
             target.protected_regions.clear()
             target.external_regions.clear()
+            target.region_wide_borrows.clear()
             target.borrow_target_slots.clear()
             target.borrow_target_places.clear()
             target.borrow_mutable.clear()
@@ -109,6 +116,7 @@ extend ElisaProof:
             target.active_regions.extend(source.active_regions)
             target.protected_regions.extend(source.protected_regions)
             target.external_regions.extend(source.external_regions)
+            target.region_wide_borrows.extend(source.region_wide_borrows)
             target.borrow_target_slots.extend(source.borrow_target_slots)
             target.borrow_target_places.extend(source.borrow_target_places)
             target.borrow_mutable.extend(source.borrow_mutable)
@@ -239,6 +247,17 @@ extend ElisaProof:
         def proof_resource_binding_region_is_live(state: ProofResourceState&, slot: usize) -> bool:
             return slot < state.binding_region_live.count and state.binding_region_live[slot]
 
+        def proof_resource_region_has_live_borrow(state: ProofResourceState&, region: sview) -> bool:
+            return true if any borrowed in state.region_wide_borrows where borrowed == region
+            for slot in 0..<state.borrow_present.count |slot, state, region|:
+                if state.borrow_present[slot]:
+                    return true if slot >= state.binding_region.count or slot >= state.binding_moved.count or slot >= state.borrow_target_slots.count
+                    if not state.binding_moved[slot] and state.binding_region[slot] == region:
+                        target_slot: usize = state.borrow_target_slots[slot]
+                        return true if target_slot >= state.binding_region.count or target_slot >= state.binding_region_live.count
+                        return true if state.binding_region[target_slot] == region and state.binding_region_live[target_slot]
+            return false
+
         def proof_resource_invalidate_region_bindings(state: mutable ProofResourceState&, region: sview) -> void:
             for index in 0..<state.binding_region.count |index, state, region|:
                 if index < state.binding_region_live.count and state.binding_region[index] == region:
@@ -248,12 +267,15 @@ extend ElisaProof:
         # `region r(size)` form keeps the owner live across following statements, so its close
         # must be a real stack transition rather than the end of a synthetic child scope.
         def proof_resource_close_named_region[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            valid: bool = region != "" and not proof_resource_region_is_external(state, region) and not proof_resource_region_is_protected(state, region) and state.active_regions.count > 0 and state.active_regions[state.active_regions.count - 1] == region
-            proof_resource_add_failing_obligation(report, "region-destroy-unsupported", position, function_name, "destroy must name the innermost active tracked region") if not valid
+            innermost: bool = region != "" and not proof_resource_region_is_external(state, region) and not proof_resource_region_is_protected(state, region) and state.active_regions.count > 0 and state.active_regions[state.active_regions.count - 1] == region
+            live_borrow: bool = innermost and proof_resource_region_has_live_borrow(state, region)
+            valid: bool = innermost and not live_borrow
+            proof_resource_add_failing_obligation(report, "region-destroy-unsupported", position, function_name, "destroy must name the innermost active tracked region") if not innermost
+            proof_resource_add_failing_obligation(report, "region-destroy-live-borrow", position, function_name, "a region cannot be destroyed while a borrowed view or reference to it is still live") if live_borrow
             if valid:
                 state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
                 proof_resource_invalidate_region_bindings(state, region)
-                proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", 0)
+                proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", PROOF_RESOURCE_EXPLICIT_REGION_DESTROY)
 
         def proof_resource_add_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
             is_reference: bool = proof_resource_is_reference_type(type_expression)
@@ -334,35 +356,66 @@ extend ElisaProof:
                 state.binding_region_owner[target_slot] <- true
                 proof_resource_record_event(state, report, "resource-region-rebind-alloc", "", encoded, target_name, region, 0)
 
-        def proof_resource_add_region_binding[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, source: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
+        def proof_resource_add_region_binding[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, source: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview, functions: ProofFunctionTable&) -> void:
             is_reference: bool = proof_resource_is_reference_type(type_expression)
             is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(type_expression)
+            sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(source, functions)
+            is_borrowed_sview: bool = proof_resource_type_may_contain_sview(type_expression, functions.type_audit_index) or sview_conversion.known
             writable: bool = is_mutable_reference or proof_resource_type_has_marker(type_expression, TokenKind.Mutable)
-            source_place: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(source, report)
-            encoded: usize = proof_resource_encode_access_place(source, report)
+            source_place_expression: mutable Ast::Expr = source
+            source_place_expression <- sview_conversion.receiver if sview_conversion.known
+            source_place: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(source_place_expression, report)
+            encoded: usize = proof_resource_encode_access_place(source_place_expression, report)
             source_slot: usize = proof_resource_lookup(state, source_place.place.root)
             source_is_reference: bool = source_slot < state.binding_reference.count and state.binding_reference[source_slot]
             source_is_mutable_reference: bool = source_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[source_slot]
             source_region_owner: bool = source_slot < state.binding_region_owner.count and state.binding_region_owner[source_slot]
             source_moved: bool = proof_resource_binding_is_moved(state, source_slot)
+            borrow_target_slot: mutable usize = source_slot
+            borrow_target_place: mutable ProofResourcePlace = source_place.place
+            if is_borrowed_sview and source_slot < state.borrow_present.count and state.borrow_present[source_slot]:
+                borrow_target_slot <- state.borrow_target_slots[source_slot]
+                borrow_target_place <- state.borrow_target_places[source_slot]
+            view_type_root: mutable usize = 0
+            view_type_valid: mutable bool = not is_borrowed_sview
+            if is_borrowed_sview:
+                view_type_expression: mutable Ast::Expr = type_expression
+                if sview_conversion.known and not proof_resource_type_may_contain_sview(type_expression, functions.type_audit_index):
+                    view_type_expression <- Ast::Expr.Ident("sview", position)
+                encoded_type: (known: bool, root: usize) = proof_resource_encode_expression(view_type_expression, report)
+                view_type_root <- encoded_type.root
+                view_type_valid <- encoded_type.known and encoded_type.root < report.kernel_nodes.count and report.kernel_nodes[encoded_type.root].kind == "ident" and report.kernel_nodes[encoded_type.root].name == "sview"
             # A borrowed or external mutable reference has no linear owner token that can be
             # transferred. Copying it through a region alias would therefore manufacture a
             # second mutable capability while leaving the original writable. A direct region
             # owner may be exposed once, but moving that owner is also forbidden while any live
             # borrow overlaps its place.
-            mutable_reference_duplication: bool = source_is_reference and source_is_mutable_reference and not source_region_owner
-            owner_borrow_overlap: bool = source_region_owner and proof_resource_has_borrow_overlap(state, report, source_place.place, state.binding_names.count)
-            valid: bool = proof_resource_region_is_active(state, region) and source_place.known and source_place.place.whole and source_slot < state.binding_names.count and not source_moved and not mutable_reference_duplication and not owner_borrow_overlap and proof_resource_binding_region(state, source_slot) == region and proof_resource_binding_region_is_live(state, source_slot) and encoded < report.kernel_nodes.count and (not is_reference and not source_is_reference or is_reference and source_is_reference) and (not is_reference or is_mutable_reference == source_is_mutable_reference or source_region_owner)
+            mutable_reference_duplication: bool = source_is_reference and source_is_mutable_reference and not source_region_owner and not is_borrowed_sview
+            borrow_overlap_except: mutable usize = state.binding_names.count
+            if is_borrowed_sview and source_slot < state.borrow_present.count and state.borrow_present[source_slot]:
+                borrow_overlap_except <- source_slot
+            sview_borrow_overlap: bool = is_borrowed_sview and proof_resource_has_mutable_borrow_overlap(state, report, borrow_target_place, borrow_overlap_except)
+            owner_borrow_overlap: bool = source_region_owner and not is_borrowed_sview and proof_resource_has_borrow_overlap(state, report, source_place.place, state.binding_names.count)
+            valid: bool = proof_resource_region_is_active(state, region) and source_place.known and source_place.place.whole and source_slot < state.binding_names.count and not source_moved and not mutable_reference_duplication and not sview_borrow_overlap and not owner_borrow_overlap and proof_resource_binding_region(state, source_slot) == region and proof_resource_binding_region_is_live(state, source_slot) and encoded < report.kernel_nodes.count and (not is_borrowed_sview or view_type_valid and borrow_target_slot < state.binding_names.count and borrow_target_place.root != "") and (is_borrowed_sview or not is_reference and not source_is_reference or is_reference and source_is_reference) and (is_borrowed_sview or not is_reference or is_mutable_reference == source_is_mutable_reference or source_region_owner)
             proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "region value aliases require a live, unmoved whole-binding source with the same tracked region") if not valid
             proof_resource_add_binding(state, name, is_reference, is_mutable_reference, writable, state.binding_names.count, false, proof_resource_empty_place())
             state.binding_region[state.binding_region.count - 1] <- region
             state.binding_region_live[state.binding_region_live.count - 1] <- valid
-            state.binding_region_owner[state.binding_region_owner.count - 1] <- valid and source_region_owner
+            state.binding_region_owner[state.binding_region_owner.count - 1] <- valid and source_region_owner and not is_borrowed_sview
+            if valid and is_borrowed_sview:
+                new_slot: usize = state.binding_names.count - 1
+                state.borrow_target_slots[new_slot] <- borrow_target_slot
+                state.borrow_target_places[new_slot] <- borrow_target_place
+                state.borrow_mutable[new_slot] <- false
+                state.borrow_present[new_slot] <- true
             # The owner token is linear even though shared region references may otherwise be
             # copied. Transfer it to the new binding; borrowed/external references have no token
             # and therefore remain ordinary shared aliases.
-            proof_resource_mark_binding_moved(state, source_slot) if valid and source_region_owner
-            proof_resource_record_event(state, report, "resource-region-bind", "", encoded, name, region, (PROOF_RESOURCE_WRITABLE_FLAG if writable else 0) + (PROOF_RESOURCE_REFERENCE_FLAG if is_reference else 0) + (PROOF_RESOURCE_MUTABLE_REFERENCE_FLAG if is_mutable_reference else 0)) if valid
+            proof_resource_mark_binding_moved(state, source_slot) if valid and source_region_owner and not is_borrowed_sview
+            event_flags: usize = (PROOF_RESOURCE_WRITABLE_FLAG if writable else 0) + (PROOF_RESOURCE_REFERENCE_FLAG if is_reference else 0) + (PROOF_RESOURCE_MUTABLE_REFERENCE_FLAG if is_mutable_reference else 0)
+            if valid:
+                proof_resource_record_sview_binding(state, report, encoded, view_type_root, name, region, event_flags) if is_borrowed_sview
+                proof_resource_record_event(state, report, "resource-region-bind", "", encoded, name, region, event_flags) if not is_borrowed_sview
 
         def proof_resource_finish[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, line: u32, failed_before: u32, parameter_count: usize) -> void:
             return if report.failed != failed_before

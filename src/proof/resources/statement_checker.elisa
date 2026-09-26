@@ -9,9 +9,76 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "resource-state analysis exceeded its bounded symbolic-state budget", "steps", report.resource_analysis_steps + 1, PROOF_RESOURCE_ANALYSIS_BUDGET)
             return false
 
+        # Install a by-value sview call result as a shared borrow of the exact actual place
+        # selected by the callee's resource-return summary. The kernel repeats this mapping and
+        # checks the callee witness before accepting the result event.
+        def proof_resource_add_sview_call_result[@s, @r](statement_name: sview, type_expression: Ast::Expr, initializer: Ast::Expr, source_region: sview, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos, functions: ProofFunctionTable&) -> void:
+            source: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool) = proof_resource_call_result_sview_source_actual(initializer, state, functions, report)
+            type_root: (known: bool, root: usize) = proof_resource_encode_expression(type_expression, report)
+            exact_sview_type: mutable bool = false
+            if type_root.known and type_root.root < report.kernel_nodes.count:
+                type_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[type_root.root]
+                exact_sview_type <- type_node.kind == "ident" and type_node.name == "sview"
+            target_slot: mutable usize = source.slot
+            target_place: mutable ProofResourcePlace = source.place
+            source_valid: mutable bool = source.known
+            if source_valid:
+                if source.slot < state.borrow_present.count:
+                    if state.borrow_present[source.slot]:
+                        if source.slot < state.borrow_target_slots.count and source.slot < state.borrow_target_places.count:
+                            target_slot <- state.borrow_target_slots[source.slot]
+                            target_place <- state.borrow_target_places[source.slot]
+                        else:
+                            source_valid <- false
+            source_region_matches: bool = source.slot < state.binding_region.count and proof_resource_binding_region(state, source.slot) == source_region
+            target_region_matches: bool = target_slot < state.binding_region.count and proof_resource_binding_region(state, target_slot) == source_region
+            source_live: bool = source.slot < state.binding_region_live.count and proof_resource_binding_region_is_live(state, source.slot) and not proof_resource_binding_is_moved(state, source.slot)
+            target_live: bool = target_slot < state.binding_region_live.count and proof_resource_binding_region_is_live(state, target_slot) and not proof_resource_binding_is_moved(state, target_slot)
+            call_name: mutable sview = ""
+            match initializer:
+                Ast::Expr.Call(callee, _, _, _):
+                    call_name <- proof_callable_name(callee)
+                _:
+                    pass
+            call_event: usize = state.trace_events[state.trace_events.count - 1] if state.trace_events.count > 0 else report.kernel_nodes.count
+            call_event_valid: mutable bool = false
+            if call_event < report.kernel_nodes.count:
+                call_event_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[call_event]
+                call_event_valid <- call_event_node.kind == "resource-call" and call_event_node.name == call_name
+            borrow_except: usize = source.slot if source.is_reference and source.mutable_reference else state.binding_names.count
+            borrow_conflict: bool = source_valid and proof_resource_has_mutable_borrow_overlap(state, report, target_place, borrow_except)
+            valid: bool = statement_name != "" and source_valid and source.place.whole and target_place.root != "" and target_place.whole and exact_sview_type and source_region != "" and proof_resource_region_is_active(state, source_region) and source_region_matches and target_region_matches and source_live and target_live and not borrow_conflict and call_event_valid
+            if not valid:
+                proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "a returned sview requires a replayed region-tied return witness and a live, unconflicted caller place")
+                proof_resource_add_binding(state, statement_name, false, false, false, state.binding_names.count, false, proof_resource_empty_place())
+                return
+            proof_resource_add_binding(state, statement_name, false, false, false, target_slot, false, target_place)
+            result_slot: usize = state.binding_names.count - 1
+            state.binding_region[result_slot] <- source_region
+            state.binding_region_live[result_slot] <- true
+            state.binding_region_owner[result_slot] <- false
+            state.binding_borrowable[result_slot] <- true
+            state.borrow_target_slots[result_slot] <- target_slot
+            state.borrow_target_places[result_slot] <- target_place
+            state.borrow_mutable[result_slot] <- false
+            state.borrow_present[result_slot] <- true
+            proof_resource_record_sview_call_result(state, report, call_event, type_root.root, statement_name, source_region)
+
         def proof_resource_check_var[@s, @r](statement_name: sview, type_expression: Ast::Expr, initializer: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, position: Ast::Pos, functions: ProofFunctionTable&) -> void:
             is_reference: bool = proof_resource_is_reference_type(type_expression)
             is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(type_expression)
+            declared_region: sview = proof_resource_local_binding_region(functions, statement_name, position.line)
+            declared_reference_call: mutable bool = false
+            if declared_region != "":
+                match initializer:
+                    Ast::Expr.Call(callee, _, _, _):
+                        callee_index: usize = proof_resource_function_index(functions, proof_callable_name(callee))
+                        declared_reference_call <- callee_index < functions.return_references.count and functions.return_references[callee_index]
+                    _:
+                        pass
+            sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(initializer, functions)
+            destination_may_contain_sview: mutable bool = proof_resource_type_may_be_sview(type_expression, functions.type_audit_index)
+            carries_sview: mutable bool = destination_may_contain_sview or sview_conversion.known
             direct_region: mutable sview = ""
             direct_region_operand: mutable Ast::Expr = Ast::Expr.Invalid
             match initializer:
@@ -21,13 +88,69 @@ extend ElisaProof:
                 _:
                     pass
             if direct_region != "":
+                if not destination_may_contain_sview:
+                    destination_may_contain_sview <- proof_resource_type_may_contain_sview(type_expression, functions.type_audit_index)
+                    carries_sview <- destination_may_contain_sview or sview_conversion.known
+                if carries_sview:
+                    proof_resource_check_expression(direct_region_operand, state, report, function_name, functions)
+                    proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "allocating storage for an sview value does not establish the lifetime of its pointee")
+                    proof_resource_add_binding(state, statement_name, false, false, false, state.binding_names.count, false, proof_resource_empty_place())
+                    return
                 proof_resource_check_expression(direct_region_operand, state, report, function_name, functions)
                 proof_resource_add_region_allocation(state, report, statement_name, type_expression, direct_region_operand, direct_region, position, function_name)
+                return
+            if declared_region != "" and not declared_reference_call:
+                if not destination_may_contain_sview:
+                    destination_may_contain_sview <- proof_resource_type_may_contain_sview(type_expression, functions.type_audit_index)
+                    carries_sview <- destination_may_contain_sview or sview_conversion.known
+                proof_resource_check_expression(initializer, state, report, function_name, functions)
+                initializer_region: sview = proof_resource_expr_result_region(initializer, state, functions, report)
+                if carries_sview and initializer_region == "":
+                    proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "an sview value has no directly tracked live backing region")
+                    proof_resource_add_binding(state, statement_name, false, false, false, state.binding_names.count, false, proof_resource_empty_place())
+                    return
+                if carries_sview and initializer_region != "":
+                    call_name: mutable sview = ""
+                    match initializer:
+                        Ast::Expr.Call(callee, _, _, _):
+                            call_name <- proof_callable_name(callee)
+                        _:
+                            pass
+                    call_function_index: usize = proof_resource_function_index(functions, call_name) if call_name != "" else functions.names.count
+                    returns_sview: mutable bool = false
+                    if call_function_index < functions.return_sviews.count:
+                        returns_sview <- functions.return_sviews[call_function_index]
+                    if returns_sview:
+                        if initializer_region == declared_region:
+                            proof_resource_add_sview_call_result(statement_name, type_expression, initializer, initializer_region, state, report, function_name, position, functions)
+                        else:
+                            proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "a returned sview must be bound to the same live region as its verified return summary")
+                            proof_resource_add_binding(state, statement_name, false, false, false, state.binding_names.count, false, proof_resource_empty_place())
+                        return
+                if initializer_region == "":
+                    proof_resource_add_region_allocation(state, report, statement_name, type_expression, initializer, declared_region, position, function_name)
+                else:
+                    proof_resource_add_region_binding(state, report, statement_name, type_expression, initializer, declared_region, position, function_name, functions)
                 return
             # A scalar copied out of a region-owned value is a plain value, not a view into the
             # region. Only reference-like results carry the source lifetime.
             scalar_binding: bool = proof_resource_type_is_scalar(type_expression)
             source_region: sview = "" if scalar_binding else proof_resource_expr_result_region(initializer, state, functions, report)
+            # Reference-returning calls need the call-result transition below, even with an
+            # explicit local lifetime. Check that annotation before evaluating the call once.
+            if declared_reference_call and source_region != declared_region:
+                proof_resource_check_expression(initializer, state, report, function_name, functions)
+                proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "a returned reference must retain the region established by the callee summary")
+                proof_resource_add_binding(state, statement_name, is_reference, is_mutable_reference, false, state.binding_names.count, false, proof_resource_empty_place())
+                return
+            if source_region != "" and not destination_may_contain_sview:
+                destination_may_contain_sview <- proof_resource_type_may_contain_sview(type_expression, functions.type_audit_index)
+                carries_sview <- destination_may_contain_sview or sview_conversion.known
+            if carries_sview and source_region == "":
+                proof_resource_check_expression(initializer, state, report, function_name, functions)
+                proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "an sview value has no directly tracked live backing region")
+                proof_resource_add_binding(state, statement_name, false, false, false, state.binding_names.count, false, proof_resource_empty_place())
+                return
             if source_region != "":
                 proof_resource_check_expression(initializer, state, report, function_name, functions)
                 callee_name: mutable sview = ""
@@ -38,6 +161,12 @@ extend ElisaProof:
                         pass
                 result_function_index: usize = proof_resource_function_index(functions, callee_name) if callee_name != "" else functions.names.count
                 result_is_reference: bool = result_function_index < functions.return_references.count and functions.return_references[result_function_index]
+                result_is_sview: mutable bool = false
+                if result_function_index < functions.return_sviews.count:
+                    result_is_sview <- functions.return_sviews[result_function_index]
+                if result_is_sview and callee_name != "":
+                    proof_resource_add_sview_call_result(statement_name, type_expression, initializer, source_region, state, report, function_name, position, functions)
+                    return
                 if result_is_reference and callee_name != "":
                     is_mutable_result: bool = result_function_index < functions.return_mutable_references.count and functions.return_mutable_references[result_function_index]
                     writable_result: bool = is_mutable_result or proof_resource_type_has_marker(type_expression, TokenKind.Mutable)
@@ -74,7 +203,7 @@ extend ElisaProof:
                     proof_resource_record_event(state, report, "resource-call-result", "", call_event, statement_name, source_region, result_flags) if valid_call_event
                     proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "a region-returning call did not leave a replayable call transition") if not valid_call_event
                     return
-                proof_resource_add_region_binding(state, report, statement_name, type_expression, initializer, source_region, position, function_name)
+                proof_resource_add_region_binding(state, report, statement_name, type_expression, initializer, source_region, position, function_name, functions)
                 return
             if not scalar_binding and proof_resource_expr_contains_unresolved_region_value(initializer, state, functions, report):
                 proof_resource_check_expression(initializer, state, report, function_name, functions)
@@ -164,7 +293,10 @@ extend ElisaProof:
                             state.binding_extent[extent_slot] <- true if extent_slot < state.binding_extent.count
                         state.facts.clear() if shadowed or proof_resource_expr_has_call(initializer) or proof_resource_expr_has_move(initializer)
                     Ast::Stmt.Assign(target, _, initializer, position):
-                        if not proof_resource_is_discard_target(target) and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
+                        target_name: sview = proof_resource_direct_binding_name(target)
+                        target_slot: usize = proof_resource_lookup(state, target_name)
+                        target_is_scalar: bool = target_slot < state.binding_scalar.count and state.binding_scalar[target_slot]
+                        if not proof_resource_is_discard_target(target) and not target_is_scalar and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
                             proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a newly created borrow is assigned across a binding boundary")
                         proof_resource_check_write(target, state, report, function_name, position, functions)
                         proof_resource_check_expression(target, state, report, function_name, functions)
@@ -185,11 +317,16 @@ extend ElisaProof:
                         state.facts.clear() if proof_resource_expr_has_call(expression) or proof_resource_expr_has_move(expression)
                     Ast::Stmt.Return(value, position):
                         if value is returned:
-                            if proof_resource_expr_returns_local_borrow(returned, state, functions, report):
-                                proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a borrow cannot escape this lexical proof resource state")
-                            proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "a region-owned value cannot escape the region that owns its storage") if proof_resource_expr_returns_local_region_value(returned, state, functions, report)
-                            returned_region: sview = proof_resource_expr_result_region(returned, state, functions, report)
                             return_function_index: usize = proof_resource_function_index(functions, function_name)
+                            return_is_scalar: bool = return_function_index < functions.return_scalar.count and functions.return_scalar[return_function_index]
+                            return_is_sview: mutable bool = false
+                            if return_function_index < functions.return_sviews.count:
+                                return_is_sview <- functions.return_sviews[return_function_index]
+                            if not return_is_scalar and proof_resource_expr_returns_local_borrow(returned, state, functions, report):
+                                proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a borrow cannot escape this lexical proof resource state")
+                            if not return_is_scalar and proof_resource_expr_returns_local_region_value(returned, state, functions, report):
+                                proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "a region-owned value cannot escape the region that owns its storage")
+                            returned_region: sview = proof_resource_expr_result_region(returned, state, functions, report)
                             return_mutable_reference: bool = return_function_index < functions.return_mutable_references.count and functions.return_mutable_references[return_function_index]
                             # Check the returned expression before emitting its summary marker. The
                             # resulting resource-use/call transition (or the explicit allocation
@@ -229,7 +366,7 @@ extend ElisaProof:
                                         # turns what was an unreplayable certificate into a clean
                                         # refusal from the obligation below.
                                         candidate_mutable: bool = candidate_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[candidate_slot]
-                                        continue if candidate_mutable != return_mutable_reference
+                                        continue if not return_is_sview and candidate_mutable != return_mutable_reference
                                         return_witness <- candidate
                                         witness_found <- true
                             # A function whose declared return type is a scalar primitive returns
@@ -239,10 +376,11 @@ extend ElisaProof:
                             # one made the ordinary shape -- read a number out of a region-owned
                             # parameter -- depend on a witness whose mutability had to match a
                             # return that is not a reference in the first place.
-                            return_is_scalar: bool = return_function_index < functions.return_scalar.count and functions.return_scalar[return_function_index]
                             if returned_region != "" and not return_is_scalar and proof_resource_region_is_external(state, returned_region):
                                 proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a region return must be tied to a replayed resource use or returned allocation") if return_witness >= report.kernel_nodes.count
-                                proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if return_witness < report.kernel_nodes.count
+                                if return_witness < report.kernel_nodes.count:
+                                    proof_resource_record_sview_return(state, report, return_witness, position, function_name, returned_region) if return_is_sview
+                                    proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if not return_is_sview
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         proof_resource_check_expression(condition, state, report, function_name, functions)
                         then_state: mutable ProofResourceState = proof_resource_empty()
@@ -374,6 +512,10 @@ extend ElisaProof:
                 proof_resource_set_binding_borrowable(state, report, parameter.name, borrowable)
                 state.binding_extent[parameter_index] <- true if parameter_index < state.binding_extent.count and proof_resource_type_is_collection(parameter.type_expression)
                 parameter_region: sview = proof_resource_function_parameter_region(functions, function_index, parameter_index)
-                proof_resource_set_binding_region(&state, report, parameter.name, parameter_region) if is_reference and parameter_region != ""
+                if parameter_region != "":
+                    if is_reference:
+                        proof_resource_set_binding_region(&state, report, parameter.name, parameter_region)
+                    elif proof_resource_type_is_sview(parameter.type_expression):
+                        proof_resource_record_sview_parameter(&state, report, parameter.type_expression, parameter.name, parameter_region, Ast::expr_pos(parameter.type_expression), function_name)
             proof_resource_check_statements(body, &state, report, function_name, functions)
             proof_resource_finish(&state, report, function_name, line, failed_before, parameters.count)

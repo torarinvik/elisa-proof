@@ -1,0 +1,110 @@
+include "../src/proof/kernel_core.elisa"
+include "../src/proof/kernel_replay.elisa"
+using ElisaProofKernelCore
+using ElisaProofKernelReplay
+
+# Wire-format constants are named independently so these tests check the public certificate ABI.
+const VIEW_BORROW: usize = 16
+const BORROWABLE_VALUE: usize = 8
+const WRITABLE_BINDING: usize = 1
+const TWO_FORMALS: usize = 2
+const REJECTED_VALID_TRACE: i64 = 1
+const ACCEPTED_WRONG_TYPE: i64 = 2
+const ACCEPTED_MISSING_REGION: i64 = 3
+const ACCEPTED_BODY_PARAMETER: i64 = 4
+const REJECTED_VALID_CALL: i64 = 5
+const ACCEPTED_CROSSED_REGION: i64 = 6
+const ACCEPTED_REGION_WRITE: i64 = 7
+const ACCEPTED_NESTED_PARAMETER: i64 = 8
+
+def event(nodes: mutable darray[ProofKernelNode]&, kind: sview, operator: sview, left: usize, flags: usize, name: sview, region: sview) -> usize:
+    return add_node(nodes, kind, operator, left, 0, flags, 0, 0, 0, name, region)
+
+def admission_agrees(nodes: mutable darray[ProofKernelNode]&, children: mutable darray[usize]&, root: usize, expected: bool) -> bool:
+    ordinary: bool = proof_kernel_replay_resource_report(nodes, children, [], root)
+    complete_arena: bool = proof_kernel_replay_resource_report_checked_arena(nodes, children, [], root)
+    return ordinary == expected and complete_arena == expected
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[ProofKernelNode] = []
+    children: mutable darray[usize] = []
+    view_type: usize = event(&nodes, "ident", "", 0, 0, "sview", "")
+    callee_region: usize = event(&nodes, "resource-region-param", "external", 0, 0, "r", "")
+    first: usize = event(&nodes, "resource-bind", "value", 0, BORROWABLE_VALUE, "view", "")
+    first_lifetime: usize = event(&nodes, "resource-sview-param", "", view_type, VIEW_BORROW, "view", "r")
+    second: usize = event(&nodes, "resource-bind", "value", 0, BORROWABLE_VALUE, "other", "")
+    second_lifetime: usize = event(&nodes, "resource-sview-param", "", view_type, VIEW_BORROW, "other", "r")
+    children.push(callee_region)
+    children.push(first)
+    children.push(first_lifetime)
+    children.push(second)
+    children.push(second_lifetime)
+    callee_count: usize = children.count
+    callee: usize = add_node(&nodes, "resource-safety", "", 0, 0, TWO_FORMALS, 0, callee_count, 0, "callee", "resource-v1")
+    return REJECTED_VALID_TRACE if not admission_agrees(&nodes, &children, callee, true)
+
+    nodes[view_type].operator <- "+"
+    return ACCEPTED_WRONG_TYPE if not admission_agrees(&nodes, &children, callee, false)
+    nodes[view_type].operator <- ""
+    nodes[first_lifetime].secondary_name <- "missing"
+    return ACCEPTED_MISSING_REGION if not admission_agrees(&nodes, &children, callee, false)
+    nodes[first_lifetime].secondary_name <- "r"
+    nodes[callee].auxiliary <- TWO_FORMALS - 1
+    return ACCEPTED_BODY_PARAMETER if not admission_agrees(&nodes, &children, callee, false)
+    nodes[callee].auxiliary <- TWO_FORMALS
+
+    region_a: usize = event(&nodes, "resource-region-param", "external", 0, 0, "a", "")
+    region_b: usize = event(&nodes, "resource-region-param", "external", 0, 0, "b", "")
+    x: usize = event(&nodes, "resource-bind", "value", 0, BORROWABLE_VALUE, "x", "")
+    x_lifetime: usize = event(&nodes, "resource-sview-param", "", view_type, VIEW_BORROW, "x", "a")
+    y: usize = event(&nodes, "resource-bind", "value", 0, BORROWABLE_VALUE, "y", "")
+    y_lifetime: usize = event(&nodes, "resource-sview-param", "", view_type, VIEW_BORROW, "y", "b")
+    x_place: usize = event(&nodes, "ident", "", 0, 0, "x", "")
+    y_place: usize = event(&nodes, "ident", "", 0, 0, "y", "")
+    first_actual: usize = event(&nodes, "resource-call-arg", "value", x_place, 0, "view", "")
+    second_actual: usize = event(&nodes, "resource-call-arg", "value", x_place, 0, "other", "")
+    crossed_actual: usize = event(&nodes, "resource-call-arg", "value", y_place, 0, "other", "")
+    mapping: usize = event(&nodes, "resource-call-region", "param", 0, 0, "r", "a")
+    arguments_start: usize = children.count
+    children.push(first_actual)
+    second_argument_slot: usize = children.count
+    children.push(second_actual)
+    children.push(mapping)
+    argument_count: usize = children.count - arguments_start
+    call: usize = add_node(&nodes, "resource-call", "", callee, 1, TWO_FORMALS, arguments_start, argument_count, 0, "callee", "")
+    caller_start: usize = children.count
+    children.push(region_a)
+    children.push(region_b)
+    children.push(x)
+    children.push(x_lifetime)
+    children.push(y)
+    children.push(y_lifetime)
+    children.push(call)
+    caller: usize = add_node(&nodes, "resource-safety", "", 0, 0, TWO_FORMALS, caller_start, children.count - caller_start, 0, "caller", "resource-v1")
+    return REJECTED_VALID_CALL if not admission_agrees(&nodes, &children, caller, true)
+    children[second_argument_slot] <- crossed_actual
+    return ACCEPTED_CROSSED_REGION if not admission_agrees(&nodes, &children, caller, false)
+    children[second_argument_slot] <- second_actual
+
+    bytes: usize = event(&nodes, "resource-bind", "external-mutable", 0, WRITABLE_BINDING, "bytes", "r")
+    bytes_place: usize = event(&nodes, "ident", "", 0, 0, "bytes", "")
+    write: usize = event(&nodes, "resource-write", "", bytes_place, 0, "bytes", "")
+    write_start: usize = children.count
+    children.push(callee_region)
+    children.push(first)
+    children.push(first_lifetime)
+    children.push(bytes)
+    children.push(write)
+    write_root: usize = add_node(&nodes, "resource-safety", "", 0, 0, TWO_FORMALS, write_start, children.count - write_start, 0, "writer", "resource-v1")
+    return ACCEPTED_REGION_WRITE if not admission_agrees(&nodes, &children, write_root, false)
+
+    nested_start: usize = children.count
+    children.push(first)
+    children.push(first_lifetime)
+    nested: usize = add_node(&nodes, "resource-scope", "", 0, 0, 0, nested_start, children.count - nested_start, 0, "", "")
+    outer_start: usize = children.count
+    children.push(callee_region)
+    children.push(nested)
+    outer: usize = add_node(&nodes, "resource-safety", "", 0, 0, 0, outer_start, children.count - outer_start, 0, "nested", "resource-v1")
+    return ACCEPTED_NESTED_PARAMETER if not admission_agrees(&nodes, &children, outer, false)
+    return 0
