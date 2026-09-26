@@ -71,6 +71,8 @@ PY
 run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] > 0; assert report["summary"]["proven"] == report["summary"]["obligations"]; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0'
 
 # Missing lifetime/place information is unsupported, not a demonstrated violation.
+python3 "$ROOT_DIR/scripts/test_overlap_diagnostics.py"
+
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
     set +e
@@ -802,7 +804,7 @@ if [[ "$rejected_sview_reference_write_status" -ne 1 ]]; then
     printf 'proof test matrix failed: write through the mutable backing reference was accepted while an sview was live\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-reference-write.json")); assert report["status"] == "failed"; assert any(f["kind"] == "borrow-write-conflict" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-reference-write.json")); assert report["status"] == "failed"; assert any(f["kind"] in {"borrow-write-conflict", "borrow-overlap-unproven"} for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: rejected sview-backed write report was incomplete\n' >&2
     exit 1
 fi
@@ -814,7 +816,7 @@ if [[ "$rejected_sview_parameter_write_status" -ne 1 ]]; then
     printf 'proof test matrix failed: write in a region borrowed by an sview parameter was accepted\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-parameter-write.json")); assert report["status"] == "failed"; assert any(f["kind"] == "borrow-write-conflict" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-parameter-write.json")); assert report["status"] == "failed"; assert any(f["kind"] in {"borrow-write-conflict", "borrow-overlap-unproven"} for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: rejected sview parameter write report was incomplete\n' >&2
     exit 1
 fi
@@ -1850,11 +1852,11 @@ run_json_report "$ROOT_DIR/examples/rejected_borrow_index_alias.elisa" | python3
 rejected_borrow_index_alias_probe_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_borrow_multi_index_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-alias-conflict" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_borrow_multi_index_alias_probe_status=${PIPESTATUS[1]}
-run_json_report "$ROOT_DIR/examples/rejected_borrow_dynamic_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-alias-conflict" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/rejected_borrow_dynamic_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-overlap-unproven" and finding["status"] == "unknown" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_borrow_dynamic_alias_probe_status=${PIPESTATUS[1]}
-run_json_report "$ROOT_DIR/examples/rejected_borrow_dynamic_multi_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-alias-conflict" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/rejected_borrow_dynamic_multi_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-overlap-unproven" and finding["status"] == "unknown" for finding in report["findings"]); assert report["replay"]["gaps"] == 0'
 rejected_borrow_dynamic_multi_alias_probe_status=${PIPESTATUS[1]}
-run_json_report "$ROOT_DIR/examples/rejected_borrow_symbolic_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-alias-conflict" and finding["status"] == "disproved" for finding in report["findings"]); assert report["replay"]["gaps"] == 0; assert not any(node["kind"] == "resource-disjoint" for node in report["kernel"]["nodes"])'
+run_json_report "$ROOT_DIR/examples/rejected_borrow_symbolic_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-overlap-unproven" and finding["status"] == "unknown" for finding in report["findings"]); assert report["replay"]["gaps"] == 0; assert not any(node["kind"] == "resource-disjoint" for node in report["kernel"]["nodes"])'
 rejected_borrow_symbolic_alias_probe_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_borrow_call_alias.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "borrow-call-summary-unsupported" and finding["status"] == "unsupported" for finding in report["findings"]); assert not any(node["kind"] == "resource-call" and node["name"] == "set_inner_ref" for node in report["kernel"]["nodes"]); assert report["replay"]["gaps"] == 0'
 rejected_borrow_call_alias_probe_status=${PIPESTATUS[1]}
