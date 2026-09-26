@@ -56,3 +56,25 @@ The full standalone replay and main-source audits still exceed the unchanged
 1,500,000 KB limit. This fixes the isolated allocation regression, not all
 self-verification scalability problems. The test matrix now runs this reproducer
 as a watchdog-completion regression without requiring a proved verdict.
+
+### General marker dispatch
+
+The same failure-node allocation pattern also occurred in marker classification,
+root lookup, signed-width lookup, and scalar-name lookup. Those queries now select
+the applicable parser by the exact bare callee name. The unsigned classifier still
+checks both its identifier and place forms; no width, arity, or argument-name
+validation was removed. Dispatch is not itself evidence that a marker is valid.
+
+After this change the decoder regression completed at 66,384 KB. An eight-module
+replay prefix that previously hit the watchdog completed at 717,601 KB, with zero
+replay gaps and an unsupported verdict. The full standalone replay and main-source
+audits still hit the memory watchdog (about 15 and 17 seconds respectively).
+
+`examples/marker_dispatch_runtime.elisa` preserves the old queries as test oracles.
+It compares classification, root identity, and signed-width selection over 1,521
+facts, including malformed arities, inconsistent argument-name counts, invalid
+widths, non-place terms, and parenthesized callees. Width lookup is checked both
+against the complete fact list and every singleton, so an early matching marker
+cannot mask later cases. This native test passed, the 45 earlier fixture reports
+were unchanged, and eight additional signed/difference/overflow fixtures retained
+their expected verdicts with complete certificate replay.

@@ -147,13 +147,15 @@ field_runtime_inputs=()
 if ! elisa_compiler_is_stage0 "$SELF_HOST_COMPILER"; then
     field_runtime_inputs=("${kernel_runtime_inputs[@]}")
 fi
-"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/field-equality.o" "$ROOT_DIR/build/snapshot/elisa-proof/examples/field_equality_runtime.elisa" >/dev/null 2>&1 &&
-    "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/field-equality" "$standalone_probe_dir/field-equality.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}" &&
-    "$standalone_probe_dir/field-equality"
-if [[ "$?" -ne 0 ]]; then
-    printf 'proof test matrix failed: allocation-free field comparison disagrees with AST equality\n' >&2
-    exit 1
-fi
+for ast_probe in field_equality_runtime marker_dispatch_runtime; do
+    "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/snapshot/elisa-proof/examples/$ast_probe.elisa" >/dev/null 2>&1 &&
+        "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/$ast_probe" "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}" &&
+        "$standalone_probe_dir/$ast_probe"
+    if [[ "$?" -ne 0 ]]; then
+        printf 'proof test matrix failed: AST allocation optimization differential test %s failed\n' "$ast_probe" >&2
+        exit 1
+    fi
+done
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/examples/kernel_sview_lifetimes_runtime.elisa" >/dev/null 2>&1 &&
     "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-sview-lifetimes" "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
     "$standalone_probe_dir/kernel-sview-lifetimes"

@@ -1,0 +1,95 @@
+# Differential test of marker dispatch against the original full parser sequence.
+include "../../Elisa-compiler/src/semantic/semantic.elisa"
+include "../src/proof/kernel_core.elisa"
+include "../src/proof/operator_impl_model.elisa"
+include "../src/proof/model/enum_index.elisa"
+include "../src/proof/model/findings.elisa"
+include "../src/proof/model.elisa"
+include "../src/proof/kernel.elisa"
+include "../src/proof/expr.elisa"
+include "../src/proof/linear.elisa"
+include "../src/proof/resources.elisa"
+include "../src/proof/check.elisa"
+include "../src/proof/kernel_replay.elisa"
+include "../src/proof/replay.elisa"
+
+
+using ElisaProof
+
+extend ElisaProof:
+    public:
+        def test_original_proof_type_marker_callee(expression: Ast::Expr) -> bool:
+            unsigned: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(expression)
+            return true if unsigned.known
+            place: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_place_marker_info(expression)
+            return true if place.known
+            scalar: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+            return true if scalar.known
+            signed: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(expression)
+            return true if signed.known
+            signed_place: (known: bool, term: Ast::Expr, width: i64) = proof_signed_place_marker_info(expression)
+            return true if signed_place.known
+            element: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(expression)
+            return element.known
+
+        # Keep the old query here as a test oracle, not in the production verifier.
+        def test_original_proof_type_marker_root_name(expression: Ast::Expr) -> sview:
+            scalar: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+            return proof_place_root_name(scalar.term, 0) if scalar.known
+            element: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(expression)
+            return proof_place_root_name(element.term, 0) if element.known
+            place: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_place_marker_info(expression)
+            return proof_place_root_name(place.term, 0) if place.known
+            signed: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(expression)
+            return proof_place_root_name(signed.term, 0) if signed.known
+            signed_place: (known: bool, term: Ast::Expr, width: i64) = proof_signed_place_marker_info(expression)
+            return proof_place_root_name(signed_place.term, 0) if signed_place.known
+            return ""
+
+        def test_original_proof_signed_marker_width_for_term(facts: darray[Ast::Expr]&, term: Ast::Expr) -> i64:
+            for fact in facts |term|:
+                marker: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(fact)
+                return marker.width if marker.known and proof_expr_equal(marker.term, term)
+                place: (known: bool, term: Ast::Expr, width: i64) = proof_signed_place_marker_info(fact)
+                return place.width if place.known and proof_expr_equal(place.term, term)
+            return 0
+
+
+const MARKER_CLASSIFICATION_CHANGED: i64 = 1
+const MARKER_ROOT_CHANGED: i64 = 2
+const MARKER_WIDTH_CHANGED: i64 = 3
+const MARKER_TEST_REGION_BYTES: usize = 65536
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    region r(MARKER_TEST_REGION_BYTES):
+        store: Ast::Node.Store[Local] = Ast::Node.Store(r)
+        in store:
+            position: Ast::Pos = Ast::pos_at_line(1)
+            base: Ast::Expr = Ast::Expr.Ident("items", position)
+            field: Ast::Expr = Ast::Expr.Field(base, "value", position)
+            terms: mutable darray[Ast::Expr] = [base, field, Ast::Expr.Paren(field, position), Ast::Expr.Index(base, Ast::Expr.IntLit(0, position), position), Ast::Expr.IntLit(0, position), Ast::Expr.Invalid]
+            names: mutable darray[sview] = ["__elisa_unsigned_type_bound", "__elisa_signed_type_bound", "__elisa_signed_place_type_bound", "__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element", "not_a_marker", ""]
+            widths: mutable darray[i64] = [-1, 0, 1, ElisaProofKernelCore::PROOF_KERNEL_FIXED_WIDTH_MIN - 1, ElisaProofKernelCore::PROOF_KERNEL_U8_WIDTH, ElisaProofKernelCore::PROOF_KERNEL_I64_WIDTH, ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS + 1]
+            facts: mutable darray[Ast::Expr] = [base, Ast::Expr.Invalid]
+            for name in names |name, terms, widths, facts, position|:
+                callee: Ast::Expr = Ast::Expr.Ident(name, position)
+                facts.push(Ast::Expr.Call(callee, [], [], position))
+                for term in terms |term, callee, widths, facts, position|:
+                    facts.push(Ast::Expr.Call(callee, [term], [], position))
+                    for width in widths |term, callee, width, facts, position|:
+                        width_term: Ast::Expr = Ast::Expr.IntLit(width, position)
+                        facts.push(Ast::Expr.Call(callee, [term, width_term], [], position))
+                        facts.push(Ast::Expr.Call(callee, [term, width_term], ["term"], position))
+                        facts.push(Ast::Expr.Call(callee, [term, width_term], ["term", "width"], position))
+                        facts.push(Ast::Expr.Call(callee, [term, width_term, width_term], [], position))
+                        facts.push(Ast::Expr.Call(Ast::Expr.Paren(callee, position), [term, width_term], [], position))
+            for fact in facts |fact|:
+                return MARKER_CLASSIFICATION_CHANGED if proof_type_marker_callee(fact) != test_original_proof_type_marker_callee(fact)
+                return MARKER_ROOT_CHANGED if proof_type_marker_root_name(fact) != test_original_proof_type_marker_root_name(fact)
+            for term in terms |term, facts|:
+                return MARKER_WIDTH_CHANGED if proof_signed_marker_width_for_term(facts, term) != test_original_proof_signed_marker_width_for_term(facts, term)
+                # Also check each singleton so an early matching fact cannot mask later cases.
+                for fact in facts |term, fact|:
+                    singleton: mutable darray[Ast::Expr] = [fact]
+                    return MARKER_WIDTH_CHANGED if proof_signed_marker_width_for_term(singleton, term) != test_original_proof_signed_marker_width_for_term(singleton, term)
+    return 0

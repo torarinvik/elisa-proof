@@ -167,10 +167,15 @@ extend ElisaProof:
 
         def proof_signed_marker_width_for_term(facts: darray[Ast::Expr]&, term: Ast::Expr) -> i64:
             for fact in facts |term|:
-                marker: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(fact)
-                return marker.width if marker.known and proof_expr_equal(marker.term, term)
-                place: (known: bool, term: Ast::Expr, width: i64) = proof_signed_place_marker_info(fact)
-                return place.width if place.known and proof_expr_equal(place.term, term)
+                match proof_marker_callee_name(fact):
+                    "__elisa_signed_type_bound":
+                        marker = proof_signed_marker_info(fact)
+                        return marker.width if marker.known and proof_expr_equal(marker.term, term)
+                    "__elisa_signed_place_type_bound":
+                        place = proof_signed_place_marker_info(fact)
+                        return place.width if place.known and proof_expr_equal(place.term, term)
+                    _:
+                        pass
             return 0
 
         def proof_signed_width_in_expression(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> i64:
@@ -217,6 +222,7 @@ extend ElisaProof:
             return 0 if not path.known or path.subscripts == 0
             width: mutable i64 = 0
             for fact in facts |fact, path, width|:
+                continue if not proof_marker_has_callee(fact, "__elisa_primitive_scalar_element")
                 marker: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(fact)
                 continue if not marker.known or marker.width == 0 or marker.depth != path.subscripts or not proof_expr_equal(marker.term, path.container)
                 width <- marker.width if width == 0 or marker.width < width
@@ -299,12 +305,15 @@ extend ElisaProof:
         # A cheap filter, never an admission rule. The full marker parser must still check
         # arguments and widths. Avoid allocating its Invalid result for unrelated facts in
         # the hot scalar-witness scans; even sentinel AST nodes occupy the source store.
-        def proof_marker_has_callee(expression: Ast::Expr, name: sview) -> bool:
+        def proof_marker_callee_name(expression: Ast::Expr) -> sview:
             match expression:
                 Ast::Expr.Call(callee, _, _, _):
-                    return proof_ident_name(callee) == name
+                    return proof_ident_name(callee)
                 _:
-                    return false
+                    return ""
+
+        def proof_marker_has_callee(expression: Ast::Expr, name: sview) -> bool:
+            return name != "" and proof_marker_callee_name(expression) == name
 
         def proof_element_marker_info(expression: Ast::Expr) -> (known: bool, term: Ast::Expr, depth: i64, width: i64):
             match expression:
@@ -335,22 +344,30 @@ extend ElisaProof:
         # constrains no model and proves no proposition by itself. Keep this parser strict because
         # the bounded model treats a recognized marker as a tautological model fact.
         def proof_type_marker_callee(expression: Ast::Expr) -> bool:
-            unsigned: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(expression)
-            return true if unsigned.known
-            place: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_place_marker_info(expression)
-            return true if place.known
-            scalar: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
-            return true if scalar.known
-            signed: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(expression)
-            return true if signed.known
-            signed_place: (known: bool, term: Ast::Expr, width: i64) = proof_signed_place_marker_info(expression)
-            return true if signed_place.known
-            element: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(expression)
-            return element.known
+            return match proof_marker_callee_name(expression):
+                "__elisa_unsigned_type_bound":
+                    unsigned = proof_unsigned_marker_info(expression)
+                    place = proof_unsigned_place_marker_info(expression)
+                    unsigned.known or place.known
+                "__elisa_primitive_scalar_type":
+                    scalar = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+                    scalar.known
+                "__elisa_signed_type_bound":
+                    signed = proof_signed_marker_info(expression)
+                    signed.known
+                "__elisa_signed_place_type_bound":
+                    signed_place = proof_signed_place_marker_info(expression)
+                    signed_place.known
+                "__elisa_primitive_scalar_element":
+                    element = proof_element_marker_info(expression)
+                    element.known
+                _:
+                    false
 
         # The bare-name form of the scalar witness. A term-shaped witness answers "" here and is
         # matched structurally by `proof_scalar_term_witnessed` instead.
         def proof_scalar_marker_name(expression: Ast::Expr) -> sview:
+            return "" if not proof_marker_has_callee(expression, "__elisa_primitive_scalar_type")
             argument: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
             return "" if not argument.known
             return proof_ident_name(argument.term)
@@ -359,17 +376,24 @@ extend ElisaProof:
         # invalidation follow that symbol, so a field or element witness dies exactly when the
         # binding it was resolved against does.
         def proof_type_marker_root_name(expression: Ast::Expr) -> sview:
-            scalar: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
-            return proof_place_root_name(scalar.term, 0) if scalar.known
-            element: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(expression)
-            return proof_place_root_name(element.term, 0) if element.known
-            place: (known: bool, term: Ast::Expr, width: i64) = proof_unsigned_place_marker_info(expression)
-            return proof_place_root_name(place.term, 0) if place.known
-            signed: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(expression)
-            return proof_place_root_name(signed.term, 0) if signed.known
-            signed_place: (known: bool, term: Ast::Expr, width: i64) = proof_signed_place_marker_info(expression)
-            return proof_place_root_name(signed_place.term, 0) if signed_place.known
-            return ""
+            return match proof_marker_callee_name(expression):
+                "__elisa_primitive_scalar_type":
+                    scalar = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+                    proof_place_root_name(scalar.term, 0) if scalar.known else ""
+                "__elisa_primitive_scalar_element":
+                    element = proof_element_marker_info(expression)
+                    proof_place_root_name(element.term, 0) if element.known else ""
+                "__elisa_unsigned_type_bound":
+                    place = proof_unsigned_place_marker_info(expression)
+                    proof_place_root_name(place.term, 0) if place.known else ""
+                "__elisa_signed_type_bound":
+                    signed = proof_signed_marker_info(expression)
+                    proof_place_root_name(signed.term, 0) if signed.known else ""
+                "__elisa_signed_place_type_bound":
+                    signed_place = proof_signed_place_marker_info(expression)
+                    proof_place_root_name(signed_place.term, 0) if signed_place.known else ""
+                _:
+                    ""
 
         def proof_place_root_name(expression: Ast::Expr, depth: usize) -> sview:
             return "" if depth >= PROOF_UNSIGNED_PLACE_DEPTH_LIMIT
