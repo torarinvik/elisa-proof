@@ -7671,3 +7671,30 @@ the prior committed executable. Source-length validation and all nine audit-harn
 An additional O2 rebuild was blocked by Stage1's 4-GiB memory guard, so this change has no new O2
 build evidence. This fixture validates scope restoration and proposition typing; it does not
 establish full proof-assistant correctness or a measurable performance improvement.
+
+### Revalidate against the freshly rebuilt Stage0 compiler (2026-09-27)
+
+The Go compiler changes were committed at `a261898f1261e88eb9eb7581197f083f1e411c61`.
+They restore the guarded small-literal comparison path for `sview` match arms while reusing the
+already-evaluated scrutinee; a regression checks that an effectful match expression is emitted
+once. The same commit updates tests to the current contracts: only NUL-terminated `cstr` values
+may enter `cstr` APIs, generic values are read from actual views rather than fabricated with
+`zeroed`, internal legacy `StringView` construction is explicit trusted code, and actual panic
+effects and `cstr` runtime return types are pinned. The negative raw-pointer-to-`cstr` test
+requires all three unsafe conversions to remain rejected while its safe reverse-direction
+control is accepted.
+
+`make test` passed across the full Go compiler package and fixture matrix. The commit hook rebuilt
+`~/.elisac/elisac-stage0`; embedded build metadata reports the same revision and
+`vcs.modified=false`. `ELISA_STAGE0_REV` pins that exact product. With it explicitly selected as
+both the proof compiler and bootstrap oracle, `scripts/dogfood.sh` completed, including the
+standalone replay report (1,890 obligations; expected failed overall due to deliberate negative
+claims; 986 proved; zero replay gaps), all proof/tactic runtime harnesses, and all Stage0
+bootstrap harnesses. The final audit check reports replay complete. This is broad regression and
+replay evidence, not proof-system self-verification; standalone audit memory scalability remains
+open.
+
+The next compiler soundness audit target is optimization-fact provenance: several view/collection
+facts are currently dispatched by a direct callee's spelling. Verify that a user-defined or
+shadowed helper cannot acquire trusted extent/disjointness facts merely by reusing a runtime helper
+name, and keep backend optimizations conservative if that identity is not established.
