@@ -7698,3 +7698,45 @@ The next compiler soundness audit target is optimization-fact provenance: severa
 facts are currently dispatched by a direct callee's spelling. Verify that a user-defined or
 shadowed helper cannot acquire trusted extent/disjointness facts merely by reusing a runtime helper
 name, and keep backend optimizations conservative if that identity is not established.
+
+### Close two optimizer/builtin identity gaps and refresh compiler pins (2026-09-27)
+
+The disjointness audit found that freshness inference accepted several `clone` AST shapes that
+were broader than the backend's actual builtin lowering (including bare-name calls and a
+standalone generic-index node). Freshness and escape analysis now share one recognizer: only an
+unshadowed, type-applied `clone` call with one argument is treated as the builtin. A regression
+uses a source function named `clone` that returns a darray parameter, so the result aliases its
+input; current Stage1 emits no disjoint/noalias metadata for the resulting pair. Compiler commit
+`1fdd797f` contains the recognizer and regression.
+
+The proof resource checker already refused collection methods whose leaf names collided with a
+source declaration, but alias-stability analysis called the same builtin classifier without the
+function table. The shared classifier now rejects those collisions in both passes. The existing
+`rejected_shadowed_collection_builtin` regression and the full resource/collection fixtures passed.
+
+Compiler identity checks found stale project pins. `ELISA_COMPILER_REV` now points to
+`1fdd797f` (the exact compiler commit containing the noalias fix), and `ELISA_STAGE0_REV` points to
+`a891c078`, the clean Stage0 product's embedded revision. Stage0's Git head, embedded VCS revision,
+and freshness check agreed; its `vcs.modified` flag is false. The frontend source at the pinned
+compiler revision matches the freshly seeded Stage1 source. The shared compiler checkout also
+contains uncommitted packed-layout work, so the Stage1 product was freshness-checked after those
+edits; these results validate that current product but do not make the packed-layout edits part of
+the pinned clean source revision.
+
+With the default proof build path and refreshed pins, `scripts/test.sh` passed, including the
+standalone audit watchdog, all example/resource fixtures, and optimized replay at O2 and O3.
+`scripts/dogfood.sh` also completed on the fresh Stage1/Stage0 pair and reported
+`dogfood audit passed: formalized layers are replay-complete`. The intentionally incomplete
+standalone replay report had 1,897 obligations, 985 proven, and zero replay gaps; the rejected
+arena-cycle report had 1,902 obligations, 987 proven, and zero gaps. These expected failed verdicts
+are not complete verification of those examples, and the proof assistant still does not verify its
+own kernel.
+
+One compiler parity limitation remains visible: `backend_native_smoke.sh` reported 539/541 while
+two newly added disjointness fixtures declined. The shadowed-clone fixture used a mutable global
+darray initializer that Stage1 does not support; it was replaced with the supported alias-returning
+function shape and then compiled under fresh Stage1 with no noalias metadata. The other, still
+uncommitted reference-alias fixture declines at `left_ref <- right` (backend decline on assignment
+to `left_ref`). That work belongs to a separate active compiler worktree and was left untouched;
+the full native smoke has not been rerun after correcting the first fixture. Follow up on reference
+assignment lowering before treating that parity gate as green.
