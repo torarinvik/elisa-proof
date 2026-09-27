@@ -2701,12 +2701,27 @@ printf 'dogfood effect_runtime: contained rows admitted and uncontained or malfo
 # Respect the same explicit stage0 compiler supplied to the stage1 driver/build; otherwise a
 # stale, unrelated `elisac-stage0` earlier on PATH can replace the verified bootstrap product.
 if [[ -n "$BOOTSTRAP_COMPILER" ]]; then
-    "$BOOTSTRAP_COMPILER" -emit obj -O0 -o "$runtime_dir/bootstrap-runtime.o" "$runtime_source" >/dev/null 2>&1
+    compile_bootstrap_object() {
+        local source="$1"
+        local output="$2"
+        local log="${output%.o}.compile.log"
+        if ! "$BOOTSTRAP_COMPILER" -emit obj -O0 -o "$output" "$source" >"$log" 2>&1; then
+            printf 'dogfood failed: stage0 compiler rejected %s; diagnostics follow:\n' "$source" >&2
+            cat "$log" >&2
+            return 1
+        fi
+    }
+
+    if ! compile_bootstrap_object "$runtime_source" "$runtime_dir/bootstrap-runtime.o"; then
+        exit 1
+    fi
     # The raw runtime support object intentionally leaves the optional profiler
     # ABI unresolved.  Keep the stage0 bootstrap link honest by supplying the
     # same small hook implementation used by the compiler parity harness.
     for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime kernel_proposition_admission_runtime; do
-        "$BOOTSTRAP_COMPILER" -emit obj -O0 -o "$runtime_dir/bootstrap-$bootstrap_example.o" "$ROOT_DIR/examples/$bootstrap_example.elisa" >/dev/null 2>&1
+        if ! compile_bootstrap_object "$ROOT_DIR/examples/$bootstrap_example.elisa" "$runtime_dir/bootstrap-$bootstrap_example.o"; then
+            exit 1
+        fi
         link_native "$runtime_dir/bootstrap-$bootstrap_example" "$runtime_dir/bootstrap-$bootstrap_example.o" "$runtime_dir/bootstrap-runtime.o"
         set +e
         "$runtime_dir/bootstrap-$bootstrap_example"
