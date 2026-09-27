@@ -44,6 +44,8 @@ import subprocess
 import sys
 import time
 
+MEMORY_SAMPLE_RETRY_LIMIT = 3
+MEMORY_SAMPLE_RETRY_DELAY_SECONDS = 0.01
 
 root, proof_binary, source, time_limit_text, memory_limit_text, stdout_path, stderr_path, audit_dir = sys.argv[1:]
 try:
@@ -59,6 +61,7 @@ if not math.isfinite(time_limit) or time_limit <= 0 or memory_limit_kb <= 0:
 command = [proof_binary, "--json", source]
 started = time.monotonic()
 peak_memory_kb = 0
+memory_sample_failures = 0
 stop_reason = None
 memory_monitor = "ps"
 memory_metric = "resident_size"
@@ -128,11 +131,19 @@ with open(stdout_path, "w", encoding="utf-8") as stdout, open(stderr_path, "w", 
         memory_kb = sample_process_memory_kb(process.pid)
         if memory_kb is None:
             # The process can exit between poll() and the memory query. Its terminal
-            # status and report below decide completion in that ordinary race.
+            # status and report below decide completion in that ordinary race. On
+            # macOS proc_pid_rusage can also briefly fail while a just-spawned child
+            # is being registered; tolerate only a few consecutive sample failures,
+            # then fail closed without falling back to weaker RSS accounting.
             if process.poll() is not None:
                 break
+            memory_sample_failures += 1
+            if memory_sample_failures <= MEMORY_SAMPLE_RETRY_LIMIT:
+                time.sleep(MEMORY_SAMPLE_RETRY_DELAY_SECONDS)
+                continue
             stop_reason = "memory-monitor-unavailable"
             break
+        memory_sample_failures = 0
         peak_memory_kb = max(peak_memory_kb, memory_kb)
 
         elapsed = time.monotonic() - started
