@@ -7763,3 +7763,23 @@ checker changes. After registering the view fixture, both regressions were run t
 their failed verdicts were deterministic, had no semantic errors, and independently replayed all
 certificates with zero gaps. This closes the demonstrated paths; it does not establish full prover
 soundness or self-verification.
+
+### Refuse sview call returns without a kernel-linked provenance witness (2026-09-27)
+
+The sview lifetime audit found an unsound summary path. For a wrapper returning
+choose_first(second, first), the checker inferred the returned sview's backing formal by
+scanning backward for the last same-region resource-use. That selected first, although the
+callee summary returned second. A reproducer then created a view from the wrapper result and
+mutated second; the assistant incorrectly reported the program as proved with six of six
+certificates replayed and zero gaps. This was not a replay gap: replay faithfully accepted a
+provenance claim that the frontend had attached to an unrelated read.
+
+The checker now refuses to certify a direct named-call sview return unless it is the compiler's
+direct as_sview() conversion, whose receiver is explicitly witnessed. The existing
+resource-call-result replay validates call-result provenance at local bindings, but the current
+resource-region-return certificate does not connect a returned call result to that exact mapping.
+Returning through such a call is therefore reported as unsupported, not as a false proof. Direct
+conversions, sview parameters, and verified call results bound to locals retain their existing
+behavior. examples/rejected_sview_call_return_wrong_provenance.elisa captures the argument
+permutation and attempted write; it must fail with zero semantic errors and complete certificate
+replay. A kernel-linked return witness is the follow-up needed to recover this expressiveness.

@@ -789,6 +789,18 @@ run_json_report "$ROOT_DIR/examples/sview_region_reference_parameter.elisa" | py
 run_json_report "$ROOT_DIR/examples/sview_region_return_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0'
 run_json_report "$ROOT_DIR/examples/sview_region_value_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0'
 set +e
+run_json_report "$ROOT_DIR/examples/rejected_sview_call_return_wrong_provenance.elisa" >/tmp/elisa-proof-rejected-sview-call-provenance.json
+rejected_sview_call_provenance_status=$?
+set -e
+if [[ "$rejected_sview_call_provenance_status" -ne 1 ]]; then
+    printf '%s\n' 'proof test matrix failed: a call-returned sview with unlinked provenance was accepted' >&2
+    exit 1
+fi
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "region-return-witness-unsupported" and f["status"] == "unsupported" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+    printf '%s\n' 'proof test matrix failed: unlinked sview call-return provenance was not refused cleanly' >&2
+    exit 1
+fi
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_sview_return_after_region_destroy.elisa" >/tmp/elisa-proof-rejected-sview-return-destroy.json
 rejected_sview_return_destroy_status=$?
 set -e
