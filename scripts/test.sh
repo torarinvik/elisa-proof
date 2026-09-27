@@ -788,16 +788,17 @@ run_json_report "$ROOT_DIR/examples/sview_region_live_use.elisa" | python3 -c 'i
 run_json_report "$ROOT_DIR/examples/sview_region_reference_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0'
 run_json_report "$ROOT_DIR/examples/sview_region_return_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0'
 run_json_report "$ROOT_DIR/examples/sview_region_value_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0'
+run_json_report "$ROOT_DIR/examples/sview_call_return_provenance.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0'
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_sview_call_return_wrong_provenance.elisa" >/tmp/elisa-proof-rejected-sview-call-provenance.json
 rejected_sview_call_provenance_status=$?
 set -e
 if [[ "$rejected_sview_call_provenance_status" -ne 1 ]]; then
-    printf '%s\n' 'proof test matrix failed: a call-returned sview with unlinked provenance was accepted' >&2
+    printf '%s\n' 'proof test matrix failed: a write to the sview backing argument was accepted' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "region-return-witness-unsupported" and f["status"] == "unsupported" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
-    printf '%s\n' 'proof test matrix failed: unlinked sview call-return provenance was not refused cleanly' >&2
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+    printf '%s\n' 'proof test matrix failed: call-return provenance was not replayed to the actual backing argument' >&2
     exit 1
 fi
 set +e

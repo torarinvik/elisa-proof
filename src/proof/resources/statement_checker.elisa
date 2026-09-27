@@ -9,11 +9,8 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "resource-state analysis exceeded its bounded symbolic-state budget", "steps", report.resource_analysis_steps + 1, PROOF_RESOURCE_ANALYSIS_BUDGET)
             return false
 
-        # A call's argument reads are not a return-provenance witness. Until the kernel
-        # certificate connects an sview call result to the exact formal selected by the
-        # callee summary, accepting one of those reads can attach the returned view to a
-        # different same-region argument and permit mutation of its real backing storage.
-        # The compiler builtin conversion has a direct receiver witness and remains supported.
+        # Normal calls need a kernel-linked return marker; their argument reads are not
+        # interchangeable provenance witnesses. The builtin conversion has a direct receiver.
         def proof_resource_sview_return_call_has_unlinked_provenance(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
             match expression:
                 Ast::Expr.Call(_, _, _, _):
@@ -22,6 +19,16 @@ extend ElisaProof:
                     return proof_resource_sview_return_call_has_unlinked_provenance(inner, functions)
                 _:
                     return false
+
+        def proof_resource_sview_return_call_name(expression: Ast::Expr, functions: ProofFunctionTable&) -> sview:
+            match expression:
+                Ast::Expr.Call(callee, _, _, _):
+                    return proof_callable_name(callee) if not proof_resource_builtin_sview_conversion(expression, functions).known
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_sview_return_call_name(inner, functions)
+                _:
+                    pass
+            return ""
 
         # Install a by-value sview call result as a shared borrow of the exact actual place
         # selected by the callee's resource-return summary. The kernel repeats this mapping and
@@ -348,6 +355,7 @@ extend ElisaProof:
                             proof_resource_check_expression(returned, state, report, function_name, functions)
                             return_witness: mutable usize = report.kernel_nodes.count
                             unlinked_sview_call: bool = return_is_sview and proof_resource_sview_return_call_has_unlinked_provenance(returned, functions)
+                            sview_call_formal: mutable sview = ""
                             if not unlinked_sview_call:
                                 match returned:
                                     Ast::Expr.RegionNew(operand, allocated_region, _):
@@ -385,6 +393,41 @@ extend ElisaProof:
                                             continue if not return_is_sview and candidate_mutable != return_mutable_reference
                                             return_witness <- candidate
                                             witness_found <- true
+                            else:
+                                callee_name: sview = proof_resource_sview_return_call_name(returned, functions)
+                                callee_return_formal: sview = proof_resource_sview_return_formal(report, callee_name) if callee_name != "" else ""
+                                actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool) = proof_resource_call_result_sview_source_actual(returned, state, functions, report)
+                                candidate_call: usize = state.trace_events[state.trace_events.count - 1] if state.trace_events.count > 0 else report.kernel_nodes.count
+                                call_event_valid: mutable bool = false
+                                if candidate_call < report.kernel_nodes.count:
+                                    call_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[candidate_call]
+                                    call_event_valid <- call_node.kind == "resource-call" and call_node.name == callee_name
+                                source_valid: mutable bool = actual.known and actual.place.whole and actual.slot < state.binding_names.count and actual.slot < state.binding_region.count and proof_resource_binding_region(state, actual.slot) == returned_region and proof_resource_binding_region_is_live(state, actual.slot) and not proof_resource_binding_is_moved(state, actual.slot)
+                                source_slot: mutable usize = actual.slot
+                                source_place: mutable ProofResourcePlace = actual.place
+                                for _ in 0..<state.binding_names.count |source_valid, source_slot, source_place, state|:
+                                    continue if source_slot >= state.borrow_present.count or not state.borrow_present[source_slot]
+                                    if source_slot >= state.borrow_target_slots.count or source_slot >= state.borrow_target_places.count:
+                                        source_valid <- false
+                                        continue
+                                    next_slot: usize = state.borrow_target_slots[source_slot]
+                                    next_place: ProofResourcePlace = state.borrow_target_places[source_slot]
+                                    if next_slot >= state.binding_names.count or not next_place.whole or next_place.root == "":
+                                        source_valid <- false
+                                        continue
+                                    source_slot <- next_slot
+                                    source_place <- next_place
+                                source_valid <- false if source_slot < state.borrow_present.count and state.borrow_present[source_slot]
+                                source_valid <- false if return_function_index >= functions.param_counts.count or return_function_index >= functions.param_starts.count
+                                source_valid <- false if source_valid and source_slot >= functions.param_counts[return_function_index]
+                                source_valid <- false if source_valid and functions.param_starts[return_function_index] + source_slot >= functions.all_params.count
+                                caller_formal: mutable sview = ""
+                                if source_valid:
+                                    caller_formal <- functions.all_params[functions.param_starts[return_function_index] + source_slot]
+                                    source_valid <- caller_formal == state.binding_names[source_slot] and source_slot < state.binding_region.count and proof_resource_binding_region(state, source_slot) == returned_region and proof_resource_binding_region_is_live(state, source_slot) and not proof_resource_binding_is_moved(state, source_slot)
+                                if source_valid and call_event_valid and callee_return_formal != "":
+                                    return_witness <- candidate_call
+                                    sview_call_formal <- caller_formal
                             # A function whose declared return type is a scalar primitive returns
                             # a copy. It cannot carry a lifetime however the expression that
                             # produced it was written, so `return cell.value` out of a region-owned
@@ -395,7 +438,8 @@ extend ElisaProof:
                             if returned_region != "" and not return_is_scalar and proof_resource_region_is_external(state, returned_region):
                                 proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a region return must be tied to a replayed resource use or returned allocation") if return_witness >= report.kernel_nodes.count
                                 if return_witness < report.kernel_nodes.count:
-                                    proof_resource_record_sview_return(state, report, return_witness, position, function_name, returned_region) if return_is_sview
+                                    proof_resource_record_sview_call_return(state, report, return_witness, sview_call_formal, position, function_name, returned_region) if return_is_sview and unlinked_sview_call
+                                    proof_resource_record_sview_return(state, report, return_witness, position, function_name, returned_region) if return_is_sview and not unlinked_sview_call
                                     proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if not return_is_sview
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         proof_resource_check_expression(condition, state, report, function_name, functions)

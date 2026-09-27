@@ -3,11 +3,12 @@ extend ElisaProofKernelReplay:
     private:
         const PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT: usize = 127
 
-        def proof_kernel_replay_resource_sview_call_result[@nodes, @children, @state](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @nodes, children: mutable darray[usize]& @children, state: mutable ProofKernelReplayResourceState& @state, node: ElisaProofKernelCore::ProofKernelNode, arena_admitted: bool) -> bool:
+        def proof_kernel_replay_resource_sview_call_result[@nodes, @children, @state](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @nodes, children: mutable darray[usize]& @children, state: mutable ProofKernelReplayResourceState& @state, node: ElisaProofKernelCore::ProofKernelNode, previous_event: usize, arena_admitted: bool) -> bool:
             return false if node.operator != "sview" or node.auxiliary != PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG + PROOF_KERNEL_REPLAY_BORROWABLE_FLAG or node.right >= nodes.count
             sview_type: ElisaProofKernelCore::ProofKernelNode = nodes[node.right]
             return false if sview_type.kind != "ident" or sview_type.name != "sview" or sview_type.left != 0 or sview_type.right != 0 or sview_type.auxiliary != 0 or sview_type.children_start != 0 or sview_type.children_count != 0 or sview_type.value != 0 or sview_type.secondary_name != ""
             return false if not any prior_call in state.resource_call_events where prior_call == node.left
+            return false if node.left != previous_event
             return false if any prior_result in state.resource_call_results where prior_result == node.left
             call_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
             return false if not call_located.known or call_located.node.kind != "resource-call" or call_located.node.name == ""
@@ -18,25 +19,10 @@ extend ElisaProofKernelReplay:
             callee: ElisaProofKernelCore::ProofKernelNode = callee_located.node
             return false if not proof_kernel_replay_child_range_valid(callee.children_start, callee.children_count, children.count)
 
-            returned_region: mutable sview = ""
-            returned_formal: mutable sview = ""
-            for child_offset in 0..<callee.children_count |child_offset, callee, children, nodes, returned_region, returned_formal|:
-                child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, callee.children_start + child_offset)
-                return false if not child.known
-                return false if child.value >= nodes.count
-                marker: ElisaProofKernelCore::ProofKernelNode = nodes[child.value]
-                continue if marker.kind != "resource-region-return"
-                return false if marker.operator != "sview" or marker.auxiliary != PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG or marker.right >= nodes.count
-                marker_type: ElisaProofKernelCore::ProofKernelNode = nodes[marker.right]
-                return false if marker_type.kind != "ident" or marker_type.name != "sview" or marker_type.left != 0 or marker_type.right != 0 or marker_type.auxiliary != 0 or marker_type.children_start != 0 or marker_type.children_count != 0 or marker_type.value != 0 or marker_type.secondary_name != ""
-                return false if returned_region != "" and returned_region != marker.name
-                return false if marker.left >= nodes.count
-                witness: ElisaProofKernelCore::ProofKernelNode = nodes[marker.left]
-                return false if witness.kind != "resource-use" or witness.name == ""
-                return false if returned_formal != "" and returned_formal != witness.name
-                returned_region <- marker.name
-                returned_formal <- witness.name
-            return false if returned_region == "" or returned_formal == ""
+            summary_return: (known: bool, region: sview, formal: sview) = proof_kernel_replay_resource_sview_summary_return(nodes, children, call.left)
+            return false if not summary_return.known
+            returned_region: sview = summary_return.region
+            returned_formal: sview = summary_return.formal
 
             mapped_region: mutable sview = ""
             for offset in call.auxiliary..<call.children_count |offset, call, children, nodes, returned_region, mapped_region|:
@@ -100,7 +86,10 @@ extend ElisaProofKernelReplay:
             requires depth <= PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT
             decreases PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT - depth
             return false if depth >= PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT
-            for root in roots |root, nodes, children, state, depth, arena_admitted|:
+            previous_event: mutable usize = nodes.count
+            for root in roots |root, nodes, children, state, depth, arena_admitted, previous_event|:
+                prior_event: usize = previous_event
+                previous_event <- root
                 located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
                 return false if not located.known
                 node: ElisaProofKernelCore::ProofKernelNode = located.node
@@ -210,9 +199,17 @@ extend ElisaProofKernelReplay:
                     state.resource_call_allocations.push(root)
                     continue
                 if node.kind == "resource-region-return":
-                    return false if not proof_kernel_replay_resource_region_external(state, node.name) or not proof_kernel_replay_resource_region_active(state, node.name)
-                    return false if not any witness in state.resource_return_witnesses where witness == node.left
                     return false if any used_witness in state.resource_return_witnesses_used where used_witness == node.left
+                    return false if not proof_kernel_replay_resource_region_external(state, node.name) or not proof_kernel_replay_resource_region_active(state, node.name)
+                    is_sview_call_return: bool = node.operator == "sview-call"
+                    if is_sview_call_return:
+                        return false if node.right >= nodes.count
+                        sview_type: ElisaProofKernelCore::ProofKernelNode = nodes[node.right]
+                        return false if sview_type.kind != "ident" or sview_type.name != "sview" or sview_type.left != 0 or sview_type.right != 0 or sview_type.auxiliary != 0 or sview_type.children_start != 0 or sview_type.children_count != 0 or sview_type.value != 0 or sview_type.secondary_name != ""
+                        return false if not proof_kernel_replay_resource_sview_call_return(nodes, children, state, node, prior_event, arena_admitted)
+                        state.resource_return_witnesses_used.push(node.left)
+                        continue
+                    return false if not any witness in state.resource_return_witnesses where witness == node.left
                     witness: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
                     return false if not witness.known
                     is_sview_return: bool = node.operator == "sview"
@@ -452,8 +449,9 @@ extend ElisaProofKernelReplay:
                     state.binding_moved[slot] <- true
                     continue
                 if node.kind == "resource-call-result":
+                    return false if node.left != prior_event
                     if node.operator == "sview":
-                        return false if not proof_kernel_replay_resource_sview_call_result(nodes, children, state, node, arena_admitted)
+                        return false if not proof_kernel_replay_resource_sview_call_result(nodes, children, state, node, prior_event, arena_admitted)
                         continue
                     return false if not any prior_call in state.resource_call_events where prior_call == node.left
                     return false if any prior_result in state.resource_call_results where prior_result == node.left

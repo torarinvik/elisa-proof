@@ -1,0 +1,96 @@
+# Replay support for sview return provenance across verified calls.
+extend ElisaProofKernelReplay:
+    private:
+        # Extract the single lifetime/formal pair carried by a completed sview summary.
+        # The summary's replay has already checked any `sview-call` transition that produced it.
+        def proof_kernel_replay_resource_sview_summary_return(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, summary_root: usize) -> (known: bool, region: sview, formal: sview):
+            return (false, "", "") if summary_root >= nodes.count or nodes[summary_root].kind != "resource-safety"
+            summary: ElisaProofKernelCore::ProofKernelNode = nodes[summary_root]
+            return (false, "", "") if not proof_kernel_replay_child_range_valid(summary.children_start, summary.children_count, children.count)
+            returned_region: mutable sview = ""
+            returned_formal: mutable sview = ""
+            for offset in 0..<summary.children_count |offset, summary, children, nodes, returned_region, returned_formal|:
+                child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, summary.children_start + offset)
+                return (false, "", "") if not child.known or child.value >= nodes.count
+                marker: ElisaProofKernelCore::ProofKernelNode = nodes[child.value]
+                continue if marker.kind != "resource-region-return"
+                return (false, "", "") if marker.auxiliary != PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG or marker.right >= nodes.count
+                marker_type: ElisaProofKernelCore::ProofKernelNode = nodes[marker.right]
+                return (false, "", "") if marker_type.kind != "ident" or marker_type.name != "sview" or marker_type.left != 0 or marker_type.right != 0 or marker_type.auxiliary != 0 or marker_type.children_start != 0 or marker_type.children_count != 0 or marker_type.value != 0 or marker_type.secondary_name != ""
+                returned_region <- marker.name if returned_region == ""
+                return (false, "", "") if returned_region != marker.name
+                marker_formal: mutable sview = ""
+                if marker.operator == "sview":
+                    return (false, "", "") if marker.secondary_name != "" or marker.left >= nodes.count
+                    witness: ElisaProofKernelCore::ProofKernelNode = nodes[marker.left]
+                    return (false, "", "") if witness.kind != "resource-use" or witness.name == ""
+                    marker_formal <- witness.name
+                elif marker.operator == "sview-call":
+                    return (false, "", "") if marker.secondary_name == ""
+                    marker_formal <- marker.secondary_name
+                else:
+                    return (false, "", "")
+                return (false, "", "") if returned_formal != "" and returned_formal != marker_formal
+                returned_formal <- marker_formal
+            return (false, "", "") if returned_region == "" or returned_formal == ""
+            return (true, returned_region, returned_formal)
+
+        # Re-derive an sview call-return witness without trusting producer-supplied provenance:
+        # inspect the callee's checked summary, select that exact call argument, follow tracked
+        # borrow aliases, and require the ultimate place to be one of this function's formals.
+        def proof_kernel_replay_resource_sview_call_return[@nodes, @children, @state](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @nodes, children: mutable darray[usize]& @children, state: mutable ProofKernelReplayResourceState& @state, node: ElisaProofKernelCore::ProofKernelNode, previous_event: usize, arena_admitted: bool) -> bool:
+            return false if node.operator != "sview-call" or node.auxiliary != PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG or node.right >= nodes.count or node.secondary_name == ""
+            return false if node.left != previous_event
+            return false if not any prior_call in state.resource_call_events where prior_call == node.left
+            return false if any used_witness in state.resource_return_witnesses_used where used_witness == node.left
+            call_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return false if not call_located.known or call_located.node.kind != "resource-call" or call_located.node.name == ""
+            call: ElisaProofKernelCore::ProofKernelNode = call_located.node
+            return false if not proof_kernel_replay_child_range_valid(call.children_start, call.children_count, children.count) or call.auxiliary > call.children_count
+            callee_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, call.left)
+            return false if not callee_located.known or callee_located.node.kind != "resource-safety" or callee_located.node.name != call.name
+            summary_return: (known: bool, region: sview, formal: sview) = proof_kernel_replay_resource_sview_summary_return(nodes, children, call.left)
+            return false if not summary_return.known
+
+            mapped_region: mutable sview = ""
+            for offset in call.auxiliary..<call.children_count |offset, call, children, nodes, summary_return, mapped_region|:
+                child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + offset)
+                return false if not child.known or child.value >= nodes.count
+                region_map: ElisaProofKernelCore::ProofKernelNode = nodes[child.value]
+                if region_map.kind == "resource-call-region" and region_map.name == summary_return.region:
+                    return false if mapped_region != ""
+                    mapped_region <- region_map.secondary_name
+            return false if mapped_region != node.name or not proof_kernel_replay_resource_region_active(state, mapped_region)
+
+            returned_argument: mutable (known: bool, root: usize) = (false, nodes.count)
+            for offset in 0..<call.auxiliary |offset, call, children, nodes, summary_return, returned_argument|:
+                child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + offset)
+                return false if not child.known or child.value >= nodes.count
+                argument: ElisaProofKernelCore::ProofKernelNode = nodes[child.value]
+                return false if argument.kind != "resource-call-arg"
+                if argument.name == summary_return.formal:
+                    return false if returned_argument.known
+                    returned_argument <- (true, child.value)
+            return false if not returned_argument.known or returned_argument.root >= nodes.count
+            return false if nodes[returned_argument.root].operator == "region-new"
+            actual: (known: bool, place: ProofKernelReplayResourcePlace, slot: usize, has_slot: bool, mutable_reference: bool) = proof_kernel_replay_resource_call_actual(state, nodes, children, returned_argument.root, arena_admitted)
+            return false if not actual.known or not actual.has_slot or not actual.place.whole or not proof_kernel_replay_resource_place_root_valid(nodes, actual.place)
+
+            source_slot: mutable usize = actual.slot
+            source_place: mutable ProofKernelReplayResourcePlace = actual.place
+            for _ in 0..<state.binding_names.count |source_slot, source_place, nodes, state|:
+                continue if source_slot >= state.borrow_present.count or not state.borrow_present[source_slot]
+                return false if source_slot >= state.borrow_target_slots.count or source_slot >= state.borrow_target_places.count
+                next_slot: usize = state.borrow_target_slots[source_slot]
+                next_place: ProofKernelReplayResourcePlace = state.borrow_target_places[source_slot]
+                return false if next_slot >= state.binding_names.count or not next_place.whole or not proof_kernel_replay_resource_place_root_valid(nodes, next_place)
+                source_slot <- next_slot
+                source_place <- next_place
+            return false if source_slot >= state.binding_names.count or source_slot < state.borrow_present.count and state.borrow_present[source_slot]
+            return false if source_slot >= state.formal_names.count or state.binding_names[source_slot] != state.formal_names[source_slot] or state.formal_names[source_slot] != node.secondary_name
+            return false if source_slot >= state.binding_region.count or state.binding_region[source_slot] != mapped_region
+            return false if source_slot >= state.binding_region_live.count or not state.binding_region_live[source_slot]
+            return false if source_slot >= state.binding_moved.count or state.binding_moved[source_slot]
+            return false if not source_place.whole or proof_kernel_replay_resource_lookup_place(state, nodes, source_place) != source_slot
+            return false if proof_kernel_replay_resource_has_mutable_borrow_overlap(nodes, state, source_place, actual.slot if nodes[returned_argument.root].operator == "reference" else state.binding_names.count)
+            return true
