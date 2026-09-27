@@ -507,3 +507,68 @@ extend ElisaProof:
                 return false if field.count != 1
                 return false if not proof_type_is_reference_free(field.type_expression, declarations, depth + 1)
             return true
+
+        # `proof_type_is_reference_free` answers whether a value can STORE references in its
+        # elements/fields; a `view[T]` has no such storage but is itself a borrowed window into
+        # external storage. Local call-stability needs the stronger property: no path through the
+        # value may reach borrowed storage. Unknown or ambiguous type shapes fail closed.
+        def proof_type_contains_borrowed_view(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return true if name == "sview"
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return true if alias.count > 1
+                    return proof_type_contains_borrowed_view(alias.target, declarations, depth + 1) if alias.count == 1
+                    return false if proof_scalar_primitive_type_name(name) or name == "void" or name == "f32" or name == "f64"
+                    enum_count: usize = proof_count_const_enums(declarations, name, 0)
+                    return false if enum_count == 1
+                    return true if enum_count > 1
+                    return proof_struct_contains_borrowed_view(name, declarations, depth + 1)
+                Ast::Expr.Scope(_, name, _):
+                    return true if name == "sview"
+                    # Bare-name alias search cannot prove which module owns a qualified alias.
+                    return true if proof_find_type_alias(declarations, name, 0).count > 0
+                    enum_count: usize = proof_count_const_enums(declarations, name, 0)
+                    return false if enum_count == 1
+                    return true if enum_count > 1
+                    return proof_struct_contains_borrowed_view(name, declarations, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_type_contains_borrowed_view(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_type_contains_borrowed_view(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return true if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    return proof_type_contains_borrowed_view(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return true
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |declarations, depth|:
+                        return true if proof_type_contains_borrowed_view(element, declarations, depth + 1)
+                    return false
+                Ast::Expr.Index(head, argument, _):
+                    head_name: sview = proof_ident_name(head)
+                    return true if head_name == "view"
+                    return proof_type_contains_borrowed_view(argument, declarations, depth + 1) if head_name == "darray" or head_name == "set"
+                    match argument:
+                        Ast::Expr.IntLit(_, _):
+                            return proof_type_contains_borrowed_view(head, declarations, depth + 1)
+                        _:
+                            return true
+                Ast::Expr.IndexN(head, arguments, _):
+                    return true if proof_ident_name(head) != "array" or arguments.count != 2
+                    match arguments[1]:
+                        Ast::Expr.IntLit(_, _):
+                            return proof_type_contains_borrowed_view(arguments[0], declarations, depth + 1)
+                        _:
+                            return true
+                _:
+                    return true
+
+        def proof_struct_contains_borrowed_view(struct_name: sview, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or struct_name == ""
+            field_names: mutable darray[sview] = []
+            return true if proof_struct_field_names(declarations, struct_name, 0, &field_names) != 1
+            for field_name in field_names |struct_name, declarations, depth|:
+                field: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(declarations, struct_name, field_name, 0)
+                return true if field.count != 1 or proof_type_contains_borrowed_view(field.type_expression, declarations, depth + 1)
+            return false

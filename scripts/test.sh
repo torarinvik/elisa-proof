@@ -2390,6 +2390,18 @@ if [[ "$rejected_nested_shared_extent_global_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A view-bearing aggregate is borrowed storage too, even though `view[T]` is not itself a
+# reference field. Refuse to preserve even a nested field fact through a call until that alias
+# shape can be modeled path-sensitively.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_borrowed_view_call_stability.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {item["name"]: item for item in report["declaration_details"] if item["kind"] == "function"}; assert not functions["borrowed_view_root_must_not_preserve_nested_facts"]["verified"]; assert any(item["kind"] == "ensure-unproven" and item["name"] == "borrowed_view_root_must_not_preserve_nested_facts" and item["status"] == "unknown" for item in report["findings"]); assert not any(goal["name"] == "borrowed_view_root_must_not_preserve_nested_facts" and goal["rule"] != "resource-safety" and goal["proven"] for goal in report["goals"])'
+rejected_borrowed_view_call_stability_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_borrowed_view_call_stability_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a view-bearing aggregate was trusted as call-local storage\n' >&2
+    exit 1
+fi
+
 # A call that lends only shared references cannot change the caller's resource state, so it is
 # admitted from the callee's declared modes with no body summary. That is the only path open to a
 # recursive component, which can never consume one of its own summaries.

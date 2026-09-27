@@ -7751,11 +7751,15 @@ emptied the same global collection through another path, and the checker neverth
 the nested extent and proved the subsequent index safe. The certificate replayed cleanly because
 the stale fact itself had been admitted into the proof state.
 
-Call-local extent roots are now admitted only when their declared type is transitively
-reference-free, both for parameters and local declarations. The reproducer now leaves the
-`index-upper` obligation unknown, marks the function unverified, and replays all remaining
-certificates with zero gaps. It is covered in both the main test matrix and dogfood suite. Stage1
-freshness passed before rebuilding; `scripts/test.sh` passed, including O2/O3 replay, and
-`scripts/dogfood.sh` passed through Stage0 bootstrap-kernel and final replay-completeness checks.
-This closes the demonstrated nested-reference path; it does not establish full prover soundness
-or self-verification.
+Call-local extent roots are admitted only when their declared type contains neither nested
+references nor borrowed `view`/`sview` storage, both for parameters and local declarations. The
+nested-reference reproducer now leaves its `index-upper` obligation unknown and marks the
+function unverified. A second regression confirms that a `view`-bearing aggregate does not keep
+even a nested scalar fact alive across an unrelated call; this protects the boundary as view
+typing grows in the kernel. Both regressions are registered in the main test matrix and dogfood
+suite. Stage1 and Stage0 freshness checks passed; the full `scripts/test.sh` (including O2/O3
+replay) and `scripts/dogfood.sh` (including Stage0 bootstrap-kernel checks) passed after the
+checker changes. After registering the view fixture, both regressions were run twice directly:
+their failed verdicts were deterministic, had no semantic errors, and independently replayed all
+certificates with zero gaps. This closes the demonstrated paths; it does not establish full prover
+soundness or self-verification.

@@ -598,6 +598,7 @@ run_probe expression_witness examples/expression_witness.elisa 0
 run_probe call_stable_facts examples/call_stable_facts.elisa 0
 run_probe rejected_call_stable_facts examples/rejected_call_stable_facts.elisa 1
 run_probe rejected_nested_shared_extent_global examples/rejected_nested_shared_extent_global.elisa 1
+run_probe rejected_borrowed_view_call_stability examples/rejected_borrowed_view_call_stability.elisa 1
 run_probe shared_borrow_calls examples/shared_borrow_calls.elisa 0
 run_probe rejected_shared_borrow_calls examples/rejected_shared_borrow_calls.elisa 1
 run_probe writable_lend_calls examples/writable_lend_calls.elisa 0
