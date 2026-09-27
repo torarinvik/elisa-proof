@@ -7740,3 +7740,22 @@ uncommitted reference-alias fixture declines at `left_ref <- right` (backend dec
 to `left_ref`). That work belongs to a separate active compiler worktree and was left untouched;
 the full native smoke has not been rerun after correcting the first fixture. Follow up on reference
 assignment lowering before treating that parity gate as green.
+
+### Do not treat by-value aggregates with references as call-local storage (2026-09-27)
+
+The call-stability audit found that every non-reference parameter/local was entered into
+`local_extent_names`. That classification was too shallow: a by-value struct can contain a
+reference to mutable external storage. `examples/rejected_nested_shared_extent_global.elisa`
+reproduced an unsound proof: a precondition bounded an index by `holder.values.count`, a call
+emptied the same global collection through another path, and the checker nevertheless retained
+the nested extent and proved the subsequent index safe. The certificate replayed cleanly because
+the stale fact itself had been admitted into the proof state.
+
+Call-local extent roots are now admitted only when their declared type is transitively
+reference-free, both for parameters and local declarations. The reproducer now leaves the
+`index-upper` obligation unknown, marks the function unverified, and replays all remaining
+certificates with zero gaps. It is covered in both the main test matrix and dogfood suite. Stage1
+freshness passed before rebuilding; `scripts/test.sh` passed, including O2/O3 replay, and
+`scripts/dogfood.sh` passed through Stage0 bootstrap-kernel and final replay-completeness checks.
+This closes the demonstrated nested-reference path; it does not establish full prover soundness
+or self-verification.

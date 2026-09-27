@@ -2379,6 +2379,17 @@ if [[ "$rejected_call_stable_facts_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A by-value aggregate that contains a reference still reaches external state. Its nested
+# collection extent must be forgotten across a call that can mutate the referent through a global.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_nested_shared_extent_global.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {item["name"]: item for item in report["declaration_details"] if item["kind"] == "function"}; assert not functions["nested_shared_extent_must_not_survive"]["verified"]; assert any(item["kind"] == "index-upper-unproven" and item["name"] == "nested_shared_extent_must_not_survive" and item["status"] == "unknown" for item in report["findings"]); assert not any(goal["name"] == "nested_shared_extent_must_not_survive" and goal["rule"] == "index-upper" and goal["proven"] for goal in report["goals"])'
+rejected_nested_shared_extent_global_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_nested_shared_extent_global_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a by-value aggregate reference preserved a mutable pointee extent across a call\n' >&2
+    exit 1
+fi
+
 # A call that lends only shared references cannot change the caller's resource state, so it is
 # admitted from the callee's declared modes with no body summary. That is the only path open to a
 # recursive component, which can never consume one of its own summaries.
