@@ -2260,6 +2260,22 @@ if [[ "$semantic_repair_status" -ne 1 || "$semantic_repair_json_status" -ne 0 ]]
 fi
 
 set +e
+"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_tactic_repair_proposition_type.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert any(finding["kind"] == "contract-proposition-type" and finding["name"] == "rejected_nonboolean_ensure" for finding in report["findings"])'
+proposition_source_statuses=("${PIPESTATUS[@]}")
+proposition_source_status=${proposition_source_statuses[0]}
+proposition_source_json_status=${proposition_source_statuses[1]}
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/rejected_tactic_repair_proposition_type.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "failed"; assert report["source"]["admissible"] is False; assert binding["bound"] and binding["goal_id"] == 1 and binding["fingerprint_match"] is True; assert report["tactic"]["valid"] is True and report["tactic"]["certificate_replayed"] is True'
+proposition_tactic_statuses=("${PIPESTATUS[@]}")
+proposition_tactic_status=${proposition_tactic_statuses[0]}
+proposition_tactic_json_status=${proposition_tactic_statuses[1]}
+set -e
+if [[ "$proposition_source_status" -ne 1 || "$proposition_source_json_status" -ne 0 || "$proposition_tactic_status" -ne 1 || "$proposition_tactic_json_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a valid target tactic laundered an ill-typed source contract (source=%s/%s tactic=%s/%s)\n' \
+        "$proposition_source_status" "$proposition_source_json_status" "$proposition_tactic_status" "$proposition_tactic_json_status" >&2
+    exit 1
+fi
+
+set +e
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_forged_resource_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["goal_id"] == 0; assert report["tactic"]["valid"] is False; assert report["tactic"]["certificate_replayed"] is False'
 resource_target_statuses=("${PIPESTATUS[@]}")
 resource_target_status=${resource_target_statuses[0]}
