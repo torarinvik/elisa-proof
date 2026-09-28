@@ -8097,3 +8097,37 @@ the rejected claims produce no certificates.
 
 Open: the budget refusal reports `ensure-unproven`. A finding kind that names the budget would
 tell the author to split the claim.
+
+### Merged from wasmbrowser-proof: qualified constants and numeric casts (2026-09-28)
+
+Two gains from the `codex/wasmbrowser-proof` branch were cherry-picked. The third commit on that
+branch, 31a5a57 (scalar reference index zero), is held back: at that commit its own regression,
+`scripts/test_scalar_reference_index.py`, fails. It passes only with work that branch has not
+committed yet.
+
+0d32407 replays module-qualified constants as call arguments. The resource replay used to read a
+`scope` node like a field, so `Fixture::VALUE` passed as a value argument looked like a runtime
+place. It now accepts a chain of non-empty identifiers and scopes only when no identifier in the
+chain names a binding in the current resource state. The kernel arena test covers both sides: a
+qualified constant is admitted, and a `scope` node rooted at the live binding `owner` is refused
+(code 52), so a shadowed resource cannot be erased as a harmless qualifier.
+
+d89902c witnesses `x.u64()`, `x.i32()` and the other built-in numeric casts as primitive scalar
+terms. They are compiler primitives, not protocol calls, so a comparison around one is no longer
+refused as possibly overloaded. It applies only to an empty argument list, a modeled integer
+target and a receiver that is witnessed itself. The acceptance case is
+`examples/numeric_cast_operator.elisa`.
+
+The branch had no false-claim case for casts. `examples/rejected_numeric_cast_operator.elisa` adds
+three:
+- `x.u64() < 5` from `x < 5`, which is false at `x == -1`;
+- `value.u8() > 200` from `value > 255`, which is false at 300;
+- `value.u8() > 0` from `value > 0`, which is false at 256.
+
+Each must fail with `ensure-unproven` and no replay gap. The witness only licenses admission.
+The cast's value stays an opaque term, and no receiver fact reaches it.
+
+Neither change alters a certificate shape. The forged `scope` node is the malformed-term case for
+the first. The second adds no replay rule, and the kernel re-derives every admitted comparison.
+No budget is involved: the qualified path is bounded by the replay depth limit, and the cast
+witness recurses under the existing depth.
