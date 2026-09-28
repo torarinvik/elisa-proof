@@ -14,7 +14,18 @@ case "$OPT_LEVEL" in
     O0|O1|O2|O3) ;;
     *) printf 'ELISA_OPT_LEVEL must be O0, O1, O2, or O3 (got %s)\n' "$OPT_LEVEL" >&2; exit 2 ;;
 esac
+# stage1 stops a compile past its runaway guard (4 GiB by default). The whole tool links the
+# compiler front end, and its compile now peaks between 3.6 and 4.2 GB (2026-09-28, O0 through
+# O3), so give it headroom unless the caller set a limit.
+export ELISA_STAGE1_MAX_RSS_KB="${ELISA_STAGE1_MAX_RSS_KB:-8388608}"
 PROOF_OUTPUT="${ELISA_PROOF_OUTPUT:-$ROOT_DIR/build/elisa-proof}"
+# The entry point, relative to the repository: `src/replay_main.elisa` builds the portable
+# package checker `elisa-proof-replay` from the same snapshot.
+PROOF_MAIN="${ELISA_PROOF_MAIN:-src/main.elisa}"
+case "$PROOF_MAIN" in
+    src/main.elisa|src/replay_main.elisa) ;;
+    *) printf 'ELISA_PROOF_MAIN must be src/main.elisa or src/replay_main.elisa (got %s)\n' "$PROOF_MAIN" >&2; exit 2 ;;
+esac
 COMPILER="${ELISA_COMPILER_BIN:-}"
 # shellcheck source=scripts/compiler_provenance.sh
 source "$ROOT_DIR/scripts/compiler_provenance.sh"
@@ -136,9 +147,9 @@ if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_O
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
 fi
 if [[ -n "$CONTRACT_FLAG" ]]; then
-    "$COMPILER" "$CONTRACT_FLAG" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/src/main.elisa"
+    "$COMPILER" "$CONTRACT_FLAG" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/$PROOF_MAIN"
 else
-    "$COMPILER" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/src/main.elisa"
+    "$COMPILER" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/$PROOF_MAIN"
 fi
 LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
 [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
@@ -147,7 +158,11 @@ clang -Wl,-dead_strip -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
 if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
     codesign -s - --force "$PROOF_BINARY" 2>/dev/null
 fi
-mv -f "$STAGE_OBJECT" "$ROOT_DIR/build/elisa-proof-stage.o"
+if [[ "$PROOF_MAIN" == "src/main.elisa" ]]; then
+    mv -f "$STAGE_OBJECT" "$ROOT_DIR/build/elisa-proof-stage.o"
+else
+    rm -f "$STAGE_OBJECT"
+fi
 MANIFEST_TEMP="$PROOF_BINARY.manifest.json"
 COMPILER_PRODUCT="$COMPILER"
 if [[ -n "${stage1_root:-}" && -x "${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}" ]]; then

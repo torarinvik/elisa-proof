@@ -1,0 +1,225 @@
+# Replays an `elisa-proof-package-v1` with the source-neutral kernel alone.
+#
+# The checker admits the whole arena first, then checks each theorem independently:
+#   1. its hypothesis and conclusion roots exist and its rule is one the kernel protocol names;
+#   2. its statement is recomputed from those roots and must equal the package's byte for byte,
+#      and its goal fingerprint must be the FNV-1a hash of that statement;
+#   3. the kernel replays the conclusion from exactly those hypotheses under that rule.
+# Replay may append nodes, so the arena is cut back to the admitted package between theorems:
+# no theorem sees terms another theorem's replay produced.
+#
+# Nothing here establishes the hypotheses or that the conclusion states the source's obligation.
+# The result's trust record says so. The verdict is all or nothing: a package exits 0 only when
+# it has at least one theorem and every theorem replays, so no accepted prefix of a rejected
+# package is ever reported as checked.
+const PROOF_PACKAGE_RESULT_FORMAT: sview = "elisa-proof-replay-result-v1"
+
+def proof_package_rule_known(rule: sview) -> bool:
+    match rule:
+        "goal":
+            return true
+        "index-lower":
+            return true
+        "index-upper":
+            return true
+        "slice-lower":
+            return true
+        "slice-upper":
+            return true
+        "slice-order":
+            return true
+        "checked-index":
+            return true
+        "checked-get":
+            return true
+        "quantifier-forall":
+            return true
+        "quantifier-exists":
+            return true
+        "resource-safety":
+            return true
+        "structural-safety":
+            return true
+        "effect-containment":
+            return true
+        _:
+            return false
+
+# The same rule dispatch the report's own replay uses, with the package's hypotheses as facts.
+def proof_package_replay_rule(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, rule: sview, facts: darray[usize], conclusion: usize, workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
+    return ElisaProofKernelReplay::proof_kernel_replay_resource_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "resource-safety"
+    return ElisaProofKernelReplay::proof_kernel_replay_structural_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "structural-safety"
+    return ElisaProofKernelReplay::proof_kernel_replay_effect_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "effect-containment"
+    return ElisaProofKernelReplay::proof_kernel_replay_checked_index_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "checked-index"
+    return ElisaProofKernelReplay::proof_kernel_replay_checked_get_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "checked-get"
+    return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_with_workspace(nodes, children, "forall", facts, conclusion, workspace) if rule == "quantifier-forall"
+    return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_with_workspace(nodes, children, "exists", facts, conclusion, workspace) if rule == "quantifier-exists"
+    conclusion_kind: sview = nodes[conclusion].kind
+    conclusion_operator: sview = nodes[conclusion].operator
+    return ElisaProofKernelReplay::proof_kernel_replay_quantifier_report_with_workspace(nodes, children, conclusion_operator, facts, conclusion, workspace) if conclusion_kind == "quantifier"
+    return ElisaProofKernelReplay::proof_kernel_replay_goal_report_with_workspace(nodes, children, facts, conclusion, workspace)
+
+# Checks one theorem against the admitted arena. `identity_remaining` is what is left of the
+# package-wide identity budget; the bytes this theorem's statement used are returned.
+def proof_package_check_theorem[@r](theorem: JsonValueHandle[r], keys: darray[sview]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, identity_remaining: usize, workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> (verdict: ProofPackageVerdict, identity_bytes: usize) can[Memory.Allocate, Abort.Panic]:
+    return (proof_package_malformed("theorem-schema"), 0) if not proof_package_has_exactly(theorem, keys)
+    goal_id: (known: bool, value: usize) = proof_package_index_field(theorem, "goal_id")
+    line: (known: bool, value: usize) = proof_package_index_field(theorem, "line")
+    name: (known: bool, value: sview) = proof_package_string_field(theorem, "name")
+    rule: (known: bool, value: sview) = proof_package_string_field(theorem, "rule")
+    statement: (known: bool, value: sview) = proof_package_string_field(theorem, "statement")
+    conclusion: (known: bool, value: usize) = proof_package_index_field(theorem, "conclusion")
+    fingerprint: (known: bool, value: usize) = proof_package_index_field(theorem, "goal_fingerprint")
+    hypotheses: (known: bool, value: JsonValueHandle[r], count: usize) = proof_package_array_field(theorem, "hypotheses")
+    origins: (known: bool, value: JsonValueHandle[r], count: usize) = proof_package_array_field(theorem, "hypothesis_origins")
+    return (proof_package_malformed("theorem-schema"), 0) if not goal_id.known or not line.known or not name.known or not rule.known or not statement.known or not conclusion.known or not fingerprint.known or not hypotheses.known or not origins.known
+    return (proof_package_over_budget("hypothesis-budget"), 0) if hypotheses.count > ProofPackageLimit::HYPOTHESES
+    # Origins are presentation, one per hypothesis; the checker reads no more of them.
+    return (proof_package_malformed("theorem-schema"), 0) if origins.count != hypotheses.count
+    facts: mutable darray[usize] = []
+    missing: JsonValueHandle[r] = ElisaProofJson::null_value(theorem)
+    for index in 0..<hypotheses.count |index, hypotheses, missing, facts|:
+        entry: JsonValueHandle[r] = try ElisaProofJson::at(hypotheses.value, index.i64()) else missing
+        root: (known: bool, value: usize) = proof_package_index(entry)
+        return (proof_package_malformed("theorem-schema"), 0) if not root.known
+        facts.push(root.value)
+    for root in facts |nodes|:
+        return (proof_package_rejected("root-out-of-range"), 0) if root >= nodes.count
+    return (proof_package_rejected("root-out-of-range"), 0) if conclusion.value >= nodes.count
+    return (proof_package_rejected("unknown-rule"), 0) if not proof_package_rule_known(rule.value)
+    identity: mutable darray[u8] = []
+    identity_valid: bool = proof_portable_sequent_identity(&identity, nodes, children, &facts, 0, facts.count, conclusion.value)
+    return (proof_package_over_budget("identity-budget"), identity.count) if identity.count > identity_remaining
+    # The encoder stops once one statement passes its byte limit, a budget rather than a shape.
+    return (proof_package_over_budget("identity-budget"), identity.count) if not identity_valid and identity.count > PROOF_RUNTIME_IDENTITY_BYTE_LIMIT
+    return (proof_package_rejected("identity-unavailable"), identity.count) if not identity_valid
+    computed: sview = ElisaProofJson::bytes_range_ref(&identity, 0, identity.count)
+    return (proof_package_rejected("statement-mismatch"), identity.count) if sview_len(computed) != identity.count or not sview_eq(computed, statement.value)
+    return (proof_package_rejected("fingerprint-mismatch"), identity.count) if fingerprint.value != proof_source_fingerprint(&identity).usize()
+    replayed: bool = proof_package_replay_rule(nodes, children, rule.value, facts, conclusion.value, workspace)
+    return (proof_package_rejected("kernel-rejected"), identity.count) if not replayed
+    return (proof_package_ok(), identity.count)
+
+# Presentation fields of a theorem, echoed as given or null when they are not well formed.
+def proof_package_push_theorem_label[@r](out: mutable darray[u8]&, theorem: JsonValueHandle[r], index: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(out, "{\"index\":")
+    proof_push_json_i64(out, index.i64())
+    goal_id: (known: bool, value: usize) = proof_package_index_field(theorem, "goal_id")
+    proof_push(out, ",\"goal_id\":")
+    if goal_id.known:
+        proof_push_json_i64(out, goal_id.value.i64())
+    else:
+        proof_push(out, "null")
+    name: (known: bool, value: sview) = proof_package_string_field(theorem, "name")
+    proof_push(out, ",\"name\":")
+    if name.known:
+        proof_push_json_string(out, name.value)
+    else:
+        proof_push(out, "null")
+    rule: (known: bool, value: sview) = proof_package_string_field(theorem, "rule")
+    proof_push(out, ",\"rule\":")
+    if rule.known:
+        proof_push_json_string(out, rule.value)
+    else:
+        proof_push(out, "null")
+
+def proof_package_push_result(out: mutable darray[u8]&, verdict: ProofPackageVerdict, node_count: usize, child_count: usize, theorem_results: darray[u8]&, theorems: usize, replayed: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(out, "{\"format\":\"")
+    proof_push(out, PROOF_PACKAGE_RESULT_FORMAT)
+    proof_push(out, "\",\"status\":")
+    proof_push_json_string(out, verdict.status)
+    proof_push(out, ",\"reason\":")
+    if sview_len(verdict.reason) > 0:
+        proof_push_json_string(out, verdict.reason)
+    else:
+        proof_push(out, "null")
+    proof_push(out, ",\"trust\":{\"kernel\":\"checked\",\"package_reader\":\"trusted\",\"hypotheses\":\"adapter\",\"source_correspondence\":\"adapter\",\"fingerprints\":\"identity-hint\",\"source_authenticated\":false},\"kernel\":{\"nodes\":")
+    proof_push_json_i64(out, node_count.i64())
+    proof_push(out, ",\"children\":")
+    proof_push_json_i64(out, child_count.i64())
+    proof_push(out, "},\"theorems\":[")
+    out.extend(theorem_results)
+    proof_push(out, "],\"summary\":{\"theorems\":")
+    proof_push_json_i64(out, theorems.i64())
+    proof_push(out, ",\"replayed\":")
+    proof_push_json_i64(out, replayed.i64())
+    proof_push(out, ",\"not_replayed\":")
+    proof_push_json_i64(out, (theorems - replayed).i64())
+    proof_push(out, "}}\n")
+
+# Checks a whole package. Returns the exit status: 0 only when every theorem of a nonempty
+# package replayed, 1 otherwise.
+def proof_package_replay(input: darray[u8]&, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    empty_results: darray[u8] = []
+    arena: mutable Arena = zeroed
+    parsed: JsonParseResult[arena] = json_parse_checked(&arena, ElisaProofJson::bytes_range_ref(input, 0, input.count))
+    if parsed.code != JsonErrorCode.OK:
+        proof_package_push_result(out, proof_package_malformed("json"), 0, 0, &empty_results, 0, 0)
+        return 1
+    root: JsonValueHandle[arena] = ElisaProofJson::from_result(parsed)
+    header: ProofPackageVerdict = proof_package_read_header(root)
+    if sview_len(header.status) > 0:
+        proof_package_push_result(out, header, 0, 0, &empty_results, 0, 0)
+        return 1
+    theorem_list: (known: bool, value: JsonValueHandle[arena], count: usize) = proof_package_array_field(root, "theorems")
+    if not theorem_list.known:
+        proof_package_push_result(out, proof_package_malformed("package-schema"), 0, 0, &empty_results, 0, 0)
+        return 1
+    if theorem_list.count > ProofPackageLimit::THEOREMS:
+        proof_package_push_result(out, proof_package_over_budget("theorem-budget"), 0, 0, &empty_results, 0, 0)
+        return 1
+    kernel: (known: bool, value: JsonValueHandle[arena]) = ElisaProofJson::field(root, "kernel")
+    raw: mutable darray[ProofPackageRawNode] = []
+    pool: mutable darray[u8] = []
+    children: mutable darray[usize] = []
+    loaded: ProofPackageVerdict = proof_package_read_kernel(kernel.value, &raw, &pool, &children)
+    if sview_len(loaded.status) > 0:
+        proof_package_push_result(out, loaded, 0, 0, &empty_results, 0, 0)
+        return 1
+    nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+    proof_package_build_nodes(&raw, &pool, &nodes)
+    node_count: usize = nodes.count
+    child_count: usize = children.count
+    # Admission of the complete arena: shapes, child ranges, acyclicity, and depth. A theorem is
+    # checked only over an arena the kernel has admitted as a whole.
+    if not ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&nodes, &children):
+        proof_package_push_result(out, proof_package_malformed("arena-inadmissible"), node_count, child_count, &empty_results, 0, 0)
+        return 1
+    theorem_keys: darray[sview] = ["goal_id", "name", "line", "rule", "hypotheses", "hypothesis_origins", "conclusion", "statement", "goal_fingerprint"]
+    workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
+    results: mutable darray[u8] = []
+    replayed: mutable usize = 0
+    identity_remaining: mutable usize = ProofPackageLimit::IDENTITY_BYTES
+    verdict: mutable ProofPackageVerdict = proof_package_ok()
+    missing: JsonValueHandle[arena] = ElisaProofJson::null_value(root)
+    for index in 0..<theorem_list.count |index, theorem_list, missing, theorem_keys, nodes, children, node_count, child_count, workspace, results, replayed, identity_remaining, verdict|:
+        theorem: JsonValueHandle[arena] = try ElisaProofJson::at(theorem_list.value, index.i64()) else missing
+        checked: (verdict: ProofPackageVerdict, identity_bytes: usize) = proof_package_check_theorem(theorem, &theorem_keys, &nodes, &children, identity_remaining, &workspace)
+        nodes <- nodes.truncate(node_count)
+        children <- children.truncate(child_count)
+        identity_remaining <- 0 if checked.identity_bytes >= identity_remaining
+        identity_remaining <- identity_remaining - checked.identity_bytes if checked.identity_bytes < identity_remaining
+        proof_push(&results, ",") if index > 0
+        proof_package_push_theorem_label(&results, theorem, index)
+        proof_push(&results, ",\"status\":")
+        if sview_len(checked.verdict.status) == 0:
+            proof_push(&results, "\"replayed\",\"reason\":null}")
+            replayed <- replayed + 1
+        else:
+            proof_push_json_string(&results, checked.verdict.status)
+            proof_push(&results, ",\"reason\":")
+            proof_push_json_string(&results, checked.verdict.reason)
+            proof_push(&results, "}")
+            # The package verdict is the first failure's; a malformed or over-budget theorem
+            # outranks a rejected one only by coming first.
+            verdict <- checked.verdict if sview_len(verdict.status) == 0
+            # Past the identity budget no further theorem can be checked within bounds.
+            break if checked.verdict.status == "over-budget"
+    if theorem_list.count == 0:
+        verdict <- proof_package_rejected("no-theorems")
+    if sview_len(verdict.status) > 0:
+        proof_package_push_result(out, verdict, node_count, child_count, &results, theorem_list.count, replayed)
+        return 1
+    final_verdict: ProofPackageVerdict = ProofPackageVerdict{status: "replayed", reason: ""}
+    proof_package_push_result(out, final_verdict, node_count, child_count, &results, theorem_list.count, replayed)
+    return 0

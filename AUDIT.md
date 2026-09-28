@@ -8996,3 +8996,141 @@ Rejected: `examples/rejected_complemented_else_arms.elisa`:
 - an unguarded then arm;
 - a complement one short;
 - the complement of a conjunction.
+## P1-05: source-admission gate matrix (2026-09-28)
+
+Invariant: exit status 0 from any CLI route certifies a result that stands on an admissible source.
+Admissible means the source parsed, every include was read, no compiler semantic error is visible,
+every proposition passed kernel formation, and every certificate replayed.
+
+`scripts/test_source_admission_matrix.py` runs all 11 routes against six malformed variants of
+`examples/verified.elisa`:
+- routes: text, `--json`, `--theorems`, `--goal`, `--proof`, `--check-proof`, `--suggest`,
+  `--repair`, `--repair-all`, `--tactics`, `--script`;
+- malformed variants: a parse error, a missing include, an unresolved name, a non-Boolean `ensure`,
+  a NUL in an identifier and a NUL in a string.
+
+Each variant keeps goal 7, which the kernel proves by itself, so a route that looked only at its
+goal would admit it.
+
+**Leaks found at 7154c90.** `--goal`, `--proof`, `--suggest` and `--theorems` exited 0 on every
+inadmissible variant. `--repair` searched and reported `"repaired"` with a script, exit 0.
+`--repair-all` reported `nothing_to_repair`, exit 0, even for a file that did not parse.
+`--check-proof` exited 0 for a block rendered from the same inadmissible source. `--json`, the text
+route, `--tactics` and `--script` already refused.
+
+**Fix.** `proof_route_exit` in `cli.elisa` maps a found goal in an inadmissible source to exit 1.
+Repair does not search an inadmissible source: `--repair` reports status `inadmissible` with a null
+script, and `--repair-all` reports batch status `inadmissible` with every goal unrepaired and
+`tried` 0. `--check-proof` keeps `matches` but adds `"admissible"` to its response and exits 1.
+
+**Soundness fix: NUL in code.** `def nul_\0name() -> i64:` was proved with exit 0. The stage1
+lexer the tool links passes over the NUL and yields a declaration named `nul_`. The stage0
+reference compiler rejects the file with parse errors, and stage1 compiles it silently. The new
+`src/app/source_admission.elisa` finds the first NUL that is not inside a `#` comment and reports a
+`parse-error` on its line. A comment starts at a `#` that no token covers. Verification is then not
+attempted.
+
+A NUL inside a comment, which both compilers accept, still proves, and the matrix checks it as a
+positive case. A NUL inside a string literal is refused. That is stricter than necessary and still
+sound.
+
+Other cases in the matrix:
+- Positive: the complete source and its commented-NUL twin exit 0 on all routes. An admissible
+  source with an unrelated open goal (`tactic_repair_target.elisa`) still serves `--tactics`,
+  `--goal` and `--theorems` with exit 0.
+- Route input: a missing source exits 2 on every route. A tactic script bound to another source
+  fingerprint exits 1 with `fingerprint_match` false. A proof block from another source diverges.
+- Budget: `rejected_budget.elisa` exits 1, and `--repair-all` does not report it `repaired`.
+
+Tests updated for the new contract: the optional-result and nonbool-hypothesis repair-all
+probes now expect `inadmissible`. The rejected-lemma catalog and suggestion probes now expect
+exit 1.
+
+Evidence: all 17 test chunks and all 10 dogfood chunks pass.
+
+Limitation: the matrix covers the CLI surface only. Certificate reuse inside one run has its own
+invalidation tests (`test_certificate_reuse.py`), and there is still no cross-run reuse route to
+gate.
+
+## P2-01: portable replay package (2026-09-28)
+
+`elisa-proof --package <source>` exports a run's replayed goals as sequents over the kernel arena.
+`elisa-proof-replay <package>` re-checks them. The checker is built from
+`src/replay_main.elisa` and weighs 0.8 MB against the main tool's 13 MB. It links the kernel, the
+JSON reader and `src/portable/` only: no compiler front end, search engine, tactic language or AI
+client. DESIGN.md, "Portable replay packages", gives the contract and the trust record.
+
+**What the checker trusts.** The kernel, the JSON parser and the package reader. It takes the
+hypotheses and the source correspondence from the adapter and says so in every result. It does not
+promote a partial prefix: a package passes only when every theorem replays. The first failure is
+the package verdict, and each theorem keeps its own status.
+
+**Bug found by the sweep: replay scratch was exported.** Exporting every example and replaying
+each package found one genuine refusal. `collection_quantifier`'s `finite_dictionary_forall`
+(`quantifier-forall`) was `kernel-rejected`. Host replay appends derived roots to the arena,
+including the dictionary quantifier's binder markers `__elisa_kernel_quantifier_{key,value}_marker`.
+The exporter wrote the whole arena, and the kernel correctly refuses to instantiate a dictionary
+quantifier when a marker name already occurs in the arena. The exporter now writes only the prefix
+ending at the highest exported root, which is closed because the arena has no forward references.
+That package went from 70 nodes to 52, and all 8 theorems replay. The refusal was the kernel doing
+its job; the defect was in what the adapter handed it.
+
+**Adversarial matrix** (`scripts/test_portable_replay.py`):
+- Positive: nine examples covering all 13 rules. Each package replays in full. The theorem count
+  equals the report's replayed proven goals. A Python re-implementation of the identity encoder
+  agrees with every exported statement and fingerprint.
+- Consistent forgeries, with statement and fingerprint recomputed, are refused by the kernel:
+  - an assumption with its hypothesis dropped;
+  - a false conclusion `2 < 1` (its `1 < 2` control replays);
+  - a real sequent relabelled with another known rule.
+- Refused before the kernel runs:
+  - unknown rule;
+  - statement or fingerprint mismatch;
+  - root out of range;
+  - an extreme i64 value one off from its statement.
+- Forged arenas, each `arena-inadmissible`: an unknown kind, a child range past the end, a
+  self-cycle, a forward reference.
+- Over budget: an exponential DAG of 40 doublings (`identity-budget`), node, child, hypothesis
+  and theorem budgets.
+- Schema and trust:
+  - malformed: duplicate keys, extra node or theorem keys, trust over-claims, an
+    `authenticated: true` source, a wrong format;
+  - non-canonical values: `01`, `-0`, `+1`, empty, space-prefixed, overflow either way, `1e3`,
+    and a number where a string belongs;
+  - bad indices: `1.5`, `-1`, `2^53`, a string, a Boolean;
+  - mismatched origins;
+  - refused packages: an inadmissible source, an empty theorem list, truncated JSON, an empty file.
+- One bad theorem among good ones fails the package with exactly one theorem rejected.
+- Usage errors and an unreadable path exit 2.
+
+The source admission matrix gained a `package` route. Every malformed class exports no theorems
+and an empty arena, and exits nonzero.
+
+**Sweep.** All 563 examples were exported and replayed. 453 packages replay in full. No package
+was refused by the kernel; the 110 refusals are:
+- 77 `source-inadmissible`: the `rejected_*` fixtures, plus sources the main report already marks
+  inadmissible (`counterexample_domain`, `slice_kernel`, `unsigned_or_goal`,
+  `theorem_suggestion_structured`, `scalar_reference_index`, and the `kernel_*` harnesses that
+  include compiler sources);
+- 23 `no-theorems`: rejection fixtures that prove nothing, `empty_include` and `import_empty_*`;
+- 10 runtime harnesses that include the compiler's semantic module (`field_equality_runtime`,
+  `tactic_runtime`, `kernel_*_runtime`, ...). Their export hit the sweep's five-minute timeout;
+  `field_equality_runtime` also exceeds five minutes under `--json`.
+
+Dogfood now packages the kernel's own audit (`src/proof/kernel_core.elisa`, 16 theorems) and the
+kernel fixture (29 theorems). It replays both in the portable checker, which is built with the
+same compiler.
+
+**Limitations.** Hypotheses stay adapter trust: the package has no derivation for a contract or
+guard fact. Certificate roots have scalar identities, so for resource, structural and effect rules
+the statement pins the root and the kernel checks the event structure under it. The event
+structure's correspondence to the source is adapter trust. A name with invalid UTF-8 would
+round-trip as its `\u00XX` code points and fail with `statement-mismatch`: a refusal, not an
+admission.
+
+The package reader returns string views inside tuples (`(known: bool, value: sview)`). The
+compiler does not yet check lifetimes on a tuple field. A compiler session reported on
+2026-09-28 that stage1 accepts a view stored out of its region through a tuple. The views here
+point into the package buffer, which lives for the whole replay call, so the code is correct by
+construction rather than by the compiler. Once the compiler lands per-field `@r` on tuple fields,
+these returns become `sview @r`.

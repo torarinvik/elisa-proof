@@ -198,6 +198,19 @@ extend ElisaProof:
                     _:
                         pass
 
+        def proof_global_constant_record_value(constant_name: sview, constant_value: i64, constant_expression: Ast::Expr, constant_type: Ast::Expr, constant_position: Ast::Pos, function_body: darray[Ast::Stmt]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex) -> void:
+            names.push(constant_name)
+            values.push(constant_expression)
+            constant_fact: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(constant_name, constant_position), TokenKind.EqEq, Ast::Expr.IntLit(constant_value, constant_position), constant_position)
+            proof_add_traced_fact(facts, report, constant_fact, "global-constant", constant_position.line, function_name)
+            is_machine_unsigned: bool = match constant_type:
+                Ast::Expr.Ident(type_name, _): type_name == "usize"
+                _: false
+            if not is_machine_unsigned:
+                proof_add_primitive_operator_witnesses_with_type_index(facts, report, Ast::Expr.Ident(constant_name, constant_position), constant_type, constant_position, type_index)
+            needs_contract_witness: bool = not is_machine_unsigned or proof_global_constant_contract_mentions_name(function_body, constant_name)
+            proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(constant_name, constant_position), constant_position.line, function_name) if needs_contract_witness
+
         def proof_global_constant_add_literal(constant_name: sview, constant_type: Ast::Expr, constant_initializer: Ast::Expr, constant_mutable: bool, constant_position: Ast::Pos, function_body: darray[Ast::Stmt]&, extent_constants: darray[sview]&, reserved_names: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, type_index: ProofTypeAuditIndex) -> void:
             # Reserve the name even when its declaration is not importable. Otherwise a malformed
             # or mutable module-local constant would be skipped and a same-named root constant
@@ -208,7 +221,7 @@ extend ElisaProof:
             return if any existing in names where existing == constant_name
             match constant_type:
                 Ast::Expr.Ident(type_name, _):
-                    return if type_name != "i64" and type_name != "usize" and type_name != "u64"
+                    return if type_name != "i64" and type_name != "usize" and type_name != "u64" and type_name != "u8"
                     # A usize constant is unfolded where a contract names it, or where it is the
                     # extent of a fixed-array place the body indexes (`slot < N` over `T[M::N]`).
                     extent_constant: bool = any extent in extent_constants where extent == constant_name
@@ -217,6 +230,14 @@ extend ElisaProof:
                     return
             match constant_initializer:
                 Ast::Expr.IntLit(constant_value, _):
+                    # Keep the new small unsigned path explicit: the proof AST stores integer
+                    # literals in signed i64, so only import a u8 constant after independently
+                    # checking that its source value is representable in that declared type.
+                    is_u8: bool = match constant_type:
+                        Ast::Expr.Ident(type_name, _): type_name == "u8"
+                        _: false
+                    if is_u8:
+                        return if constant_value < 0 or constant_value > 255
                     is_unsigned_64: bool = match constant_type:
                         Ast::Expr.Ident(type_name, _): type_name == "u64"
                         _: false
@@ -230,21 +251,22 @@ extend ElisaProof:
                         return if not proof_global_constant_contract_mentions_name(function_body, constant_name)
                         proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(constant_name, constant_position), constant_position.line, function_name)
                         return
-                    names.push(constant_name)
-                    # Reuse the parser-owned literal instead of manufacturing a fresh AST node
-                    # in the proof-state region. Substitution then sees the constant's value
-                    # directly, while the separately traced equality below preserves the
-                    # source-level name for replay validation.
-                    values.push(constant_initializer)
-                    constant_fact: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(constant_name, constant_position), TokenKind.EqEq, Ast::Expr.IntLit(constant_value, constant_position), constant_position)
-                    proof_add_traced_fact(facts, report, constant_fact, "global-constant", constant_position.line, function_name)
-                    is_machine_unsigned: bool = match constant_type:
-                        Ast::Expr.Ident(type_name, _): type_name == "usize"
+                    # Reuse the parser-owned positive literal. The independent
+                    # fact below also binds its source name to the imported value.
+                    proof_global_constant_record_value(constant_name, constant_value, constant_initializer, constant_type, constant_position, function_body, names, values, facts, report, function_name, type_index)
+                Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(magnitude, _), _):
+                    # The proof AST stores integer payloads in signed i64. Import
+                    # negative module literals only for i64 and only when the
+                    # positive magnitude is representable before negation.
+                    is_signed_64: bool = match constant_type:
+                        Ast::Expr.Ident(type_name, _): type_name == "i64"
                         _: false
-                    if not is_machine_unsigned:
-                        proof_add_primitive_operator_witnesses_with_type_index(facts, report, Ast::Expr.Ident(constant_name, constant_position), constant_type, constant_position, type_index)
-                    needs_contract_witness: bool = not is_machine_unsigned or proof_global_constant_contract_mentions_name(function_body, constant_name)
-                    proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(constant_name, constant_position), constant_position.line, function_name) if needs_contract_witness
+                    return if not is_signed_64 or magnitude < 0 or magnitude > 9223372036854775807
+                    negative_value: i64 = 0 - magnitude
+                    # Preserve the source unary node in substitutions. Replacing it
+                    # with a negative payload would erase the distinction between a
+                    # signed i64 value and an unsigned 64-bit bit pattern in the kernel.
+                    proof_global_constant_record_value(constant_name, negative_value, constant_initializer, constant_type, constant_position, function_body, names, values, facts, report, function_name, type_index)
                 _:
                     pass
 

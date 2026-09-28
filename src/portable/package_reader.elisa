@@ -1,0 +1,221 @@
+# Strict reader for `elisa-proof-package-v1`. It is part of the trusted replay base: whatever it
+# builds is what the kernel checks, so it accepts one spelling of each package and nothing else.
+#
+# * Every object must have exactly its schema's keys. The JSON parser keeps repeated keys, so a
+#   count check plus a presence check for each distinct key rules out duplicates and extras.
+# * Integers must be exact: a JSON number is binary64, so an index must be a nonnegative integer
+#   below 2^53, and a node value, a full i64, travels as a canonical decimal string.
+# * Strings are copied into one byte pool before any kernel node is built, so every kernel name
+#   views bytes that stay put for the whole check.
+# * Every count is bounded before the work it controls: nodes and children by the kernel's own
+#   budgets, theorems, hypotheses, and string bytes by `ProofPackageLimit`.
+
+const PROOF_PACKAGE_INPUT_FORMAT: sview = "elisa-proof-package-v1"
+
+const module ProofPackageLimit:
+    THEOREMS: usize = 65536
+    HYPOTHESES: usize = 4096
+    STRING_BYTES: usize = 65536
+    # Canonical sequent identities of every theorem together. One identity is already capped by
+    # PROOF_RUNTIME_IDENTITY_BYTE_LIMIT; this caps a package of many theorems over a shared DAG.
+    IDENTITY_BYTES: usize = 67108864
+    DECIMAL_DIGITS: usize = 19
+
+const module ProofPackageNumber:
+    EXACT_INTEGER_BOUND: f64 = 9007199254740992.0
+    U32_BOUND: usize = 4294967296
+
+# One kernel node as read, with each string held as a range of the byte pool.
+struct ProofPackageRawNode:
+    kind_start: usize
+    kind_count: usize
+    operator_start: usize
+    operator_count: usize
+    left: usize
+    right: usize
+    auxiliary: usize
+    children_start: usize
+    children_count: usize
+    value: i64
+    name_start: usize
+    name_count: usize
+    secondary_start: usize
+    secondary_count: usize
+
+# Why a package, or one of its theorems, did not replay. `status` is one of "malformed",
+# "over-budget", or "rejected"; an empty status means the step succeeded.
+struct ProofPackageVerdict:
+    status: sview
+    reason: sview
+
+def proof_package_ok() -> ProofPackageVerdict:
+    return ProofPackageVerdict{status: "", reason: ""}
+
+def proof_package_malformed(reason: sview) -> ProofPackageVerdict:
+    return ProofPackageVerdict{status: "malformed", reason: reason}
+
+def proof_package_over_budget(reason: sview) -> ProofPackageVerdict:
+    return ProofPackageVerdict{status: "over-budget", reason: reason}
+
+def proof_package_rejected(reason: sview) -> ProofPackageVerdict:
+    return ProofPackageVerdict{status: "rejected", reason: reason}
+
+def proof_package_raw_node_empty() -> ProofPackageRawNode:
+    return ProofPackageRawNode{kind_start: 0, kind_count: 0, operator_start: 0, operator_count: 0, left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name_start: 0, name_count: 0, secondary_start: 0, secondary_count: 0}
+
+def proof_package_has_exactly[@r](value: JsonValueHandle[r], keys: darray[sview]&) -> bool:
+    return false if not ElisaProofJson::is_object(value)
+    return false if ElisaProofJson::object_len(value) != keys.count.i64()
+    for key in keys |value|:
+        return false if not ElisaProofJson::has(value, key)
+    return true
+
+# A nonnegative integer below 2^53, which a binary64 number represents exactly.
+def proof_package_index[@r](value: JsonValueHandle[r]) -> (known: bool, value: usize):
+    return (false, 0) if ElisaProofJson::kind(value) != JsonKind.NUMBER
+    number: f64 = try ElisaProofJson::as_number(value) else -1.0
+    return (false, 0) if not (number >= 0.0 and number < ProofPackageNumber::EXACT_INTEGER_BOUND)
+    integer: i64 = number.i64()
+    return (false, 0) if integer.f64() != number or integer < 0
+    return (true, integer.usize())
+
+def proof_package_index_field[@r](object: JsonValueHandle[r], key: sview) -> (known: bool, value: usize):
+    found: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(object, key)
+    return (false, 0) if not found.known
+    return proof_package_index(found.value)
+
+def proof_package_string_field[@r](object: JsonValueHandle[r], key: sview) -> (known: bool, value: sview):
+    empty: sview = ""
+    found: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(object, key)
+    return (false, empty) if not found.known or ElisaProofJson::kind(found.value) != JsonKind.STRING
+    text: sview @r = try ElisaProofJson::as_string(found.value) else empty
+    return (false, empty) if sview_len(text) > ProofPackageLimit::STRING_BYTES
+    return (true, text)
+
+def proof_package_bool_field[@r](object: JsonValueHandle[r], key: sview) -> (known: bool, value: bool):
+    found: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(object, key)
+    return (false, false) if not found.known or ElisaProofJson::kind(found.value) != JsonKind.BOOL
+    flag: bool = try ElisaProofJson::as_bool(found.value) else false
+    return (true, flag)
+
+def proof_package_array_field[@r](object: JsonValueHandle[r], key: sview) -> (known: bool, value: JsonValueHandle[r], count: usize):
+    found: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(object, key)
+    return (false, found.value, 0) if not found.known or not ElisaProofJson::is_array(found.value)
+    count: i64 = ElisaProofJson::array_len(found.value)
+    return (false, found.value, 0) if count < 0
+    return (true, found.value, count.usize())
+
+def proof_package_string_is(object_text: (known: bool, value: sview), expected: sview) -> bool:
+    return object_text.known and object_text.value == expected
+
+# The canonical decimal spelling of an i64: an optional minus, no leading zero, no "-0". Digits
+# accumulate on the negative side so that the minimum value parses without overflow.
+def proof_package_decimal_i64(text: sview) -> (known: bool, value: i64):
+    length: usize = sview_len(text)
+    return (false, 0) if length == 0
+    negative: bool = sview_at(text, 0) == '-'.u8()
+    start: mutable usize = 0
+    start <- 1 if negative
+    return (false, 0) if start >= length or length - start > ProofPackageLimit::DECIMAL_DIGITS
+    first: u8 = sview_at(text, start)
+    return (false, 0) if first == '0'.u8() and (length - start > 1 or negative)
+    accumulated: mutable i64 = 0
+    for index in start..<length |index, text, accumulated|:
+        byte: u8 = sview_at(text, index)
+        return (false, 0) if byte < '0'.u8() or byte > '9'.u8()
+        digit: i64 = (byte - '0'.u8()).i64()
+        return (false, 0) if accumulated < (PROOF_I64_MIN + digit) / 10
+        accumulated <- accumulated * 10 - digit
+    return (true, accumulated) if negative
+    return (false, 0) if accumulated == PROOF_I64_MIN
+    return (true, 0 - accumulated)
+
+def proof_package_pool_append(pool: mutable darray[u8]&, text: sview) -> usize can[Memory.Allocate, Abort.Panic]:
+    start: usize = pool.count
+    for index in 0..<sview_len(text) |pool, text|:
+        pool.push(sview_at(text, index))
+    return start
+
+def proof_package_read_node[@r](node: JsonValueHandle[r], keys: darray[sview]&, pool: mutable darray[u8]&) -> (known: bool, node: ProofPackageRawNode) can[Memory.Allocate, Abort.Panic]:
+    raw: ProofPackageRawNode = proof_package_raw_node_empty()
+    return (false, raw) if not proof_package_has_exactly(node, keys)
+    kind: (known: bool, value: sview) = proof_package_string_field(node, "kind")
+    operator: (known: bool, value: sview) = proof_package_string_field(node, "operator")
+    name: (known: bool, value: sview) = proof_package_string_field(node, "name")
+    secondary: (known: bool, value: sview) = proof_package_string_field(node, "secondary_name")
+    value_text: (known: bool, value: sview) = proof_package_string_field(node, "value")
+    return (false, raw) if not kind.known or not operator.known or not name.known or not secondary.known or not value_text.known
+    value: (known: bool, value: i64) = proof_package_decimal_i64(value_text.value)
+    left: (known: bool, value: usize) = proof_package_index_field(node, "left")
+    right: (known: bool, value: usize) = proof_package_index_field(node, "right")
+    auxiliary: (known: bool, value: usize) = proof_package_index_field(node, "auxiliary")
+    children_start: (known: bool, value: usize) = proof_package_index_field(node, "children_start")
+    children_count: (known: bool, value: usize) = proof_package_index_field(node, "children_count")
+    return (false, raw) if not value.known or not left.known or not right.known or not auxiliary.known or not children_start.known or not children_count.known
+    kind_start: usize = proof_package_pool_append(pool, kind.value)
+    operator_start: usize = proof_package_pool_append(pool, operator.value)
+    name_start: usize = proof_package_pool_append(pool, name.value)
+    secondary_start: usize = proof_package_pool_append(pool, secondary.value)
+    read: ProofPackageRawNode = ProofPackageRawNode{kind_start: kind_start, kind_count: sview_len(kind.value), operator_start: operator_start, operator_count: sview_len(operator.value), left: left.value, right: right.value, auxiliary: auxiliary.value, children_start: children_start.value, children_count: children_count.value, value: value.value, name_start: name_start, name_count: sview_len(name.value), secondary_start: secondary_start, secondary_count: sview_len(secondary.value)}
+    return (true, read)
+
+# Reads `kernel` into raw nodes, the byte pool, and the children array. Nothing here decides
+# whether the arena is well formed; the kernel's own admission does that after the nodes exist.
+def proof_package_read_kernel[@r](kernel: JsonValueHandle[r], raw: mutable darray[ProofPackageRawNode]&, pool: mutable darray[u8]&, children: mutable darray[usize]&) -> ProofPackageVerdict can[Memory.Allocate, Abort.Panic]:
+    kernel_keys: darray[sview] = ["nodes", "children"]
+    return proof_package_malformed("kernel-schema") if not proof_package_has_exactly(kernel, &kernel_keys)
+    nodes: (known: bool, value: JsonValueHandle[r], count: usize) = proof_package_array_field(kernel, "nodes")
+    child_list: (known: bool, value: JsonValueHandle[r], count: usize) = proof_package_array_field(kernel, "children")
+    return proof_package_malformed("kernel-schema") if not nodes.known or not child_list.known
+    return proof_package_over_budget("node-budget") if nodes.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+    return proof_package_over_budget("child-budget") if child_list.count > ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET
+    node_keys: darray[sview] = ["kind", "operator", "left", "right", "auxiliary", "children_start", "children_count", "value", "name", "secondary_name"]
+    missing: JsonValueHandle[r] = ElisaProofJson::null_value(kernel)
+    for index in 0..<nodes.count |index, nodes, node_keys, missing, raw, pool|:
+        node: JsonValueHandle[r] = try ElisaProofJson::at(nodes.value, index.i64()) else missing
+        read: (known: bool, node: ProofPackageRawNode) = proof_package_read_node(node, &node_keys, pool)
+        return proof_package_malformed("node-schema") if not read.known
+        raw.push(read.node)
+    for index in 0..<child_list.count |index, child_list, missing, children|:
+        child: JsonValueHandle[r] = try ElisaProofJson::at(child_list.value, index.i64()) else missing
+        read: (known: bool, value: usize) = proof_package_index(child)
+        return proof_package_malformed("child-schema") if not read.known
+        children.push(read.value)
+    return proof_package_ok()
+
+# Builds kernel nodes over the finished pool. The pool must not grow after this point: every
+# node's strings are views of it.
+def proof_package_build_nodes(raw: darray[ProofPackageRawNode]&, pool: darray[u8]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&) -> void can[Memory.Allocate, Abort.Panic]:
+    for entry in raw |pool, nodes|:
+        nodes.push(ElisaProofKernelCore::ProofKernelNode{kind: ElisaProofJson::bytes_range_ref(pool, entry.kind_start, entry.kind_count), operator: ElisaProofJson::bytes_range_ref(pool, entry.operator_start, entry.operator_count), left: entry.left, right: entry.right, auxiliary: entry.auxiliary, children_start: entry.children_start, children_count: entry.children_count, value: entry.value, name: ElisaProofJson::bytes_range_ref(pool, entry.name_start, entry.name_count), secondary_name: ElisaProofJson::bytes_range_ref(pool, entry.secondary_start, entry.secondary_count)})
+
+# The fixed top-level shape: format, source record, and the trust record this format allows. A
+# package that claims more trust than the format grants (say, kernel-checked hypotheses) is not
+# a package of this format.
+def proof_package_read_header[@r](root: JsonValueHandle[r]) -> ProofPackageVerdict:
+    root_keys: darray[sview] = ["format", "source", "trust", "kernel", "theorems"]
+    return proof_package_malformed("package-schema") if not proof_package_has_exactly(root, &root_keys)
+    return proof_package_malformed("format") if not proof_package_string_is(proof_package_string_field(root, "format"), PROOF_PACKAGE_INPUT_FORMAT)
+    source: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "source")
+    source_keys: darray[sview] = ["path", "bytes", "fingerprint", "admissible", "authenticated"]
+    return proof_package_malformed("source-schema") if not source.known or not proof_package_has_exactly(source.value, &source_keys)
+    path: (known: bool, value: sview) = proof_package_string_field(source.value, "path")
+    bytes: (known: bool, value: usize) = proof_package_index_field(source.value, "bytes")
+    admissible: (known: bool, value: bool) = proof_package_bool_field(source.value, "admissible")
+    authenticated: (known: bool, value: bool) = proof_package_bool_field(source.value, "authenticated")
+    return proof_package_malformed("source-schema") if not path.known or not bytes.known or not admissible.known or not authenticated.known or authenticated.value
+    fingerprint: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(source.value, "fingerprint")
+    fingerprint_keys: darray[sview] = ["algorithm", "value"]
+    return proof_package_malformed("source-schema") if not fingerprint.known or not proof_package_has_exactly(fingerprint.value, &fingerprint_keys)
+    fingerprint_value: (known: bool, value: usize) = proof_package_index_field(fingerprint.value, "value")
+    return proof_package_malformed("source-schema") if not proof_package_string_is(proof_package_string_field(fingerprint.value, "algorithm"), "fnv1a32") or not fingerprint_value.known or fingerprint_value.value >= ProofPackageNumber::U32_BOUND
+    trust: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "trust")
+    trust_keys: darray[sview] = ["hypotheses", "source_correspondence", "fingerprints"]
+    return proof_package_malformed("trust-schema") if not trust.known or not proof_package_has_exactly(trust.value, &trust_keys)
+    return proof_package_malformed("trust-schema") if not proof_package_string_is(proof_package_string_field(trust.value, "hypotheses"), "adapter")
+    return proof_package_malformed("trust-schema") if not proof_package_string_is(proof_package_string_field(trust.value, "source_correspondence"), "adapter")
+    return proof_package_malformed("trust-schema") if not proof_package_string_is(proof_package_string_field(trust.value, "fingerprints"), "identity-hint")
+    # A source the adapter could not admit exports no theorems; a package that says otherwise
+    # is inconsistent rather than merely unproved.
+    return proof_package_rejected("source-inadmissible") if not admissible.value
+    return proof_package_ok()

@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 "$ROOT_DIR/scripts/build.sh"
+# The portable package checker is its own small product built from the same snapshot.
+ELISA_PROOF_MAIN=src/replay_main.elisa ELISA_PROOF_OUTPUT="$ROOT_DIR/build/elisa-proof-replay" "$ROOT_DIR/scripts/build.sh"
 
 # The marker-decoder regression must finish under the normal watchdog. Completion
 # is not proof: unresolved obligations remain visible in the report.
@@ -74,6 +76,7 @@ run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'im
 python3 "$ROOT_DIR/scripts/test_overlap_diagnostics.py"
 python3 "$ROOT_DIR/scripts/test_certificate_reuse.py"
 python3 "$ROOT_DIR/scripts/test_measurements.py"
+python3 "$ROOT_DIR/scripts/test_source_admission_matrix.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_rejected_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
@@ -84,6 +87,10 @@ python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
 python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
 python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_remainder_range.py"
+python3 "$ROOT_DIR/scripts/test_portable_replay.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
@@ -1402,7 +1409,7 @@ if [[ "$optional_repair_status" -ne 1 ]]; then
     printf 'proof test matrix failed: malformed optional source repair result status changed unexpectedly\n' >&2
     exit 1
 fi
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"]=="partial" and r["source"]["admissible"] is False; assert any(g["name"]=="rejected_optional_getelse_summary" and g["status"]=="unrepaired" for g in r["goals"])' "$optional_repair_report"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"]=="inadmissible" and r["source"]["admissible"] is False; assert any(g["name"]=="rejected_optional_getelse_summary" and g["status"]=="unrepaired" and g["tried"]==0 for g in r["goals"])' "$optional_repair_report"
 optional_target_tactic_report="$standalone_probe_dir/rejected-optional-result-target-tactic.json"
 set +e
 "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_malformed_source_target.json" "$ROOT_DIR/examples/rejected_optional_result_comparison.elisa" >"$optional_target_tactic_report"
@@ -1467,8 +1474,13 @@ if [[ "$assertion_proposition_status" -ne 1 ]]; then
     exit 1
 fi
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"] == "failed" and r["summary"]["semantic_errors"] > 0; assert any(f["kind"] == "contract-proposition-type" for f in r["findings"]); assert not any(g["rule"] == "proof-step" and g["proven"] for g in r["goals"]); f=next(d for d in r["declaration_details"] if d["name"] == "rejected_nonbool_assert_call"); assert not f["verified"] and f["verification_reason"] == "body-unverified"; assert r["replay"]["gaps"] == 0' "$assertion_proposition_report"
-"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/rejected_nonbool_hypothesis_reuse.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] == "nothing_to_repair" and r["goals"] == [] and r["summary"]["unresolved"] == 0'
-repair_proposition_probe_status=${PIPESTATUS[1]}
+# An inadmissible source is never repaired, so the batch exits 1 as well.
+set +e
+"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/rejected_nonbool_hypothesis_reuse.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] == "inadmissible" and r["source"]["admissible"] is False and r["summary"]["repaired"] == 0 and all(g["script"] is None for g in r["goals"])'
+repair_proposition_probe_statuses=("${PIPESTATUS[@]}")
+set -e
+repair_proposition_probe_status=${repair_proposition_probe_statuses[1]}
+[[ "${repair_proposition_probe_statuses[0]}" -eq 1 ]] || repair_proposition_probe_status=1
 if [[ "$repair_proposition_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: malformed source contracts entered the repair queue\n' >&2
     exit 1
@@ -2263,7 +2275,7 @@ missing_theorem_suggestion_statuses=("${PIPESTATUS[@]}")
 missing_theorem_suggestion_status=${missing_theorem_suggestion_statuses[0]}
 missing_theorem_suggestion_json_status=${missing_theorem_suggestion_statuses[1]}
 set -e
-if [[ "$checked_index_diagnostics_status" -ne 1 || "$checked_index_diagnostics_json_status" -ne 0 || "$multiple_preconditions_status" -ne 1 || "$multiple_preconditions_json_status" -ne 0 || "$lexicographic_repair_queue_status" -ne 0 || "$lexicographic_repair_queue_json_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$void_postcondition_goal_json_status" -ne 0 || "$focused_open_goal_status" -ne 0 || "$focused_open_goal_json_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_proved_goal_json_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_missing_goal_json_status" -ne 0 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 || "$stable_goal_fingerprint_status" -ne 0 || "$theorem_catalog_status" -ne 0 || "$theorem_catalog_json_status" -ne 0 || "$lemma_summary_provenance_status" -ne 0 || "$lemma_summary_provenance_json_status" -ne 0 || "$rejected_theorem_catalog_status" -ne 0 || "$rejected_theorem_catalog_json_status" -ne 0 || "$default_theorem_catalog_status" -ne 0 || "$default_theorem_catalog_json_status" -ne 0 || "$stable_theorem_fingerprint_status" -ne 0 || "$theorem_suggestion_status" -ne 0 || "$theorem_suggestion_json_status" -ne 0 || "$unverified_theorem_suggestion_status" -ne 0 || "$unverified_theorem_suggestion_json_status" -ne 0 || "$theorem_suggestion_default_status" -ne 0 || "$theorem_suggestion_default_json_status" -ne 0 || "$theorem_suggestion_structured_status" -ne 2 || "$theorem_suggestion_structured_json_status" -ne 0 || "$deterministic_theorem_suggestion_status" -ne 0 || "$missing_theorem_suggestion_status" -ne 2 || "$missing_theorem_suggestion_json_status" -ne 0 ]]; then
+if [[ "$checked_index_diagnostics_status" -ne 1 || "$checked_index_diagnostics_json_status" -ne 0 || "$multiple_preconditions_status" -ne 1 || "$multiple_preconditions_json_status" -ne 0 || "$lexicographic_repair_queue_status" -ne 0 || "$lexicographic_repair_queue_json_status" -ne 0 || "$void_postcondition_goal_status" -ne 1 || "$void_postcondition_goal_json_status" -ne 0 || "$focused_open_goal_status" -ne 0 || "$focused_open_goal_json_status" -ne 0 || "$focused_proved_goal_status" -ne 0 || "$focused_proved_goal_json_status" -ne 0 || "$focused_missing_goal_status" -ne 2 || "$focused_missing_goal_json_status" -ne 0 || "$focused_overflow_goal_status" -ne 2 || "$focused_negative_goal_status" -ne 2 || "$stable_goal_fingerprint_status" -ne 0 || "$theorem_catalog_status" -ne 0 || "$theorem_catalog_json_status" -ne 0 || "$lemma_summary_provenance_status" -ne 0 || "$lemma_summary_provenance_json_status" -ne 0 || "$rejected_theorem_catalog_status" -ne 1 || "$rejected_theorem_catalog_json_status" -ne 0 || "$default_theorem_catalog_status" -ne 0 || "$default_theorem_catalog_json_status" -ne 0 || "$stable_theorem_fingerprint_status" -ne 0 || "$theorem_suggestion_status" -ne 0 || "$theorem_suggestion_json_status" -ne 0 || "$unverified_theorem_suggestion_status" -ne 1 || "$unverified_theorem_suggestion_json_status" -ne 0 || "$theorem_suggestion_default_status" -ne 0 || "$theorem_suggestion_default_json_status" -ne 0 || "$theorem_suggestion_structured_status" -ne 2 || "$theorem_suggestion_structured_json_status" -ne 0 || "$deterministic_theorem_suggestion_status" -ne 0 || "$missing_theorem_suggestion_status" -ne 2 || "$missing_theorem_suggestion_json_status" -ne 0 ]]; then
     printf 'proof test matrix failed: goal/repair API statuses checked=%s preconditions=%s lexicographic=%s void=%s focused-open=%s focused-proved=%s focused-missing=%s overflow=%s negative=%s goal-fingerprint=%s theorem-catalog=%s lemma-provenance=%s rejected-catalog=%s defaults=%s theorem-fingerprint=%s suggestion=%s unverified-suggestion=%s default-suggestion=%s structured-suggestion=%s deterministic-suggestion=%s missing-suggestion=%s missing-suggestion-json=%s\n' \
         "$checked_index_diagnostics_status" "$multiple_preconditions_status" "$lexicographic_repair_queue_status" "$void_postcondition_goal_status" \
         "$focused_open_goal_status" "$focused_proved_goal_status" "$focused_missing_goal_status" "$focused_overflow_goal_status" "$focused_negative_goal_status" \
@@ -4530,6 +4542,7 @@ if [[ "$global_constant_module_status" -ne 0 || "$rejected_global_constant_colli
     printf 'proof test matrix failed: module constant scope was not preserved through replay\n' >&2
     exit 1
 fi
+python3 "$ROOT_DIR/scripts/test_module_u8_constant_contract.py"
 
 # A rebind written over the binding's own symbol takes a fresh symbol, so the new value is recorded
 # and the old one keeps its facts. The equality that records it is admitted into the difference

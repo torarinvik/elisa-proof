@@ -24,10 +24,18 @@ def proof_push_int_type_annotations(annotations: mutable darray[Ast::EnumAnnotat
         elif proof_int_suffix_is(source, start, length, "usize"):
             annotations.push(Ast::EnumAnnotation{owner: PROOF_INT_TYPE_ANNOTATION_OWNER, name: "usize", line: token.line, offset: token.start})
 
+# Exit status 0 is the one verdict a caller can act on without reading the output, so every
+# route reserves it for a result that stands on an admissible source. A found goal in a source
+# that failed to parse, import, type-check, or form its propositions exits 1, whatever the
+# route's own status field says about that goal; a missing goal exits 2.
+def proof_route_exit(found: bool, source_admissible: bool) -> i64:
+    return 2 if not found
+    return 0 if source_admissible else 1
+
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
-        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --proof <id> <file.elisa> | --check-proof <proof.txt> <file.elisa> | --script <proof.txt> <file.elisa> | --repair <id> <file.elisa> | --repair-all <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa>\n")
+        proof_push(&usage, "usage: elisa-proof [--json|--theorems] <file.elisa> | --goal <id> <file.elisa> | --proof <id> <file.elisa> | --check-proof <proof.txt> <file.elisa> | --script <proof.txt> <file.elisa> | --repair <id> <file.elisa> | --repair-all <file.elisa> | --suggest <id> <file.elisa> | --tactics <proof.json> <file.elisa> | --package <file.elisa>\n")
         proof_write(usage)
         return 2
     slots: mutable cstr&& = argv.cast[mutable cstr&&]
@@ -35,6 +43,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     goal_json_output: mutable bool = false
     suggestion_json_output: mutable bool = false
     theorem_json_output: mutable bool = false
+    package_output: mutable bool = false
     proof_text_output: mutable bool = false
     proof_check_output: mutable bool = false
     script_is_text: mutable bool = false
@@ -142,6 +151,14 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             proof_write(usage)
             return 2
         path_slot <- 2
+    elif proof_cstr_equals(first_argument, "--package"):
+        package_output <- true
+        if argc < 3:
+            usage: mutable darray[u8] = []
+            proof_push(&usage, "usage: elisa-proof --package <file.elisa>\n")
+            proof_write(usage)
+            return 2
+        path_slot <- 2
     elif proof_cstr_equals(first_argument, "--suggest"):
         suggestion_json_output <- true
         if argc < 4:
@@ -208,14 +225,16 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     pass_offsets: mutable darray[u32] = []
     for token in tokens |pass_offsets|:
         pass_offsets.push(token.start) if token.kind == TokenKind.Pass
+    stray_nul_line: u32 = proof_source_stray_nul_line(tokens, source, source_bytes)
     arena_free(&token_arena)
     report: mutable ProofReport = proof_empty_report()
     report.pass_statement_offsets <- pass_offsets
     semantic_diagnostics: mutable darray[Semantic::Diagnostic] = []
-    parse_failed: bool = file.errors.count > 0
+    parse_failed: bool = file.errors.count > 0 or stray_nul_line > 0
     if parse_failed:
         for parse_error in file.errors |report|:
             proof_add_finding(&report, "parse-error", parse_error.line, "", "source could not be parsed; verification was not attempted")
+        proof_add_finding(&report, "parse-error", stray_nul_line, "", "source has a NUL byte outside a comment; verification was not attempted") if stray_nul_line > 0
     else:
         proof_check_with_semantic_diagnostics(file, &report, &semantic_diagnostics)
         proof_replay_certificates(&report)
@@ -246,7 +265,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         focused: mutable darray[u8] = []
         proof_push_json_focused_goal(&focused, report, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible)
         proof_write(focused)
-        return 0 if focused_goal_id < report.goal_attempts.count else 2
+        return proof_route_exit(focused_goal_id < report.goal_attempts.count, source_admissible)
     if proof_check_output:
         source_complete: bool = proof_report_source_complete(report, import_failed, semantic_errors)
         source_admissible: bool = proof_report_source_admissible(report, import_failed, semantic_errors)
@@ -259,28 +278,34 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         checked: mutable darray[u8] = []
         check_status: i64 = proof_push_proof_check(&checked, report, script_read.contents, source_fingerprint, source_complete, source_admissible)
         proof_write(checked)
-        return check_status
+        return 1 if check_status == 0 and not source_admissible else check_status
     if proof_text_output:
         source_complete: bool = proof_report_source_complete(report, import_failed, semantic_errors)
         source_admissible: bool = proof_report_source_admissible(report, import_failed, semantic_errors)
         rendered: mutable darray[u8] = []
         proof_push_elisa_proof(&rendered, report, focused_goal_id, source_fingerprint, source_complete, source_admissible)
         proof_write(rendered)
-        return 0 if focused_goal_id < report.goal_attempts.count else 2
+        return proof_route_exit(focused_goal_id < report.goal_attempts.count, source_admissible)
     if theorem_json_output:
         source_complete: bool = proof_report_source_complete(report, import_failed, semantic_errors)
         source_admissible: bool = proof_report_source_admissible(report, import_failed, semantic_errors)
         catalog: mutable darray[u8] = []
         proof_push_json_theorem_catalog(&catalog, report, source_bytes, source_fingerprint, source_complete, source_admissible)
         proof_write(catalog)
-        return 0
+        return proof_route_exit(true, source_admissible)
+    if package_output:
+        source_admissible: bool = proof_report_source_admissible(report, import_failed, semantic_errors)
+        package: mutable darray[u8] = []
+        _ = proof_push_json_package(&package, report, root_path, source_bytes, source_fingerprint, source_admissible)
+        proof_write(package)
+        return proof_route_exit(true, source_admissible)
     if suggestion_json_output:
         source_complete: bool = proof_report_source_complete(report, import_failed, semantic_errors)
         source_admissible: bool = proof_report_source_admissible(report, import_failed, semantic_errors)
         suggestions: mutable darray[u8] = []
         proof_push_json_suggestions(&suggestions, report, file.enum_annotations, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible)
         proof_write(suggestions)
-        return 0 if focused_goal_id < report.goal_attempts.count else 2
+        return proof_route_exit(focused_goal_id < report.goal_attempts.count, source_admissible)
     if repair_output or repair_all_output:
         source_admissible: bool = proof_report_source_admissible(report, import_failed, semantic_errors)
         response: mutable darray[u8] = []
@@ -293,12 +318,17 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             for goal_index in 0..<report.goal_attempts.count |goal_index, report, entries, repaired_count, unresolved_count|:
                 continue if report.goal_attempts[goal_index].proven
                 unresolved_count <- unresolved_count + 1
-                batch_found: (repaired: bool, searched: usize, actions: sview) = proof_repair_search(report, goal_index)
+                # A script found against an inadmissible source would be refused by --script, so
+                # the search is not run and the goal is listed as unrepaired with nothing tried.
+                batch_found: mutable (repaired: bool, searched: usize, actions: sview) = (false, 0, "")
+                batch_found <- proof_repair_search(report, goal_index) if source_admissible
                 repaired_count <- repaired_count + 1 if batch_found.repaired
                 proof_push(&entries, ",") if unresolved_count > 1
                 proof_push_repair_goal(&entries, report, goal_index, batch_found)
             proof_push(&response, "{\"format\":\"elisa-proof-repair-batch-v1\",\"status\":")
-            if unresolved_count == 0:
+            if not source_admissible:
+                proof_push(&response, "\"inadmissible\"")
+            elif unresolved_count == 0:
                 proof_push(&response, "\"nothing_to_repair\"")
             else:
                 proof_push(&response, "\"repaired\"" if repaired_count == unresolved_count else "\"partial\"")
@@ -317,11 +347,14 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
                 response.push(entries[entry_index])
             proof_push(&response, "]}\n")
             proof_write(response)
-            return 0 if repaired_count == unresolved_count else 1
-        found: (repaired: bool, searched: usize, actions: sview) = proof_repair_search(report, focused_goal_id)
+            return proof_route_exit(true, source_admissible and repaired_count == unresolved_count)
+        found: mutable (repaired: bool, searched: usize, actions: sview) = (false, 0, "")
+        found <- proof_repair_search(report, focused_goal_id) if source_admissible
         proof_push(&response, "{\"format\":\"elisa-proof-repair-v1\",\"status\":")
         if focused_goal_id >= report.goal_attempts.count:
             proof_push(&response, "\"not_found\"")
+        elif not source_admissible:
+            proof_push(&response, "\"inadmissible\"")
         else:
             proof_push(&response, "\"repaired\"" if found.repaired else "\"unrepaired\"")
         proof_push(&response, ",\"goal_id\":")
@@ -335,7 +368,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         proof_push(&response, ",\"tried\":")
         proof_push_number(&response, found.searched.u32())
         proof_push(&response, ",\"exhaustive\":")
-        proof_push(&response, "false" if found.repaired else "true")
+        proof_push(&response, "false" if found.repaired or not source_admissible else "true")
         proof_push(&response, "},\"script\":")
         if found.repaired:
             script_body: mutable darray[u8] = []
@@ -345,7 +378,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             proof_push(&response, "null")
         proof_push(&response, "}\n")
         proof_write(response)
-        return 2 if focused_goal_id >= report.goal_attempts.count else (0 if found.repaired else 1)
+        return proof_route_exit(focused_goal_id < report.goal_attempts.count, source_admissible and found.repaired)
     if tactic_json_output:
         source_status: mutable sview = "proved"
         # Keep the tactic boundary explicit about import failure. The importer records an

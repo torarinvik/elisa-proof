@@ -80,6 +80,9 @@ extend ElisaProof:
                         sum_witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(left, right, facts)
                         if sum_witness.known and proof_peer_is_nameable(sum_witness.bound):
                             return true if proof_peer_unsigned_width(sum_witness.bound, facts) == width
+                    if operator == TokenKind.Star:
+                        scaled_witness: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = proof_unsigned_scaled_product_witness(expression, facts)
+                        return true if scaled_witness.known
                     if operator == TokenKind.Minus:
                         orders: mutable darray[Ast::Expr] = []
                         # Read the facts the same way the structural rules do: conjuncts
@@ -106,6 +109,19 @@ extend ElisaProof:
                         # then be deciding about itself.
                         return true if proof_has_order_fact(right, left, false, orders)
                         return true if proof_linear_goal(right, TokenKind.LtEq, left, orders)
+                    # For an unsigned remainder, a positive, representable constant divisor
+                    # gives the machine result range [0, divisor - 1] regardless of the
+                    # dividend. The generic interval below is signed and intentionally spans
+                    # negative values, which used to reject safe `%` terms in conditional paths.
+                    # Keep this rule narrow: variable/zero/negative divisors and divisors that
+                    # do not fit the witnessed result width still fall through to rejection.
+                    if operator == TokenKind.Percent and width > 0:
+                        divisor: (known: bool, value: i64) = proof_constant_int(right)
+                        return false if not divisor.known or divisor.value <= 0
+                        return false if not proof_unsigned_constants_fit(right, width, 0)
+                        remainder_upper: (known: bool, value: i64) = proof_sub_safe(divisor.value, 1)
+                        return false if not remainder_upper.known
+                        return remainder_upper.value <= proof_unsigned_width_max(width)
                     interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
                     return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
                 Ast::Expr.If(condition, then_expression, else_expression, position):
@@ -123,9 +139,7 @@ extend ElisaProof:
                     return true
 
         # The then arm of `a if c else b` runs only when `c` holds, so `x - k if x >= k else 0`
-        # does not wrap. The condition, already found range-safe, joins the facts for that arm
-        # alone; the else arm keeps the outer facts, which is what the kernel mirror can state
-        # without building a negation.
+        # does not wrap. The condition, already found range-safe, joins the facts for that arm alone.
         def proof_unsigned_arm_safe_under(arm: Ast::Expr, condition: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             guarded: mutable darray[Ast::Expr] = []
             guarded.extend(facts)
@@ -138,8 +152,7 @@ extend ElisaProof:
             proof_close_plain_bounds(guarded, &bounds)
             proof_unsigned_expression_safe_with_bounds(arm, guarded, bounds)
 
-        # The else arm runs only when the condition fails. The complement enters the bounds
-        # alone, never the facts, so the kernel mirror can state it without building a negation.
+        # The else arm runs only when the condition fails; its complement enters the bounds alone.
         def proof_unsigned_arm_safe_unless(arm: Ast::Expr, condition: Ast::Expr, facts: darray[Ast::Expr]&, position: Ast::Pos) -> bool:
             bounds: mutable darray[ProofBound] = []
             for fact in facts |bounds|:
