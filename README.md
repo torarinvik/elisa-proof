@@ -21,6 +21,13 @@ PATH=/path/to/elisac-bin:$PATH scripts/build.sh
 build/elisa-proof examples/verified.elisa
 ```
 
+The default build requires static compiler contract discharge. During development,
+`ELISA_PROOF_COMPILE_MODE=runtime-checks scripts/build.sh` keeps unresolved compiler
+contracts as warnings and runtime checks (`-permissive`). Compiler provenance and
+the pinned parser snapshot are still checked. This mode does not relax proof-report
+admission or certificate replay, and does not establish a formal proof of the
+assistant's own implementation. Record the compile mode with any retained evidence.
+
 When the fallback is used, `ELISA_STAGE0_REV` pins the expected Go VCS revision. The build reads
 the embedded revision and `vcs.modified` flag from `elisac-stage0` and refuses a missing, dirty, or
 mismatched binary, so a bootstrap result is never silently accepted from stale compiler sources.

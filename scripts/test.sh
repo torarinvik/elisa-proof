@@ -73,6 +73,10 @@ run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'im
 # Missing lifetime/place information is unsupported, not a demonstrated violation.
 python3 "$ROOT_DIR/scripts/test_overlap_diagnostics.py"
 python3 "$ROOT_DIR/scripts/test_certificate_reuse.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
+python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
+python3 "$ROOT_DIR/scripts/test_safe_constant_replay.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_disjunction.py"
 python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 
@@ -319,10 +323,14 @@ if [[ "$rejected_overloaded_runtime_assert_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the valid runtime-assert overload audit fixture\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >/dev/null 2>&1
-rejected_borrow_call_duplicate_alias_compiler_status=$?
-if [[ "$rejected_borrow_call_duplicate_alias_compiler_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate mutable call-alias fixture\n' >&2
+rejected_borrow_call_duplicate_alias_report="$standalone_probe_dir/rejected-borrow-call-duplicate-alias.log"
+if "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >"$rejected_borrow_call_duplicate_alias_report" 2>&1; then
+    printf 'proof test matrix failed: compiler accepted overlapping mutable call arguments\n' >&2
+    exit 1
+fi
+if ! grep -Fq 'call "write_pair" passes "x" to mutable reference parameter "right" while argument for "left" refers to overlapping memory' "$rejected_borrow_call_duplicate_alias_report"; then
+    printf 'proof test matrix failed: duplicate mutable call aliases lacked the expected overlap diagnostic\n' >&2
+    cat "$rejected_borrow_call_duplicate_alias_report" >&2
     exit 1
 fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-unsigned-overflow-goal.o" "$ROOT_DIR/examples/rejected_unsigned_overflow_goal.elisa" >/dev/null 2>&1
@@ -2536,11 +2544,49 @@ fi
 # must not contradict the unsigned lower bound and make the bounded model vacuously prove a false
 # conclusion; ordinary unsigned reflexivity should remain provable.
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; assert not functions["u64_max_does_not_imply_zero"]["verified"]; assert not functions["usize_max_does_not_imply_zero"]["verified"]; assert functions["u64_reflexive_equality_remains_provable"]["verified"]; assert not functions["u64_max_is_not_less_than_zero"]["verified"]; assert not functions["usize_global_max_is_not_negative"]["verified"]; assert not functions["usize_local_max_is_not_negative"]["verified"]; refused = {f["name"]: f for f in report["findings"] if f["kind"] == "ensure-unproven"}; assert {"u64_max_does_not_imply_zero", "usize_max_does_not_imply_zero", "u64_max_is_not_less_than_zero", "usize_global_max_is_not_negative"} <= {name for name, finding in refused.items() if finding["status"] == "unknown"}; assert refused["usize_local_max_is_not_negative"]["status"] == "unknown" and not refused["usize_local_max_is_not_negative"]["counterexample_found"] and refused["usize_local_max_is_not_negative"]["counterexample"] == []'
+run_json_report "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; assert not functions["u64_max_does_not_imply_zero"]["verified"]; assert not functions["usize_max_does_not_imply_zero"]["verified"]; assert functions["u64_reflexive_equality_remains_provable"]["verified"]; assert not functions["u64_max_is_not_less_than_zero"]["verified"]; assert not functions["usize_global_max_is_not_negative"]["verified"]; assert not functions["usize_local_max_is_not_negative"]["verified"]; assert not functions["u8_overflow_is_not_unequal"]["verified"]; assert not functions["u8_shift_outside_width_is_not_zero"]["verified"]; assert not functions["u8_overflow_hidden_in_conditional_is_not_nonzero"]["verified"]; refused = {f["name"]: f for f in report["findings"] if f["kind"] == "ensure-unproven"}; assert {"u64_max_does_not_imply_zero", "usize_max_does_not_imply_zero", "u64_max_is_not_less_than_zero", "usize_global_max_is_not_negative", "u8_overflow_is_not_unequal", "u8_shift_outside_width_is_not_zero", "u8_overflow_hidden_in_conditional_is_not_nonzero"} <= {name for name, finding in refused.items() if finding["status"] == "unknown"}; assert refused["usize_local_max_is_not_negative"]["status"] == "unknown" and not refused["usize_local_max_is_not_negative"]["counterexample_found"] and refused["usize_local_max_is_not_negative"]["counterexample"] == []'
 rejected_u64_max_conflict_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_u64_max_conflict_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a reinterpreted u64 maximum created a vacuous proof\n' >&2
+    exit 1
+fi
+
+# The i64-backed arena must neither decide a negative u64 bit pattern using signed order nor
+# fold fixed-width unsigned arithmetic as unbounded signed arithmetic. Exercise both exact and
+# simp tactic replay against their false claims; either accepting one would be a kernel soundness
+# failure even if ordinary source analysis correctly reports the goal as unknown.
+readonly REJECTED_U64_MAX_GOAL_ID=7
+readonly REJECTED_U64_MAX_GOAL_FINGERPRINT=515359733
+readonly REJECTED_U8_OVERFLOW_GOAL_ID=13
+readonly REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT=1229197265
+for tactic_fixture in rejected_u64_max_decide rejected_u8_overflow_decide rejected_u8_overflow_simp; do
+    case "$tactic_fixture" in
+        rejected_u64_max_decide)
+            tactic_source_goal="$REJECTED_U64_MAX_GOAL_ID"
+            tactic_goal_fingerprint="$REJECTED_U64_MAX_GOAL_FINGERPRINT"
+            ;;
+        rejected_u8_overflow_*)
+            tactic_source_goal="$REJECTED_U8_OVERFLOW_GOAL_ID"
+            tactic_goal_fingerprint="$REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT"
+            ;;
+    esac
+    tactic_report="$standalone_probe_dir/$tactic_fixture.json"
+    set +e
+    "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_$tactic_fixture.json" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$tactic_report"
+    tactic_exit=$?
+    set -e
+    if [[ "$tactic_exit" -ne 1 ]] || ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); t=r["tactic"]; binding=r["source_goal_binding"]; assert r["status"] == "failed" and binding["goal_id"] == int(sys.argv[2]); assert binding["fingerprint_match"] is True and binding["goal_fingerprint"]["value"] == int(sys.argv[3]); assert t["valid"] is False and t["solved"] is False' "$tactic_report" "$tactic_source_goal" "$tactic_goal_fingerprint"; then
+        printf 'proof test matrix failed: unsound unsigned tactic proof was accepted (%s)\n' "$tactic_fixture" >&2
+        exit 1
+    fi
+done
+
+# Safe small arithmetic remains available to tactics, and the independently replayed kernel
+# must accept the same bottom-up simplification as the source tactic.
+if ! "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_safe_small_constant_simp.json" "$ROOT_DIR/examples/replay_constant.elisa" \
+    | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["status"] == "proved"; assert t["valid"] is True and t["solved"] is True; assert t["kernel_trace_replayed"] is True and t["certificate_replayed"] is True'; then
+    printf 'proof test matrix failed: safe small-constant simp did not replay successfully\n' >&2
     exit 1
 fi
 
