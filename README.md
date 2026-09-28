@@ -185,7 +185,13 @@ transition trace and final certificate to replay independently; an optional unsi
 `source_fingerprint` makes any source edit invalidate the script. A source-bound script may
 instead put the focused view's canonical value in `target.goal_fingerprint`; this binds the script
 to the exact source-neutral proposition and ordered hypotheses while allowing unrelated
-declarations or source-line shifts. The FNV value is an incremental identity guard rather than
+declarations or source-line shifts. Goal and theorem fingerprints are versioned by their
+`algorithm` field. Version 2 (`fnv1a32-kernel-goal-v2`, `fnv1a32-kernel-theorem-v2`) hashes the
+width tag that a full-width `u64`/`usize` literal (one whose i64 payload is negative) now carries,
+so `0xFFFFFFFFFFFFFFFFu64` no longer shares its identity with the signed value `-1`. For every
+goal without such a literal the v2 value equals the v1 value, so existing scripts keep binding;
+a v1 value recorded for a goal with a high-bit unsigned literal no longer matches and must be
+regenerated from the focused goal view. The FNV value is an incremental identity guard rather than
 cryptographic proof; the matching term and complete tactic certificate are still independently
 replayed. The result is a compact
 `elisa-proof-tactic-result-v1` document containing the source-goal binding, final state, and trace.

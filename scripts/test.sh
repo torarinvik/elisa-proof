@@ -2093,7 +2093,7 @@ import json, subprocess, sys
 def fingerprint(path):
     catalog = json.loads(subprocess.check_output([sys.argv[1], "--theorems", path]))
     theorem = next(item for item in catalog["theorems"] if item["name"] == "stable_identity")
-    assert theorem["theorem_fingerprint"]["algorithm"] == "fnv1a32-kernel-theorem-v1"
+    assert theorem["theorem_fingerprint"]["algorithm"] == "fnv1a32-kernel-theorem-v2"
     return theorem["theorem_fingerprint"]["value"]
 original = fingerprint(sys.argv[2])
 shifted = fingerprint(sys.argv[3])
@@ -2102,7 +2102,7 @@ assert original == shifted
 assert original != changed
 PY
 stable_theorem_fingerprint_status=$?
-"$ROOT_DIR/build/elisa-proof" --suggest 4 "$ROOT_DIR/examples/theorem_suggestions.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["format"] == "elisa-proof-suggestions-v1"; assert result["status"] == "ok"; assert result["source"]["admissible"] is True; assert result["goal_id"] == 4; assert result["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v1"; assert isinstance(result["goal_fingerprint"]["value"], int); assert len(result["candidates"]) == 1; candidate = result["candidates"][0]; assert candidate["theorem"] == "double_three"; assert candidate["ensure_index"] == 0; assert candidate["bindings"][0]["parameter"] == "value"; assert candidate["bindings"][0]["value"]["operator"] == "+"; assert candidate["premises"][0]["satisfied"] is True; assert candidate["premises_satisfied"] is True; assert candidate["applicable"] is True'
+"$ROOT_DIR/build/elisa-proof" --suggest 4 "$ROOT_DIR/examples/theorem_suggestions.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["format"] == "elisa-proof-suggestions-v1"; assert result["status"] == "ok"; assert result["source"]["admissible"] is True; assert result["goal_id"] == 4; assert result["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert isinstance(result["goal_fingerprint"]["value"], int); assert len(result["candidates"]) == 1; candidate = result["candidates"][0]; assert candidate["theorem"] == "double_three"; assert candidate["ensure_index"] == 0; assert candidate["bindings"][0]["parameter"] == "value"; assert candidate["bindings"][0]["value"]["operator"] == "+"; assert candidate["premises"][0]["satisfied"] is True; assert candidate["premises_satisfied"] is True; assert candidate["applicable"] is True'
 theorem_suggestion_statuses=("${PIPESTATUS[@]}")
 theorem_suggestion_status=${theorem_suggestion_statuses[0]}
 theorem_suggestion_json_status=${theorem_suggestion_statuses[1]}
@@ -2609,7 +2609,7 @@ fi
 # simp tactic replay against their false claims; either accepting one would be a kernel soundness
 # failure even if ordinary source analysis correctly reports the goal as unknown.
 readonly REJECTED_U64_MAX_GOAL_ID=7
-readonly REJECTED_U64_MAX_GOAL_FINGERPRINT=515359733
+readonly REJECTED_U64_MAX_GOAL_FINGERPRINT=3748040360
 readonly REJECTED_U8_OVERFLOW_GOAL_ID=13
 readonly REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT=1229197265
 for tactic_fixture in rejected_u64_max_decide rejected_u8_overflow_decide rejected_u8_overflow_simp; do
@@ -2643,6 +2643,59 @@ for tactic_fixture in rejected_u64_max_decide rejected_u8_overflow_decide reject
     set -e
     if [[ "$refused_exit" -ne 1 ]] || ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); t=r["tactic"]; assert r["status"] == "failed"; assert t["valid"] is True and t["solved"] is False; assert t["action_count"] == 1 and t["accepted_count"] == 0' "$refused_report"; then
         printf 'proof test matrix failed: unsigned tactic refusal was not observed as a refused action (%s)\n' "$tactic_fixture" >&2
+        exit 1
+    fi
+done
+
+# A `u64`/`usize` literal above the i64 range keeps its recorded type through proof search, the
+# kernel arena and replay: true orderings prove and replay, the orderings its wrapped payload
+# would satisfy under signed order stay refused, and no refusal claims a counterexample.
+set +e
+run_json_report "$ROOT_DIR/examples/typed_unsigned_literals.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; proved = {"u64_max_exceeds_zero", "u64_max_equals_itself", "u64_max_exceeds_high_bit", "usize_high_bit_at_least_small"}; refused = {"u64_max_is_not_below_zero", "u64_high_bit_is_not_below_max", "u64_max_is_not_zero", "untyped_wrapped_literal_is_not_ordered"}; assert all(functions[name]["verified"] for name in proved); assert not any(functions[name]["verified"] for name in refused); findings = {f["name"]: f for f in report["findings"] if f["kind"] == "ensure-unproven"}; assert set(findings) == refused; assert all(f["status"] == "unknown" and not f["counterexample_found"] for f in findings.values())'
+typed_unsigned_status=${PIPESTATUS[1]}
+set -e
+if [[ "$typed_unsigned_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: typed high-bit unsigned literal comparison\n' >&2
+    exit 1
+fi
+typed_goal_fingerprint() {
+    "$ROOT_DIR/build/elisa-proof" --goal "$1" "$ROOT_DIR/examples/typed_unsigned_literals.elisa" \
+        | python3 -c 'import json,sys; g=json.load(sys.stdin)["goal_fingerprint"]; assert g["algorithm"] == "fnv1a32-kernel-goal-v2"; print(g["value"])'
+}
+# Goal 1 is `0xFFFFFFFFFFFFFFFFu64 > 0u64` (true), goal 9 is `... < 0u64` (false). The
+# script names the literal only by its source offset; the type comes from the source table.
+for typed_goal in 1 9; do
+    typed_script="$standalone_probe_dir/typed_unsigned_decide_$typed_goal.json"
+    printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":%s,"goal_fingerprint":%s},"actions":[{"action":"decide"}]}' "$typed_goal" "$(typed_goal_fingerprint "$typed_goal")" >"$typed_script"
+    set +e
+    typed_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$typed_script" "$ROOT_DIR/examples/typed_unsigned_literals.elisa")"
+    set -e
+    if ! printf '%s' "$typed_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["source_goal_binding"]["fingerprint_match"] is True; expected = sys.argv[1] == "1"; assert t["valid"] is expected and t["solved"] is expected; assert (r["status"] == "proved") is expected; assert not expected or (t["kernel_replayed"] is True and t["certificate_replayed"] is True)' "$typed_goal"; then
+        printf 'proof test matrix failed: typed unsigned decide tactic on goal %s\n' "$typed_goal" >&2
+        exit 1
+    fi
+done
+# Migration: the v1 fingerprint recorded for the u64 maximum goal before literals carried their
+# type no longer binds, so a stale script cannot silently address the re-typed proposition.
+stale_script="$standalone_probe_dir/typed_unsigned_stale_v1.json"
+printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":7,"goal_fingerprint":515359733},"actions":[{"action":"decide","accepted":false}]}' >"$stale_script"
+set +e
+stale_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$stale_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa")"
+set -e
+if ! printf '%s' "$stale_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); b=r["source_goal_binding"]; assert r["status"] == "failed" and b["fingerprint_match"] is False and b["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert r["tactic"]["reason"] == "target.goal_fingerprint does not match the imported kernel goal and hypotheses"'; then
+    printf 'proof test matrix failed: a stale v1 goal fingerprint still bound a typed-literal goal\n' >&2
+    exit 1
+fi
+# A literal offset is a u32 source position; any other spelling makes the script malformed. A
+# portable script's offset names no source literal, so its wrapped payload stays undecidable.
+for typed_offset in '-3' '"x"' '4294967296' '120'; do
+    offset_script="$standalone_probe_dir/typed_unsigned_offset.json"
+    printf '{"format":"elisa-proof-tactics-v1","initial":{"facts":[],"goal":{"kind":"binary","operator":">","left":{"kind":"int","value":-1,"line":6,"offset":%s},"right":{"kind":"int","value":0}}},"actions":[{"action":"decide","accepted":false}]}' "$typed_offset" >"$offset_script"
+    set +e
+    offset_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$offset_script" "$ROOT_DIR/examples/verified.elisa")"
+    set -e
+    if ! printf '%s' "$offset_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["status"] == "failed" and t["solved"] is False; assert t["valid"] is (sys.argv[1] == "120"); assert t["valid"] or t["reason"] == "invalid proof script"' "$typed_offset"; then
+        printf 'proof test matrix failed: typed literal offset %s\n' "$typed_offset" >&2
         exit 1
     fi
 done

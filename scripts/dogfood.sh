@@ -2661,7 +2661,7 @@ else
     link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$runtime_dir/runtime-support.o"
 fi
 "$runtime_dir/comparison-runtime"
-printf 'dogfood comparison_runtime: witnessed comparisons, typed negative constants, and every range-quantifier instance checked; unwitnessed reflexivity refused\n'
+printf 'dogfood comparison_runtime: witnessed comparisons, typed negative constants, width-tagged unsigned literals, and every range-quantifier instance checked; unwitnessed reflexivity refused\n'
 
 # Congruence closure is exercised against the kernel directly: every participating former must
 # carry an equality, and every excluded former (call, move, address-of, namespace path, guarded

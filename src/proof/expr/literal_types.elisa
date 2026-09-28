@@ -1,0 +1,79 @@
+# Typed integer-literal identity recovered from the source lexer.
+#
+# The compiler AST keeps an integer literal as its i64 payload and drops the type suffix, so a
+# full-width unsigned literal such as `0xFFFFFFFFFFFFFFFFu64` arrives as the payload -1. That
+# payload is ambiguous: a synthesized signed bound such as `-128` has the same shape. The CLI
+# records the suffix of every `u64`/`usize` literal as a `__proof_int_type` annotation keyed by
+# the token's exact line and byte offset, and this lookup restores the type only where the
+# payload alone cannot denote the value (a negative payload). Every other literal keeps its
+# legacy untyped encoding, so each mathematical value has exactly one arena spelling.
+extend ElisaProof:
+    public:
+        const PROOF_INT_TYPE_ANNOTATION_OWNER: sview = "__proof_int_type"
+
+        def proof_integer_literal_tag_valid(tag: sview) -> bool:
+            return tag == "u64" or tag == "usize"
+
+        # Return the recorded type of a high-bit unsigned literal, or "" for a legacy untyped
+        # literal. Exactly one annotation must match the literal's line and offset; a missing or
+        # duplicated marker leaves the literal untyped, which every consumer treats as ambiguous.
+        def proof_integer_literal_tag(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> sview:
+            match expression:
+                Ast::Expr.IntLit(value, position):
+                    # Byte 0 cannot hold an expression literal, and parser annotations that
+                    # carry no source offset default to it; never let those select a type.
+                    return "" if value >= 0 or position.offset == 0
+                    found: mutable sview = ""
+                    count: mutable usize = 0
+                    for annotation in annotations |found, count, position|:
+                        if annotation.owner == PROOF_INT_TYPE_ANNOTATION_OWNER and annotation.line == position.line and annotation.offset == position.offset:
+                            found <- annotation.name
+                            count <- count + 1
+                    return found if count == 1 and proof_integer_literal_tag_valid(found)
+                    return ""
+                _:
+                    return ""
+
+        # One comparison operand: an untyped nonnegative literal denotes its payload, a tagged
+        # high-bit literal denotes payload + 2^64. Anything else is not a closed typed constant.
+        def proof_typed_comparison_operand(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> (known: bool, tag: sview, value: i64):
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_typed_comparison_operand(inner, annotations)
+                Ast::Expr.IntLit(value, _):
+                    tag: sview = proof_integer_literal_tag(expression, annotations)
+                    return (value >= 0 or tag != "", tag, value)
+                _:
+                    return (false, "", 0)
+
+        # Decide a comparison of two closed typed literals, mirroring the kernel's typed constant
+        # comparison exactly: a tagged operand exceeds every untyped one, two tagged operands must
+        # share their width tag, and same-class operands compare by payload.
+        def proof_typed_constant_comparison(goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            match goal:
+                Ast::Expr.Paren(inner, _):
+                    return proof_typed_constant_comparison(inner, annotations)
+                Ast::Expr.Binary(left, operator, right, _):
+                    lhs: (known: bool, tag: sview, value: i64) = proof_typed_comparison_operand(left, annotations)
+                    rhs: (known: bool, tag: sview, value: i64) = proof_typed_comparison_operand(right, annotations)
+                    return false if not lhs.known or not rhs.known
+                    return false if lhs.tag == "" and rhs.tag == ""
+                    return false if lhs.tag != "" and rhs.tag != "" and lhs.tag != rhs.tag
+                    order: mutable i64 = 0
+                    if lhs.tag != "" and rhs.tag == "":
+                        order <- 1
+                    elif lhs.tag == "" and rhs.tag != "":
+                        order <- -1
+                    elif lhs.value < rhs.value:
+                        order <- -1
+                    elif lhs.value > rhs.value:
+                        order <- 1
+                    return order == 0 if operator == TokenKind.EqEq
+                    return order != 0 if operator == TokenKind.BangEq
+                    return order < 0 if operator == TokenKind.Lt
+                    return order > 0 if operator == TokenKind.Gt
+                    return order <= 0 if operator == TokenKind.LtEq
+                    return order >= 0 if operator == TokenKind.GtEq
+                    return false
+                _:
+                    return false
