@@ -1,6 +1,34 @@
 # Private statement-transition submodule for the checker.
 extend ElisaProof:
     private:
+        def proof_scalar_reference_write_target(target: Ast::Expr, operator: TokenKind, initializer: Ast::Expr, names: darray[sview]&, frame_parameters: darray[sview]&, functions: ProofFunctionTable&, declarations: darray[Ast::Decl]&, owner: sview) -> (known: bool, name: sview):
+            return (false, "") if operator != TokenKind.LArrow or proof_expr_has_call(initializer) or proof_expr_has_move(initializer) or not proof_expr_supported(initializer)
+            match target:
+                Ast::Expr.Index(object, index, _):
+                    root: sview = proof_ident_name(object)
+                    match index:
+                        Ast::Expr.IntLit(offset, _):
+                            return (false, "") if offset != 0
+                        _:
+                            return (false, "")
+                    return (false, "") if root == "" or not proof_current_parameter(names, frame_parameters, root)
+                    function_index: usize = proof_function_index(functions, owner)
+                    return (false, "") if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
+                    parameter_start: usize = functions.param_starts[function_index]
+                    parameter_count: usize = functions.param_counts[function_index]
+                    return (false, "") if parameter_start > functions.all_params.count or parameter_count > functions.all_params.count - parameter_start
+                    parameter_slot: mutable usize = functions.all_params.count
+                    for parameter_index in parameter_start..<parameter_start + parameter_count |parameter_index, functions, root, parameter_slot|:
+                        parameter_slot <- parameter_index if functions.all_params[parameter_index] == root
+                    return (false, "") if parameter_slot >= functions.all_params.count or parameter_slot >= functions.all_parameter_mutable_references.count or not functions.all_parameter_mutable_references[parameter_slot]
+                    source_parameter: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations(declarations, owner, root, 0)
+                    return (false, "") if source_parameter.count != 1
+                    scalar_target: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type(source_parameter.type_expression, declarations, 0)
+                    return (false, "") if not scalar_target.known
+                    return (true, root)
+                _:
+                    return (false, "")
+
         def proof_check_return_declarations(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
             match statement:
                 Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
@@ -129,10 +157,23 @@ extend ElisaProof:
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name)
                         proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
                     else:
-                        # Field/index/compound assignments can mutate aliases whose
-                        # dependencies are not represented in this small state model.
-                        proof_check_direct_frame_write(proof_substitute(target, names, values), names, frame_parameters, changes, preserves, report, name, position.line)
-                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
+                        # A mutable scalar reference's exact zero element is one primitive
+                        # storage cell. Version that pointee in the same substitution state used
+                        # for direct mutable variables; the reference handle itself remains the
+                        # original binding. Every broader indexed/field mutation retains the
+                        # conservative invalidation path below.
+                        reference_target: (known: bool, name: sview) = proof_scalar_reference_write_target(target, operator, initializer, names, frame_parameters, functions, report.source_declarations, name)
+                        proof_check_direct_frame_write(target, names, frame_parameters, changes, preserves, report, name, position.line)
+                        if reference_target.known:
+                            value: Ast::Expr = proof_substitute(initializer, names, values)
+                            target_slot: mutable usize = names.count
+                            while target_slot > 0 |target_slot, names, reference_target|:
+                                target_slot <- target_slot - 1
+                                if names[target_slot] == reference_target.name:
+                                    values[target_slot] <- proof_scalar_reference_state_marker(value, position)
+                                    break
+                        else:
+                            proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
                 _:
                     return false
             return true

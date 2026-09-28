@@ -154,7 +154,7 @@ python3 - "$REPORT_DIR/kernel_core.json" "$REPORT_DIR/kernel_core_fixture.json" 
 import json
 import sys
 
-for path, proven in zip(sys.argv[1:], (15, 28)):
+for path, proven in zip(sys.argv[1:], (16, 29)):
     with open(path, encoding="utf-8") as handle:
         report = json.load(handle)
     assert report["status"] == "proved"
@@ -726,6 +726,11 @@ run_probe body_ensures examples/body_ensures.elisa 0
 run_probe rejected_body_ensures examples/rejected_body_ensures.elisa 1
 run_probe contract_placement examples/contract_placement.elisa 0
 run_probe rejected_contract_placement examples/rejected_contract_placement.elisa 1
+run_probe scalar_reference_index examples/scalar_reference_index.elisa 1
+run_probe unsigned_disjunction_introduction examples/unsigned_disjunction_introduction.elisa 0
+run_probe rejected_unsigned_disjunction examples/rejected_unsigned_disjunction.elisa 1
+run_probe fixed_array_constant_indices examples/fixed_array_constant_indices.elisa 0
+run_probe rejected_fixed_array_constant_index examples/rejected_fixed_array_constant_index.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.

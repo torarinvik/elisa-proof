@@ -8245,3 +8245,54 @@ Evidence:
   harness exit 215.
 - **Suites.** `scripts/test.sh` passes (run in chunks); `scripts/dogfood.sh` passes, including
   the stage0-built arena harness. `test_kernel_inventory.py` reports 132 entries.
+
+### Merged elisa-proof main and the remaining wasmbrowser-proof gains (2026-09-28)
+
+`elisa-proof` main (through 0ab60f5) is merged into this branch. The resolutions:
+- `scripts/test.sh` and `AUDIT.md` keep both sides.
+- The replay `or` rule keeps the negated-left-disjunct rule from this branch under main's
+  `remaining` budget.
+- The affine comparison in `kernel_replay/difference_constraints.elisa` takes main's refusal of
+  a fully cancelled comparison, except for a certified caller. A certified caller has already
+  shown that no operation in either source term wraps, and its normal forms fold only
+  nonnegative literals, so the remaining integer comparison is exact. Without that exemption,
+  the `decreases limit - i` obligations in `examples/contract_placement.elisa` (lines 27 and 36)
+  became replay gaps.
+
+Of the `codex/wasmbrowser-proof` commits, main had already absorbed 47e3a61's unsigned-width
+hardening and c5585da's tactic branch regions, in reworked form (3c13be7), and this branch had
+0d32407 and d89902c. The three behaviors still missing were ported, each with that branch's
+accepted and rejected examples and focused test:
+- **31a5a57, scalar reference index zero.** It now carries the kernel half it depended on from
+  47e3a61:
+  - `reference-value` typing bindings;
+  - `proof_source_kernel_scalar_reference`;
+  - `kernel_replay/scalar_reference_typing.elisa`, which types `value[0]` for a scalar
+    reference parameter only at the literal zero subscript, and only when the receiver has no
+    container element sort.
+
+  A scalar reference parameter with no fixed-array shape gets extent 1 among this branch's
+  expression-keyed fixed places. `rejected_reference_offset` (`value[1]`) is still refused at
+  proposition formation.
+- **47e3a61, disjunction introduction ahead of the fixed-width guards,** in both the solver
+  (`proof_goal_depth`) and the kernel replay. Either alternative closes the disjunction, and
+  each alternative re-enters every guard, so a wrapping term in the unused alternative no
+  longer blocks a true identity. The later negated-left rule is unchanged. The false claims in
+  `rejected_unsigned_disjunction.elisa` (a wrapping alternative with a false identity, in both
+  orders) stay `proof-unproven`.
+- **0b47131, closed safe-constant comparisons** before the signed tier, so unrelated unsigned
+  premises no longer suppress `1 < 28` for a fixed-array literal index. The rule consumes no
+  premise; the branch's version also refused when any premise held an ambiguous constant, which
+  guards nothing here. The kernel replays the comparison through its constant-comparison rule,
+  which runs before its guards. `values[28]` on `array[usize, 28]` is still refused.
+
+`WASMBROWSER_WORKFLOW.md` was not taken. `test_safe_constant_replay.py` was not taken either:
+its positive cases pass here, but its negative case pins a goal fingerprint from that branch's
+kernel goal encoding, which main's encoding does not reproduce.
+
+The new binding is pushed with a literal kind, since the self-check refuses a conditional `sview` local in `kernel_core.elisa`, and `KERNEL_INVENTORY.md` lists the kind. No certificate shape changed. The new kernel typing binding kind is validated in
+`proof_kernel_replay_typing_binding_valid` (a by-reference flag, no owner or signature), so a
+forged `reference-value` binding without it is refused. Disjunction introduction spends the
+existing `remaining` budget per alternative.
+
+The merged tree first failed test.sh's standalone replay audit: it peaked at 1,776,033 KB against the 1,700,000 KB watchdog. The cause was the `proof_negated_operand` AST-node leak, which main fixed in 0ab60f5 after db44b78 was taken. That fix is applied here as-is, and the standalone audit now peaks at 918,065 KB in 41.6 s. test.sh and dogfood pass on the combined tree.
