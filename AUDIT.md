@@ -7784,6 +7784,7 @@ behavior. examples/rejected_sview_call_return_wrong_provenance.elisa captures th
 permutation and attempted write; it must fail with zero semantic errors and complete certificate
 replay. A kernel-linked return witness is the follow-up needed to recover this expressiveness.
 
+
 ### Replay exact reference call-return witnesses and nested return markers (2026-09-28)
 
 P1-03 replaces every name-based or "last read" provenance guess for returned references and
@@ -8361,3 +8362,231 @@ Not ported: edef742's tactic scratch-pair refactor. Main had already reworked th
 
 Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass, and so does
 `test_return_branch_path_fact.py`. The strict `<` claim and the float NaN control are refused.
+### Replay exact reference call-return witnesses and nested return markers (2026-09-28)
+
+P1-03 replaces every name-based or "last read" provenance guess for returned references and
+sviews with a witness the kernel re-derives. A wrapper that returns a call result now emits a
+`resource-region-return` marker with operator `param-call` (or `sview-call`). Its `left` must be
+the immediately preceding `resource-call` event. Replay then does the following:
+
+- reads the callee's replayed summary for its single returned formal and region;
+- maps that formal through the call's own argument list and that region through the call's
+  own region map;
+- follows the actual's borrow chain to a caller formal;
+- requires that formal to equal the marker's `secondary_name`, with the mapped region, live,
+  unmoved, not mutably borrowed elsewhere, and with the summary's mutability.
+
+The producer uses the same exact summary reader
+(`proof_resource_reference_summary_return_at`, in `resources/return_witnesses.elisa`). The
+removed helpers each authorized a resource fact without a witness:
+
+- `proof_resource_summary_returns_direct_formal` matched any `resource-use` of the formal's
+  *name*.
+- `proof_resource_summary_returns_only_fresh_allocations` did not bind the region.
+- The call-argument remapping in `region_flow.elisa` re-derived provenance from
+  `return_reference_parameters` rather than from the replayed summary.
+
+Holes found and closed while doing this:
+
+- **Wrong region.** A marker could claim a region the call never mapped. Both producer and
+  replay now require the mapped region to equal the marker's region and to be active.
+  `rejected_reference_call_return_region_mismatch` fails with `region-return-escape`.
+- **Nested returns.** Summary readers only scanned a summary's top-level children, so a `return`
+  of a different formal inside a branch was invisible. Readers now collect markers through
+  nested scopes, and conflicting markers pin nothing. `rejected_nested_reference_return_provenance`
+  and `rejected_nested_sview_return_provenance` fail with `region-return-witness-unsupported`.
+- **Syntactic scan.** The frontend's syntactic return scan now fails closed on any compound
+  statement, because the statement may hide a nested return.
+- **Stale sentinel.** The checker used "witness index < node count" as its found-witness
+  sentinel. That value goes stale as nodes are appended, which produced `param-call` markers
+  with empty formals and could skip the region-ful failing obligation. An explicit
+  `return_witness_found` flag replaces it.
+- **Region-less upgrade.** `def upgrade(a: i64&) -> mutable i64&: return a` was proved. The
+  compiler accepts it too. A mutable region-less reference return now needs an exact witness to
+  a replayed mutable reference formal; `rejected_regionless_reference_return_mutability_upgrade`
+  fails with `region-return-witness-unsupported`, zero semantic errors and zero gaps.
+  `rejected_reference_call_return_mutability_upgrade` covers the call-return form.
+
+Region-less reference returns (`keep(value: T&) -> T&`) previously emitted no marker, so
+wrappers over them could not compose. They now emit an empty-name `param`/`param-call` marker.
+The kernel (`proof_kernel_replay_resource_regionless_return`) admits the direct form only when
+the witness is a use of a region-less reference formal (by slot, not by name) of equal
+mutability. The arena shape check allows an empty lifetime only for these reference markers;
+an `sview` marker must always name its lifetime.
+
+Evidence:
+
+- **Positive examples.** `reference_call_return_provenance`, `regionless_reference_call_return_provenance`
+  and `sview_call_return_provenance` prove with full certificate replay.
+- **Rejected examples.** `rejected_reference_call_return_wrong_provenance` (argument
+  permutation followed by a write through the other formal) and
+  `rejected_sview_call_return_wrong_provenance` are disproved.
+- **Arena harness.** `examples/kernel_arena_runtime/reference_call_returns.elisa` adds cases
+  201–222: valid wrappers, a swapped formal, flipped mutability, unmapped region, `param` vs
+  `param-call` confusion, an ambiguous callee summary, a region-less keep/wrap, and
+  non-formal or region-carrying witnesses. It builds separate nodes rather than rewriting the
+  arena's immutable fields; the stage0 compiler enforces this and stage1 does not.
+- **Mutation evidence.** Deleting the formal check from the region-less kernel rule makes the
+  harness exit 215.
+- **Suites.** `scripts/test.sh` passes (run in chunks); `scripts/dogfood.sh` passes, including
+  the stage0-built arena harness. `test_kernel_inventory.py` reports 132 entries.
+
+### Merged elisa-proof main and the remaining wasmbrowser-proof gains (2026-09-28)
+
+`elisa-proof` main (through 0ab60f5) is merged into this branch. The resolutions:
+- `scripts/test.sh` and `AUDIT.md` keep both sides.
+- The replay `or` rule keeps the negated-left-disjunct rule from this branch under main's
+  `remaining` budget.
+- The affine comparison in `kernel_replay/difference_constraints.elisa` takes main's refusal of
+  a fully cancelled comparison, except for a certified caller. A certified caller has already
+  shown that no operation in either source term wraps, and its normal forms fold only
+  nonnegative literals, so the remaining integer comparison is exact. Without that exemption,
+  the `decreases limit - i` obligations in `examples/contract_placement.elisa` (lines 27 and 36)
+  became replay gaps.
+
+Of the `codex/wasmbrowser-proof` commits, main had already absorbed 47e3a61's unsigned-width
+hardening and c5585da's tactic branch regions, in reworked form (3c13be7), and this branch had
+0d32407 and d89902c. The three behaviors still missing were ported, each with that branch's
+accepted and rejected examples and focused test:
+- **31a5a57, scalar reference index zero.** It now carries the kernel half it depended on from
+  47e3a61:
+  - `reference-value` typing bindings;
+  - `proof_source_kernel_scalar_reference`;
+  - `kernel_replay/scalar_reference_typing.elisa`, which types `value[0]` for a scalar
+    reference parameter only at the literal zero subscript, and only when the receiver has no
+    container element sort.
+
+  A scalar reference parameter with no fixed-array shape gets extent 1 among this branch's
+  expression-keyed fixed places. `rejected_reference_offset` (`value[1]`) is still refused at
+  proposition formation.
+- **47e3a61, disjunction introduction ahead of the fixed-width guards,** in both the solver
+  (`proof_goal_depth`) and the kernel replay. Either alternative closes the disjunction, and
+  each alternative re-enters every guard, so a wrapping term in the unused alternative no
+  longer blocks a true identity. The later negated-left rule is unchanged. The false claims in
+  `rejected_unsigned_disjunction.elisa` (a wrapping alternative with a false identity, in both
+  orders) stay `proof-unproven`.
+- **0b47131, closed safe-constant comparisons** before the signed tier, so unrelated unsigned
+  premises no longer suppress `1 < 28` for a fixed-array literal index. The rule consumes no
+  premise; the branch's version also refused when any premise held an ambiguous constant, which
+  guards nothing here. The kernel replays the comparison through its constant-comparison rule,
+  which runs before its guards. `values[28]` on `array[usize, 28]` is still refused.
+
+`WASMBROWSER_WORKFLOW.md` was not taken. `test_safe_constant_replay.py` was not taken either:
+its positive cases pass here, but its negative case pins a goal fingerprint from that branch's
+kernel goal encoding, which main's encoding does not reproduce.
+
+The new binding is pushed with a literal kind, since the self-check refuses a conditional `sview` local in `kernel_core.elisa`, and `KERNEL_INVENTORY.md` lists the kind. No certificate shape changed. The new kernel typing binding kind is validated in
+`proof_kernel_replay_typing_binding_valid` (a by-reference flag, no owner or signature), so a
+forged `reference-value` binding without it is refused. Disjunction introduction spends the
+existing `remaining` budget per alternative.
+
+The merged tree first failed test.sh's standalone replay audit: it peaked at 1,776,033 KB against the 1,700,000 KB watchdog. The cause was the `proof_negated_operand` AST-node leak, which main fixed in 0ab60f5 after db44b78 was taken. That fix is applied here as-is, and the standalone audit now peaks at 918,065 KB in 41.6 s. test.sh and dogfood pass on the combined tree.
+
+
+### Pure call guards survive element writes and bound short-circuit operands (2026-09-28)
+
+The engine's `AudioVirtual` slot accessors guard with a pure call, `live(t, s)`, whose
+postcondition is `not result or s < CAPACITY`. Two gaps kept those guards from bounding later
+accesses:
+
+- **Element writes dropped the resolved bound.** After `raise E if not live(t, s)`, the facts
+  hold both `live(t, s)` and `not live(t, s) or s < CAPACITY`. The first write `t.live[s] <- x`
+  clears every fact that is not call-stable. The disjunction mentions `t` and was dropped, so
+  the second write's index was unproven. `proof_resolve_disjunctive_facts`
+  (`check/symbol_and_move_state.elisa`) now runs before that clear. For each fact `A or B`
+  where another fact is the syntactic negation of `A` (or of `B`), it records the other side as
+  a derived fact of kind `unit-resolution`, over exactly those two premises. The clear then
+  keeps `s < CAPACITY` because it is call-stable in its own right.
+- **Short-circuit guards with a call recorded nothing.** `live(t, s) and t.real[s]` and
+  `not live(t, s) or now < t.stamp[s]` checked the right operand without the guard. The guard
+  is now recorded when every call in it is pure and the right operand calls nothing impure.
+  With no state change between guard and access, the call term denotes one value. The guard's
+  own call summaries are also added: `proof_add_guard_call_summaries` in
+  `check/guard_summaries.elisa`. The statement records them only after the whole expression,
+  too late for the operand. Only calls on the guard's unconditional path qualify. A call in the
+  right operand of a nested `and`/`or`/`else` may not run, so its postcondition may not hold.
+
+Accepted: `examples/call_guard_summaries.elisa` (a write after a guard, an `and` guard, an `or`
+early return).
+
+Rejected: `examples/rejected_call_guard_summaries.elisa`:
+- an inverted raise guard;
+- `(flag or live(t, s)) and t.real[s]`, where the call may not run;
+- an inverted `or` guard.
+
+All three stay `index-upper-unproven`, and no `unit-resolution` fact appears.
+`rejected_short_circuit_guard`'s `guard_has_a_call` still fails, because `bound` states no
+postcondition. Its comment now says so.
+
+Malformed certificates: `unit-resolution` joins `proof-step`, `lemma-step`,
+`loop-invariant-step` and `branch-conjunct` as a derived kind in both certificate validators.
+Replay requires each premise to be an independently valid trace in the same owner, and it
+re-proves the resolvent from the premises in the kernel. A forged resolvent, or a premise
+without a trace, fails closed. `report_output` counts `unit-resolution` as a derivation, not a
+trusted boundary. `KERNEL_INVENTORY.md` lists the kind.
+
+Budget: resolution is quadratic in the facts standing at one element write, and each resolvent
+goes through the existing `proof_kernel_report_append_allowed` gates. Guard summaries descend at
+most 16 expression levels, and each ensure is admitted through `proof_add_function_summary_fact`.
+The callee's requires are certified against the pre-guard facts, and a refused precondition
+adds nothing.
+
+`scripts/test.sh` now also wraps main's `rejected_normalized_ground_difference` probe in
+`set +e`. Unwrapped, its expected exit 1 ended the run silently under `set -e` right after the
+standalone audit.
+
+### Resolve a call's arguments once, so loop binders meet callee preconditions (2026-09-28)
+
+Every call inside a range loop failed its callee's `requires` over the binder. This affected
+`best <- slot if better(pool, slot, best)`, the block `if`, a declaration initializer and a
+short-circuit operand, even though the index accesses on the same line proved.
+
+A range binder's value is a versioned symbol `(slot, k)`. The call sites resolved the call in
+the caller's environment and then handed it to `proof_apply_function`, which resolves the
+arguments again. Resolution is idempotent for ordinary values, but not for a value that
+mentions its own name. The goal became `((slot, k), k) < CAP`, which no fact about the binder
+matches.
+
+`proof_call_source` (`check/function_contracts_and_frames.elisa`) now gives
+`proof_apply_function` the call as written, at every site:
+- nested calls in `check/block_checker_and_patterns.elisa`;
+- declarations and plain assignments in `check/returns/declarations.elisa`;
+- call statements in `check/returns/contracts.elisa`.
+
+The resolved call is still the result term. A source that is not itself a call (a local whose
+value is a call term) keeps the resolved form, as before.
+
+Accepted: `examples/loop_binder_call_requires.elisa` (four call positions).
+
+Rejected: `examples/rejected_loop_binder_call_requires.elisa`:
+- a range one past `CAP`;
+- a call with `slot + 1`.
+
+Both stay `call-requires-unproven`.
+
+Malformed certificates: no certificate shape changed. The requires goal and the summary facts
+record the singly resolved arguments, which are the ones replay re-derives from.
+
+Budget: unchanged, and one substitution pass fewer per call.
+
+Found while proving the engine's `AudioVirtual.next_virtual`.
+
+## Merge of elisa-engine-proof through 6930911 (2026-09-28)
+
+Both lines ported the same wasmbrowser gains independently (main in 7ca04f3, 6683562 and
+212c3de; the engine branch in ed4db77). Where the two versions were equivalent, main's code
+was kept.
+
+The one real difference was `proof_closed_safe_constant_comparison`. It had been defined twice,
+and the engine's one-argument form was kept. That form does not refuse because a premise holds
+an ambiguous constant. The comparison consumes no premise, and the kernel's constant-comparison
+rule runs before any fact guard, so the extra refusal protected nothing.
+
+The engine's other gains come in unchanged:
+- disjunctive-fact resolution at return sites;
+- pure call guard summaries;
+- one-time argument resolution;
+- `test.sh` failing on rejected-probe errors.
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass on the merged tree, along with
+every focused wasmbrowser test.
