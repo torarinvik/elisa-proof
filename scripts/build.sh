@@ -14,6 +14,10 @@ case "$OPT_LEVEL" in
     O0|O1|O2|O3) ;;
     *) printf 'ELISA_OPT_LEVEL must be O0, O1, O2, or O3 (got %s)\n' "$OPT_LEVEL" >&2; exit 2 ;;
 esac
+# stage1 stops a compile past its runaway guard (4 GiB by default). The whole tool links the
+# compiler front end, and its compile now peaks between 3.6 and 4.2 GB (2026-09-28, O0 through
+# O3), so give it headroom unless the caller set a limit.
+export ELISA_STAGE1_MAX_RSS_KB="${ELISA_STAGE1_MAX_RSS_KB:-8388608}"
 PROOF_OUTPUT="${ELISA_PROOF_OUTPUT:-$ROOT_DIR/build/elisa-proof}"
 # The entry point, relative to the repository: `src/replay_main.elisa` builds the portable
 # package checker `elisa-proof-replay` from the same snapshot.

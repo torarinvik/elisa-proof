@@ -168,27 +168,30 @@ for path, proven in zip(sys.argv[1:], (16, 29)):
 PY
 # The kernel's own audit, exported as a package, replays in the separate checker theorem by
 # theorem: the package carries every replayed goal, and the checker trusts no fingerprint.
-for probe in kernel_core:src/proof/kernel_core.elisa kernel_core_fixture:examples/dogfood_kernel_core.elisa; do
-    label="${probe%%:*}"
-    "$ROOT_DIR/build/elisa-proof" --package "$ROOT_DIR/${probe#*:}" >"$REPORT_DIR/$label.package.json"
-    "$ROOT_DIR/build/elisa-proof-replay" "$REPORT_DIR/$label.package.json" >"$REPORT_DIR/$label.replay.json" || {
+for label in kernel_core kernel_core_fixture; do
+    source_path="src/proof/kernel_core.elisa"
+    [[ "$label" == kernel_core_fixture ]] && source_path="examples/dogfood_kernel_core.elisa"
+    "$ROOT_DIR/build/elisa-proof" --package "$ROOT_DIR/$source_path" >"$REPORT_DIR/$label.package.json"
+    if ! "$ROOT_DIR/build/elisa-proof-replay" "$REPORT_DIR/$label.package.json" >"$REPORT_DIR/$label.replay.json"; then
         printf 'dogfood failed: %s package did not replay in the portable checker\n' "$label" >&2
         exit 1
-    }
-    python3 - "$label" "$REPORT_DIR/$label.json" "$REPORT_DIR/$label.package.json" "$REPORT_DIR/$label.replay.json" <<'PY'
+    fi
+done
+python3 - "$REPORT_DIR" kernel_core kernel_core_fixture <<'PY'
 import json
 import sys
 
-label = sys.argv[1]
-report, package, result = (json.load(open(path, encoding="utf-8")) for path in sys.argv[2:])
-replayed = sum(1 for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed")
-if not (result["status"] == "replayed" and result["trust"]["kernel"] == "checked"
-        and len(result["theorems"]) == len(package["theorems"]) == replayed > 0
-        and all(theorem["status"] == "replayed" for theorem in result["theorems"])):
-    raise SystemExit(f"dogfood failed: {label} package replay disagrees with its report")
-print(f"dogfood {label}: {replayed} packaged theorems replay in the portable checker")
+report_dir = sys.argv[1]
+for label in sys.argv[2:]:
+    report, package, result = (json.load(open(f"{report_dir}/{label}{suffix}", encoding="utf-8"))
+                               for suffix in (".json", ".package.json", ".replay.json"))
+    replayed = sum(1 for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed")
+    if not (result["status"] == "replayed" and result["trust"]["kernel"] == "checked"
+            and len(result["theorems"]) == len(package["theorems"]) == replayed > 0
+            and all(theorem["status"] == "replayed" for theorem in result["theorems"])):
+        raise SystemExit(f"dogfood failed: {label} package replay disagrees with its report")
+    print(f"dogfood {label}: {replayed} packaged theorems replay in the portable checker")
 PY
-done
 python3 - "$REPORT_DIR/source_context_scope.json" <<'PY'
 import json
 import sys
