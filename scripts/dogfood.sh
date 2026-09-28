@@ -601,6 +601,8 @@ run_probe literal_index examples/literal_index.elisa 0
 run_probe rejected_literal_index examples/rejected_literal_index.elisa 1
 run_probe disjunctive_goals examples/disjunctive_goals.elisa 0
 run_probe rejected_disjunctive_goals examples/rejected_disjunctive_goals.elisa 1
+run_probe leaving_branch_join examples/leaving_branch_join.elisa 0
+run_probe rejected_leaving_branch_join examples/rejected_leaving_branch_join.elisa 1
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1

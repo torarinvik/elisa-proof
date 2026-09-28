@@ -7957,3 +7957,30 @@ certificate that claimed it could not replay.
 Open: the arithmetic guard still checks a right disjunct under the facts alone, not under the
 left one's negation. `ensure a >= 100 or a + 1 <= 100` stays unproven for an unbounded `a`, even
 though `a + 1` is evaluated only when `a < 100`.
+
+
+### Branches that leave do not weaken the join (2026-09-28)
+
+An `if` or `match` whose branch could modify state cleared the facts after the join, even when
+that branch never reached it. A guard such as `raise E if not live(table, slot)` parses as an
+`if` whose branch is a call-shaped raise, so the bound that `live`'s summary gives the
+surviving path was dropped before the read on the next line. A branch that called a mutator and
+then raised or returned had the same effect.
+
+Only a branch that falls through reaches the statement after the join. A return or continue
+checks its own state, a raise leaves the function, and a loop exit reached by a break keeps only
+the invariants the break re-establishes. The `if` join in `proof_check_return_contracts` now
+weakens only for a branch that falls through and may modify state, and the `match` join does the
+same per arm. A guard's call still weakens a `match` join, because it runs whenever its pattern
+matches, even when a later arm is taken. A call in the condition or scrutinee is applied before
+the branches fork, so it still reaches every path.
+
+`examples/leaving_branch_join.elisa` proves all 24 obligations with every certificate replayed:
+postfix, block and bound-local guards before a read, a `match` whose raising arm precedes a read,
+and three branches that call `clear` before raising or returning. Before this change the four
+guarded reads and the three ensures were unproven. `examples/rejected_leaving_branch_join.elisa`
+must report exactly five findings: an inverted guard, a branch and an arm that fall through after
+calling `clear`, and `clear` in a condition and in a scrutinee.
+
+No certificate shape or budget changes. The facts at each goal are still recorded and replayed
+as before, and the join does no extra exploration.
