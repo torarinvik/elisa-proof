@@ -117,99 +117,60 @@ extend ElisaProof:
 
         # Fixed arrays carry an exact element count in their type (`array[T, N]` or the
         # primitive shorthand `T[N]`). Keep this importer intentionally narrower than the
-        # compiler's full type algebra: only a literal extent is admitted, and wrappers are
-        # transparent. The result is -1 for dynamic arrays, dependent extents, aliases, or
-        # malformed type syntax. This is used only to derive a memory-safety fact after the
-        # index itself has independently been proved below the exact extent.
-        def proof_fixed_array_extent(expression: Ast::Expr) -> i64:
+        # compiler's full type algebra: an extent is a literal or a uniquely declared qualified
+        # integer constant (fixed_array_places.elisa), and wrappers are transparent. Dynamic
+        # arrays, bare or dependent extents, aliases, and malformed syntax have no shape. This
+        # is used only to derive a memory-safety fact after the index itself has independently
+        # been proved below the exact extent.
+        #
+        # The dimensions are collected in receiver-to-element order. A missing nested dimension
+        # is intentionally not invented: `array[darray[T], N]` contributes only its outer `N`, so
+        # a second runtime index remains opaque. This flat shape is enough for a bounded `IndexN`
+        # access without introducing a separate heap/alias model.
+        def proof_fixed_array_shape(expression: Ast::Expr, declarations: darray[Ast::Decl]&, extents: mutable darray[i64]&) -> bool:
             match expression:
                 Ast::Expr.Unary(_, operand, _):
-                    return proof_fixed_array_extent(operand)
+                    return proof_fixed_array_shape(operand, declarations, extents)
                 Ast::Expr.Paren(inner, _):
-                    return proof_fixed_array_extent(inner)
-                Ast::Expr.IndexN(object, arguments, _):
-                    head: sview = proof_callable_name(object)
-                    return -1 if head != "array" or arguments.count != 2
-                    extent: (known: bool, value: i64) = proof_constant_int(arguments[1])
-                    return extent.value if extent.known and extent.value >= 0
-                    return -1
-                Ast::Expr.Index(object, extent_expression, _):
-                    head: sview = proof_callable_name(object)
-                    # The compiler's shorthand form is only a fixed array when the
-                    # element head is a primitive scalar. Generic `T[N]`-shaped syntax
-                    # must not be reinterpreted as a storage bound by the proof importer.
-                    primitive: bool = head == "i8" or head == "i16" or head == "i32" or head == "i64" or head == "int" or head == "isize" or head == "u8" or head == "u16" or head == "u32" or head == "u64" or head == "usize" or head == "uintptr" or head == "f32" or head == "f64"
-                    return -1 if not primitive
-                    extent: (known: bool, value: i64) = proof_constant_int(extent_expression)
-                    return extent.value if extent.known and extent.value >= 0
-                    return -1
-                _:
-                    return -1
-
-        # Only direct function parameters are imported into this first fixed-array model.
-        # Looking through parentheses is harmless; fields, calls, and arbitrary paths are
-        # intentionally excluded until their storage identity and aliasing are modeled.
-        def proof_fixed_array_extent_for_object(expression: Ast::Expr, names: darray[sview]&, extents: darray[i64]&) -> i64:
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_fixed_array_extent_for_object(inner, names, extents)
-                Ast::Expr.Ident(object_name, _):
-                    limit: usize = names.count if names.count <= extents.count else extents.count
-                    for index in 0..<limit |index, names, extents, object_name|:
-                        return extents[index] if names[index] == object_name
-                    return -1
-                _:
-                    return -1
-
-        # Collect the statically known dimensions of a nested fixed-array parameter in
-        # receiver-to-element order. A missing nested dimension is intentionally not invented:
-        # `array[darray[T], N]` contributes only its outer `N`, so a second runtime index remains
-        # opaque. This flat shape is enough for a bounded `IndexN` access without introducing a
-        # separate heap/alias model.
-        def proof_fixed_array_shape(expression: Ast::Expr, extents: mutable darray[i64]&) -> bool:
-            match expression:
-                Ast::Expr.Unary(_, operand, _):
-                    return proof_fixed_array_shape(operand, extents)
-                Ast::Expr.Paren(inner, _):
-                    return proof_fixed_array_shape(inner, extents)
+                    return proof_fixed_array_shape(inner, declarations, extents)
                 Ast::Expr.IndexN(object, arguments, _):
                     head: sview = proof_callable_name(object)
                     return false if head != "array" or arguments.count != 2
-                    extent: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                    extent: (known: bool, value: i64) = proof_fixed_extent_constant(arguments[1], declarations)
                     return false if not extent.known or extent.value < 0
                     extents.push(extent.value)
                     nested: mutable darray[i64] = []
-                    proof_fixed_array_shape(arguments[0], &nested)
+                    proof_fixed_array_shape(arguments[0], declarations, &nested)
                     extents.extend(nested)
                     return true
                 Ast::Expr.Index(object, extent_expression, _):
-                    head: sview = proof_callable_name(object)
-                    primitive: bool = head == "i8" or head == "i16" or head == "i32" or head == "i64" or head == "int" or head == "isize" or head == "u8" or head == "u16" or head == "u32" or head == "u64" or head == "usize" or head == "uintptr" or head == "f32" or head == "f64"
-                    return false if not primitive
-                    extent: (known: bool, value: i64) = proof_constant_int(extent_expression)
+                    # The compiler's shorthand form is only a fixed array when the element head
+                    # is a primitive scalar. Generic `T[N]`-shaped syntax must not be
+                    # reinterpreted as a storage bound by the proof importer.
+                    return false if not proof_fixed_array_primitive_head(proof_callable_name(object))
+                    extent: (known: bool, value: i64) = proof_fixed_extent_constant(extent_expression, declarations)
                     return false if not extent.known or extent.value < 0
                     extents.push(extent.value)
                     return true
                 _:
                     return false
 
-        # The ordinary index path uses the first dimension. Multi-index expressions select the
-        # dimension by occurrence, so duplicate parameter names in the flat shape are deliberate
-        # and preserve the exact nesting order.
-        def proof_fixed_array_dimension_extent(expression: Ast::Expr, dimension: usize, names: darray[sview]&, extents: darray[i64]&) -> i64:
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_fixed_array_dimension_extent(inner, dimension, names, extents)
-                Ast::Expr.Ident(object_name, _):
-                    limit: usize = names.count if names.count <= extents.count else extents.count
-                    occurrence: mutable usize = 0
-                    for index in 0..<limit |index, names, extents, object_name, dimension, occurrence|:
-                        if names[index] == object_name:
-                            return extents[index] if occurrence == dimension
-                            occurrence <- occurrence + 1
-                    return -1
-                _:
-                    return -1
+        # The ordinary index path uses the first dimension of a collected place: a parameter,
+        # or a field chain rooted at one (fixed_array_places.elisa). Calls and arbitrary paths
+        # are excluded until their storage identity and aliasing are modeled.
+        def proof_fixed_array_extent_for_object(expression: Ast::Expr, places: darray[Ast::Expr]&, extents: darray[i64]&) -> i64:
+            return proof_fixed_array_dimension_extent(expression, 0, places, extents)
+
+        # Multi-index expressions select the dimension by occurrence, so a place repeated in the
+        # flat shape is deliberate and preserves the exact nesting order.
+        def proof_fixed_array_dimension_extent(expression: Ast::Expr, dimension: usize, places: darray[Ast::Expr]&, extents: darray[i64]&) -> i64:
+            limit: usize = places.count if places.count <= extents.count else extents.count
+            occurrence: mutable usize = 0
+            for index in 0..<limit |index, places, extents, expression, dimension, occurrence|:
+                if proof_fixed_place_matches(expression, places[index]):
+                    return extents[index] if occurrence == dimension
+                    occurrence <- occurrence + 1
+            return -1
 
         def proof_quantifier_rule(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> sview:
             kind: sview = proof_quantifier_kind(expression, annotations)

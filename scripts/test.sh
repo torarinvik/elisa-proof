@@ -426,7 +426,7 @@ if [[ "$oversized_action_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: oversized tactic action report was incomplete\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant loop_accumulator arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call; do
+for replay_fixture in replay_constant loop_accumulator arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_fields fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call; do
     run_json_report "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -1179,6 +1179,19 @@ run_json_report "$ROOT_DIR/examples/fixed_array_bounds.elisa" | python3 -c 'impo
 fixed_array_bounds_probe_status=${PIPESTATUS[1]}
 if [[ "$fixed_array_bounds_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: fixed-array type bounds\n' >&2
+    exit 1
+fi
+run_json_report "$ROOT_DIR/examples/fixed_array_fields.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 26; upper = [goal for goal in report["goals"] if goal["rule"] == "index-upper"]; assert len(upper) == 8 and all(goal["proven"] for goal in upper); assert all(any(origin and origin["kind"] == "global-constant" for origin in goal["fact_origins"]) for goal in upper); flag = [goal for goal in report["goals"] if goal["name"] == "live_flag" and goal["rule"] == "goal"]; assert len(flag) == 1 and flag[0]["proven"]; assert report["replay"]["gaps"] == 0'
+fixed_array_fields_probe_status=${PIPESTATUS[1]}
+if [[ "$fixed_array_fields_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: fixed-array struct-field and qualified-extent bounds\n' >&2
+    exit 1
+fi
+rejected_fixed_array_fields_report="$standalone_probe_dir/rejected-fixed-array-fields.json"
+run_json_report "$ROOT_DIR/examples/rejected_fixed_array_fields.elisa" >"$rejected_fixed_array_fields_report"
+rejected_fixed_array_fields_status=$?
+if [[ "$rejected_fixed_array_fields_status" -ne 1 ]] || ! python3 -c 'import json, sys; report = json.load(open(sys.argv[1])); assert report["status"] == "failed"; found = sorted((finding["name"], finding["kind"]) for finding in report["findings"]); assert found == [("rejected_derived_extent", "expression-unsupported"), ("rejected_derived_flag", "contract-proposition-type"), ("rejected_flag", "ensure-unproven"), ("rejected_off_by_one", "index-upper-unproven")], found; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0' "$rejected_fixed_array_fields_report"; then
+    printf 'proof test matrix failed: rejected_fixed_array_fields=%s\n' "$rejected_fixed_array_fields_status" >&2
     exit 1
 fi
 run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==28 and r["summary"]["obligations"]==28; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'

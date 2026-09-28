@@ -1,0 +1,142 @@
+# Fixed-array places. A fixed array's element count is part of its type (`T[N]`,
+# `array[T, N]`), and an assignment replaces elements, never the extent, so a place of that
+# type holds exactly N elements for its whole lifetime. The index checker uses this to turn a
+# proved `index < N` into `index < place.count`. The places are a parameter and the fields
+# reachable from it through uniquely declared structs; the compiler rejects a local that
+# reuses a parameter's name, so a place rooted at a parameter spelling always denotes it.
+extend ElisaProof:
+    private:
+        const PROOF_FIXED_PLACE_DEPTH_LIMIT: usize = 3
+        const PROOF_FIXED_PLACE_BUDGET: usize = 64
+        const PROOF_FIXED_EXTENT_SEARCH_DEPTH_LIMIT: usize = 64
+
+        # The compiler's `T[N]` shorthand is a fixed array only for these scalar element heads
+        # (semantic/check_fixed_array_shape.elisa). `uintptr` predates that list here and stays.
+        def proof_fixed_array_primitive_head(head: sview) -> bool:
+            return head == "i8" or head == "i16" or head == "i32" or head == "i64" or head == "int" or head == "isize" or head == "u8" or head == "u16" or head == "u32" or head == "u64" or head == "usize" or head == "uintptr" or head == "f32" or head == "f64" or head == "bool" or head == "char"
+
+        def proof_fixed_extent_integer_type(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Absent:
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "int" or name == "isize" or name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize"
+                _:
+                    return false
+
+        # Count every constant `constant_name` declared directly in a module named
+        # `module_name`, anywhere in the file, and keep the value of the last one when it is an
+        # immutable integer constant with a non-negative literal initializer (else -1). Nested
+        # modules, static-if branches and impl bodies are all searched, so two candidates for
+        # one spelling leave the extent unresolved instead of choosing one.
+        def proof_fixed_extent_find_constant(declarations: darray[Ast::Decl]&, module_name: sview, constant_name: sview, inside: bool, matches: mutable usize&, value: mutable i64&, depth: usize) -> void:
+            if depth >= PROOF_FIXED_EXTENT_SEARCH_DEPTH_LIMIT:
+                matches <- matches + 2
+                return
+            for declaration in declarations |module_name, constant_name, inside, matches, value, depth|:
+                match declaration:
+                    Ast::Decl.Const(name, type_expression, initializer, is_mutable, _):
+                        if inside and name == constant_name:
+                            matches <- matches + 1
+                            value <- -1
+                            if not is_mutable and proof_fixed_extent_integer_type(type_expression):
+                                match initializer:
+                                    Ast::Expr.IntLit(literal, _):
+                                        value <- literal if literal >= 0
+                                    _:
+                                        pass
+                    Ast::Decl.Module(name, body, _):
+                        proof_fixed_extent_find_constant(body, module_name, constant_name, name == module_name, matches, value, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_fixed_extent_find_constant(body, module_name, constant_name, inside, matches, value, depth + 1)
+                    _:
+                        pass
+
+        # An extent is a literal, or a qualified `Module::NAME` that names exactly one immutable
+        # integer constant with a non-negative literal value. A bare identifier stays unresolved:
+        # it may be a generic parameter, which lives only in the parser's side tables.
+        def proof_fixed_extent_constant(expression: Ast::Expr, declarations: darray[Ast::Decl]&) -> (known: bool, value: i64):
+            match expression:
+                Ast::Expr.IntLit(literal, _):
+                    return (true, literal) if literal >= 0
+                    return (false, 0)
+                Ast::Expr.Paren(inner, _):
+                    return proof_fixed_extent_constant(inner, declarations)
+                Ast::Expr.Scope(base, constant_name, _):
+                    module_name: sview = proof_callable_name(base)
+                    return (false, 0) if module_name == ""
+                    matches: mutable usize = 0
+                    value: mutable i64 = -1
+                    proof_fixed_extent_find_constant(declarations, module_name, constant_name, false, &matches, &value, 0)
+                    return (true, value) if matches == 1 and value >= 0
+                    return (false, 0)
+                _:
+                    literal: (known: bool, value: i64) = proof_constant_int(expression)
+                    return literal if literal.known and literal.value >= 0
+                    return (false, 0)
+
+        # The leaf names of the qualified extent constants a fixed-array type spells. The
+        # function-boundary importer unfolds the same constant where the body spells it bare.
+        def proof_collect_fixed_extent_names(expression: Ast::Expr, names: mutable darray[sview]&, depth: usize) -> void:
+            return if depth >= PROOF_FIXED_EXTENT_SEARCH_DEPTH_LIMIT
+            extent: mutable Ast::Expr = Ast::Expr.Invalid
+            match expression:
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_fixed_extent_names(operand, names, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_fixed_extent_names(inner, names, depth + 1)
+                Ast::Expr.IndexN(_, arguments, _):
+                    if arguments.count == 2:
+                        proof_collect_fixed_extent_names(arguments[0], names, depth + 1)
+                        extent <- arguments[1]
+                Ast::Expr.Index(_, extent_expression, _):
+                    extent <- extent_expression
+                _:
+                    pass
+            match extent:
+                Ast::Expr.Scope(_, constant_name, _):
+                    names.push(constant_name) if not (any existing in names where existing == constant_name)
+                _:
+                    pass
+
+        # A place spelled by an index object matches a collected place when both are the same
+        # parameter name and the same chain of field projections. Parentheses are transparent.
+        def proof_fixed_place_matches(object: Ast::Expr, place: Ast::Expr) -> bool:
+            match object:
+                Ast::Expr.Paren(inner, _):
+                    return proof_fixed_place_matches(inner, place)
+                Ast::Expr.Ident(object_name, _):
+                    return proof_ident_name(place) == object_name
+                Ast::Expr.Field(object_base, object_field, _):
+                    match place:
+                        Ast::Expr.Field(place_base, place_field, _):
+                            return object_field == place_field and proof_fixed_place_matches(object_base, place_base)
+                        _:
+                            return false
+                _:
+                    return false
+
+        # Collect the fixed-array places rooted at `root`: the root itself when its declared
+        # type is a fixed array (one entry per dimension, outermost first), otherwise each field
+        # of a uniquely declared struct, recursively to a fixed depth. Every visited place costs
+        # one unit of the per-function budget, so a wide or deep record ends the walk early.
+        def proof_collect_fixed_array_places(root: Ast::Expr, type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, places: mutable darray[Ast::Expr]&, extents: mutable darray[i64]&, constant_names: mutable darray[sview]&, depth: usize, budget: mutable usize&) -> void:
+            return if depth >= PROOF_FIXED_PLACE_DEPTH_LIMIT or budget == 0
+            budget <- budget - 1
+            shape: mutable darray[i64] = []
+            if proof_fixed_array_shape(type_expression, declarations, &shape):
+                for extent in shape |places, extents, root|:
+                    places.push(root)
+                    extents.push(extent)
+                proof_collect_fixed_extent_names(type_expression, constant_names, 0)
+                return
+            struct_name: sview = proof_type_head_name(type_expression, declarations, 0)
+            return if struct_name == ""
+            field_names: mutable darray[sview] = []
+            return if proof_struct_field_names(declarations, struct_name, 0, &field_names) != 1
+            position: Ast::Pos = Ast::expr_pos(root)
+            for field_name in field_names |root, declarations, places, extents, constant_names, depth, budget, struct_name, position|:
+                return if budget == 0
+                field: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(declarations, struct_name, field_name, 0)
+                continue if field.count != 1
+                proof_collect_fixed_array_places(Ast::Expr.Field(root, field_name, position), field.type_expression, declarations, places, extents, constant_names, depth + 1, budget)

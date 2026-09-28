@@ -7811,3 +7811,46 @@ inside an accumulator loop (`index-upper-unproven`), a false `ensure` on the acc
 (`ensure-unproven`), and a write to an ordinary immutable local (`resource-write-readonly`). Both
 fixtures are in `scripts/test.sh` and the dogfood probes, and the accepted one is also a replay
 fixture. The full `scripts/test.sh` passed, including O2/O3 replay.
+
+### Fixed-array fields and qualified extents (2026-09-28)
+
+Proving elisa-engine's audio voice pool exposed four holes in fixed-array bounds and contracts.
+Each made the assistant reject a correct index or contract; none admitted a false proof.
+
+Only a parameter whose own type is a fixed array had a known element count. A field of a struct
+parameter, `pool.live[slot]` over `live: bool[M::N]`, got no count. Fixed-array places are now the
+parameter and every field chain reachable from it through uniquely declared structs, up to three
+projections deep and 64 visited places per function (`check/fixed_array_places.elisa`). The index
+checker matches the indexed object against those places by parameter name and field names. This
+is sound because the extent belongs to the type: assignment replaces elements, never the count,
+and the compiler rejects a local that reuses a parameter's name, so a place spelled from a
+parameter always denotes it.
+
+An extent had to be an integer literal. A qualified constant, `bool[Slots::CAPACITY]`, now
+resolves when exactly one immutable integer constant of that name is declared directly in a
+module of that name, with a non-negative literal initializer. Two candidates, a mutable constant,
+a derived initializer (`WIDTH * 2`), or a bare identifier (possibly a generic parameter) leave the
+extent unknown, and the `T[N]` spelling then stays an unmodeled generic application. The shape
+reader and the scalar-witness element reader use the same resolution. `bool` and `char` joined the
+scalar heads, matching the compiler's fixed-array shorthand.
+
+The function-boundary importer unfolds a `usize` global constant only where a contract names it.
+It now also unfolds the constants a fixed-array place's extent names, so a body guard spelled
+`slot < CAPACITY` meets the count fact `live.count == 8`. The scalar-witness budget rose from 12 to
+16 markers, enough for a record of seven fixed-array fields.
+
+The kernel's proposition typing gave a container element type only to `T[literal]` and
+`array[T, literal]`, so a contract such as `ensure result == pool.live[slot]` over a
+`bool[M::N]` field failed with `contract-proposition-type`. The typing now accepts the same
+qualified extents as the bounds checker, and for the `T[N]` spelling only over a scalar head,
+since `Name[M::N]` over any other head may be a generic application.
+
+`examples/fixed_array_fields.elisa` proves reads and writes through struct fields, a nested
+`shelf.table.weight[slot]`, a two-dimensional `array[array[i64, 3], 2]` field, and an ensure over
+a `bool[Slots::CAPACITY]` element, all 26 obligations with clean replay. Without the typing change
+the ensure fails with `contract-proposition-type`. `examples/rejected_fixed_array_fields.elisa`
+must fail with four findings: an off-by-one guard (`index-upper-unproven`), an extent whose
+constant is derived (`expression-unsupported`), a false ensure over a typed element
+(`ensure-unproven`), and a contract over a derived-extent element (`contract-proposition-type`).
+Both fixtures are in `scripts/test.sh` and the dogfood probes, and the accepted one is also a
+replay fixture.
