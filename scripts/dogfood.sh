@@ -651,6 +651,16 @@ run_probe call_guard_summaries examples/call_guard_summaries.elisa 0
 run_probe rejected_call_guard_summaries examples/rejected_call_guard_summaries.elisa 1
 run_probe loop_binder_call_requires examples/loop_binder_call_requires.elisa 0
 run_probe rejected_loop_binder_call_requires examples/rejected_loop_binder_call_requires.elisa 1
+run_probe disequality_bounds examples/disequality_bounds.elisa 0
+run_probe rejected_disequality_bounds examples/rejected_disequality_bounds.elisa 1
+run_probe conditional_equality_split examples/conditional_equality_split.elisa 0
+run_probe rejected_conditional_equality_split examples/rejected_conditional_equality_split.elisa 1
+run_probe place_aliases examples/place_aliases.elisa 0
+run_probe rejected_place_aliases examples/rejected_place_aliases.elisa 1
+run_probe global_constant_loop_exit examples/global_constant_loop_exit.elisa 0
+run_probe rejected_global_constant_loop_exit examples/rejected_global_constant_loop_exit.elisa 1
+run_probe branch_join examples/branch_join.elisa 0
+run_probe rejected_branch_join examples/rejected_branch_join.elisa 1
 run_probe bound_propagation examples/bound_propagation.elisa 0
 run_probe rejected_bound_propagation examples/rejected_bound_propagation.elisa 1
 run_probe strict_shift examples/strict_shift.elisa 0
@@ -1475,6 +1485,36 @@ for owner in ("write_after_inverted_guard", "conditional_guard_call", "inverted_
     if (owner, "index-upper-unproven") not in owners:
         raise SystemExit("dogfood failed: %s bounded an access its guard call does not certify" % owner)
 print("dogfood call_guard_summaries: a pure guard call bounds exactly the path it certifies")
+PY
+
+python3 - "$REPORT_DIR" <<'PY'
+import json
+import os
+import sys
+
+report_dir = sys.argv[1]
+cases = (
+    ("disequality_bounds", {('interior', 'ensure-unproven'), ('not_endpoint', 'ensure-unproven')}),
+    ("conditional_equality_split", {('clamp_off_by_one', 'ensure-unproven')}),
+    ("place_aliases", {('other_element', 'ensure-unproven')}),
+    ("global_constant_loop_exit", {('last_slot', 'ensure-unproven')}),
+    ("branch_join", {('not_always_kept', 'ensure-unproven'), ('replace_too_far', 'ensure-unproven'), ('stale_rebind', 'ensure-unproven')}),
+)
+for name, owners in cases:
+    with open(os.path.join(report_dir, name + ".json"), encoding="utf-8") as handle:
+        report = json.load(handle)
+    if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+        raise SystemExit("dogfood failed: %s did not prove cleanly" % name)
+    if report["replay"]["certificates"] != report["replay"]["replayed"]:
+        raise SystemExit("dogfood failed: a %s certificate was left unreplayed" % name)
+    with open(os.path.join(report_dir, "rejected_" + name + ".json"), encoding="utf-8") as handle:
+        report = json.load(handle)
+    if report["status"] != "failed" or report["replay"]["gaps"]:
+        raise SystemExit("dogfood failed: rejected_%s did not fail cleanly" % name)
+    found = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+    if not owners <= found:
+        raise SystemExit("dogfood failed: rejected_%s proved %s" % (name, sorted(owners - found)))
+print("dogfood fact_transfer: disequality, conditional, alias, constant and join facts transfer only where sound")
 PY
 
 python3 - "$REPORT_DIR/short_circuit_guard.json" "$REPORT_DIR/rejected_short_circuit_guard.json" <<'PY'

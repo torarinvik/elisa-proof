@@ -1,0 +1,61 @@
+extend ElisaProof:
+    public:
+        # A local read from an element, `length: u64 = frames[slot]`, leaves the fact
+        # `length == frames[slot]`. The arithmetic tiers name only identifiers, so a goal about
+        # `frames[slot]` stays out of reach even with every bound on `length` known. Rewriting
+        # the element to its alias in the goal and in every fact is substitution of equals: the
+        # fact itself says both denote one value. The rewrite leaves anything it does not model
+        # (calls, quantifier bodies) untouched, which only withholds information. Each rewrite
+        # removes the element from the goal and spends one case-split level. The kernel mirror
+        # is `proof_kernel_replay_place_alias_goal`.
+        def proof_place_alias_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+            for fact in facts |fact, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                match fact:
+                    Ast::Expr.Binary(alias, TokenKind.EqEq, place, _):
+                        if proof_place_alias_shape(alias, place, facts):
+                            rewritten_goal: (changed: bool, value: Ast::Expr) = proof_replace_place(goal, place, alias, 0)
+                            if rewritten_goal.changed:
+                                rewritten_facts: mutable darray[Ast::Expr] = []
+                                for other in facts |other, place, alias, rewritten_facts|:
+                                    rewritten_facts.push(proof_replace_place(other, place, alias, 0).value)
+                                return true if proof_goal_depth(rewritten_facts, rewritten_goal.value, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+                    _:
+                        pass
+            return false
+
+        # The alias is a bare identifier and the place an element read; both must be witnessed
+        # primitive scalars of one comparison sort, so `==` is the built-in equality.
+        def proof_place_alias_shape(alias: Ast::Expr, place: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            match alias:
+                Ast::Expr.Ident(name, _):
+                    return false if name == ""
+                _:
+                    return false
+            match place:
+                Ast::Expr.Index(_, _, _):
+                    return proof_primitive_comparison(alias, place, facts)
+                _:
+                    return false
+
+        def proof_replace_place(expression: Ast::Expr, place: Ast::Expr, alias: Ast::Expr, depth: usize) -> (changed: bool, value: Ast::Expr):
+            return (false, expression) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (true, alias) if proof_expr_equal(expression, place)
+            match expression:
+                Ast::Expr.Paren(inner, position):
+                    replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(inner, place, alias, depth + 1)
+                    return (replaced.changed, Ast::Expr.Paren(replaced.value, position))
+                Ast::Expr.Unary(operator, operand, position):
+                    replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(operand, place, alias, depth + 1)
+                    return (replaced.changed, Ast::Expr.Unary(operator, replaced.value, position))
+                Ast::Expr.Binary(left, operator, right, position):
+                    left_replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(left, place, alias, depth + 1)
+                    right_replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(right, place, alias, depth + 1)
+                    return (left_replaced.changed or right_replaced.changed, Ast::Expr.Binary(left_replaced.value, operator, right_replaced.value, position))
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    condition_replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(condition, place, alias, depth + 1)
+                    then_replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(then_expression, place, alias, depth + 1)
+                    else_replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(else_expression, place, alias, depth + 1)
+                    return (condition_replaced.changed or then_replaced.changed or else_replaced.changed, Ast::Expr.If(condition_replaced.value, then_replaced.value, else_replaced.value, position))
+                _:
+                    return (false, expression)

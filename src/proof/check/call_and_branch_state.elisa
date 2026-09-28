@@ -395,6 +395,97 @@ extend ElisaProof:
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
+        # The facts of an arm that still read the same at the join. A binding the join forgot is
+        # a fresh atom under its own name, so an arm fact over that name speaks of the joined value
+        # only when the arm itself recorded the binding as that very atom. An arm that rebound it
+        # to a fresh symbol, as `b <- b + 1` does, keeps `b` for the old value, and its facts over
+        # `b` must not cross the join.
+        def proof_join_reads(source: darray[Ast::Expr]&, values: darray[Ast::Expr]&, names: darray[sview]&, arm_values: darray[Ast::Expr]&, limit: usize) -> darray[Ast::Expr]:
+            stale: mutable darray[sview] = []
+            for index in 0..<names.count |index, values, names, arm_values, limit, stale|:
+                continue if index >= limit or index >= values.count or proof_ident_name(values[index]) != names[index]
+                stale.push(names[index]) if index >= arm_values.count or proof_ident_name(arm_values[index]) != names[index]
+            kept: mutable darray[Ast::Expr] = []
+            for fact in source |stale, kept|:
+                kept.push(fact) if not (any name in stale where proof_expr_mentions_name(fact, name))
+            return kept
+
+        # Re-establish, at a join both arms reach, a fact that one arm states and the other arm
+        # implies. A binding the join forgot is a fresh atom under its own name; on each path it
+        # equals that arm's recorded value, so a candidate holds at the join when each arm proves
+        # it with the forgotten names replaced by the arm's values. That holds even when both arms
+        # record the same `b`: each arm reads its atoms in its own state, and on either path the
+        # joined atom is that arm's value. A name the join kept keeps its atom and is not replaced.
+        # A fact both arms state is left to the literal intersection, which bounds the search. `if flag: best <- slot` thus keeps `best <= CAP`: the
+        # untouched arm states it and the other derives it from `best == slot` and `slot < CAP`.
+        def proof_restore_branch_implied_facts(then_facts: mutable darray[Ast::Expr]&, else_facts: mutable darray[Ast::Expr]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, values: darray[Ast::Expr]&, names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            return if not analyzed
+            capped: mutable usize = limit if limit < values.count else values.count
+            capped <- names.count if names.count < capped
+            capped <- then_values.count if then_values.count < capped
+            capped <- else_values.count if else_values.count < capped
+            then_map: mutable darray[Ast::Expr] = []
+            else_map: mutable darray[Ast::Expr] = []
+            joined: mutable darray[sview] = []
+            for index in 0..<names.count |index, names, values, then_values, else_values, capped, then_map, else_map, joined, position|:
+                forgotten: bool = index < capped and proof_ident_name(values[index]) == names[index]
+                then_map.push(then_values[index] if forgotten else Ast::Expr.Ident(names[index], position))
+                else_map.push(else_values[index] if forgotten else Ast::Expr.Ident(names[index], position))
+                joined.push(names[index]) if forgotten
+            return if joined.count == 0
+            candidates: mutable darray[Ast::Expr] = []
+            candidates.extend(then_facts)
+            candidates.extend(else_facts)
+            # An arm that records a joined name as some other expression, `b: usize = best`,
+            # states its facts over that expression; read them back over the name as well.
+            for index in 0..<then_map.count |index, names, then_map, else_map, joined, then_facts, else_facts, candidates|:
+                continue if not (any name in joined where name == names[index])
+                proof_push_renamed_facts(&candidates, then_facts, then_map[index], names[index]) if proof_ident_name(then_map[index]) != names[index]
+                proof_push_renamed_facts(&candidates, else_facts, else_map[index], names[index]) if proof_ident_name(else_map[index]) != names[index]
+                proof_push_equal_renamings(&candidates, then_facts, names[index])
+                proof_push_equal_renamings(&candidates, else_facts, names[index])
+            accepted: mutable darray[Ast::Expr] = []
+            then_steps: mutable darray[Ast::Expr] = []
+            else_steps: mutable darray[Ast::Expr] = []
+            for fact in candidates |candidates, then_facts, else_facts, facts, names, parameters, report, annotations, then_map, else_map, joined, accepted, then_steps, else_steps|:
+                continue if not (any name in joined where proof_expr_mentions_name(fact, name))
+                continue if any existing in facts where proof_expr_equal(existing, fact)
+                continue if any existing in accepted where proof_expr_equal(existing, fact)
+                continue if (any other in then_facts where proof_expr_equal(other, fact)) and (any other in else_facts where proof_expr_equal(other, fact))
+                continue if not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
+                then_step: Ast::Expr = proof_substitute(fact, names, then_map)
+                else_step: Ast::Expr = proof_substitute(fact, names, else_map)
+                # The joined fact is recorded through an arm whose own reading is the fact itself,
+                # so its trace is that arm's kernel-checked step.
+                continue if not proof_expr_equal(then_step, fact) and not proof_expr_equal(else_step, fact)
+                continue if not proof_goal(then_facts, then_step, annotations)
+                continue if not proof_goal(else_facts, else_step, annotations)
+                accepted.push(fact)
+                then_steps.push(then_step)
+                else_steps.push(else_step)
+            for index in 0..<accepted.count |index, accepted, then_steps, else_steps, then_facts, else_facts, facts, report, owner, position|:
+                proof_add_derived_fact(then_facts, report, then_steps[index], "branch-join", position.line, owner) if not (any existing in then_facts where proof_expr_equal(existing, then_steps[index]))
+                proof_add_derived_fact(else_facts, report, else_steps[index], "branch-join", position.line, owner) if not (any existing in else_facts where proof_expr_equal(existing, else_steps[index]))
+                then_held: bool = any existing in then_facts where proof_expr_equal(existing, then_steps[index])
+                else_held: bool = any existing in else_facts where proof_expr_equal(existing, else_steps[index])
+                facts.push(accepted[index]) if then_held and else_held
+
+        def proof_push_renamed_facts(candidates: mutable darray[Ast::Expr]&, source: darray[Ast::Expr]&, value: Ast::Expr, name: sview) -> void:
+            alias: Ast::Expr = Ast::Expr.Ident(name, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+            for fact in source |candidates, value, alias|:
+                renamed: (changed: bool, value: Ast::Expr) = proof_replace_place(fact, value, alias, 0)
+                candidates.push(renamed.value) if renamed.changed
+
+        # A binding recorded as `b == best` states the arm's other facts over `best`.
+        def proof_push_equal_renamings(candidates: mutable darray[Ast::Expr]&, source: darray[Ast::Expr]&, name: sview) -> void:
+            for fact in source |candidates, source, name|:
+                match fact:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        proof_push_renamed_facts(candidates, source, right, name) if proof_ident_name(left) == name and not proof_expr_mentions_name(right, name)
+                    _:
+                        continue
+
         # Havoc for an opaque call. Type bounds are kept as at every havoc point; in addition a
         # fact that is call-stable for the current function is kept. The alias set must belong
         # to this very owner, otherwise nothing but type bounds survives.

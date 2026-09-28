@@ -1,0 +1,68 @@
+extend ElisaProof:
+    public:
+        # A disequality `x != c` removes one integer from x's interval. It only narrows the
+        # interval when c is an endpoint: then `x >= c` with `x != c` gives `x >= c + 1`, which
+        # is how an unsigned `length != 0` becomes the `length >= 1` that `length - 1` needs.
+        # Each pass can expose a new endpoint (`x != 0, x != 1`), so passes repeat while one
+        # moved a bound, at most once per disequality. Other facts are skipped up front: this
+        # runs on every equality closure, so a scan of every fact per pass is too slow.
+        # The kernel mirror is `proof_kernel_replay_tighten_disequality_bounds`.
+        def proof_tighten_disequality_bounds(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            disequalities: mutable darray[Ast::Expr] = []
+            for fact in facts |fact, disequalities|:
+                disequalities.push(fact) if proof_fact_is_disequality(fact)
+            rounds: mutable usize = 0
+            changed: mutable bool = true
+            while changed and rounds < disequalities.count |rounds, changed, disequalities, facts, bounds|:
+                changed <- false
+                for fact in disequalities |fact, changed, facts, bounds|:
+                    changed <- true if proof_tighten_by_disequality(fact, facts, bounds)
+                rounds <- rounds + 1
+
+        def proof_fact_is_disequality(fact: Ast::Expr) -> bool:
+            match fact:
+                Ast::Expr.Binary(_, TokenKind.BangEq, _, _):
+                    return true
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
+                            return true
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_tighten_by_disequality(fact: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> bool:
+            match fact:
+                Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
+                    return proof_tighten_named_disequality(left, right, facts, bounds)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                            return proof_tighten_named_disequality(left, right, facts, bounds)
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_tighten_named_disequality(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> bool:
+            return false if not proof_primitive_comparison(left, right, facts)
+            name: mutable sview = proof_ident_name(left)
+            constant: mutable (known: bool, value: i64) = proof_constant_int(right)
+            if name == "" or not constant.known:
+                name <- proof_ident_name(right)
+                constant <- proof_constant_int(left)
+            return false if name == "" or not constant.known
+            bound: ProofBound = proof_bound_for(bounds, name)
+            changed: mutable bool = false
+            if bound.has_lower and bound.lower == constant.value:
+                raised: (known: bool, value: i64) = proof_add_safe(constant.value, 1)
+                if raised.known:
+                    proof_add_lower(bounds, name, raised.value)
+                    changed <- true
+            if bound.has_upper and bound.upper == constant.value:
+                lowered: (known: bool, value: i64) = proof_sub_safe(constant.value, 1)
+                if lowered.known:
+                    proof_add_upper(bounds, name, lowered.value)
+                    changed <- true
+            return changed

@@ -3089,6 +3089,105 @@ if [[ "$rejected_loop_binder_call_requires_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `x != c` at an interval endpoint narrows the interval by one: unsigned `length != 0` gives
+# `length >= 1`. A disequality away from an endpoint narrows nothing.
+set +e
+run_json_report "$ROOT_DIR/examples/disequality_bounds.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+disequality_bounds_status=${PIPESTATUS[1]}
+set -e
+if [[ "$disequality_bounds_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an endpoint disequality did not narrow an unsigned interval\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_disequality_bounds.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert {("interior", "ensure-unproven"), ("not_endpoint", "ensure-unproven")} <= owners'
+rejected_disequality_bounds_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_disequality_bounds_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a disequality away from an interval endpoint narrowed the interval\n' >&2
+    exit 1
+fi
+
+# `x == if c then a else b` splits into the arm cases, each with its condition or its negation.
+set +e
+run_json_report "$ROOT_DIR/examples/conditional_equality_split.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+conditional_equality_split_status=${PIPESTATUS[1]}
+set -e
+if [[ "$conditional_equality_split_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an equality with a conditional value was not split into its arms\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_conditional_equality_split.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert {("clamp_off_by_one", "ensure-unproven")} <= owners'
+rejected_conditional_equality_split_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_conditional_equality_split_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a conditional equality proved a bound neither arm gives\n' >&2
+    exit 1
+fi
+
+# A local bound to a place (`last: T = xs[i]`) carries its facts to that place and back.
+set +e
+run_json_report "$ROOT_DIR/examples/place_aliases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+place_aliases_status=${PIPESTATUS[1]}
+set -e
+if [[ "$place_aliases_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a place read through its local alias did not keep the facts of its alias\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_place_aliases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert {("other_element", "ensure-unproven")} <= owners'
+rejected_place_aliases_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_place_aliases_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an alias transferred facts to a different place\n' >&2
+    exit 1
+fi
+
+# A global constant named only in a tail accumulator loop's invariant is imported, and its
+# value fact survives the clears at the loop boundary.
+set +e
+run_json_report "$ROOT_DIR/examples/global_constant_loop_exit.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+global_constant_loop_exit_status=${PIPESTATUS[1]}
+set -e
+if [[ "$global_constant_loop_exit_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a global constant in a tail-loop invariant was not imported\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_global_constant_loop_exit.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert {("last_slot", "ensure-unproven")} <= owners'
+rejected_global_constant_loop_exit_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_global_constant_loop_exit_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a tail-loop exit proved a bound tighter than its constant\n' >&2
+    exit 1
+fi
+
+# A fact both arms of an if establish over the names they rebind survives the join as a
+# re-proved `branch-join` fact. A fact only one arm proves, or one about a value rebound from
+# itself (`b <- b + 1`), does not.
+set +e
+run_json_report "$ROOT_DIR/examples/branch_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; origins = {origin["kind"] for goal in report["goals"] for origin in goal["fact_origins"] if origin}; assert "branch-join" in origins'
+branch_join_status=${PIPESTATUS[1]}
+set -e
+if [[ "$branch_join_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a fact both arms establish over a rebound name was lost at the join\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_branch_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert {("not_always_kept", "ensure-unproven"), ("replace_too_far", "ensure-unproven"), ("stale_rebind", "ensure-unproven")} <= owners'
+rejected_branch_join_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_branch_join_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a join kept a fact only one arm establishes, or one about a stale value\n' >&2
+    exit 1
+fi
+
 # A difference constraint carries an interval to the name the overflow guard asks about.
 set +e
 run_json_report "$ROOT_DIR/examples/bound_propagation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "goal") in proven for owner in ("increment_under_a_bounded_limit", "increment_through_a_chain", "lower_bound_travels", "unsigned_increment_under_a_strict_peer", "unsigned_increment_under_a_reversed_peer", "strict_fact_needs_no_upper_bound", "strict_fact_needs_no_related_bound"))'
