@@ -426,7 +426,7 @@ if [[ "$oversized_action_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: oversized tactic action report was incomplete\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call; do
+for replay_fixture in replay_constant loop_accumulator arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call; do
     run_json_report "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -2962,6 +2962,26 @@ rejected_captured_scalar_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_captured_scalar_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a binding a captured body writes kept its facts\n' >&2
+    exit 1
+fi
+
+# A loop-header accumulator is the one binding its loop may write, and a loop whose value is the
+# accumulator is checked statement by statement before that value is returned.
+set +e
+run_json_report "$ROOT_DIR/examples/loop_accumulator.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"count_small", "first_small", "bounded_total"}'
+loop_accumulator_status=${PIPESTATUS[1]}
+set -e
+if [[ "$loop_accumulator_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a loop-header accumulator loop was refused\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_loop_accumulator.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert all(reason == "body-unverified" for reason in reasons.values()) and len(reasons) == 3; kinds = {(f["name"], f["kind"]) for f in report["findings"]}; assert ("an_accumulator_body_still_checks_its_index", "index-upper-unproven") in kinds; assert ("an_accumulator_value_keeps_its_ensure", "ensure-unproven") in kinds; assert ("an_ordinary_local_stays_immutable", "resource-write-readonly") in kinds'
+rejected_loop_accumulator_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_loop_accumulator_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an accumulator loop skipped a check or widened the write exemption\n' >&2
     exit 1
 fi
 

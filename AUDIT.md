@@ -7783,3 +7783,31 @@ conversions, sview parameters, and verified call results bound to locals retain 
 behavior. examples/rejected_sview_call_return_wrong_provenance.elisa captures the argument
 permutation and attempted write; it must fail with zero semantic errors and complete certificate
 replay. A kernel-linked return witness is the follow-up needed to recover this expressiveness.
+
+### Loop-header accumulators and tail value blocks (2026-09-28)
+
+Two holes showed up while proving elisa-engine's audio code. Both made the assistant reject correct
+programs; neither admitted a false proof.
+
+A loop-header accumulator, `for value in values |count: usize = 0| -> count:`, is a local that the
+loop assigns. The parser declares it with its bare type and records the accumulator only in the
+`__loop_header_accumulator` side table. The resource checker read the declaration alone and
+reported every `count <- ...` in the body as `resource-write-readonly`. The function table now
+collects that side table, keyed by binding name and declaration offset, and the resource checker
+marks exactly those bindings writable. An ordinary `count: usize = 0` that a later `|count|` loop
+captures keeps its immutable type, so writing it is still rejected.
+
+A loop whose value is its accumulator reaches a tail `return` as a value block. Such a block is
+`return Block(statements, value)`, which went to the unmodeled-operator gate and left the function
+unsupported. The return checker now checks it as the body `statements ++ [return value]`, in a
+private copy of the state, so the block's declarations stay local. Index obligations, loop
+invariants, and the function's `ensure` clauses all apply to that body. A block without a value
+still goes through the old admission gate.
+
+`examples/loop_accumulator.elisa` proves a counting loop, a `break index` search, and an
+invariant-carrying total, with clean replay and no trusted assumptions. The three functions in
+`examples/rejected_loop_accumulator.elisa` must stay unverified. They fail on an out-of-range index
+inside an accumulator loop (`index-upper-unproven`), a false `ensure` on the accumulator value
+(`ensure-unproven`), and a write to an ordinary immutable local (`resource-write-readonly`). Both
+fixtures are in `scripts/test.sh` and the dogfood probes, and the accepted one is also a replay
+fixture. The full `scripts/test.sh` passed, including O2/O3 replay.

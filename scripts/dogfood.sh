@@ -591,6 +591,8 @@ run_probe rejected_region_bind_mutable_external examples/rejected_region_bind_mu
 run_probe rejected_region_call_result_duplicate_owner examples/rejected_region_call_result_duplicate_owner.elisa 1
 run_probe rejected_for_invariant examples/rejected_for_invariant.elisa 1
 run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.elisa 1
+run_probe loop_accumulator examples/loop_accumulator.elisa 0
+run_probe rejected_loop_accumulator examples/rejected_loop_accumulator.elisa 1
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
