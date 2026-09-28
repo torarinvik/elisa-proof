@@ -7852,3 +7852,24 @@ Evidence:
   harness exit 215.
 - **Suites.** `scripts/test.sh` passes (run in chunks); `scripts/dogfood.sh` passes, including
   the stage0-built arena harness. `test_kernel_inventory.py` reports 132 entries.
+
+### Stop leaking AST nodes from the propositional inconsistency probe (2026-09-28)
+
+A diagnostic allocation collector (scratch only, linked in place of the weak profiling hooks)
+tracked live bytes per allocation in the process arena, with temporary phase markers around
+parsing, source preparation, each scheduled function check, replay and JSON rendering. On
+`examples/kernel_replay_standalone.elisa` live bytes were 143 MB before function checking,
+1,374 MB after it, 1,438 MB after replay and 1,580 MB after rendering: the checker phase, not the
+report, owned the peak. A size histogram showed 1,125 MB in 29,693 blocks of exactly 37,888
+bytes; LLDB placed those in `ctx_aos_store_alloc`, the AST node store, which never releases a
+node. Sampled backtraces of those allocations during checking were 13 of 17 in
+`proof_negated_operand`, reached from `proof_fact_denies` through
+`proof_facts_propositionally_inconsistent`, which runs for every fact pair of every goal. Its
+miss path constructed a fresh `Ast::Expr.Invalid`, and constructing any AST value appends a node.
+
+The miss path now returns the input handle. `operand` is read only when `known` is true (its sole
+caller is `proof_fact_denies`), so no decision changes. Measured on the same target: the complete
+report is byte-identical to the baseline (1,669 obligations, 1,179 proven, 611 expected failures,
+0 replay gaps), and the watchdog's phys_footprint peak fell from 1,623,185 KB to 845,617 KB
+against the 1,700,000-KB limit. The remaining store growth (336 MB in 8,882 chunks at exit) comes
+from other checker paths that build AST values and is still to be attributed.
