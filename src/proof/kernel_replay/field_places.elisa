@@ -1,0 +1,87 @@
+const PROOF_KERNEL_REPLAY_FIELD_PLACE_LIMIT: usize = 4
+
+extend ElisaProofKernelReplay:
+    private:
+        # Mirror of `proof_field_place_goal`: generalize each witnessed primitive scalar field
+        # place over a plain name to a fresh reserved name in the goal and every fact, then
+        # decide the generalized goal. Instantiating the names back gives the original goal, so
+        # this is sound for any fixed values; the witness keeps protocol dispatch out.
+        def proof_kernel_replay_field_place_goal(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if split_depth >= PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT or remaining <= 1
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            probe: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, proof_kernel_replay_field_place_name(0), "")
+            return false if not proof_kernel_replay_valid(nodes, probe)
+            return false if proof_kernel_replay_replace_exact(nodes, children, goal_root, probe, probe, 0).changed
+            for fact in facts |fact, nodes, children, probe|:
+                return false if proof_kernel_replay_replace_exact(nodes, children, fact, probe, probe, 0).changed
+            places: mutable darray[usize] = []
+            proof_kernel_replay_collect_field_places(nodes, children, facts, goal_root, &places, 0)
+            for fact in facts |fact, nodes, children, facts, places|:
+                proof_kernel_replay_collect_field_places(nodes, children, facts, fact, &places, 0)
+            return false if places.count == 0
+            rewritten_goal: mutable usize = goal_root
+            rewritten_facts: mutable darray[usize] = []
+            for fact in facts |fact, rewritten_facts|:
+                rewritten_facts.push(fact)
+            for index in 0..<places.count |index, nodes, children, places, rewritten_goal, rewritten_facts|:
+                fresh: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, proof_kernel_replay_field_place_name(index), "")
+                rewritten_goal <- proof_kernel_replay_replace_exact(nodes, children, rewritten_goal, places[index], fresh, 0).value
+                next_facts: mutable darray[usize] = []
+                for fact in rewritten_facts |fact, nodes, children, places, index, fresh, next_facts|:
+                    next_facts.push(proof_kernel_replay_replace_exact(nodes, children, fact, places[index], fresh, 0).value)
+                rewritten_facts <- next_facts
+            return proof_kernel_replay_goal_depth_remaining(nodes, children, rewritten_facts, rewritten_goal, split_depth + 1, depth + 1, remaining: remaining - 1)
+
+        def proof_kernel_replay_field_place_name(index: usize) -> sview:
+            return "__elisa_field_place_0" if index == 0
+            return "__elisa_field_place_1" if index == 1
+            return "__elisa_field_place_2" if index == 2
+            "__elisa_field_place_3"
+
+        # `name.field` or `name.outer.field` (field nodes down to a named identifier), or a
+        # renamed loop binder.
+        def proof_kernel_replay_field_place_shape(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, root)
+            if nodes[root].kind == "tuple":
+                # A renamed loop binder, `(index, 518)`.
+                return false if nodes[root].children_count != 2 or not proof_kernel_replay_child_range_valid(nodes[root].children_start, 2, children.count)
+                first: usize = children[nodes[root].children_start]
+                second: usize = children[nodes[root].children_start + 1]
+                return false if not proof_kernel_replay_valid(nodes, first) or not proof_kernel_replay_valid(nodes, second)
+                return nodes[first].kind == "ident" and nodes[first].name != "" and nodes[second].kind == "int"
+            return false if nodes[root].kind != "field" or nodes[root].name == ""
+            cursor: mutable usize = nodes[root].left
+            for step in 0..<ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT |cursor, nodes|:
+                return false if not proof_kernel_replay_valid(nodes, cursor)
+                return nodes[cursor].name != "" if nodes[cursor].kind == "ident"
+                return false if nodes[cursor].kind != "field" or nodes[cursor].name == ""
+                cursor <- nodes[cursor].left
+            return false
+
+        def proof_kernel_replay_collect_field_places(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, places: mutable darray[usize]&, depth: usize) -> void:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return if places.count >= PROOF_KERNEL_REPLAY_FIELD_PLACE_LIMIT or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "unary":
+                proof_kernel_replay_collect_field_places(nodes, children, facts, node.left, places, depth + 1)
+            elif node.kind == "binary" or node.kind == "index":
+                proof_kernel_replay_collect_field_places(nodes, children, facts, node.left, places, depth + 1)
+                proof_kernel_replay_collect_field_places(nodes, children, facts, node.right, places, depth + 1)
+            elif node.kind == "if":
+                proof_kernel_replay_collect_field_places(nodes, children, facts, node.left, places, depth + 1)
+                proof_kernel_replay_collect_field_places(nodes, children, facts, node.right, places, depth + 1)
+                proof_kernel_replay_collect_field_places(nodes, children, facts, node.auxiliary, places, depth + 1)
+            elif node.kind == "call":
+                return if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, nodes, children, facts, places, depth|:
+                    proof_kernel_replay_collect_field_places(nodes, children, facts, children[node.children_start + index], places, depth + 1)
+            elif node.kind == "field" or node.kind == "tuple":
+                if proof_kernel_replay_field_place_shape(nodes, children, root) and proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, root, 0):
+                    for place in places |place, nodes, children, root|:
+                        return if proof_kernel_replay_expr_equal(nodes, children, place, root, 0)
+                    places.push(root)

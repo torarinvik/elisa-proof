@@ -1,0 +1,138 @@
+extend ElisaProofKernelReplay:
+    private:
+        # Mirror of `proof_guarded_difference_import`: `high - low op c` over two same-width
+        # unsigned names, with a fact ordering `low <= high`, is the integer constraint
+        # `high op low + c`, because the guard rules out the wrap.
+        def proof_kernel_replay_guarded_difference_import(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize], constraints: mutable darray[ProofKernelReplayDifference]&) -> bool:
+            right_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right_root, 0)
+            if right_constant.known:
+                split: (known: bool, high: sview, low: sview) = proof_kernel_replay_guarded_difference_names(nodes, children, left_root, facts)
+                return false if not split.known
+                high: ProofKernelReplayAffine = ProofKernelReplayAffine{base: split.high, offset: 0, known: true, negative: false}
+                low: ProofKernelReplayAffine = ProofKernelReplayAffine{base: split.low, offset: right_constant.value, known: true, negative: false}
+                proof_kernel_replay_guarded_difference_push(high, operator, low, constraints)
+                return true
+            left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left_root, 0)
+            return false if not left_constant.known
+            split: (known: bool, high: sview, low: sview) = proof_kernel_replay_guarded_difference_names(nodes, children, right_root, facts)
+            return false if not split.known
+            low: ProofKernelReplayAffine = ProofKernelReplayAffine{base: split.low, offset: left_constant.value, known: true, negative: false}
+            high: ProofKernelReplayAffine = ProofKernelReplayAffine{base: split.high, offset: 0, known: true, negative: false}
+            proof_kernel_replay_guarded_difference_push(low, operator, high, constraints)
+            true
+
+        def proof_kernel_replay_guarded_difference_push(left: ProofKernelReplayAffine, operator: sview, right: ProofKernelReplayAffine, constraints: mutable darray[ProofKernelReplayDifference]&) -> void:
+            proof_kernel_replay_difference_push(left, right, false, false, constraints) if operator == "<=" or operator == "=="
+            proof_kernel_replay_difference_push(left, right, false, true, constraints) if operator == "<"
+            proof_kernel_replay_difference_push(left, right, true, false, constraints) if operator == ">=" or operator == "=="
+            proof_kernel_replay_difference_push(left, right, true, true, constraints) if operator == ">"
+
+        def proof_kernel_replay_guarded_difference_names(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize]) -> (known: bool, high: sview, low: sview):
+            return (false, "", "") if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return (false, "", "") if node.kind != "binary" or node.operator != "-"
+            high: sview = proof_kernel_replay_ident_name(nodes, node.left)
+            low: sview = proof_kernel_replay_ident_name(nodes, node.right)
+            return (false, "", "") if high == "" or low == "" or high == low
+            width: i64 = proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, high)
+            return (false, "", "") if width == 0 or proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, low) != width
+            for fact in facts |fact, nodes, high, low|:
+                return (true, high, low) if proof_kernel_replay_fact_orders_names(nodes, fact, low, high, 0)
+            return (false, "", "")
+
+        # The fact, or one of its conjuncts, says `low <= high` or `low < high`.
+        def proof_kernel_replay_fact_orders_names(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, low: sview, high: sview, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return false if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if node.kind != "binary"
+            if node.operator == "and":
+                return proof_kernel_replay_fact_orders_names(nodes, node.left, low, high, depth + 1) or proof_kernel_replay_fact_orders_names(nodes, node.right, low, high, depth + 1)
+            left_name: sview = proof_kernel_replay_ident_name(nodes, node.left)
+            right_name: sview = proof_kernel_replay_ident_name(nodes, node.right)
+            return true if (node.operator == "<=" or node.operator == "<") and left_name == low and right_name == high
+            (node.operator == ">=" or node.operator == ">") and left_name == high and right_name == low
+
+        # Mirror of `proof_push_base_bounds`.
+        def proof_kernel_replay_push_base_bounds(bounds: darray[ProofKernelReplayBound]&, base: sview, constraints: mutable darray[ProofKernelReplayDifference]&) -> void:
+            return if base == ""
+            bound: ProofKernelReplayBound = proof_kernel_replay_bound_for(bounds, base)
+            constraints.push(ProofKernelReplayDifference{left: base, right: "", bound: bound.upper}) if bound.has_upper
+            negated: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, bound.lower)
+            constraints.push(ProofKernelReplayDifference{left: "", right: base, bound: negated.value}) if bound.has_lower and negated.known
+
+        # Mirror of `proof_close_bounds_from_facts`.
+        def proof_kernel_replay_close_bounds_from_facts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+            constraints: mutable darray[ProofKernelReplayDifference] = []
+            for fact in facts |fact, nodes, children, facts, bounds, constraints|:
+                proof_kernel_replay_collect_differences(nodes, fact, bounds, children, facts, &constraints, 0)
+            return if constraints.count > PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
+            proof_kernel_replay_close_bounds_through_differences(constraints, bounds)
+
+        # Mirror of `proof_close_plain_bounds`.
+        def proof_kernel_replay_close_plain_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+            constraints: mutable darray[ProofKernelReplayDifference] = []
+            for fact in facts |fact, nodes, children, facts, bounds, constraints|:
+                proof_kernel_replay_collect_plain_differences(nodes, children, fact, bounds, facts, &constraints, 0)
+            return if constraints.count == 0 or constraints.count > PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
+            proof_kernel_replay_close_bounds_through_differences(constraints, bounds)
+
+        def proof_kernel_replay_collect_plain_differences(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, bounds: darray[ProofKernelReplayBound]&, facts: darray[usize], constraints: mutable darray[ProofKernelReplayDifference]&, depth: usize) -> void:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return if node.kind != "binary"
+            if node.operator == "and":
+                proof_kernel_replay_collect_plain_differences(nodes, children, node.left, bounds, facts, constraints, depth + 1)
+                proof_kernel_replay_collect_plain_differences(nodes, children, node.right, bounds, facts, constraints, depth + 1)
+                return
+            return if node.operator != "==" and node.operator != "<" and node.operator != "<=" and node.operator != ">" and node.operator != ">="
+            return if not proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
+            return if proof_kernel_replay_guarded_difference_import(nodes, children, node.left, node.operator, node.right, facts, constraints)
+            return if not proof_kernel_replay_plain_order_side(nodes, node.left) or not proof_kernel_replay_plain_order_side(nodes, node.right)
+            proof_kernel_replay_collect_differences(nodes, root, bounds, children, facts, constraints, depth + 1)
+
+        def proof_kernel_replay_plain_order_side(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, root)
+            return nodes[root].name != "" if nodes[root].kind == "ident"
+            nodes[root].kind == "int" and nodes[root].value >= 0
+
+        # Mirror of the producer's lazy closure: the plain-order closure only narrows intervals,
+        # so it runs only when the collected bounds leave a root undecided.
+        def proof_kernel_replay_unsigned_safe_closing(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> bool:
+            return true if proof_kernel_replay_unsigned_expression_safe(nodes, children, root, facts, bounds, 0)
+            proof_kernel_replay_close_plain_bounds(nodes, children, facts, bounds)
+            proof_kernel_replay_unsigned_expression_safe(nodes, children, root, facts, bounds, 0)
+
+        # Mirror of `proof_close_defining_equalities`: two passes passing the interval of `expr`
+        # to `name` over each `name == expr` fact or conjunct, in the goal tier only.
+        def proof_kernel_replay_close_defining_equalities(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+            for fact in facts |fact, nodes, children, facts, bounds|:
+                proof_kernel_replay_transport_defining_equality(nodes, children, facts, fact, bounds, 0)
+            for fact in facts |fact, nodes, children, facts, bounds|:
+                proof_kernel_replay_transport_defining_equality(nodes, children, facts, fact, bounds, 0)
+
+        def proof_kernel_replay_transport_defining_equality(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, bounds: mutable darray[ProofKernelReplayBound]&, depth: usize) -> void:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return if node.kind != "binary"
+            if node.operator == "and":
+                proof_kernel_replay_transport_defining_equality(nodes, children, facts, node.left, bounds, depth + 1)
+                proof_kernel_replay_transport_defining_equality(nodes, children, facts, node.right, bounds, depth + 1)
+                return
+            return if node.operator != "==" or not proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
+            proof_kernel_replay_transport_interval(nodes, proof_kernel_replay_ident_name(nodes, node.left), node.right, bounds)
+            proof_kernel_replay_transport_interval(nodes, proof_kernel_replay_ident_name(nodes, node.right), node.left, bounds)
+
+        def proof_kernel_replay_transport_interval(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, name: sview, root: usize, bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+            return if name == ""
+            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, root, bounds, 0)
+            proof_kernel_replay_add_lower(bounds, name, interval.lower) if interval.has_lower
+            proof_kernel_replay_add_upper(bounds, name, interval.upper) if interval.has_upper

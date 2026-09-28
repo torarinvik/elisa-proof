@@ -1,0 +1,149 @@
+extend ElisaProof:
+    public:
+        # A guarded unsigned subtraction compared with a constant, `stop - start == 4` beside
+        # `start <= stop`, is a difference constraint over the integers: the guard rules out the
+        # wrap, so `stop - start` is the exact difference. The affine reader declines a side
+        # naming two names, so the fact never reached the graph. Both operands must be plain
+        # names of the same unsigned width, and the guard must be stated directly as an order
+        # between those names. Returns true when the fact was imported.
+        def proof_guarded_difference_import(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, constraints: mutable darray[ProofDifference]&) -> bool:
+            right_constant: (known: bool, value: i64) = proof_constant_int(right)
+            if right_constant.known:
+                split: (known: bool, high: sview, low: sview) = proof_guarded_difference_names(left, facts)
+                return false if not split.known
+                # `high - low op c` is `high op low + c`.
+                high: ProofAffine = ProofAffine{known: true, base: split.high, offset: 0, negative: false}
+                low: ProofAffine = ProofAffine{known: true, base: split.low, offset: right_constant.value, negative: false}
+                proof_guarded_difference_push(high, operator, low, constraints)
+                return true
+            left_constant: (known: bool, value: i64) = proof_constant_int(left)
+            return false if not left_constant.known
+            split: (known: bool, high: sview, low: sview) = proof_guarded_difference_names(right, facts)
+            return false if not split.known
+            # `c op high - low` is `low + c op high`.
+            low: ProofAffine = ProofAffine{known: true, base: split.low, offset: left_constant.value, negative: false}
+            high: ProofAffine = ProofAffine{known: true, base: split.high, offset: 0, negative: false}
+            proof_guarded_difference_push(low, operator, high, constraints)
+            true
+
+        def proof_guarded_difference_push(left: ProofAffine, operator: TokenKind, right: ProofAffine, constraints: mutable darray[ProofDifference]&) -> void:
+            proof_difference_push(left, right, false, false, constraints) if operator == TokenKind.LtEq or operator == TokenKind.EqEq
+            proof_difference_push(left, right, false, true, constraints) if operator == TokenKind.Lt
+            proof_difference_push(left, right, true, false, constraints) if operator == TokenKind.GtEq or operator == TokenKind.EqEq
+            proof_difference_push(left, right, true, true, constraints) if operator == TokenKind.Gt
+
+        # `high - low` over two same-width unsigned names that a fact orders `low <= high`.
+        def proof_guarded_difference_names(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, high: sview, low: sview):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(minuend, TokenKind.Minus, subtrahend, _):
+                    high: sview = proof_ident_name(proof_strip_parens(minuend))
+                    low: sview = proof_ident_name(proof_strip_parens(subtrahend))
+                    return (false, "", "") if high == "" or low == "" or high == low
+                    width: i64 = proof_unsigned_marker_width_for_name(facts, high)
+                    return (false, "", "") if width == 0 or proof_unsigned_marker_width_for_name(facts, low) != width
+                    for fact in facts |fact, high, low|:
+                        return (true, high, low) if proof_fact_orders_names(fact, low, high, 0)
+                    return (false, "", "")
+                _:
+                    return (false, "", "")
+
+        # The fact, or one of its conjuncts, says `low <= high` or `low < high`.
+        def proof_fact_orders_names(fact: Ast::Expr, low: sview, high: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match proof_strip_parens(fact):
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        return proof_fact_orders_names(left, low, high, depth + 1) or proof_fact_orders_names(right, low, high, depth + 1)
+                    left_name: sview = proof_ident_name(proof_strip_parens(left))
+                    right_name: sview = proof_ident_name(proof_strip_parens(right))
+                    return true if (operator == TokenKind.LtEq or operator == TokenKind.Lt) and left_name == low and right_name == high
+                    return (operator == TokenKind.GtEq or operator == TokenKind.Gt) and left_name == high and right_name == low
+                _:
+                    return false
+
+        # The interval a goal base received, including through difference closure, as edges to
+        # the zero node. The closure narrowed `bounds` only; without these edges the graph query
+        # could not use a bound the closure derived, such as `start <= 15` from `start < stop`
+        # and `stop <= 16`, when the literal side of the premise was not itself imported.
+        def proof_push_base_bounds(bounds: darray[ProofBound]&, base: sview, constraints: mutable darray[ProofDifference]&) -> void:
+            return if base == ""
+            bound: ProofBound = proof_bound_for(bounds, base)
+            constraints.push(ProofDifference{left: base, right: "", bound: bound.upper}) if bound.has_upper
+            negated: (known: bool, value: i64) = proof_sub_safe(0, bound.lower)
+            constraints.push(ProofDifference{left: "", right: base, bound: negated.value}) if bound.has_lower and negated.known
+
+        # Narrow the collected intervals through the facts' difference constraints, so the
+        # interval tier sees `start <= 15` from `start < stop` and `stop <= 16`. Each step is an
+        # ordinary interval inference over true facts. The kernel mirror is
+        # `proof_kernel_replay_close_bounds_from_facts`.
+        def proof_close_bounds_from_facts(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            constraints: mutable darray[ProofDifference] = []
+            for fact in facts |bounds, constraints|:
+                proof_collect_difference_constraints(fact, bounds, facts, &constraints)
+            return if constraints.count > PROOF_LINEAR_MAX_DIFFERENCE_CONSTRAINTS
+            proof_close_bounds_through_differences(constraints, bounds)
+
+        # A defining equality `name == expr` passes the interval of `expr` to `name`, so a local
+        # bound to `v * 10 + 9` inherits the range the difference tier cannot express. Like that
+        # tier's reading of `y == x + 1`, the equality is integer-exact only in the goal tier,
+        # after each operator has its own safety goal; the wrap guard never calls this.
+        def proof_close_defining_equalities(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            for fact in facts |facts, bounds|:
+                proof_transport_defining_equality(fact, facts, bounds, 0)
+            for fact in facts |facts, bounds|:
+                proof_transport_defining_equality(fact, facts, bounds, 0)
+
+        def proof_transport_defining_equality(fact: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match proof_strip_parens(fact):
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        proof_transport_defining_equality(left, facts, bounds, depth + 1)
+                        proof_transport_defining_equality(right, facts, bounds, depth + 1)
+                        return
+                    return if operator != TokenKind.EqEq or not proof_primitive_comparison(left, right, facts)
+                    proof_transport_interval(proof_ident_name(left), right, bounds)
+                    proof_transport_interval(proof_ident_name(right), left, bounds)
+                _:
+                    pass
+
+        def proof_transport_interval(name: sview, expression: Ast::Expr, bounds: mutable darray[ProofBound]&) -> void:
+            return if name == ""
+            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+            proof_add_lower(bounds, name, interval.lower) if interval.has_lower
+            proof_add_upper(bounds, name, interval.upper) if interval.has_upper
+
+        # The wrap guard's own propagation. It may not read `y == x + 1`, a modular equality, but
+        # an order between two names or a name and a literal, `start < stop` or `stop <= 16`,
+        # involves no arithmetic and holds over the integers, and so does a guarded difference.
+        # Only those are imported, so the guard never assumes the answer it is deciding.
+        def proof_close_plain_bounds(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            constraints: mutable darray[ProofDifference] = []
+            for fact in facts |bounds, constraints|:
+                proof_collect_plain_differences(fact, bounds, facts, &constraints, 0)
+            return if constraints.count == 0 or constraints.count > PROOF_LINEAR_MAX_DIFFERENCE_CONSTRAINTS
+            proof_close_bounds_through_differences(constraints, bounds)
+
+        def proof_collect_plain_differences(fact: Ast::Expr, bounds: darray[ProofBound]&, facts: darray[Ast::Expr]&, constraints: mutable darray[ProofDifference]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match proof_strip_parens(fact):
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        proof_collect_plain_differences(left, bounds, facts, constraints, depth + 1)
+                        proof_collect_plain_differences(right, bounds, facts, constraints, depth + 1)
+                        return
+                    return if not proof_is_comparison(operator) or operator == TokenKind.BangEq or not proof_primitive_comparison(left, right, facts)
+                    return if proof_guarded_difference_import(left, operator, right, facts, constraints)
+                    return if not proof_plain_order_side(left) or not proof_plain_order_side(right)
+                    proof_collect_difference_constraints(proof_strip_parens(fact), bounds, facts, constraints)
+                _:
+                    pass
+
+        def proof_plain_order_side(expression: Ast::Expr) -> bool:
+            match proof_strip_parens(expression):
+                Ast::Expr.Ident(name, _):
+                    return name != ""
+                Ast::Expr.IntLit(_, _):
+                    return true
+                _:
+                    return false

@@ -1,0 +1,136 @@
+const PROOF_FIELD_PLACE_LIMIT: usize = 4
+
+extend ElisaProof:
+    public:
+        # A requirement written over a field, `at < t.length and t.length <= 16`, names the
+        # place `t.length` rather than an identifier, and the interval, difference and affine
+        # tiers read only identifiers, so the chain never closes. Generalization fixes that:
+        # replacing every occurrence of one fixed value with a fresh name turns a proof of the
+        # generalized goal into a proof of the original by instantiating the name back. Only
+        # witnessed primitive scalar places over a plain name, and renamed loop binders, are
+        # generalized, each to its own
+        # reserved `__elisa_field_place_N` name, which source code cannot spell. Quantifier
+        # bodies are left as they are, which only withholds information. The rule runs once per
+        # goal: a fact that already names a generalized place stops it. The kernel mirror is
+        # `proof_kernel_replay_field_place_goal`.
+        def proof_field_place_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+            return false if proof_expr_mentions_name(goal, proof_field_place_name(0))
+            for fact in facts |goal|:
+                return false if proof_expr_mentions_name(fact, proof_field_place_name(0))
+            places: mutable darray[Ast::Expr] = []
+            proof_collect_field_places(goal, facts, &places, 0)
+            for fact in facts |facts, places|:
+                proof_collect_field_places(fact, facts, &places, 0)
+            return false if places.count == 0
+            rewritten_goal: mutable Ast::Expr = goal
+            rewritten_facts: mutable darray[Ast::Expr] = []
+            for fact in facts |rewritten_facts|:
+                rewritten_facts.push(fact)
+            for index in 0..<places.count |places, rewritten_goal, rewritten_facts|:
+                fresh: Ast::Expr = Ast::Expr.Ident(proof_field_place_name(index), Ast::pos_at_line(0))
+                rewritten_goal <- proof_generalize_place(rewritten_goal, places[index], fresh, 0).value
+                next_facts: mutable darray[Ast::Expr] = []
+                for fact in rewritten_facts |places, index, fresh, next_facts|:
+                    next_facts.push(proof_generalize_place(fact, places[index], fresh, 0).value)
+                rewritten_facts <- next_facts
+            proof_goal_depth(rewritten_facts, rewritten_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+
+        def proof_field_place_name(index: usize) -> sview:
+            return "__elisa_field_place_0" if index == 0
+            return "__elisa_field_place_1" if index == 1
+            return "__elisa_field_place_2" if index == 2
+            "__elisa_field_place_3"
+
+        # `name.field` or `name.outer.field`, never through an index or a call, or a renamed
+        # loop binder.
+        def proof_field_place_shape(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_field_place_shape(inner, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    return depth > 0 and name != ""
+                Ast::Expr.Field(object, field_name, _):
+                    return field_name != "" and proof_field_place_shape(object, depth + 1)
+                Ast::Expr.Tuple(elements, _):
+                    # A loop binder after renaming, `(index, 518)`: one fixed value per iteration.
+                    return false if depth > 0 or elements.count != 2 or proof_ident_name(elements[0]) == ""
+                    match elements[1]:
+                        Ast::Expr.IntLit(_, _):
+                            return true
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_collect_field_places(expression: Ast::Expr, facts: darray[Ast::Expr]&, places: mutable darray[Ast::Expr]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or places.count >= PROOF_FIELD_PLACE_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_field_places(inner, facts, places, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_field_places(operand, facts, places, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_field_places(left, facts, places, depth + 1)
+                    proof_collect_field_places(right, facts, places, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    proof_collect_field_places(condition, facts, places, depth + 1)
+                    proof_collect_field_places(then_expression, facts, places, depth + 1)
+                    proof_collect_field_places(else_expression, facts, places, depth + 1)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |facts, places, depth|:
+                        proof_collect_field_places(argument, facts, places, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    proof_collect_field_places(object, facts, places, depth + 1)
+                    proof_collect_field_places(index, facts, places, depth + 1)
+                Ast::Expr.Field(_, _, _) | Ast::Expr.Tuple(_, _):
+                    if proof_field_place_shape(expression, 0) and proof_scalar_term_witnessed(expression, facts, 0):
+                        for place in places |expression|:
+                            return if proof_expr_equal(place, expression)
+                        places.push(expression)
+                _:
+                    pass
+
+        # Replaces every occurrence of `place` outside quantifier bodies, including inside the
+        # type markers, so the fresh name inherits the place's scalar and width witnesses.
+        def proof_generalize_place(expression: Ast::Expr, place: Ast::Expr, fresh: Ast::Expr, depth: usize) -> (changed: bool, value: Ast::Expr):
+            return (false, expression) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (true, fresh) if proof_expr_equal(expression, place)
+            match expression:
+                Ast::Expr.Call(callee, arguments, names, position):
+                    rewritten: mutable darray[Ast::Expr] = []
+                    changed: mutable bool = false
+                    for argument in arguments |place, fresh, depth, rewritten, changed|:
+                        replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(argument, place, fresh, depth + 1)
+                        rewritten.push(replaced.value)
+                        changed <- true if replaced.changed
+                    return (changed, Ast::Expr.Call(callee, rewritten, names, position))
+                Ast::Expr.Index(object, index, position):
+                    object_replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(object, place, fresh, depth + 1)
+                    index_replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(index, place, fresh, depth + 1)
+                    return (object_replaced.changed or index_replaced.changed, Ast::Expr.Index(object_replaced.value, index_replaced.value, position))
+                Ast::Expr.Paren(inner, position):
+                    replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(inner, place, fresh, depth + 1)
+                    return (replaced.changed, Ast::Expr.Paren(replaced.value, position))
+                Ast::Expr.Unary(operator, operand, position):
+                    replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(operand, place, fresh, depth + 1)
+                    return (replaced.changed, Ast::Expr.Unary(operator, replaced.value, position))
+                Ast::Expr.Binary(left, operator, right, position):
+                    left_replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(left, place, fresh, depth + 1)
+                    right_replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(right, place, fresh, depth + 1)
+                    return (left_replaced.changed or right_replaced.changed, Ast::Expr.Binary(left_replaced.value, operator, right_replaced.value, position))
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    condition_replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(condition, place, fresh, depth + 1)
+                    then_replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(then_expression, place, fresh, depth + 1)
+                    else_replaced: (changed: bool, value: Ast::Expr) = proof_generalize_place(else_expression, place, fresh, depth + 1)
+                    return (condition_replaced.changed or then_replaced.changed or else_replaced.changed, Ast::Expr.If(condition_replaced.value, then_replaced.value, else_replaced.value, position))
+                _:
+                    return (false, expression)
+
+        def proof_comparison_goal_shape(goal: Ast::Expr) -> bool:
+            match goal:
+                Ast::Expr.Binary(_, operator, _, _):
+                    return proof_is_comparison(operator)
+                _:
+                    return false

@@ -657,6 +657,23 @@ run_probe conditional_equality_split examples/conditional_equality_split.elisa 0
 run_probe rejected_conditional_equality_split examples/rejected_conditional_equality_split.elisa 1
 run_probe place_aliases examples/place_aliases.elisa 0
 run_probe rejected_place_aliases examples/rejected_place_aliases.elisa 1
+run_probe field_places examples/field_places.elisa 0
+run_probe rejected_field_places examples/rejected_field_places.elisa 1
+run_probe guarded_differences examples/guarded_differences.elisa 0
+run_probe rejected_guarded_differences examples/rejected_guarded_differences.elisa 1
+run_probe shared_fixed_borrows examples/shared_fixed_borrows.elisa 0
+run_probe rejected_shared_fixed_borrows examples/rejected_shared_fixed_borrows.elisa 1
+run_probe rejected_shared_fixed_global examples/rejected_shared_fixed_global.elisa 1
+run_probe bound_call_summaries examples/bound_call_summaries.elisa 0
+run_probe rejected_bound_call_summaries examples/rejected_bound_call_summaries.elisa 1
+run_probe rebind_join examples/rebind_join.elisa 0
+run_probe rejected_rebind_join examples/rejected_rebind_join.elisa 1
+run_probe conditional_conversions examples/conditional_conversions.elisa 0
+run_probe rejected_conditional_conversions examples/rejected_conditional_conversions.elisa 1
+run_probe guarded_conditional_arms examples/guarded_conditional_arms.elisa 0
+run_probe rejected_guarded_conditional_arms examples/rejected_guarded_conditional_arms.elisa 1
+run_probe captured_block_exit examples/captured_block_exit.elisa 0
+run_probe rejected_captured_block_exit examples/rejected_captured_block_exit.elisa 1
 run_probe global_constant_loop_exit examples/global_constant_loop_exit.elisa 0
 run_probe rejected_global_constant_loop_exit examples/rejected_global_constant_loop_exit.elisa 1
 run_probe branch_join examples/branch_join.elisa 0
@@ -1497,6 +1514,14 @@ cases = (
     ("disequality_bounds", {('interior', 'ensure-unproven'), ('not_endpoint', 'ensure-unproven')}),
     ("conditional_equality_split", {('clamp_off_by_one', 'ensure-unproven')}),
     ("place_aliases", {('other_element', 'ensure-unproven')}),
+    ("field_places", {('non_strict', 'index-upper-unproven'), ('other_field', 'index-upper-unproven'), ('other_record', 'index-upper-unproven')}),
+    ("guarded_differences", {('modular_sum_fact', 'ensure-unproven'), ('modular_sum_bound', 'index-upper-unproven'), ('unguarded_difference', 'ensure-unproven'), ('one_past_the_span', 'ensure-unproven'), ('one_past_in_text', 'index-upper-unproven')}),
+    ("shared_fixed_borrows", {('with_a_mutable_parameter', 'call-requires-unproven'), ('with_a_reference_field', 'call-requires-unproven')}),
+    ("bound_call_summaries", {('stronger_than_the_summary', 'ensure-unproven'), ('unproven_precondition', 'call-requires-unproven'), ('unproven_precondition', 'ensure-unproven')}),
+    ("rebind_join", {('overshoot', 'ensure-unproven'), ('overshoot', 'invariant-not-preserved')}),
+    ("conditional_conversions", {('counted', 'expression-unsupported'), ('widened_bound', 'ensure-unproven')}),
+    ("guarded_conditional_arms", {('wrong_arm', 'ensure-unproven'), ('weak_guard', 'ensure-unproven')}),
+    ("captured_block_exit", {('unchecked', 'ensure-unproven'), ('broken', 'invariant-not-preserved'), ('broken', 'ensure-unproven')}),
     ("global_constant_loop_exit", {('last_slot', 'ensure-unproven')}),
     ("branch_join", {('not_always_kept', 'ensure-unproven'), ('replace_too_far', 'ensure-unproven'), ('stale_rebind', 'ensure-unproven')}),
 )

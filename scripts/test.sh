@@ -85,6 +85,8 @@ python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
 python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -2989,7 +2991,7 @@ if [[ "$region_extent_contract_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_region_extent_contract.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; refused = ("struct_count_is_not_an_extent", "an_element_in_a_contract", "a_field_of_an_element"); assert all((owner, "region-contract-unsupported") in owners for owner in refused); assert ("the_binding_itself", "contract-proposition-type") in owners; assert ("shared_cannot_be_returned_mutable", "region-return-witness-unsupported") in owners; assert {kind for _, kind in owners} == {"contract-proposition-type", "region-contract-unsupported", "region-return-witness-unsupported", "index-upper-unproven"}'
+run_json_report "$ROOT_DIR/examples/rejected_region_extent_contract.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; refused = ("struct_count_is_not_an_extent", "an_element_in_a_contract", "a_field_of_an_element"); assert all((owner, "region-contract-unsupported") in owners for owner in refused); assert ("the_binding_itself", "contract-proposition-type") in owners; assert ("shared_cannot_be_returned_mutable", "region-return-witness-unsupported") in owners; assert {kind for _, kind in owners} == {"contract-proposition-type", "region-contract-unsupported", "region-return-witness-unsupported"}; goals = {(g["name"], g["rule"]): g["proven"] for g in report["goals"]}; assert goals[("shared_cannot_be_returned_mutable", "index-upper")] is True'
 rejected_region_extent_contract_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_region_extent_contract_status" -ne 0 ]]; then
@@ -3154,6 +3156,167 @@ rejected_place_aliases_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_place_aliases_status" -ne 0 ]]; then
     printf 'proof test matrix failed: an alias transferred facts to a different place\n' >&2
+    exit 1
+fi
+
+# A bound chained through a field place or a loop binder (`at < t.length <= CAP`) closes
+# once the place is generalized to a fresh name.
+set +e
+run_json_report "$ROOT_DIR/examples/guarded_differences.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert ("last_of_four", "goal") in proven; assert ("strict_chain_sum", "goal") in proven; assert ("fourth_byte", "index-upper") in proven'
+guarded_differences_status=${PIPESTATUS[1]}
+set -e
+if [[ "$guarded_differences_status" -ne 0 ]]; then
+  printf 'proof test matrix failed: a guarded difference or plain order did not bound a goal sum\n' >&2
+  exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_guarded_differences.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("modular_sum_fact", "ensure-unproven"), ("modular_sum_bound", "index-upper-unproven"), ("unguarded_difference", "ensure-unproven"), ("one_past_the_span", "ensure-unproven"), ("one_past_in_text", "index-upper-unproven")}'
+rejected_guarded_differences_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_guarded_differences_status" -ne 0 ]]; then
+  printf 'proof test matrix failed: a modular sum or unguarded difference bounded a goal\n' >&2
+  exit 1
+fi
+printf 'guarded differences: exact differences and plain orders bound goal sums; modular and unguarded forms refused\n'
+set +e
+run_json_report "$ROOT_DIR/examples/field_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+field_places_status=${PIPESTATUS[1]}
+set -e
+if [[ "$field_places_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a bound chained through a field place did not close\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_field_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert {("non_strict", "index-upper-unproven"), ("other_field", "index-upper-unproven"), ("other_record", "index-upper-unproven")} <= owners'
+rejected_field_places_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_field_places_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: field generalization linked unrelated places\n' >&2
+    exit 1
+fi
+
+# A shared borrow lent inside a loop keeps its field facts when the frame received no mutable
+# path; a mutable parameter, a reference field or a mutable global withdraws the rule.
+set +e
+run_json_report "$ROOT_DIR/examples/shared_fixed_borrows.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+shared_fixed_borrows_status=${PIPESTATUS[1]}
+set -e
+if [[ "$shared_fixed_borrows_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a closed frame lost a field fact of a shared borrow across a call\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_shared_fixed_borrows.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("with_a_mutable_parameter", "call-requires-unproven"), ("with_a_reference_field", "call-requires-unproven")}'
+rejected_shared_fixed_borrows_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_shared_fixed_borrows_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a frame holding a mutable path kept a field fact across a call\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_shared_fixed_global.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("scan", "call-requires-unproven")}'
+rejected_shared_fixed_global_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_shared_fixed_global_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a mutable global left a field fact fixed across a call\n' >&2
+    exit 1
+fi
+
+# A scalar bound to a call result carries the call summary over the bound name.
+set +e
+run_json_report "$ROOT_DIR/examples/bound_call_summaries.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+bound_call_summaries_status=${PIPESTATUS[1]}
+set -e
+if [[ "$bound_call_summaries_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call summary did not carry over the name bound to the call\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_bound_call_summaries.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("stronger_than_the_summary", "ensure-unproven"), ("unproven_precondition", "call-requires-unproven"), ("unproven_precondition", "ensure-unproven")}'
+rejected_bound_call_summaries_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_bound_call_summaries_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a bound call result proved more than its summary\n' >&2
+    exit 1
+fi
+
+# A join decides a fact over each arm value when an arm rebound a name over itself.
+set +e
+run_json_report "$ROOT_DIR/examples/rebind_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+rebind_join_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rebind_join_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a guarded self-increment lost the invariant at the join\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_rebind_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("overshoot", "ensure-unproven"), ("overshoot", "invariant-not-preserved")}'
+rejected_rebind_join_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_rebind_join_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a join kept a fact an arm value does not satisfy\n' >&2
+    exit 1
+fi
+
+# An integer conversion may sit in an if-expression arm that does not always run.
+set +e
+run_json_report "$ROOT_DIR/examples/conditional_conversions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+conditional_conversions_status=${PIPESTATUS[1]}
+set -e
+if [[ "$conditional_conversions_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a conversion in a conditional arm was refused\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_conditional_conversions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("counted", "expression-unsupported"), ("widened_bound", "ensure-unproven")}'
+rejected_conditional_conversions_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_conditional_conversions_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a conditional arm admitted a state-changing call or assumed a conversion value\n' >&2
+    exit 1
+fi
+
+# The then arm of an if-expression is range-checked under its own condition.
+set +e
+run_json_report "$ROOT_DIR/examples/guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+guarded_conditional_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$guarded_conditional_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a subtraction guarded by its if-expression condition was refused\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrong_arm", "ensure-unproven"), ("weak_guard", "ensure-unproven")}'
+rejected_guarded_conditional_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_guarded_conditional_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an if-expression condition guarded the wrong arm or more than it says\n' >&2
+    exit 1
+fi
+
+# A block-form captured loop keeps the invariants it checked after it.
+set +e
+run_json_report "$ROOT_DIR/examples/captured_block_exit.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+captured_block_exit_status=${PIPESTATUS[1]}
+set -e
+if [[ "$captured_block_exit_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a block-form captured loop lost its invariants after the loop\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_captured_block_exit.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("unchecked", "ensure-unproven"), ("broken", "invariant-not-preserved"), ("broken", "ensure-unproven")}'
+rejected_captured_block_exit_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_captured_block_exit_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a captured loop kept a fact it never checked or broke\n' >&2
     exit 1
 fi
 
