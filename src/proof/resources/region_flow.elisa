@@ -91,17 +91,11 @@ extend ElisaProof:
                         summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.secondary_name == "resource-v1"
                     return "" if summary_root >= report.kernel_nodes.count
                     if is_sview_result:
-                        summary: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[summary_root]
-                        return "" if summary.children_start > report.kernel_children.count or summary.children_count > report.kernel_children.count - summary.children_start
-                        found_sview_return: mutable bool = false
-                        for child_offset in 0..<summary.children_count |child_offset, summary, report, return_region, found_sview_return|:
-                            child: usize = report.kernel_children[summary.children_start + child_offset]
-                            continue if child >= report.kernel_nodes.count
-                            marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[child]
-                            continue if marker.kind != "resource-region-return"
+                        sview_markers: mutable darray[usize] = []
+                        return "" if not proof_resource_summary_return_markers(report, summary_root, &sview_markers) or sview_markers.count == 0
+                        for marker_root in sview_markers |marker_root, report, return_region|:
+                            marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[marker_root]
                             return "" if (marker.operator != "sview" and marker.operator != "sview-call") or marker.name != return_region
-                            found_sview_return <- true
-                        return "" if not found_sview_return
                     mapped: mutable darray[Ast::Expr] = []
                     return "" if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
                     formal_regions: mutable darray[sview] = []
@@ -126,15 +120,12 @@ extend ElisaProof:
                 candidate: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[candidate_root]
                 summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.secondary_name == "resource-v1"
             return "" if summary_root >= report.kernel_nodes.count
-            summary: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[summary_root]
-            return "" if summary.children_start > report.kernel_children.count or summary.children_count > report.kernel_children.count - summary.children_start
+            markers: mutable darray[usize] = []
+            return "" if not proof_resource_summary_return_markers(report, summary_root, &markers)
             returned_formal: mutable sview = ""
             found_return: mutable bool = false
-            for child_offset in 0..<summary.children_count |child_offset, summary, report, returned_formal, found_return|:
-                child: usize = report.kernel_children[summary.children_start + child_offset]
-                continue if child >= report.kernel_nodes.count
-                marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[child]
-                continue if marker.kind != "resource-region-return"
+            for marker_root in markers |marker_root, report, returned_formal, found_return|:
+                marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[marker_root]
                 marker_formal: mutable sview = ""
                 if marker.operator == "sview":
                     return "" if marker.secondary_name != "" or marker.left >= report.kernel_nodes.count
@@ -184,48 +175,28 @@ extend ElisaProof:
                     pass
             return (false, empty, state.binding_names.count, false, false)
 
-        # Recover the provenance of a region-carrying reference result. A direct reference
-        # formal returns the caller's place (and therefore must remain an alias); a
+        # Recover the provenance of a region-carrying reference result. A returned formal gives
+        # the caller's place (and therefore must remain an alias); a
         # `resource-region-return-alloc` witness is the only other accepted shape and denotes a
         # fresh allocation. Any summary that returns a reference through an opaque expression is
         # deliberately rejected instead of minting an independent capability.
         def proof_resource_call_result_source_actual(expression: Ast::Expr, state: ProofResourceState&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> (known: bool, aliases_source: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool):
             empty: ProofResourcePlace = proof_resource_empty_place()
             match expression:
-                Ast::Expr.Call(callee, arguments, argument_names, _):
+                Ast::Expr.Call(callee, _, _, _):
                     callee_name: sview = proof_callable_name(callee)
                     function_index: usize = proof_resource_function_index(functions, callee_name)
                     return (false, false, empty, state.binding_names.count, false, false, false) if function_index >= functions.return_references.count or not functions.return_references[function_index]
-                    return (false, false, empty, state.binding_names.count, false, false, false) if function_index >= functions.param_counts.count or function_index >= functions.param_starts.count or function_index >= functions.return_reference_parameters.count
-                    source_parameter: usize = functions.return_reference_parameters[function_index]
-                    mapped: mutable darray[Ast::Expr] = []
-                    if source_parameter < functions.param_counts[function_index]:
-                        return (false, false, empty, state.binding_names.count, false, false, false) if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
-                        return (false, false, empty, state.binding_names.count, false, false, false) if source_parameter >= mapped.count
-                        actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_source_actual(mapped[source_parameter], state, report)
-                        return (actual.known, actual.place.root != "", actual.place, actual.slot, actual.is_reference, actual.mutable_reference, actual.writable)
-                    summary_root: mutable usize = report.kernel_nodes.count
-                    for candidate_root in 0..<report.kernel_nodes.count |candidate_root, report, callee_name, summary_root|:
-                        candidate: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[candidate_root]
-                        summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.secondary_name == "resource-v1"
-                    return (false, false, empty, state.binding_names.count, false, false, false) if summary_root >= report.kernel_nodes.count
-                    summary: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[summary_root]
-                    return (false, false, empty, state.binding_names.count, false, false, false) if summary.children_start > report.kernel_children.count or summary.children_count > report.kernel_children.count - summary.children_start
-                    fresh_witness: mutable bool = false
-                    for index in 0..<summary.children_count |index, summary, report, fresh_witness|:
-                        child: usize = report.kernel_children[summary.children_start + index]
-                        continue if child >= report.kernel_nodes.count
-                        marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[child]
-                        if marker.kind == "resource-region-return":
-                            return (false, false, empty, state.binding_names.count, false, false, false) if marker.left >= report.kernel_nodes.count
-                            witness: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[marker.left]
-                            if witness.kind == "resource-region-return-alloc":
-                                fresh_witness <- true
-                            elif witness.kind == "resource-use":
-                                return (false, false, empty, state.binding_names.count, false, false, false)
-                            else:
-                                return (false, false, empty, state.binding_names.count, false, false, false)
-                    return (fresh_witness, false, empty, state.binding_names.count, false, false, false)
+                    return (false, false, empty, state.binding_names.count, false, false, false) if function_index >= functions.verified.count or not functions.verified[function_index]
+                    # The callee's replayed summary names the returned formal (through an exact
+                    # direct witness or a `param-call` marker) or a fresh allocation, and
+                    # resource-call-result replay re-derives exactly that. A syntactic
+                    # `return formal` scan is never consulted: it does not see nested returns.
+                    summary_return: (known: bool, region: sview, formal: sview, mutable_reference: bool, allocation: bool) = proof_resource_reference_summary_return(report, callee_name)
+                    return (false, false, empty, state.binding_names.count, false, false, false) if not summary_return.known
+                    return (true, false, empty, state.binding_names.count, false, false, false) if summary_return.allocation
+                    formal_actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_formal_actual(expression, summary_return.formal, state, functions, report)
+                    return (formal_actual.known, formal_actual.place.root != "", formal_actual.place, formal_actual.slot, formal_actual.is_reference, formal_actual.mutable_reference, formal_actual.writable)
                 Ast::Expr.Paren(inner, _):
                     return proof_resource_call_result_source_actual(inner, state, functions, report)
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):

@@ -815,6 +815,29 @@ if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-s
     printf '%s\n' 'proof test matrix failed: call-return provenance was not replayed to the actual backing argument' >&2
     exit 1
 fi
+run_json_report "$ROOT_DIR/examples/reference_call_return_provenance.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0; nodes=report["kernel"]["nodes"]; assert any(n["kind"] == "resource-region-return" and n["operator"] == "param-call" and n["secondary_name"] == "second" for n in nodes)'
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_reference_call_return_wrong_provenance.elisa" >/tmp/elisa-proof-rejected-reference-call-provenance.json
+rejected_reference_call_provenance_status=$?
+set -e
+if [[ "$rejected_reference_call_provenance_status" -ne 1 ]] || ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-reference-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "resource-use-after-move" and f["status"] == "disproved" and f["line"] == 16 for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+    printf '%s\n' 'proof test matrix failed: a write to the reference call-return backing argument was accepted' >&2
+    exit 1
+fi
+# Wrong-region, mutability-upgrade and branch-dependent call returns must be refused.
+run_json_report "$ROOT_DIR/examples/regionless_reference_call_return_provenance.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0; nodes=report["kernel"]["nodes"]; assert any(n["kind"] == "resource-region-return" and n["operator"] == "param-call" and n["name"] == "" and n["secondary_name"] == "b" for n in nodes)'
+for rejected_call_return in rejected_regionless_reference_return_mutability_upgrade:region-return-witness-unsupported rejected_reference_call_return_region_mismatch:region-return-escape rejected_reference_call_return_mutability_upgrade:region-return-witness-unsupported rejected_nested_reference_return_provenance:region-return-witness-unsupported rejected_nested_sview_return_provenance:region-return-witness-unsupported; do
+    rejected_call_return_example="${rejected_call_return%%:*}"
+    rejected_call_return_kind="${rejected_call_return##*:}"
+    set +e
+    run_json_report "$ROOT_DIR/examples/$rejected_call_return_example.elisa" >/tmp/elisa-proof-rejected-call-return.json
+    rejected_call_return_status=$?
+    set -e
+    if [[ "$rejected_call_return_status" -ne 1 ]] || ! REJECTED_KIND="$rejected_call_return_kind" python3 -c 'import json, os; report=json.load(open("/tmp/elisa-proof-rejected-call-return.json")); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == os.environ["REJECTED_KIND"] for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+        printf 'proof test matrix failed: %s was not refused with %s\n' "$rejected_call_return_example" "$rejected_call_return_kind" >&2
+        exit 1
+    fi
+done
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_sview_return_after_region_destroy.elisa" >/tmp/elisa-proof-rejected-sview-return-destroy.json
 rejected_sview_return_destroy_status=$?

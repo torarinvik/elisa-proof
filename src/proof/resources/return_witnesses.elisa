@@ -1,0 +1,170 @@
+# Exact provenance for a direct region return.
+#
+# A returned `T& @r` or `sview @r` summary names the formal that backs the result through a
+# replayed `resource-use` witness, and callers map that formal to their own actual argument. The
+# witness therefore has to be the use of the returned place's own root binding, not whichever
+# same-region read happened to come last: `return pick(first, second)`-style shapes, index reads
+# (`return nodes[index]`) and earlier unrelated reads of another formal in the same region would
+# otherwise hand the caller an alias of the wrong argument. The selector below only considers
+# events emitted while checking the returned expression itself and only a use whose binding name
+# is the syntactic root of that expression; any other shape yields no witness, and the caller
+# refuses the return with `region-return-witness-unsupported`.
+extend ElisaProof:
+    private:
+        # The binding a directly returned place is rooted at, or "" when the expression is not a
+        # place path. Calls other than the builtin sview conversion produce no root: their result
+        # provenance comes from the callee summary, never from an argument read.
+        def proof_resource_return_root_name(expression: Ast::Expr, functions: ProofFunctionTable&) -> sview:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_return_root_name(inner, functions)
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_return_root_name(object, functions)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_resource_return_root_name(base, functions)
+                Ast::Expr.Index(object, _, _):
+                    return proof_resource_return_root_name(object, functions)
+                Ast::Expr.IndexN(object, _, _):
+                    return proof_resource_return_root_name(object, functions)
+                Ast::Expr.Slice(object, _, _, _):
+                    return proof_resource_return_root_name(object, functions)
+                Ast::Expr.Call(_, _, _, _):
+                    conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(expression, functions)
+                    return proof_resource_return_root_name(conversion.receiver, functions) if conversion.known
+                    return ""
+                _:
+                    return ""
+
+        # Select the witness for a direct region return: the first `resource-use` of the returned
+        # root binding among the events the returned expression produced (`events_before` is the
+        # trace length before it was checked). The root binding must itself be live in the
+        # returned region and, for a reference return, carry exactly the declared mutability.
+        # Returns `report.kernel_nodes.count` when no exact witness exists.
+        def proof_resource_exact_return_witness(state: ProofResourceState&, report: ProofReport&, events_before: usize, root: sview, returned_region: sview, return_is_sview: bool, return_mutable_reference: bool) -> usize:
+            none: usize = report.kernel_nodes.count
+            return none if root == "" or events_before > state.trace_events.count
+            slot: usize = proof_resource_lookup(state, root)
+            return none if slot >= state.binding_names.count
+            # An empty `returned_region` asks for a region-less reference witness; the caller
+            # additionally requires the binding to be a formal, as replay does.
+            return none if proof_resource_binding_region(state, slot) != returned_region
+            return none if returned_region != "" and not proof_resource_binding_region_is_live(state, slot)
+            # Replay requires the witness binding's mutability to match the marker's: a shared
+            # binding may not witness a `mutable T&` return, which is what stops a summary from
+            # handing the caller write access it never had.
+            root_mutable: bool = slot < state.binding_mutable_reference.count and state.binding_mutable_reference[slot]
+            return none if not return_is_sview and root_mutable != return_mutable_reference
+            witness: mutable usize = none
+            for offset in 0..<(state.trace_events.count - events_before) |offset, state, report, events_before, root, witness|:
+                continue if witness < report.kernel_nodes.count
+                candidate: usize = state.trace_events[events_before + offset]
+                continue if candidate >= report.kernel_nodes.count
+                continue if report.kernel_nodes[candidate].kind != "resource-use" or report.kernel_nodes[candidate].name != root
+                witness <- candidate
+            return witness
+
+        # A region-less reference return has no lifetime to pin it, so its direct witness must be
+        # a use of a whole reference formal of this function, never of a local, and that formal
+        # must carry no region. Mirrors proof_kernel_replay_resource_regionless_return.
+        def proof_resource_regionless_return_witness_is_formal(state: ProofResourceState&, report: ProofReport&, functions: ProofFunctionTable&, function_index: usize, witness: usize) -> bool:
+            return false if witness >= report.kernel_nodes.count or report.kernel_nodes[witness].kind != "resource-use"
+            name: sview = report.kernel_nodes[witness].name
+            slot: usize = proof_resource_lookup(state, name)
+            return false if name == "" or slot >= state.binding_names.count
+            return false if function_index >= functions.param_counts.count or function_index >= functions.param_starts.count or slot >= functions.param_counts[function_index]
+            return false if functions.param_starts[function_index] + slot >= functions.all_params.count or functions.all_params[functions.param_starts[function_index] + slot] != name
+            return false if proof_resource_binding_region(state, slot) != "" or proof_resource_binding_is_moved(state, slot)
+            return slot < state.binding_reference.count and state.binding_reference[slot]
+
+        # Producer mirror of the kernel's summary marker walk: every return marker of a summary,
+        # including returns recorded inside branch scopes.
+        def proof_resource_summary_return_markers(report: ProofReport&, summary_root: usize, markers: mutable darray[usize]&) -> bool:
+            return false if summary_root >= report.kernel_nodes.count or report.kernel_nodes[summary_root].kind != "resource-safety"
+            scopes: mutable darray[usize] = [summary_root]
+            next_scope: mutable usize = 0
+            for _ in 0..<report.kernel_nodes.count |next_scope, scopes, markers, report|:
+                break if next_scope >= scopes.count
+                container: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[scopes[next_scope]]
+                next_scope <- next_scope + 1
+                return false if container.children_start > report.kernel_children.count or container.children_count > report.kernel_children.count - container.children_start
+                for offset in 0..<container.children_count |offset, container, report, scopes, markers|:
+                    child: usize = report.kernel_children[container.children_start + offset]
+                    return false if child >= report.kernel_nodes.count
+                    if report.kernel_nodes[child].kind == "resource-scope":
+                        return false if scopes.count >= report.kernel_nodes.count
+                        scopes.push(child)
+                    elif report.kernel_nodes[child].kind == "resource-region-return":
+                        markers.push(child)
+            return next_scope >= scopes.count
+
+        # Producer mirror of the kernel's reference summary reader: the single region, formal and
+        # pointee mutability a verified callee's reference return is backed by, or a fresh
+        # allocation. Disagreeing or foreign markers make the summary unusable.
+        def proof_resource_reference_summary_return(report: ProofReport&, callee_name: sview) -> (known: bool, region: sview, formal: sview, mutable_reference: bool, allocation: bool):
+            summary_root: mutable usize = report.kernel_nodes.count
+            for candidate_root in 0..<report.kernel_nodes.count |candidate_root, report, callee_name, summary_root|:
+                candidate: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[candidate_root]
+                summary_root <- candidate_root if candidate.kind == "resource-safety" and candidate.name == callee_name and candidate.secondary_name == "resource-v1"
+            return proof_resource_reference_summary_return_at(report, summary_root)
+
+        def proof_resource_reference_summary_return_at(report: ProofReport&, summary_root: usize) -> (known: bool, region: sview, formal: sview, mutable_reference: bool, allocation: bool):
+            return (false, "", "", false, false) if summary_root >= report.kernel_nodes.count or report.kernel_nodes[summary_root].secondary_name != "resource-v1"
+            markers: mutable darray[usize] = []
+            return (false, "", "", false, false) if not proof_resource_summary_return_markers(report, summary_root, &markers)
+            returned_region: mutable sview = ""
+            returned_formal: mutable sview = ""
+            returned_mutable: mutable bool = false
+            returned_allocation: mutable bool = false
+            seen: mutable bool = false
+            for marker_root in markers |marker_root, report, seen, returned_region, returned_formal, returned_mutable, returned_allocation|:
+                marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[marker_root]
+                return (false, "", "", false, false) if marker.auxiliary > 1
+                return (false, "", "", false, false) if seen and (returned_region != marker.name or returned_mutable != (marker.auxiliary == 1))
+                seen <- true
+                returned_region <- marker.name
+                returned_mutable <- marker.auxiliary == 1
+                marker_formal: mutable sview = ""
+                if marker.operator == "param":
+                    return (false, "", "", false, false) if marker.secondary_name != "" or marker.left >= report.kernel_nodes.count
+                    witness: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[marker.left]
+                    if witness.kind == "resource-region-return-alloc":
+                        return (false, "", "", false, false) if returned_formal != "" or marker.name == ""
+                        returned_allocation <- true
+                        continue
+                    return (false, "", "", false, false) if witness.kind != "resource-use" or witness.name == ""
+                    marker_formal <- witness.name
+                elif marker.operator == "param-call":
+                    return (false, "", "", false, false) if marker.secondary_name == ""
+                    marker_formal <- marker.secondary_name
+                else:
+                    return (false, "", "", false, false)
+                return (false, "", "", false, false) if returned_allocation or (returned_formal != "" and returned_formal != marker_formal)
+                returned_formal <- marker_formal
+            return (false, "", "", false, false) if not seen or (returned_formal == "" and not returned_allocation)
+            return (true, returned_region, returned_formal, returned_mutable, returned_allocation)
+
+        # The actual argument a call binds to the callee formal `formal_name`, or unknown when the
+        # formal does not exist, the arguments do not map, or the argument is not a tracked place.
+        def proof_resource_call_formal_actual(expression: Ast::Expr, formal_name: sview, state: ProofResourceState&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool):
+            empty: ProofResourcePlace = proof_resource_empty_place()
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    function_index: usize = proof_resource_function_index(functions, proof_callable_name(callee))
+                    return (false, empty, state.binding_names.count, false, false, false) if formal_name == "" or function_index >= functions.param_counts.count or function_index >= functions.param_starts.count
+                    param_start: usize = functions.param_starts[function_index]
+                    param_count: usize = functions.param_counts[function_index]
+                    formal_index: mutable usize = param_count
+                    for candidate in 0..<param_count |candidate, functions, param_start, formal_name, formal_index|:
+                        formal_index <- candidate if param_start + candidate < functions.all_params.count and functions.all_params[param_start + candidate] == formal_name
+                    return (false, empty, state.binding_names.count, false, false, false) if formal_index >= param_count
+                    mapped: mutable darray[Ast::Expr] = []
+                    return (false, empty, state.binding_names.count, false, false, false) if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
+                    return (false, empty, state.binding_names.count, false, false, false) if formal_index >= mapped.count
+                    return proof_resource_call_source_actual(mapped[formal_index], state, report)
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_call_formal_actual(inner, formal_name, state, functions, report)
+                _:
+                    pass
+            return (false, empty, state.binding_names.count, false, false, false)

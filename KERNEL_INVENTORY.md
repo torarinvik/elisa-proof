@@ -62,7 +62,7 @@ Consumers are all kernel modules unless the row names specific ones. Structural 
 | `resource-sview-param` | resource binding | `name`, `secondary_name` = region, `auxiliary` = sview flag | `resources/sview_certificates.elisa` |
 | `resource-bind` | resource binding | `operator` = mode, `left` = source, `auxiliary` = flags | `resources/state_and_regions.elisa` |
 | `resource-region-param` | resource binding | `operator` = external, `name` = region | `resources/statement_checker.elisa` |
-| `resource-region-return` | resource binding | `operator` in {param, sview, sview-call}, `right` = returned root | `resources/statement_checker.elisa`, `resources/sview_certificates.elisa` |
+| `resource-region-return` | resource binding | `operator` in {param, param-call, sview, sview-call}; `param`/`sview` `left` = the returned root's own use or allocation, `param-call`/`sview-call` `left` = the immediately preceding call, `secondary_name` = the caller formal that replay re-derives from the callee summary; summaries are read with returns nested in branch scopes; an empty `name` is admitted only for a `param`/`param-call` reference return, whose `param` witness must be a use of a region-less reference formal of equal mutability | `resources/statement_checker.elisa`, `resources/return_witnesses.elisa`, `resources/sview_certificates.elisa` |
 | `resource-region-open` | resource region | `name` = region | `resources/statement_checker.elisa` |
 | `resource-region-close` | resource region | `name`, `auxiliary` = explicit destroy | `resources/state_and_regions.elisa`, `resources/statement_checker.elisa` |
 | `resource-region-alloc` | resource region | `name`, `secondary_name` = region, `auxiliary` = extent flags | `resources/state_and_regions.elisa` |

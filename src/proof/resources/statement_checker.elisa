@@ -348,61 +348,53 @@ extend ElisaProof:
                             if not return_is_scalar and proof_resource_expr_returns_local_region_value(returned, state, functions, report):
                                 proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "a region-owned value cannot escape the region that owns its storage")
                             returned_region: sview = proof_resource_expr_result_region(returned, state, functions, report)
+                            # The summary marker records where the value really lives; it must be the
+                            # declared lifetime, including when a call permutes region parameters.
+                            declared_return_region: sview = proof_resource_function_return_region(functions, return_function_index)
+                            proof_resource_add_failing_obligation(report, "region-return-escape", position, function_name, "the returned value lives in a region other than the declared return region") if not return_is_scalar and returned_region != "" and declared_return_region != "" and returned_region != declared_return_region
                             return_mutable_reference: bool = return_function_index < functions.return_mutable_references.count and functions.return_mutable_references[return_function_index]
                             # Check the returned expression before emitting its summary marker. The
                             # resulting resource-use/call transition (or the explicit allocation
                             # transition below) is then available as the marker's witness.
+                            return_events_before: usize = state.trace_events.count
                             proof_resource_check_expression(returned, state, report, function_name, functions)
                             return_witness: mutable usize = report.kernel_nodes.count
-                            unlinked_sview_call: bool = return_is_sview and proof_resource_sview_return_call_has_unlinked_provenance(returned, functions)
-                            sview_call_formal: mutable sview = ""
-                            if not unlinked_sview_call:
+                            # The node-count sentinel goes stale as later lookups add nodes, so presence is a flag.
+                            return_witness_found: mutable bool = false
+                            unlinked_call: bool = proof_resource_sview_return_call_has_unlinked_provenance(returned, functions)
+                            unlinked_sview_call: bool = return_is_sview and unlinked_call
+                            # A reference returned straight out of a verified call is backed by
+                            # whatever the callee summary returns, applied to this call's arguments;
+                            # it is recorded as a `param-call` marker that replay re-derives.
+                            unlinked_reference_call: bool = not return_is_sview and return_function_index < functions.return_references.count and functions.return_references[return_function_index] and unlinked_call
+                            call_return_formal: mutable sview = ""
+                            if not unlinked_sview_call and not unlinked_reference_call:
                                 match returned:
                                     Ast::Expr.RegionNew(operand, allocated_region, _):
                                         return_witness <- proof_resource_add_region_return_alloc(state, report, operand, allocated_region, position, function_name) if allocated_region != "" and proof_resource_region_is_external(state, allocated_region)
+                                        return_witness_found <- allocated_region != "" and proof_resource_region_is_external(state, allocated_region) and return_witness < report.kernel_nodes.count
                                     _:
-                                        # The witness has to be the use of the binding that carries the
-                                        # returned region, not just the last transition the expression
-                                        # happened to produce. `return nodes[index].left` records a use
-                                        # of `nodes` and then one of `index`; only the first is in the
-                                        # region. Independent replay checks exactly that the witness's
-                                        # binding is in the region the marker names, so handing it the
-                                        # other use produced a certificate the kernel refused and a
-                                        # `proved_with_replay_gaps` verdict. Scanning back for the
-                                        # right use is bounded: past the cap the witness stays unset
-                                        # and the obligation below refuses, which only loses a proof.
-                                        witness_found: mutable bool = false
-                                        witness_scan_limit: usize = PROOF_RESOURCE_RETURN_WITNESS_SCAN if state.trace_events.count > PROOF_RESOURCE_RETURN_WITNESS_SCAN else state.trace_events.count
-                                        for offset in 0..<witness_scan_limit |offset, state, report, returned_region, return_mutable_reference, witness_found|:
-                                            continue if witness_found
-                                            candidate: usize = state.trace_events[state.trace_events.count - 1 - offset]
-                                            continue if candidate >= report.kernel_nodes.count
-                                            continue if report.kernel_nodes[candidate].kind != "resource-use"
-                                            candidate_name: sview = report.kernel_nodes[candidate].name
-                                            candidate_slot: usize = proof_resource_lookup(state, candidate_name)
-                                            continue if candidate_slot >= state.binding_names.count
-                                            continue if proof_resource_binding_region(state, candidate_slot) != returned_region
-                                            # The marker records the return's own mutability, and
-                                            # replay requires the witness binding to match it exactly:
-                                            # a shared binding may not witness a `mutable T&` return,
-                                            # which is what stops a summary from handing the caller
-                                            # write access it never had. Requiring the match here too
-                                            # turns what was an unreplayable certificate into a clean
-                                            # refusal from the obligation below.
-                                            candidate_mutable: bool = candidate_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[candidate_slot]
-                                            continue if not return_is_sview and candidate_mutable != return_mutable_reference
-                                            return_witness <- candidate
-                                            witness_found <- true
+                                        # The witness is the use of the returned place's own root
+                                        # binding, produced by the returned expression itself; see
+                                        # return_witnesses.elisa. `return nodes[index].left` uses
+                                        # `nodes` and `index`, and only `nodes` backs the result.
+                                        return_witness <- proof_resource_exact_return_witness(state, report, return_events_before, proof_resource_return_root_name(returned, functions), returned_region, return_is_sview, return_mutable_reference)
+                                        return_witness_found <- return_witness < report.kernel_nodes.count
                             else:
                                 callee_name: sview = proof_resource_sview_return_call_name(returned, functions)
-                                callee_return_formal: sview = proof_resource_sview_return_formal(report, callee_name) if callee_name != "" else ""
-                                actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool) = proof_resource_call_result_sview_source_actual(returned, state, functions, report)
+                                callee_return_formal: mutable sview = ""
+                                if unlinked_sview_call and callee_name != "":
+                                    callee_return_formal <- proof_resource_sview_return_formal(report, callee_name)
+                                elif callee_name != "":
+                                    reference_summary: (known: bool, region: sview, formal: sview, mutable_reference: bool, allocation: bool) = proof_resource_reference_summary_return(report, callee_name)
+                                    callee_return_formal <- reference_summary.formal if reference_summary.known and not reference_summary.allocation and reference_summary.mutable_reference == return_mutable_reference
+                                actual: (known: bool, place: ProofResourcePlace, slot: usize, is_reference: bool, mutable_reference: bool, writable: bool) = proof_resource_call_formal_actual(returned, callee_return_formal, state, functions, report)
                                 candidate_call: usize = state.trace_events[state.trace_events.count - 1] if state.trace_events.count > 0 else report.kernel_nodes.count
                                 call_event_valid: mutable bool = false
                                 if candidate_call < report.kernel_nodes.count:
                                     call_node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[candidate_call]
                                     call_event_valid <- call_node.kind == "resource-call" and call_node.name == callee_name
-                                source_valid: mutable bool = actual.known and actual.place.whole and actual.slot < state.binding_names.count and actual.slot < state.binding_region.count and proof_resource_binding_region(state, actual.slot) == returned_region and proof_resource_binding_region_is_live(state, actual.slot) and not proof_resource_binding_is_moved(state, actual.slot)
+                                source_valid: mutable bool = actual.known and actual.place.whole and actual.slot < state.binding_names.count and actual.slot < state.binding_region.count and proof_resource_binding_region(state, actual.slot) == returned_region and (returned_region == "" or proof_resource_binding_region_is_live(state, actual.slot)) and not proof_resource_binding_is_moved(state, actual.slot)
                                 source_slot: mutable usize = actual.slot
                                 source_place: mutable ProofResourcePlace = actual.place
                                 for _ in 0..<state.binding_names.count |source_valid, source_slot, source_place, state|:
@@ -424,10 +416,15 @@ extend ElisaProof:
                                 caller_formal: mutable sview = ""
                                 if source_valid:
                                     caller_formal <- functions.all_params[functions.param_starts[return_function_index] + source_slot]
-                                    source_valid <- caller_formal == state.binding_names[source_slot] and source_slot < state.binding_region.count and proof_resource_binding_region(state, source_slot) == returned_region and proof_resource_binding_region_is_live(state, source_slot) and not proof_resource_binding_is_moved(state, source_slot)
+                                    source_valid <- caller_formal == state.binding_names[source_slot] and source_slot < state.binding_region.count and proof_resource_binding_region(state, source_slot) == returned_region and (returned_region == "" or proof_resource_binding_region_is_live(state, source_slot)) and not proof_resource_binding_is_moved(state, source_slot)
+                                # A returned reference keeps the formal's own capability: it must be a
+                                # reference formal of exactly the declared pointee mutability.
+                                if source_valid and not return_is_sview:
+                                    source_valid <- source_slot < state.binding_reference.count and state.binding_reference[source_slot] and (source_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[source_slot]) == return_mutable_reference
                                 if source_valid and call_event_valid and callee_return_formal != "":
                                     return_witness <- candidate_call
-                                    sview_call_formal <- caller_formal
+                                    return_witness_found <- true
+                                    call_return_formal <- caller_formal
                             # A function whose declared return type is a scalar primitive returns
                             # a copy. It cannot carry a lifetime however the expression that
                             # produced it was written, so `return cell.value` out of a region-owned
@@ -436,11 +433,22 @@ extend ElisaProof:
                             # parameter -- depend on a witness whose mutability had to match a
                             # return that is not a reference in the first place.
                             if returned_region != "" and not return_is_scalar and proof_resource_region_is_external(state, returned_region):
-                                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a region return must be tied to a replayed resource use or returned allocation") if return_witness >= report.kernel_nodes.count
-                                if return_witness < report.kernel_nodes.count:
-                                    proof_resource_record_sview_call_return(state, report, return_witness, sview_call_formal, position, function_name, returned_region) if return_is_sview and unlinked_sview_call
+                                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a region return must be tied to a replayed resource use or returned allocation") if not return_witness_found
+                                if return_witness_found:
+                                    proof_resource_record_sview_call_return(state, report, return_witness, call_return_formal, position, function_name, returned_region) if unlinked_sview_call
                                     proof_resource_record_sview_return(state, report, return_witness, position, function_name, returned_region) if return_is_sview and not unlinked_sview_call
-                                    proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if not return_is_sview
+                                    proof_resource_record_event(state, report, "resource-region-return", "param-call", return_witness, returned_region, call_return_formal, 1 if return_mutable_reference else 0) if unlinked_reference_call
+                                    proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, returned_region, "", 1 if return_mutable_reference else 0) if not return_is_sview and not unlinked_reference_call
+                            # A region-less reference return gets a marker only from an exact
+                            # witness; without one the summary pins nothing and callers fail closed.
+                            # A mutable one must have it: nothing else stops `return shared_formal`
+                            # from minting write access the caller never lent.
+                            elif returned_region == "" and declared_return_region == "" and not return_is_scalar and not return_is_sview and return_function_index < functions.return_references.count and functions.return_references[return_function_index]:
+                                direct_formal: bool = return_witness_found and not unlinked_reference_call and proof_resource_regionless_return_witness_is_formal(state, report, functions, return_function_index, return_witness)
+                                call_formal: bool = return_witness_found and unlinked_reference_call
+                                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "a mutable reference return must be tied to a replayed mutable reference formal") if return_mutable_reference and not direct_formal and not call_formal
+                                proof_resource_record_event(state, report, "resource-region-return", "param-call", return_witness, "", call_return_formal, 1 if return_mutable_reference else 0) if call_formal
+                                proof_resource_record_event(state, report, "resource-region-return", "param", return_witness, "", "", 1 if return_mutable_reference else 0) if direct_formal
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         proof_resource_check_expression(condition, state, report, function_name, functions)
                         then_state: mutable ProofResourceState = proof_resource_empty()
