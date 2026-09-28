@@ -9459,3 +9459,41 @@ It was therefore not ported, which keeps the trusted surface smaller.
   - Without the kernel rule, 4 of 16 goals become replay gaps.
   - Without the producer rule, only 8 of 16 obligations prove.
 - All 18 test chunks and all 9 dogfood chunks pass.
+
+## Recursive payload enums: sibling summaries and binder types (2026-09-29)
+
+First slice of P2-03 (ADT proof library).
+
+**Sibling summaries.** In `Tree.Node(left, _, right)`, a call `tree_size(right)` used to drop
+the summary of the earlier `tree_size(left)`: the call-stability rule accepted only witnessed
+scalars and parameters as arguments that survive a call. A payload symbol
+(`__elisa_rebind_N`) is now also stable when it is a registered local extent. Such a symbol is
+created only over a by-value, reference-free scrutinee. No source text can spell or assign it,
+and the payload tree it names is immutable, so it denotes one value across any call.
+
+**Binder types.** A positional or named binder in `Enum.Variant(...)` now takes the declared
+type of the payload field at its pattern position, wildcards included. This matches the
+compiler's lowering (`codegen_stmt_match_arm.elisa`). The typing is used in two places:
+- Proposition formation types the binder, so `head < 0` is no longer refused as
+  `contract-proposition-type`.
+- The checker adds the type-bound facts. This is done only for primitive scalar field types,
+  with no aliases, and only when the path is exactly `Enum.Variant` of one non-hierarchy
+  enum with one matching variant and one field per pattern slot. Anything else adds no facts.
+
+These are trusted boundary facts, like every other type bound, so the mapping must be exact.
+
+**Evidence.**
+- `examples/adt_recursive_payload_probe.elisa`: 16 of 16 goals prove and replay. It covers
+  list length, tree size over two recursive calls, a head-sign scan, and a u8 binder.
+- Rejected controls:
+  - `rejected_adt_recursive_payload_difference`: `l - r + 1 >= 1` is unbounded.
+  - `rejected_adt_payload_binder_position`: an i64 binder after a u8 wildcard gets no u8 bound.
+  - `rejected_adt_payload_binder_width`: u8 does not give `<= 254`.
+
+  All three are refused with `ensure-unproven`. The difference control's only replay gap is a
+  goal that depends on its own refused summary, which is never counted as replayed.
+- Mutation checks:
+  - Without the stability rule, `tree_size` is unproven.
+  - Without the checker facts, `tagged_tag` is unproven.
+  - Without the formation typing, `list_all_nonnegative` is refused as
+    `contract-proposition-type`.
