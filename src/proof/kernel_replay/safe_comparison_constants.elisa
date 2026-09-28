@@ -1,0 +1,80 @@
+extend ElisaProofKernelReplay:
+    private:
+        const PROOF_KERNEL_REPLAY_SMALL_CONSTANT_MAX: i64 = ElisaProofKernelCore::PROOF_KERNEL_I8_MAX
+
+        def proof_kernel_replay_integer_arithmetic_operator(operator: sview) -> bool:
+            return true if operator == "+" or operator == "-" or operator == "*" or operator == "/" or operator == "%"
+            return true if operator == "&" or operator == "|" or operator == "^" or operator == "<<" or operator == ">>"
+            return false
+
+        def proof_kernel_replay_small_range(value: ProofKernelReplayInt) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if not value.known
+            return empty if value.value < 0 or value.value > PROOF_KERNEL_REPLAY_SMALL_CONSTANT_MAX
+            return value
+
+        # Evaluate integer literals, unary plus and the arithmetic operators, refusing as soon as
+        # any leaf or intermediate leaves [0, 127]. Inside that range every admitted signed and
+        # unsigned machine-integer width computes the same value, so the missing width/signedness
+        # metadata in the arena cannot change the result. A shift is admitted only by an amount
+        # below 7; unary minus and non-literal leaves stay outside this fragment.
+        def proof_kernel_replay_small_constant_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize) -> ProofKernelReplayInt:
+            decreases remaining
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if root >= nodes.count
+            match nodes[root].kind:
+                "int":
+                    return proof_kernel_replay_small_range(ProofKernelReplayInt{known: true, value: nodes[root].value})
+                "field":
+                    # The empty literal's count is 0 under every width, as in the constant leaf.
+                    return proof_kernel_replay_constant_leaf(nodes, nodes[root].kind, nodes[root].name, nodes[root].left, nodes[root].value)
+                "unary":
+                    return empty if remaining < 1
+                    return empty if nodes[root].operator != "+"
+                    inner: ProofKernelReplayInt = proof_kernel_replay_small_constant_remaining(nodes, nodes[root].left, remaining - 1)
+                    return proof_kernel_replay_small_range(inner)
+                "binary":
+                    return empty if remaining < 1
+                    return empty if not proof_kernel_replay_integer_arithmetic_operator(nodes[root].operator)
+                    left: ProofKernelReplayInt = proof_kernel_replay_small_constant_remaining(nodes, nodes[root].left, remaining - 1)
+                    right: ProofKernelReplayInt = proof_kernel_replay_small_constant_remaining(nodes, nodes[root].right, remaining - 1)
+                    # Every admitted machine-integer width has at least 8 bits, so a shift by fewer
+                    # than 7 keeps a small operand inside the width and off the i8 sign bit. The
+                    # limit is a literal: an i64 global becomes a fact in every audited function.
+                    shift: bool = nodes[root].operator == "<<" or nodes[root].operator == ">>"
+                    return empty if shift and (not right.known or right.value >= 7)
+                    combined: ProofKernelReplayInt = proof_kernel_replay_constant_binary(nodes[root].operator, left, right)
+                    return proof_kernel_replay_small_range(combined)
+                _:
+                    return empty
+
+        def proof_kernel_replay_small_nonnegative_constant(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize) -> ProofKernelReplayInt:
+            return proof_kernel_replay_small_constant_remaining(nodes, root, remaining)
+
+        def proof_kernel_replay_safe_comparison_constant(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: true, value: nodes[root].value} if root < nodes.count and nodes[root].kind == "int" and nodes[root].value >= 0
+            return proof_kernel_replay_small_nonnegative_constant(nodes, root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
+
+        def proof_kernel_replay_constant_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
+            # Direct nonnegative literals retain their exact values. Compound arithmetic is
+            # admitted only when every intermediate is in the nonnegative i8 range, making its
+            # value identical under every wider signed/unsigned machine-integer interpretation.
+            left: ProofKernelReplayInt = proof_kernel_replay_safe_comparison_constant(nodes, left_root)
+            right: ProofKernelReplayInt = proof_kernel_replay_safe_comparison_constant(nodes, right_root)
+            return false if not left.known or not right.known
+            return left.value == right.value if operator == "=="
+            return left.value != right.value if operator == "!="
+            return left.value < right.value if operator == "<"
+            return left.value > right.value if operator == ">"
+            return left.value <= right.value if operator == "<="
+            return left.value >= right.value if operator == ">="
+            return false
+
+        def proof_kernel_replay_negated_constant_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
+            return proof_kernel_replay_constant_comparison(nodes, left_root, "!=", right_root) if operator == "=="
+            return proof_kernel_replay_constant_comparison(nodes, left_root, "==", right_root) if operator == "!="
+            return proof_kernel_replay_constant_comparison(nodes, left_root, ">=", right_root) if operator == "<"
+            return proof_kernel_replay_constant_comparison(nodes, left_root, ">", right_root) if operator == "<="
+            return proof_kernel_replay_constant_comparison(nodes, left_root, "<=", right_root) if operator == ">"
+            return proof_kernel_replay_constant_comparison(nodes, left_root, "<", right_root) if operator == ">="
+            return false
