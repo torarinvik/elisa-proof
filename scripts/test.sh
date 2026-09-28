@@ -85,6 +85,9 @@ python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
 python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
 python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_remainder_range.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
