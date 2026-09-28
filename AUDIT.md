@@ -8590,3 +8590,62 @@ The engine's other gains come in unchanged:
 
 Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass on the merged tree, along with
 every focused wasmbrowser test.
+
+## P1-04: shared kernel terms and a measurement section (2026-09-28)
+
+The standalone replay audit wrote 379,288 kernel nodes and a 106 MB report. Most of that was
+copies. Every goal re-encodes its facts, so a fact used by many certificates appeared once for
+each of them.
+
+`src/proof/kernel_intern.elisa` now rewrites each freshly encoded term onto nodes that already
+hold exactly the same data. It walks the new nodes bottom-up and keeps one hash table over the
+arena. This is a producer change, not a trust change: replay still admits the arena node by node,
+and provenance compares terms by structure, so a shared node is indistinguishable from a copy.
+
+The sharing refuses in two cases:
+- **Quantifiers.** A quantifier's kind is bound in place after encoding. Any encoding that
+  contains a quantifier keeps all of its fresh nodes.
+- **Unexpected shapes.** If a reference does not point strictly below its node, a children range
+  reaches outside the fresh entries, or a kind without children carries some, the suffix is
+  left exactly as encoded.
+
+A table slot only proposes a candidate. The candidate must lie in the settled prefix and match
+field by field, children by content. So a slot left stale by a truncation elsewhere cannot alias
+a different term.
+
+Result on the standalone audit, identical in everything but node indices:
+- status, summary, findings and trust are unchanged, and 1,180 of 1,180 certificates replay with
+  0 gaps;
+- every certificate's goal and fact terms decode to the same expressions;
+- nodes went from 379,288 to 46,461, and children from 86,424 to 40,462;
+- the report went from 106 MB to 55 MB;
+- the peak footprint went from about 900 MB to 751 MB.
+
+`test.sh`'s memory limit for the audit drops from 1.7 GB to 1.2 GB. The standalone validator now
+requires at least three shared nodes for each kept node.
+
+Reports end with a fixed-size `measurements` object (`elisa-proof-measurements-v1`). It holds
+declarations, obligations, goal attempts, certificates, certificate facts (total, largest, and
+roots repeated within a certificate), fact traces, control-flow steps, the peak live-fact count,
+kernel nodes (kept and shared), kernel children, and report bytes. No proof decision reads these
+counters. The compiler's AST store exposes no node count, so declarations stand in for source
+size.
+
+While wiring this in, I found that `report_output.elisa` began with the last line of the final
+function in `theorem_output.elisa`, left there by an earlier split. That line now closes its own
+function.
+
+Tests:
+- `examples/kernel_intern_runtime.elisa` calls the rewrite directly. Its name hash sends every
+  name to one value. It covers repeated terms, partial reuse, high value bits, operators, names,
+  children order, quantifier separation, three malformed shapes, a foreign root, stale slots
+  (including one naming an unsettled node), and a 3,000-term table load.
+  - It was checked by mutation. Removing the value, name, limit, forward-reference or
+    children-start checks, or making quantifiers shareable, each produces a nonzero exit.
+  - It compiles and passes under both stage0 and stage1.
+- `examples/rejected_quantifier_kind_sharing.elisa` puts the same body under `exists` (true) and
+  `forall` (false). Both `forall` goals stay open, and each `exists` replays from its own node.
+- `scripts/test_measurements.py` checks the section's schema, its agreement with the report and
+  the raw byte offset, the bottom-up arena order, and a source that does not parse.
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass.

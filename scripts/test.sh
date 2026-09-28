@@ -73,6 +73,7 @@ run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'im
 # Missing lifetime/place information is unsupported, not a demonstrated violation.
 python3 "$ROOT_DIR/scripts/test_overlap_diagnostics.py"
 python3 "$ROOT_DIR/scripts/test_certificate_reuse.py"
+python3 "$ROOT_DIR/scripts/test_measurements.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_rejected_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
@@ -225,6 +226,14 @@ if [[ "$kernel_proposition_admission_status" -ne 0 ]]; then
     printf 'proof test matrix failed: native proposition-admission boundary tests failed (%s)\n' "$kernel_proposition_admission_status" >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-intern.o" "$ROOT_DIR/examples/kernel_intern_runtime.elisa" >/dev/null 2>&1 &&
+    "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-intern" "$standalone_probe_dir/kernel-intern.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
+    "$standalone_probe_dir/kernel-intern"
+kernel_intern_status=$?
+if [[ "$kernel_intern_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: kernel term sharing boundary tests failed (%s)\n' "$kernel_intern_status" >&2
+    exit 1
+fi
 "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/report-invariants" "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
 "$standalone_probe_dir/report-invariants"
 report_invariants_status=$?
@@ -353,7 +362,7 @@ fi
 # The replay checker deliberately bounds branch-state retention to keep the self-hosting corpus
 # deterministic. Keep a coverage floor, require the important summaries, and require every
 # budget exhaustion to be classified as unsupported rather than silently unknown.
-KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-1700000}"
+KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-1200000}"
 kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
 kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
 ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \

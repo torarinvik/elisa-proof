@@ -114,6 +114,14 @@ def main() -> None:
     ]
     require(not unsigned_findings, f"unsigned-local containment regressed: {unsigned_findings}")
     require(report["trust"]["trusted_assumptions"] == [], "standalone audit gained trusted assumptions")
+    # Certificates re-encode the same facts; before terms were shared this arena held 379,288
+    # nodes, over 8 times its shared size. Losing most of the sharing is a memory regression.
+    measured = report["measurements"]
+    require(measured["kernel_nodes"] == len(report["kernel"]["nodes"]), f"measured node count is wrong: {measured}")
+    require(
+        measured["kernel_nodes_shared"] >= 3 * measured["kernel_nodes"],
+        f"kernel term sharing regressed: {measured['kernel_nodes_shared']} shared, {measured['kernel_nodes']} kept",
+    )
 
 
 if __name__ == "__main__":
