@@ -81,6 +81,7 @@ python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
 python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
+python3 "$ROOT_DIR/scripts/test_vector_index_arithmetic.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do

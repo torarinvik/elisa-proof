@@ -22,6 +22,9 @@ module ElisaProofKernelReplay:
 
         struct ProofKernelReplayBound:
             name: sview
+            term_name: sview
+            term_offset: i64
+            term_key: bool
             lower: mutable i64
             upper: mutable i64
             has_lower: mutable bool
@@ -314,37 +317,81 @@ module ElisaProofKernelReplay:
 
         def proof_kernel_replay_bound_index(bounds: darray[ProofKernelReplayBound]&, name: sview) -> usize:
             for index in 0..<bounds.count:
-                if bounds[index].name == name:
+                if not bounds[index].term_key and bounds[index].name == name:
                     return index
             return bounds.count
 
         def proof_kernel_replay_bound_for(bounds: darray[ProofKernelReplayBound]&, name: sview) -> ProofKernelReplayBound:
             for index in 0..<bounds.count:
-                if bounds[index].name == name:
+                if not bounds[index].term_key and bounds[index].name == name:
                     return bounds[index]
-            return ProofKernelReplayBound{name: name, has_lower: false, lower: 0, has_upper: false, upper: 0}
+            return ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
 
         def proof_kernel_replay_add_lower(bounds: mutable darray[ProofKernelReplayBound]&, name: sview, value: i64) -> void:
             return if name == ""
             for mutable bound in bounds:
-                if bound.name == name:
+                if not bound.term_key and bound.name == name:
                     old_has: bool = bound.has_lower
                     old_value: i64 = bound.lower
                     bound.has_lower <- true
                     bound.lower <- value if not old_has or value > old_value
                     return
-            bounds <- bounds.push(ProofKernelReplayBound{name: name, has_lower: true, lower: value, has_upper: false, upper: 0})
+            bounds <- bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, has_lower: true, lower: value, has_upper: false, upper: 0})
 
         def proof_kernel_replay_add_upper(bounds: mutable darray[ProofKernelReplayBound]&, name: sview, value: i64) -> void:
             return if name == ""
             for mutable bound in bounds:
-                if bound.name == name:
+                if not bound.term_key and bound.name == name:
                     old_has: bool = bound.has_upper
                     old_value: i64 = bound.upper
                     bound.has_upper <- true
                     bound.upper <- value if not old_has or value < old_value
                     return
-            bounds <- bounds.push(ProofKernelReplayBound{name: name, has_lower: false, lower: 0, has_upper: true, upper: value})
+            bounds <- bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, has_lower: false, lower: 0, has_upper: true, upper: value})
+
+        # Loop binders are encoded as `(source-name, source-offset)` tuple atoms so shadowed
+        # binders remain distinct. Only the producer's exact shape with an independent scalar
+        # type marker may contribute structural bounds.
+        def proof_kernel_replay_loop_range_atom_key(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize) -> (known: bool, name: sview, offset: i64):
+            return (false, "", 0) if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return (false, "", 0) if node.kind != "tuple" or node.children_count != 2 or not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+            first: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start)
+            second: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + 1)
+            return (false, "", 0) if not first.known or not second.known or first.value >= nodes.count or second.value >= nodes.count
+            return (false, "", 0) if nodes[first.value].kind != "ident" or nodes[first.value].name == "" or nodes[second.value].kind != "int"
+            return (true, nodes[first.value].name, nodes[second.value].value)
+
+        def proof_kernel_replay_loop_range_bound_atom(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> bool:
+            key: (known: bool, name: sview, offset: i64) = proof_kernel_replay_loop_range_atom_key(nodes, children, root)
+            return key.known and proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, root, 0)
+
+        def proof_kernel_replay_bound_for_term(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, bounds: darray[ProofKernelReplayBound]&, root: usize) -> ProofKernelReplayBound:
+            key: (known: bool, name: sview, offset: i64) = proof_kernel_replay_loop_range_atom_key(nodes, children, root)
+            for bound in bounds:
+                if key.known and bound.term_key and bound.term_name == key.name and bound.term_offset == key.offset:
+                    return bound
+            return ProofKernelReplayBound{name: "", term_name: key.name, term_offset: key.offset, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
+
+        def proof_kernel_replay_add_term_lower(bounds: mutable darray[ProofKernelReplayBound]&, name: sview, offset: i64, value: i64) -> void:
+            for mutable bound in bounds:
+                if bound.term_key and bound.term_name == name and bound.term_offset == offset:
+                    old_has: bool = bound.has_lower
+                    old_value: i64 = bound.lower
+                    bound.has_lower <- true
+                    bound.lower <- value if not old_has or value > old_value
+                    return
+            bounds <- bounds.push(ProofKernelReplayBound{name: "", term_name: name, term_offset: offset, term_key: true, has_lower: true, lower: value, has_upper: false, upper: 0})
+
+        def proof_kernel_replay_add_term_upper(bounds: mutable darray[ProofKernelReplayBound]&, name: sview, offset: i64, value: i64) -> void:
+            for mutable bound in bounds:
+                if bound.term_key and bound.term_name == name and bound.term_offset == offset:
+                    old_has: bool = bound.has_upper
+                    old_value: i64 = bound.upper
+                    bound.has_upper <- true
+                    bound.upper <- value if not old_has or value < old_value
+                    return
+            bounds <- bounds.push(ProofKernelReplayBound{name: "", term_name: name, term_offset: offset, term_key: true, has_lower: false, lower: 0, has_upper: true, upper: value})
 
         def proof_kernel_replay_collect_bound_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left_root: usize, operator: sview, right_root: usize, bounds: mutable darray[ProofKernelReplayBound]&) -> void:
             return if not proof_kernel_replay_primitive_comparison(nodes, children, facts, left_root, right_root)
@@ -370,6 +417,22 @@ module ElisaProofKernelReplay:
                 incremented_left: ProofKernelReplayInt = proof_kernel_replay_add_safe(left_constant.value, 1)
                 proof_kernel_replay_add_lower(bounds, nodes[right_name_root].name, incremented_left.value) if operator == "<" and incremented_left.known
                 proof_kernel_replay_add_lower(bounds, nodes[right_name_root].name, left_constant.value) if operator == "<=" or operator == "=="
+            left_term: (known: bool, name: sview, offset: i64) = proof_kernel_replay_loop_range_atom_key(nodes, children, left_root)
+            if left_name_root == nodes.count and left_term.known and proof_kernel_replay_loop_range_bound_atom(nodes, children, facts, left_root) and right_constant.known:
+                incremented: ProofKernelReplayInt = proof_kernel_replay_add_safe(right_constant.value, 1)
+                proof_kernel_replay_add_term_lower(bounds, left_term.name, left_term.offset, incremented.value) if operator == ">" and incremented.known
+                proof_kernel_replay_add_term_lower(bounds, left_term.name, left_term.offset, right_constant.value) if operator == ">=" or operator == "=="
+                decremented: ProofKernelReplayInt = proof_kernel_replay_sub_safe(right_constant.value, 1)
+                proof_kernel_replay_add_term_upper(bounds, left_term.name, left_term.offset, decremented.value) if operator == "<" and decremented.known
+                proof_kernel_replay_add_term_upper(bounds, left_term.name, left_term.offset, right_constant.value) if operator == "<=" or operator == "=="
+            right_term: (known: bool, name: sview, offset: i64) = proof_kernel_replay_loop_range_atom_key(nodes, children, right_root)
+            if right_name_root == nodes.count and right_term.known and proof_kernel_replay_loop_range_bound_atom(nodes, children, facts, right_root) and left_constant.known:
+                decremented_left: ProofKernelReplayInt = proof_kernel_replay_sub_safe(left_constant.value, 1)
+                proof_kernel_replay_add_term_upper(bounds, right_term.name, right_term.offset, decremented_left.value) if operator == ">" and decremented_left.known
+                proof_kernel_replay_add_term_upper(bounds, right_term.name, right_term.offset, left_constant.value) if operator == ">=" or operator == "=="
+                incremented_left: ProofKernelReplayInt = proof_kernel_replay_add_safe(left_constant.value, 1)
+                proof_kernel_replay_add_term_lower(bounds, right_term.name, right_term.offset, incremented_left.value) if operator == "<" and incremented_left.known
+                proof_kernel_replay_add_term_lower(bounds, right_term.name, right_term.offset, left_constant.value) if operator == "<=" or operator == "=="
 
         def proof_kernel_replay_collect_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, bounds: mutable darray[ProofKernelReplayBound]&, depth: usize) -> void:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
