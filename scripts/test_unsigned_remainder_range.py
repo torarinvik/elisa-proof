@@ -16,7 +16,7 @@ assert data["replay"]["certificates"] == data["replay"]["replayed"] > 0, data
 functions = {d["name"]: d for d in data["declaration_details"] if d.get("kind") == "function"}
 for name in ("remainder_below_positive_divisor", "conditional_rounded_quotient",
              "quotient_successor_lower_bound", "quotient_successor_upper_bound",
-             "bounded_scaled_product"):
+             "bounded_scaled_product", "bounded_scaled_product_reversed"):
     assert functions[name]["verified"], (name, functions[name])
     assert not any(g["name"] == name and not g["proven"] for g in data["goals"]), name
 negative = functions["untrue_tighter_remainder_bound"]
