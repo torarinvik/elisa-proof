@@ -27,4 +27,11 @@ negative = report("rejected_module_u8_constant_contract.elisa", 1)
 assert negative["status"] == "failed" and negative["verification_state"] == "unknown", negative
 assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong_action"
            and not f["counterexample_found"] for f in negative["findings"]), negative
-print("module-local u8 constants substitute with range checks; false contracts stay open")
+signed = report("module_negative_i64_constant_contract.elisa", 0)
+assert signed["status"] == signed["verification_state"] == "proved", signed
+assert not signed["findings"], signed
+wrong_signed = report("rejected_negative_i64_module_constant_contract.elisa", 1)
+assert wrong_signed["status"] == "failed" and wrong_signed["verification_state"] == "unknown", wrong_signed
+assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong_status"
+           and not f["counterexample_found"] for f in wrong_signed["findings"]), wrong_signed
+print("module-local u8 and signed i64 constants preserve range and scope; false contracts stay open")
