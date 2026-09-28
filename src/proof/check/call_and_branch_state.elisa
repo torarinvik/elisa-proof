@@ -16,7 +16,7 @@ extend ElisaProof:
             for lent in lends |blocked|:
                 proof_push_aliased(&blocked, lent)
             for fact in source |source, facts, names, parameters, report, blocked|:
-                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, report.local_extent_names, 0)
+                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -37,7 +37,7 @@ extend ElisaProof:
             for index in 0..<values.count |index, names, values, facts, parameters, blocked, position|:
                 values[index] <- Ast::Expr.Invalid if index >= names.count
                 continue if index >= names.count
-                retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, report.shared_extent_names, report.local_extent_names, 0)
+                retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 values[index] <- Ast::Expr.Ident(names[index], position) if not retained
 
         # Give a fresh opaque symbol, at a call boundary, only to the bindings the callee can
@@ -57,7 +57,7 @@ extend ElisaProof:
                 continue if index == keep
                 values[index] <- Ast::Expr.Invalid if index >= names.count
                 continue if index >= names.count
-                retained: bool = analyzed and not (any existing in report.aliased_names where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
+                retained: bool = analyzed and not (any existing in report.aliased_names where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 values[index] <- Ast::Expr.Ident(names[index], position) if not retained
 
         # The roots a body assigns, in every nested statement form. Captured blocks nested in the
@@ -294,8 +294,11 @@ extend ElisaProof:
                     continue if not proof_current_parameter(names, parameters, shared)
                     proof_push_aliased(&extent_safe, shared)
             entry_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
-            for target in written |names, values, facts, report, owner, position|:
+            for target in written |names, values, facts, report, owner, position, parameters, whole_roots|:
                 continue if not (any candidate in names where candidate == target)
+                # A shared-fixed parameter is referenced, never written: the body may lend it to
+                # a callee, but nothing reaches its storage through the lend or any other path.
+                continue if proof_shared_fixed_parameter(report, names, parameters, target) and not (any existing in whole_roots where existing == target)
                 proof_resymbolize_binding(names, values, facts, report, owner, target, position)
             proof_restore_type_bound_facts(entry_facts, facts, names, report, owner)
             proof_restore_extent_facts(entry_facts, facts, written, extent_safe)
@@ -356,7 +359,7 @@ extend ElisaProof:
             blocked.extend(report.aliased_names)
             blocked.extend(captures)
             for fact in source |source, facts, names, parameters, blocked|:
-                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, report.local_extent_names, 0)
+                continue if not proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -378,7 +381,7 @@ extend ElisaProof:
             for index in 0..<capped |index, values, names, then_values, else_values, then_reaches, else_reaches, facts, parameters, report|:
                 candidate: Ast::Expr = then_values[index] if then_reaches else else_values[index]
                 continue if then_reaches and else_reaches and not proof_expr_equal(then_values[index], else_values[index])
-                continue if not proof_expr_call_stable(candidate, facts, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
+                continue if not proof_expr_call_stable(candidate, facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 values[index] <- candidate
 
         # Re-establish, at a branch join both arms reach, every fact that both arms still hold.
@@ -391,7 +394,7 @@ extend ElisaProof:
             return if not analyzed
             for fact in primary |primary, secondary, facts, names, parameters, report|:
                 continue if not (any other in secondary where proof_expr_equal(other, fact))
-                continue if not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
+                continue if not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -416,7 +419,7 @@ extend ElisaProof:
         # it with the forgotten names replaced by the arm's values. That holds even when both arms
         # record the same `b`: each arm reads its atoms in its own state, and on either path the
         # joined atom is that arm's value. A name the join kept keeps its atom and is not replaced.
-        # A fact both arms state is left to the literal intersection, which bounds the search. `if flag: best <- slot` thus keeps `best <= CAP`: the
+        # A fact both arms state and read unchanged is left to the literal intersection, which bounds the search. `if flag: best <- slot` thus keeps `best <= CAP`: the
         # untouched arm states it and the other derives it from `best == slot` and `slot < CAP`.
         def proof_restore_branch_implied_facts(then_facts: mutable darray[Ast::Expr]&, else_facts: mutable darray[Ast::Expr]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, values: darray[Ast::Expr]&, names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> void:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
@@ -452,10 +455,13 @@ extend ElisaProof:
                 continue if not (any name in joined where proof_expr_mentions_name(fact, name))
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 continue if any existing in accepted where proof_expr_equal(existing, fact)
-                continue if (any other in then_facts where proof_expr_equal(other, fact)) and (any other in else_facts where proof_expr_equal(other, fact))
-                continue if not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, 0)
+                continue if not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 then_step: Ast::Expr = proof_substitute(fact, names, then_map)
                 else_step: Ast::Expr = proof_substitute(fact, names, else_map)
+                # Both arms stating the fact leave it to the literal intersection only when both
+                # read it unchanged. An arm that rebound a name, `cursor <- cursor + 1`, states it
+                # over the old value; the intersection drops that reading, so it is decided here.
+                continue if proof_expr_equal(then_step, fact) and proof_expr_equal(else_step, fact) and (any other in then_facts where proof_expr_equal(other, fact)) and (any other in else_facts where proof_expr_equal(other, fact))
                 # The joined fact is recorded through an arm whose own reading is the fact itself,
                 # so its trace is that arm's kernel-checked step.
                 continue if not proof_expr_equal(then_step, fact) and not proof_expr_equal(else_step, fact)

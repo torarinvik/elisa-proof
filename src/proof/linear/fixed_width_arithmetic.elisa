@@ -367,13 +367,16 @@ extend ElisaProof:
             return proof_signed_expression_safe_with_bounds(expression, facts, bounds, 0)
 
         # The width a comparison operand is evaluated at, when every leaf of it is a
-        # witnessed primitive signed term of one width. Closed constants carry no width of
-        # their own; they are typed by the operand they meet. Zero means "not known", and a
-        # term with any unwitnessed leaf, call, shift or bitwise operator is not known.
+        # witnessed primitive term of one type. Closed constants carry no width of their own;
+        # they are typed by the operand they meet. Zero means "not known", and a term with any
+        # unwitnessed leaf, call, shift or bitwise operator is not known. An unsigned name
+        # reports its width negated, so a signed and an unsigned leaf never agree on a width.
         def proof_strict_signed_width(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> i64:
             return 0 if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Ident(_, _) or Ast::Expr.Field(_, _, _) or Ast::Expr.Index(_, _, _) or Ast::Expr.IndexN(_, _, _):
+                    unsigned_width: i64 = proof_unsigned_marker_width_for_name(facts, proof_ident_name(expression))
+                    return 0 - unsigned_width if unsigned_width > 0 and proof_signed_marker_width_for_term(facts, expression) == 0
                     return 0 if not proof_scalar_term_witnessed(expression, facts, depth + 1)
                     return proof_signed_marker_width_for_term(facts, expression)
                 Ast::Expr.Paren(inner, _):
@@ -383,28 +386,39 @@ extend ElisaProof:
                     return proof_strict_signed_width(operand, facts, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     return 0 if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent
-                    left_closed: bool = proof_closed_integer_arithmetic(left, depth + 1)
-                    right_closed: bool = proof_closed_integer_arithmetic(right, depth + 1)
-                    return 0 if left_closed and right_closed
-                    left_width: mutable i64 = 0
-                    left_width <- proof_strict_signed_width(left, facts, depth + 1) if not left_closed
-                    right_width: mutable i64 = 0
-                    right_width <- proof_strict_signed_width(right, facts, depth + 1) if not right_closed
-                    return 0 if not left_closed and left_width == 0
-                    return 0 if not right_closed and right_width == 0
-                    return 0 if left_width != 0 and right_width != 0 and left_width != right_width
-                    return left_width if left_width != 0
-                    return right_width
+                    return proof_strict_joined_width(left, right, facts, depth + 1)
+                Ast::Expr.If(_, then_expression, else_expression, _):
+                    # A conditional has the type of its arms; its condition is typed on its own.
+                    return proof_strict_joined_width(then_expression, else_expression, facts, depth + 1)
                 _:
                     return 0
 
-        # The exact value of a closed constant evaluated at a signed width, known only when
-        # every literal is a non-negative payload and every intermediate result fits.
+        # The one width two operands of a single type share, read from whichever are not closed.
+        def proof_strict_joined_width(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> i64:
+            return 0 if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            left_closed: bool = proof_closed_integer_arithmetic(left, depth)
+            right_closed: bool = proof_closed_integer_arithmetic(right, depth)
+            return 0 if left_closed and right_closed
+            left_width: mutable i64 = 0
+            left_width <- proof_strict_signed_width(left, facts, depth) if not left_closed
+            right_width: mutable i64 = 0
+            right_width <- proof_strict_signed_width(right, facts, depth) if not right_closed
+            return 0 if not left_closed and left_width == 0
+            return 0 if not right_closed and right_width == 0
+            return 0 if left_width != 0 and right_width != 0 and left_width != right_width
+            return left_width if left_width != 0
+            return right_width
+
+        # The exact value of a closed constant evaluated at a width, known only when every
+        # literal is a non-negative payload and every intermediate result fits. A negative width
+        # is unsigned: its floor is zero, so a subtraction that would wrap is refused, and a
+        # 64-bit value above the i64 ceiling is unrepresentable here and refused too.
         def proof_signed_constant_at_width(expression: Ast::Expr, width: i64, depth: usize) -> (known: bool, value: i64):
             return (false, 0) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            minimum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_min(width)
-            maximum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_max(width)
-            return (false, 0) if minimum == 0 or maximum == 0
+            unsigned: bool = width < 0
+            minimum: i64 = 0 if unsigned else ElisaProofKernelCore::proof_kernel_signed_width_min(width)
+            maximum: i64 = proof_unsigned_width_max(0 - width) if unsigned else ElisaProofKernelCore::proof_kernel_signed_width_max(width)
+            return (false, 0) if (minimum == 0 and not unsigned) or maximum <= 0
             match expression:
                 Ast::Expr.IntLit(value, _):
                     return (value >= 0 and value <= maximum, value)
@@ -426,6 +440,10 @@ extend ElisaProof:
                     result <- proof_add_safe(left_value.value, right_value.value) if operator == TokenKind.Plus
                     result <- proof_sub_safe(left_value.value, right_value.value) if operator == TokenKind.Minus
                     result <- proof_mul_safe(left_value.value, right_value.value) if operator == TokenKind.Star
+                    # Truncating division and remainder of in-width operands stay in width, except
+                    # `min / -1`, which the range check below refuses like any other overflow.
+                    result <- proof_div_safe(left_value.value, right_value.value) if operator == TokenKind.Slash
+                    result <- proof_mod_safe(left_value.value, right_value.value) if operator == TokenKind.Percent
                     return (result.known and result.value >= minimum and result.value <= maximum, result.value)
                 _:
                     return (false, 0)
@@ -446,6 +464,9 @@ extend ElisaProof:
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent:
                         return proof_ambiguous_constant_at_width(left, facts, width, depth + 1) or proof_ambiguous_constant_at_width(right, facts, width, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return true if proof_has_ambiguous_integer_constant_in(condition, facts, depth + 1)
+                    return proof_ambiguous_constant_at_width(then_expression, facts, width, depth + 1) or proof_ambiguous_constant_at_width(else_expression, facts, width, depth + 1)
                 _:
                     pass
             return proof_has_ambiguous_integer_constant(expression, depth)

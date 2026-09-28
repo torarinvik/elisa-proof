@@ -8758,6 +8758,244 @@ premises do not re-prove it, fails replay closed, like `branch-conjunct`.
 Budget: candidates are bounded by the arm facts times 3. Each is checked with the existing
 `proof_goal` budget per arm, and only while both arms rebind the same name set.
 
+
+## Unsigned disjunctions and bounded sums (port of elisa-proof 64d4297, 2026-09-28)
+
+This ports `Prove unsigned disjunctions and bounded sums safely` from elisa-proof main. It adds
+`examples/unsigned_or_goal.elisa` and `examples/unsigned_sum_upper_shape.elisa`, with their
+`scripts/test_*.py` checks. Two local adjustments:
+
+- In `kernel_replay/resource_model.elisa`, the ported early `or` introduction returned its
+  result directly. That shadowed the implication reading of `or` below it, so a failed
+  introduction now falls through to it.
+- The ported comment in `check/declaration_checks.elisa` was shortened to keep the file at the
+  600-line limit.
+
+
+### Field places and loop binders are generalized to fresh names (2026-09-28)
+
+The interval, difference and affine tiers read only identifiers. A requirement such as
+`at < text.length and text.length <= CAP` therefore could not bound `text.bytes[at]`. For the
+same reason, a found-index loop invariant over the renamed binder `(index, 518)` never closed.
+`proof_field_place_goal` (`linear/field_places.elisa`) collects up to four places:
+- field chains over a plain name;
+- renamed loop binders.
+
+Each must carry a primitive scalar witness. The rule replaces every occurrence, including inside
+type markers, with a reserved `__elisa_field_place_N` name in the goal and every fact. It then
+proves the result once, at split depth + 1. Instantiating the names back yields the original
+goal, so the rule is sound for any fixed values. Quantifier bodies are left alone, which only
+withholds information. A goal or fact that already names `__elisa_field_place_0` stops the rule,
+so it runs once per goal. Places reached through an index or a call are never generalized. The
+kernel mirror is `kernel_replay/field_places.elisa`, which rewrites with
+`proof_kernel_replay_replace_exact`.
+
+Accepted: `examples/field_places.elisa`, which covers `byte_at`, `by_value`, `two_hops`,
+`bounded_position`, `all_spaces` and `skip_spaces`: 20/20 proven and replayed.
+
+Rejected: `examples/rejected_field_places.elisa`, where every case stays `index-upper-unproven`:
+- `non_strict` uses `<=` where `<` is needed;
+- `other_field` bounds a different field;
+- `other_record` bounds a different record.
+
+The field-place rule also accepts one case in the older region example. In
+`examples/rejected_region_extent_contract.elisa`, `shared_cannot_be_returned_mutable` reads
+`nodes[0]` under `nodes.count > 0`. That read now proves, because the extent is a field place.
+The function is still refused, for its return witness. The test asserts the proven bound.
+
+### Guarded differences and plain orders reach the difference graph and the wrap guard (2026-09-28)
+
+An unsigned fact is modular. `stop == start + 4` and `start + 4 <= stop` hold for a wrapped
+`start`, so neither may be read as an integer relation, and neither is.
+
+A guarded subtraction is different. `stop - start == 4` beside `start <= stop` is the exact
+integer difference, because the guard rules out the wrap. The affine reader declined any side
+that names two identifiers, so this fact never reached the graph.
+
+`proof_guarded_difference_import` (`linear/guarded_differences.elisa`) imports `high - low op c`
+and `c op high - low` as `high op low + c` when all of these hold:
+- both operands are plain names of the same nonzero unsigned width;
+- some fact, or a conjunct of one, orders `low <= high` or `low < high` directly.
+
+Base bounds narrowed by closure are also pushed into the graph query as zero-node edges. The
+linear tier closes interval bounds through the facts' difference constraints before its
+interval check.
+
+The wrap guard on goals and facts had no propagation at all. It rejected `start + 3 <= 18` under
+`start < stop` and `stop <= 16`. `proof_close_plain_bounds` now gives it exactly this much:
+- comparisons whose sides are bare names or literals, which involve no arithmetic;
+- guarded differences.
+
+It still never reads a sum in a fact, which keeps `examples/rejected_unsigned_fact_explosion.elisa`
+refused.
+
+When the goal guard fails on a comparison, the field-place rule is tried before refusing. It
+re-enters every guard over fresh names, so `text.bytes[start + 3]` proves under
+`stop <= text.length`.
+
+Kernel mirrors:
+- `kernel_replay/guarded_differences.elisa`, with hooks in `proof_kernel_replay_collect_differences`,
+  `proof_kernel_replay_interval_goal`, `proof_kernel_replay_unsigned_goal_safe` and the
+  resource-model guard;
+- the field-place fallback in `kernel_replay/resource_model.elisa`.
+
+Accepted: `examples/guarded_differences.elisa`, 15/15 proven and replayed.
+
+Rejected: `examples/rejected_guarded_differences.elisa`:
+- `modular_sum_fact` and `modular_sum_bound`, the modular sums;
+- `unguarded_difference`, which has no order guard;
+- `one_past_the_span` and `one_past_in_text`, the off-by-one cases.
+
+## Lazy plain-order closure (2026-09-28)
+
+`proof_close_plain_bounds` ran for every unsigned goal and fact. It only narrows intervals, so
+it now runs only when the bounds already collected leave the root undecided. Both the producer
+(`proof_unsigned_expression_safe`) and the replay (`proof_kernel_replay_unsigned_safe_closing`)
+do this. The standalone kernel audit went from 275.8 s to 63.6 s, with a 425 MB peak. It fails
+one obligation fewer than main (707 against 708).
+
+## Shared borrows with fixed fields in closed frames (2026-09-28)
+
+A field fact behind a shared borrow, like `stop <= text.length`, was cleared whenever the borrow
+was lent to a call. The compiler does not promise borrow exclusivity: `noalias` is opt-in and
+needs a disjointness proof. So the rule rests on reachability instead.
+
+A frame is closed when both of these hold:
+- the program declares no mutable global;
+- every parameter is a shared borrow or a value, and its pointee holds neither a reference nor a
+  borrowed view.
+
+In a closed frame, nothing the frame can reach through a call can write a shared pointee. Every
+field place under a shared-borrow parameter is then fixed (`shared_fixed_names`,
+`check/shared_borrows.elisa`). The named-extent audit confirmed that `u8[CAP]` counts as a fixed
+scalar array, so such a pointee qualifies.
+
+Accepted: `examples/shared_fixed_borrows.elisa`.
+
+Rejected: `examples/rejected_shared_fixed_borrows.elisa`:
+- a `mutable Text&` parameter;
+- a pointee holding a `mutable Text&` field.
+
+Rejected: `examples/rejected_shared_fixed_global.elisa`, a mutable global.
+
+`examples/rejected_value_root_field.elisa` still fails as before.
+
+## Call summaries carried over a bound name (2026-09-28)
+
+A call result is deliberately not a witnessed scalar term. So `cursor == need(cursor, stop)`
+beside the summary `need(cursor, stop) <= stop` never gave `cursor <= stop`.
+
+When a scalar is bound to a call, `proof_rebind_call_summaries` (`check/bound_call_summaries.elisa`)
+re-adds each active summary trace of that call, with the call text replaced by the bound name.
+The re-added fact is a function-summary fact with the same callee ensure and bindings, and the
+result is bound to the name. Replay validates it by instantiating the callee ensure.
+
+Accepted: `examples/bound_call_summaries.elisa`.
+
+Rejected: `examples/rejected_bound_call_summaries.elisa`:
+- an ensure stronger than the summary;
+- a call whose precondition fails, which contributes nothing.
+
+## Joins over an arm that rebinds a name over itself (2026-09-28)
+
+`proof_restore_branch_implied_facts` skipped any fact that both arms state literally, and left it
+to the literal intersection. `cursor <- cursor + 1` states `cursor <= stop` of the old value, so
+the intersection dropped it. The skip now applies only when both arm steps leave the fact
+unchanged. Otherwise the fact is decided over each arm's value.
+
+Accepted: `examples/rebind_join.elisa`.
+
+Rejected: `examples/rejected_rebind_join.elisa`, where a step of two overshoots.
+
+Still open:
+- an `else: cursor <- cursor` arm;
+- an if-expression value `cursor + 1 if cursor < stop else cursor`.
+
+## A captured block loop leaves its own post state (2026-09-28)
+
+`proof_check_captured_block` checked a block-form captured loop (`for … |cursor|:` with no
+result) and then havocked every captured name again. The loop's own post state holds opaque
+current values and the invariants it checked. Havocking dropped all of that, so nothing the loop
+proved survived it. When the block is exactly one loop that ended normally and kept its names,
+its post state is now the block's exit state, as it already was for the accumulator spelling.
+
+Accepted: `examples/captured_block_exit.elisa`.
+
+Rejected: `examples/rejected_captured_block_exit.elisa`:
+- a bound the loop never stated;
+- an invariant the body breaks.
+
+## Integer conversions in conditional arms (2026-09-28)
+
+`b.u64() if b >= 48 else 0` was expression-unsupported. The syntax gate refused any call inside
+an if-expression, and the purity gate only knew function-table callees.
+- A zero-argument integer conversion now passes both gates when its receiver does.
+- A source function with the conversion's name keeps the old rule.
+- The conversion's value stays opaque: nothing assumes `b.u64() <= 255`.
+
+Accepted: `examples/conditional_conversions.elisa`.
+
+Rejected: `examples/rejected_conditional_conversions.elisa`:
+- a state-changing call in an arm;
+- a bound that needs the widened value.
+
+Still open: widening conversions do not carry the receiver's value.
+
+## Unsigned arms checked under their condition (2026-09-28)
+
+The unsigned wrap guard read all three parts of an if-expression under the outer facts. It
+refused `byte - 48 if byte >= 48 else 0` before the case split could see the condition. Now, when
+the then arm is not safe on its own, it is checked again with the condition, which the guard has
+already found range-safe, added to the facts. The kernel mirror
+(`kernel_replay/unsigned_bounds.elisa`) does the same. The else arm keeps the outer facts, so the
+kernel needs no negation node.
+
+Accepted: `examples/guarded_conditional_arms.elisa`.
+
+Rejected: `examples/rejected_guarded_conditional_arms.elisa`:
+- the guard on the wrong arm;
+- a condition weaker than the subtraction needs.
+
+## Constants typed at their peer's width (2026-09-28)
+
+The ambiguity guard refused any closed constant past the i8 range, so `v < 200 / 2` over a
+`u64` gave no bound, and neither did `1000000000000000000 if v >= 100000000000000000 else 7`.
+A comparison's constants are now read at the width of a strictly typed peer:
+- `/` and `%` fold with the same zero and overflow checks as `+`, `-` and `*`;
+- an unsigned peer gives the unsigned range (width encoded as `-w`), so a signed and an
+  unsigned leaf never agree on a width;
+- an if-expression takes the width its two arms agree on, and its condition is checked the
+  same way.
+
+`u64` constants and their defining equalities (committed in a5ecf4b) are covered by the same
+examples. The kernel mirror (`kernel_replay/fixed_width_arithmetic.elisa`) folds the same
+operators at the same widths.
+
+Accepted: `examples/typed_wide_constants.elisa`.
+
+Rejected: `examples/rejected_typed_wide_constants.elisa`:
+- `100 - 200` at `u64` width wraps, so it bounds nothing;
+- a folded quotient one past the goal;
+- a wide then arm that breaks the bound.
+
+## Else arms checked under the complement (2026-09-28)
+
+This replaces the else-arm half of the entry above. The else arm of `a if c else b` is now
+checked again, when it is not safe on its own, with the bounds of `not c` added to the bounds
+but not to the facts. `not (p or q)` splits one level by De Morgan into `not p` and `not q`. A
+negated conjunction adds nothing. The kernel reads the same complement through
+`proof_kernel_replay_collect_negated_bounds`, so it still builds no negation node. The arm
+checks are inlined in the recursive safety check: helper functions calling back into it put a
+mutual-recursion edge outside the compiler's checked one-step-decrease subset.
+
+Accepted: `examples/complemented_else_arms.elisa`. It covers a saturating `v * 10 + 9` as an
+expression and as a captured-loop step.
+
+Rejected: `examples/rejected_complemented_else_arms.elisa`:
+- a complement that leaves the multiply free;
+- an unguarded then arm;
+- a complement one short;
+- the complement of a conjunction.
 ## P1-05: source-admission gate matrix (2026-09-28)
 
 Invariant: exit status 0 from any CLI route certifies a result that stands on an admissible source.
