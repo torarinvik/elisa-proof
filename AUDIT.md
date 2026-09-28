@@ -9391,3 +9391,38 @@ Two reads of the call-term width marker turned out to be unnecessary and were re
 signed width of an unreduced call term, and a stability rule keeping the marker across calls.
 Once the call is generalized, the width is read under its fresh name. The marker is also
 re-derived for any call the goal still mentions.
+
+## Pure call-entry reference snapshots (2026-09-29)
+
+Ported from `codex/wasmbrowser-proof`: d23142c "Replay pure call-entry scalar reference
+snapshots" and 02120fa "Make replay recursion budgets strict-checkable".
+
+A pure function may now state `old(p[0])` in an ensure when `p` is a scalar reference parameter.
+At a call site, that ensure's `old(p[0])` becomes the caller's `a[0]` when all of these hold:
+- both caller and callee are pure;
+- the actual argument is a bare name;
+- that name is one of the caller's own reference parameters.
+
+The fact trace records the snapshot as an extra `__old_reference_state` binding after `result`.
+
+Trusted surface: certificate validation grows by about 40 lines, plus
+`replay/old_reference_call_validation.elisa` (85 lines). Replay re-derives each condition from
+its own tables and does not trust the producer's flag:
+- the formal the `old` names, which must be the one supported `old(p[0])` place;
+- that the callee's formal is a reference;
+- that the caller is pure;
+- that the actual is one of the caller's reference parameters;
+- that the snapshot is exactly `a[0]`.
+
+Any other `old` shape makes the substitution invalid, and the certificate is refused.
+
+Merge adjustments:
+- `old(...)` stays refused in every non-ensure contract kind of a pure function, `decreases`
+  included. The branch refused it only in `requires`.
+- Bound call summaries re-emit the snapshot binding, so a rebound call result still replays.
+- The branch's congruence and proposition-typing budget edits were already on main in an
+  equivalent form, so main's versions were kept.
+
+Mutation check: with the producer's caller-purity gate removed,
+`reference_observe_after_impure_call` proves in the producer, and replay refuses it (1 gap of
+32 certificates). All 18 test chunks and all 9 dogfood chunks pass.
