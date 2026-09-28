@@ -68,15 +68,23 @@ conclusion as a `show` line, and its justification as the certificate that repla
 keyword carries the verdict and only `proof ... qed` means the kernel checked it — `unchecked` is a
 goal the producer proved with no replayed certificate, and `open` is an unproven goal, printed with
 its recorded failure instead of a proof. The renderer decides nothing: a form it does not model
-prints as an explicit marker rather than as plausible source. It exits `0` when the goal exists and
-`2` otherwise.
+prints as an explicit marker rather than as plausible source. It exits `0` when the goal exists in an
+admissible source, `1` when the source is not admissible, and `2` when the goal does not exist.
+
+Every route follows the same exit contract, checked by `scripts/test_source_admission_matrix.py`
+against a parse error, a missing include, a semantic error, a non-Boolean contract and a NUL byte in
+code: exit `0` is reserved for a result that stands on an admissible source, so a caller that reads
+only the status cannot act on a goal whose surrounding source is malformed. A NUL byte is refused
+anywhere but inside a `#` comment, because the linked stage1 lexer passes over one the reference
+compiler rejects.
 
 `build/elisa-proof --check-proof block.txt file.elisa` reads such a block back and checks it against
 the source it names, treating the file as untrusted input: it re-renders the canonical block for the
 goal the file claims and reports every divergence with its line number, expected text and found
 text. An edited keyword, an invented hypothesis, a swapped conclusion, a renumbered certificate and
 a block from another source all diverge alike. It exits `0` for a block that matches what the report
-supports, `1` for one that diverges, and `2` for one that names no goal of this source.
+supports, `1` for one that diverges or that matches a goal of an inadmissible source (the response
+then carries `"admissible": false`), and `2` for one that names no goal of this source.
 
 `build/elisa-proof --script block.txt file.elisa` runs a proof written by hand in that same shape,
 so a person can propose a different proof of the goal rather than only compare against the recorded
@@ -94,20 +102,25 @@ report names a broken goal, repair proposes a proof, `--script` runs it, the ker
 search only ever proposes — a candidate is admitted solely when the checked engine solves the goal
 *and* the kernel replays the certificate it produced. The response states `candidates`, `tried` and
 `exhaustive`, so a success is explicitly a bounded one; `unrepaired` means the fixed vocabulary
-contained no proof and never that the goal is false. It exits `0` when a repair was found, `1` when
-none was, and `2` when the goal id does not exist.
+contained no proof and never that the goal is false. A source that is not admissible (it failed to
+parse, import, type-check or form its propositions) is not searched: the status is `inadmissible`
+and the script is null, since `--script` would refuse any script found there. It exits `0` when a
+repair was found, `1` when none was or the source is inadmissible, and `2` when the goal id does not
+exist.
 
 `build/elisa-proof --repair-all file.elisa` walks every unresolved goal of a file in one pass,
 reporting each with its own verdict and script. It tries nothing the checker already proved, and
 its own verdict is the conjunction of the per-goal ones: `nothing_to_repair` when the file has no
-open goals, `repaired` when every open goal got a kernel-checked script, and `partial` otherwise.
-It exits `0` for the first two and `1` for the third.
+open goals, `repaired` when every open goal got a kernel-checked script, `partial` otherwise, and
+`inadmissible`, with nothing searched, for an inadmissible source. It exits `0` for the first two
+and `1` for the others.
 
 Use `build/elisa-proof --goal N file.elisa` to retrieve only one of those goals without loading the
 full report or kernel arena. The deterministic `elisa-proof-goal-v1` response includes the source
 fingerprint and completeness gate, proposition, exact hypotheses and origins, dependencies,
 certificate/replay state, and the goal-bound failure classification. Retrieval exits `0` when the
-goal exists—including an unresolved goal—and `2` for an invalid or missing ID; proof status is
+goal exists—including an unresolved goal—in an admissible source, `1` when the source is not
+admissible, and `2` for an invalid or missing ID; proof status is
 carried explicitly as `proved`, `disproved`, `unsupported`, or `unknown` in the response.
 `dependency_index` provides the reverse mapping from theorem/function-summary dependency names to
 the stable goal IDs that consume them, making downstream invalidation direct and deterministic.

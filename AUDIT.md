@@ -8757,3 +8757,59 @@ premises do not re-prove it, fails replay closed, like `branch-conjunct`.
 
 Budget: candidates are bounded by the arm facts times 3. Each is checked with the existing
 `proof_goal` budget per arm, and only while both arms rebind the same name set.
+
+## P1-05: source-admission gate matrix (2026-09-28)
+
+Invariant: exit status 0 from any CLI route certifies a result that stands on an admissible source.
+Admissible means the source parsed, every include was read, no compiler semantic error is visible,
+every proposition passed kernel formation, and every certificate replayed.
+
+`scripts/test_source_admission_matrix.py` runs all 11 routes against six malformed variants of
+`examples/verified.elisa`:
+- routes: text, `--json`, `--theorems`, `--goal`, `--proof`, `--check-proof`, `--suggest`,
+  `--repair`, `--repair-all`, `--tactics`, `--script`;
+- malformed variants: a parse error, a missing include, an unresolved name, a non-Boolean `ensure`,
+  a NUL in an identifier and a NUL in a string.
+
+Each variant keeps goal 7, which the kernel proves by itself, so a route that looked only at its
+goal would admit it.
+
+**Leaks found at 7154c90.** `--goal`, `--proof`, `--suggest` and `--theorems` exited 0 on every
+inadmissible variant. `--repair` searched and reported `"repaired"` with a script, exit 0.
+`--repair-all` reported `nothing_to_repair`, exit 0, even for a file that did not parse.
+`--check-proof` exited 0 for a block rendered from the same inadmissible source. `--json`, the text
+route, `--tactics` and `--script` already refused.
+
+**Fix.** `proof_route_exit` in `cli.elisa` maps a found goal in an inadmissible source to exit 1.
+Repair does not search an inadmissible source: `--repair` reports status `inadmissible` with a null
+script, and `--repair-all` reports batch status `inadmissible` with every goal unrepaired and
+`tried` 0. `--check-proof` keeps `matches` but adds `"admissible"` to its response and exits 1.
+
+**Soundness fix: NUL in code.** `def nul_\0name() -> i64:` was proved with exit 0. The stage1
+lexer the tool links passes over the NUL and yields a declaration named `nul_`. The stage0
+reference compiler rejects the file with parse errors, and stage1 compiles it silently. The new
+`src/app/source_admission.elisa` finds the first NUL that is not inside a `#` comment and reports a
+`parse-error` on its line. A comment starts at a `#` that no token covers. Verification is then not
+attempted.
+
+A NUL inside a comment, which both compilers accept, still proves, and the matrix checks it as a
+positive case. A NUL inside a string literal is refused. That is stricter than necessary and still
+sound.
+
+Other cases in the matrix:
+- Positive: the complete source and its commented-NUL twin exit 0 on all routes. An admissible
+  source with an unrelated open goal (`tactic_repair_target.elisa`) still serves `--tactics`,
+  `--goal` and `--theorems` with exit 0.
+- Route input: a missing source exits 2 on every route. A tactic script bound to another source
+  fingerprint exits 1 with `fingerprint_match` false. A proof block from another source diverges.
+- Budget: `rejected_budget.elisa` exits 1, and `--repair-all` does not report it `repaired`.
+
+Tests updated for the new contract: the optional-result and nonbool-hypothesis repair-all
+probes now expect `inadmissible`. The rejected-lemma catalog and suggestion probes now expect
+exit 1.
+
+Evidence: all 17 test chunks and all 10 dogfood chunks pass.
+
+Limitation: the matrix covers the CLI surface only. Certificate reuse inside one run has its own
+invalidation tests (`test_certificate_reuse.py`), and there is still no cross-run reuse route to
+gate.
