@@ -44,4 +44,13 @@ assert underflow["replay"]["certificates"] == underflow["replay"]["replayed"], u
 assert any(finding["kind"] == "index-lower-unproven"
            for finding in underflow["findings"]), underflow
 
-print("scaled vector indices: safe loop bounds replay; out-of-range and underflow controls refused")
+shadowing = report("rejected_vector_index_shadowing.elisa", 1)
+assert shadowing["status"] == "failed", shadowing
+assert shadowing["summary"]["semantic_errors"] == 0, shadowing
+assert shadowing["trust"]["trusted_assumptions"] == [], shadowing
+assert shadowing["replay"]["gaps"] == 0, shadowing
+assert shadowing["replay"]["certificates"] == shadowing["replay"]["replayed"], shadowing
+assert any(finding["kind"] == "index-upper-unproven"
+           for finding in shadowing["findings"]), shadowing
+
+print("scaled vector indices: safe loop bounds replay; out-of-range, underflow, and shadowing controls refused")
