@@ -1,0 +1,207 @@
+# The symbolic state of the correspondence checker's reference semantics.
+#
+# A variable's value is a term over symbols. The symbol `x` denotes a parameter's entry value, or a
+# variable's value at the point it was last resymbolized (a branch join or a loop head); each
+# resymbolization takes a fresh epoch, so two states agree about `x` only when they agree about
+# which point `x` names. Facts are propositions over the same symbols that hold on every execution
+# reaching the current point. A symbol's meaning changes only when it is resymbolized, and then
+# every fact and every value mentioning it is dropped or resymbolized in turn.
+
+struct CorrState:
+    names: mutable darray[sview]
+    # A scalar type name, or "" for a loop binder, which carries no type facts of its own.
+    types: mutable darray[sview]
+    values: mutable darray[usize]
+    epochs: mutable darray[usize]
+    assignable: mutable darray[bool]
+    facts: mutable darray[usize]
+    live: mutable bool
+
+def corr_state_empty() -> CorrState:
+    return CorrState{names: [], types: [], values: [], epochs: [], assignable: [], facts: [], live: true}
+
+def corr_state_assign(target: mutable CorrState&, source: CorrState&) -> void:
+    target.names.clear()
+    target.names.extend(source.names)
+    target.types.clear()
+    target.types.extend(source.types)
+    target.values.clear()
+    target.values.extend(source.values)
+    target.epochs.clear()
+    target.epochs.extend(source.epochs)
+    target.assignable.clear()
+    target.assignable.extend(source.assignable)
+    target.facts.clear()
+    target.facts.extend(source.facts)
+    target.live <- source.live
+
+def corr_state_truncate(state: mutable CorrState&, count: usize) -> void:
+    return if state.names.count <= count
+    state.names <- state.names.truncate(count)
+    state.types <- state.types.truncate(count)
+    state.values <- state.values.truncate(count)
+    state.epochs <- state.epochs.truncate(count)
+    state.assignable <- state.assignable.truncate(count)
+
+def corr_state_index(state: CorrState&, name: sview) -> usize:
+    found: mutable usize = state.names.count
+    for index in 0..<state.names.count |index, state, name, found|:
+        found <- index if state.names[index] == name
+    return found
+
+def corr_add_fact(state: mutable CorrState&, fact: usize) -> bool:
+    return false if fact == 0 or state.facts.count >= CorrLimit::FACTS
+    state.facts.push(fact)
+    return true
+
+def corr_add_type_facts(pool: mutable CorrPool&, state: mutable CorrState&, term: usize, type_name: sview) -> bool:
+    produced: mutable darray[usize] = []
+    return false if not corr_push_type_facts(pool, term, type_name, &produced)
+    for fact in produced |state|:
+        return false if not corr_add_fact(state, fact)
+    return true
+
+def corr_declare(pool: mutable CorrPool&, state: mutable CorrState&, name: sview, type_name: sview, value: usize, assignable: bool, epoch: usize) -> bool:
+    return false if value == 0 or state.names.count >= CorrLimit::VARIABLES
+    state.names.push(name)
+    state.types.push(type_name)
+    state.values.push(value)
+    state.epochs.push(epoch)
+    state.assignable.push(assignable)
+    return true if sview_len(type_name) == 0
+    symbol: usize = corr_ident(pool, name)
+    return corr_add_type_facts(pool, state, symbol, type_name)
+
+def corr_comparison_complement(operator: sview) -> sview:
+    return "!=" if operator == "=="
+    return "==" if operator == "!="
+    return ">=" if operator == "<"
+    return "<" if operator == ">="
+    return "<=" if operator == ">"
+    return ">" if operator == "<="
+    return ""
+
+# Assume that `condition` evaluated to `holds`. The proposition itself is recorded (negated with
+# `not` when it failed), then whatever it implies by one propositional step: the conjuncts of a
+# true `and`, the disjuncts of a false `or`, the operand of a double negation, and the complement
+# of a failed comparison. Every recorded fact is a consequence of the branch taken.
+def corr_assume(pool: mutable CorrPool&, state: mutable CorrState&, condition: usize, holds: bool, depth: usize) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or condition == 0 or condition >= pool.terms.count
+    node: CorrTerm = pool.terms[condition]
+    if holds:
+        return false if not corr_add_fact(state, condition)
+        if node.kind == "binary" and node.operator == "and":
+            return corr_assume(pool, state, node.left, true, depth + 1) and corr_assume(pool, state, node.right, true, depth + 1)
+        if node.kind == "unary" and node.operator == "not":
+            return corr_assume_failed(pool, state, node.left, depth + 1)
+        return true
+    negated: usize = corr_unary(pool, "not", condition)
+    return false if not corr_add_fact(state, negated)
+    return corr_assume_failed(pool, state, condition, depth + 1)
+
+def corr_assume_failed(pool: mutable CorrPool&, state: mutable CorrState&, condition: usize, depth: usize) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or condition == 0 or condition >= pool.terms.count
+    node: CorrTerm = pool.terms[condition]
+    if node.kind == "binary" and node.operator == "or":
+        return corr_assume(pool, state, node.left, false, depth + 1) and corr_assume(pool, state, node.right, false, depth + 1)
+    if node.kind == "unary" and node.operator == "not":
+        return corr_assume(pool, state, node.left, true, depth + 1)
+    complement: sview = corr_comparison_complement(node.operator)
+    if node.kind == "binary" and sview_len(complement) > 0:
+        complemented: usize = corr_binary(pool, complement, node.left, node.right)
+        return corr_add_fact(state, complemented)
+    return true
+
+def corr_name_listed(names: darray[sview]&, name: sview) -> bool:
+    for listed in names |name|:
+        return true if listed == name
+    return false
+
+# Give every variable in `changed` a fresh symbol. The set is first closed over the variables
+# whose values mention a changed symbol, since those values would otherwise change meaning too.
+def corr_resymbolize(pool: mutable CorrPool&, state: mutable CorrState&, changed: mutable darray[sview]&, next_epoch: mutable usize&) -> bool:
+    growing: mutable bool = true
+    rounds: mutable usize = 0
+    while growing and rounds <= state.names.count |growing, rounds, pool, state, changed|:
+        growing <- false
+        rounds <- rounds + 1
+        for index in 0..<state.names.count |index, pool, state, changed, growing|:
+            name: sview = state.names[index]
+            continue if corr_name_listed(changed, name)
+            if corr_mentions_any(pool, state.values[index], changed):
+                changed.push(name)
+                growing <- true
+    kept: mutable darray[usize] = []
+    for fact in state.facts |pool, changed, kept|:
+        kept.push(fact) if not corr_mentions_any(pool, fact, changed)
+    state.facts.clear()
+    state.facts.extend(kept)
+    for index in 0..<state.names.count |index, pool, state, changed, next_epoch|:
+        name: sview = state.names[index]
+        continue if not corr_name_listed(changed, name)
+        symbol: usize = corr_ident(pool, name)
+        return false if symbol == 0
+        state.values[index] <- symbol
+        fresh: usize = next_epoch + 1
+        next_epoch <- fresh
+        state.epochs[index] <- fresh
+        type_name: sview = state.types[index]
+        if sview_len(type_name) > 0:
+            return false if not corr_add_type_facts(pool, state, symbol, type_name)
+    return true
+
+def corr_fact_listed(pool: CorrPool&, facts: darray[usize]&, fact: usize) -> bool:
+    for listed in facts |pool, fact|:
+        return true if corr_equal(pool, listed, fact, 0)
+    return false
+
+# The state after an `if`: each branch's own declarations go out of scope, a variable the branches
+# leave with different values or different symbol meanings gets a fresh symbol, and only facts
+# established on both paths survive. A path that returned contributes nothing.
+def corr_join(pool: mutable CorrPool&, outer_count: usize, then_state: mutable CorrState&, else_state: mutable CorrState&, joined: mutable CorrState&, next_epoch: mutable usize&) -> bool:
+    corr_state_truncate(then_state, outer_count)
+    corr_state_truncate(else_state, outer_count)
+    if not then_state.live and not else_state.live:
+        corr_state_assign(joined, then_state)
+        joined.live <- false
+        return true
+    if not then_state.live:
+        corr_state_assign(joined, else_state)
+        return true
+    if not else_state.live:
+        corr_state_assign(joined, then_state)
+        return true
+    return false if then_state.names.count != else_state.names.count
+    changed: mutable darray[sview] = []
+    for index in 0..<then_state.names.count |index, pool, then_state, else_state, changed|:
+        same_epoch: bool = then_state.epochs[index] == else_state.epochs[index]
+        if not same_epoch or not corr_equal(pool, then_state.values[index], else_state.values[index], 0):
+            changed.push(then_state.names[index])
+    corr_state_assign(joined, then_state)
+    common: mutable darray[usize] = []
+    for fact in then_state.facts |pool, else_state, common|:
+        common.push(fact) if corr_fact_listed(pool, else_state.facts, fact)
+    joined.facts.clear()
+    joined.facts.extend(common)
+    return corr_resymbolize(pool, joined, changed, next_epoch)
+
+# The outer variables a statement list may assign, at any depth.
+def corr_collect_assigned(body: darray[Ast::Stmt]&, state: CorrState&, assigned: mutable darray[sview]&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    for statement in body |state, assigned, depth|:
+        match statement:
+            Ast::Stmt.Assign(target, _, _, _):
+                match target:
+                    Ast::Expr.Ident(name, _):
+                        if corr_state_index(state, name) < state.names.count and not corr_name_listed(assigned, name):
+                            assigned.push(name)
+                    _:
+                        return false
+            Ast::Stmt.If(_, then_body, else_body, _):
+                return false if not corr_collect_assigned(then_body, state, assigned, depth + 1)
+                return false if not corr_collect_assigned(else_body, state, assigned, depth + 1)
+            Ast::Stmt.For(_, _, _, body, _):
+                return false if not corr_collect_assigned(body, state, assigned, depth + 1)
+            _:
+                pass
+    return true

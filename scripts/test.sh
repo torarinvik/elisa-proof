@@ -91,6 +91,7 @@ python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_remainder_range.py"
 python3 "$ROOT_DIR/scripts/test_portable_replay.py"
+python3 "$ROOT_DIR/scripts/test_correspondence.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
