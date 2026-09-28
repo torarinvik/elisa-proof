@@ -702,6 +702,8 @@ run_probe rejected_shared_fixed_borrows examples/rejected_shared_fixed_borrows.e
 run_probe rejected_shared_fixed_global examples/rejected_shared_fixed_global.elisa 1
 run_probe bound_call_summaries examples/bound_call_summaries.elisa 0
 run_probe rejected_bound_call_summaries examples/rejected_bound_call_summaries.elisa 1
+run_probe value_call_arguments examples/value_call_arguments.elisa 0
+run_probe rejected_value_call_arguments examples/rejected_value_call_arguments.elisa 1
 run_probe rebind_join examples/rebind_join.elisa 0
 run_probe rejected_rebind_join examples/rejected_rebind_join.elisa 1
 run_probe conditional_conversions examples/conditional_conversions.elisa 0
@@ -1557,6 +1559,7 @@ cases = (
     ("literal_widths", {('plus_zero', 'ensure-unproven'), ('times_one', 'ensure-unproven'), ('wide_difference', 'ensure-unproven'), ('wide_sum', 'ensure-unproven'), ('negative_unsigned', 'ensure-unproven'), ('wide_signed', 'ensure-unproven'), ('below_signed_minimum', 'ensure-unproven'), ('wide_goal', 'ensure-unproven')}),
     ("shared_fixed_borrows", {('with_a_mutable_parameter', 'call-requires-unproven'), ('with_a_reference_field', 'call-requires-unproven')}),
     ("bound_call_summaries", {('stronger_than_the_summary', 'ensure-unproven'), ('unproven_precondition', 'call-requires-unproven'), ('unproven_precondition', 'ensure-unproven')}),
+    ("value_call_arguments", {('container', 'ensure-unproven'), ('view', 'ensure-unproven'), ('hierarchy', 'ensure-unproven'), ('common_fields', 'ensure-unproven'), ('lent', 'ensure-unproven')}),
     ("rebind_join", {('overshoot', 'ensure-unproven'), ('overshoot', 'invariant-not-preserved')}),
     ("conditional_conversions", {('counted', 'expression-unsupported'), ('widened_bound', 'ensure-unproven')}),
     ("guarded_conditional_arms", {('wrong_arm', 'ensure-unproven'), ('weak_guard', 'ensure-unproven')}),

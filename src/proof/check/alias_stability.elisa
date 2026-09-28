@@ -118,6 +118,14 @@ extend ElisaProof:
                 report.local_extent_names[write_index] <- existing
                 write_index <- write_index + 1
             report.local_extent_names.resize(write_index)
+            value_count: usize = report.value_binding_names.count
+            write_index <- 0
+            for read_index in 0..<value_count |read_index, write_index, report, name|:
+                existing: sview = report.value_binding_names[read_index]
+                continue if existing == name
+                report.value_binding_names[write_index] <- existing
+                write_index <- write_index + 1
+            report.value_binding_names.resize(write_index)
 
         def proof_push_aliased(aliased: mutable darray[sview]&, name: sview) -> void:
             return if name == ""
@@ -385,7 +393,9 @@ extend ElisaProof:
                     return parts.count == 1 and parts[0] != ""
                 Ast::Expr.Ident(name, _):
                     return false if any existing in aliased where existing == name
-                    return false if not (any candidate in names where candidate == name) and not (any parameter in parameters where parameter == name)
+                    # A registered match payload symbol is a constant of this frame's own storage.
+                    payload_symbol: bool = proof_name_is_reserved_internal(name) and (any owned in local_extents where owned == name)
+                    return false if not (any candidate in names where candidate == name) and not (any parameter in parameters where parameter == name) and not payload_symbol
                     return proof_scalar_witnessed(facts, name)
                 Ast::Expr.Tuple(_, _):
                     # A loop binder's atom `(name, offset)`: the binder is a local of this body.
@@ -441,6 +451,7 @@ extend ElisaProof:
                     # together with the witness recorded beside that fact when it is built.
                     return false if not proof_scalar_term_witnessed(expression, facts, 0)
                     for argument in arguments |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth|:
+                        continue if proof_value_argument_stable(argument, names, parameters, aliased, local_extents, 0)
                         return false if not proof_expr_call_stable(argument, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
                     return true
                 Ast::Expr.Paren(inner, _):
@@ -454,6 +465,42 @@ extend ElisaProof:
                     return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
                 _:
                     return false
+
+        # A by-value, reference-free binding no reference, receiver or opaque argument names is
+        # storage no callee can reach, so it denotes the same value after a call whatever its
+        # type: an enum or struct argument keeps a pure callee's summary term meaningful exactly
+        # as a scalar one does. The binding is a current local or parameter, or a match payload
+        # symbol `proof_freshen_opaque_bindings` registered because its scrutinee is such a
+        # binding. A field chain under it is part of the same value. An index is not followed:
+        # its subscript is a separate term with its own stability question.
+        def proof_value_argument_stable(expression: Ast::Expr, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, local_extents: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == "" or not (any owned in local_extents where owned == name)
+                    return false if any existing in aliased where existing == name
+                    return (any candidate in names where candidate == name) or (any parameter in parameters where parameter == name) or proof_name_is_reserved_internal(name)
+                Ast::Expr.Field(object, field_name, _):
+                    return false if field_name == ""
+                    return proof_value_argument_stable(object, names, parameters, aliased, local_extents, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_value_argument_stable(inner, names, parameters, aliased, local_extents, depth + 1)
+                _:
+                    return false
+
+        # The binding a pure place names through fields alone, or "" for any other form.
+        def proof_value_place_root(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Field(object, field_name, _):
+                    return "" if field_name == ""
+                    return proof_value_place_root(object, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_value_place_root(inner, depth + 1)
+                _:
+                    return ""
 
         # Re-establish, after a nested opaque call, every pre-call fact that is call-stable for
         # the current function. Witnesses are read from the pre-call state, which still holds

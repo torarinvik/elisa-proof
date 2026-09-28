@@ -9270,3 +9270,69 @@ state directly, with the type ranges the producer supplies. Mutation checks:
 - admitting any negated literal fails with 235.
 The signed cases need the primitive scalar witness that source states carry. Without it the
 kernel refuses them for another reason, and the cases would test nothing.
+
+## Payload-enum values as call arguments (2026-09-28)
+
+A pure call over a by-value payload-enum binding, such as `depth(n)` with `n: Nat`, now gets
+the pure-call witness a call over scalars gets. Its summary also survives the next call in the
+body. Before this change, `a: i64 = depth(n); b: i64 = depth(n)` lost `a >= 0` at the second
+call because the witness required every argument to be a witnessed scalar.
+
+This is producer-side only. The witness is the same `__elisa_primitive_scalar_type(call)`
+marker, and replay checks every fact trace exactly as before. What it admits is decided by
+`enum_value_types.elisa`, `proof_value_argument_stable` and `proof_value_binding_argument`.
+
+Why a plain enum value is fixed:
+- Both compilers refuse a write to a payload field ("field is immutable"), and a payload field
+  cannot be declared `mutable`. So an enum value, inline or a handle into a packed store,
+  denotes one immutable tree for its lifetime.
+- A binding of such a type is one of the frame's value bindings (`value_binding_names`). If no
+  reference, receiver or opaque argument names it (`aliased_names`), only reassignment changes
+  it, and reassignment drops facts by root name as it does for a scalar.
+- A match payload symbol that is bound from such a binding is registered the same way.
+
+What is admitted as a plain value type:
+- primitive scalars and floats;
+- a const enum with a unique name;
+- a struct of plain fields;
+- a payload enum whose name is unique, that is in no `is` hierarchy, that has no `common:`
+  block, and whose variant fields are all plain.
+
+Recursive mentions are admitted coinductively. Any alias, container, view or reference type is
+refused.
+
+Assumptions, recorded as such:
+- Payload and common fields are immutable in both compilers.
+- Store lifetime and dangling handles are the compiler's responsibility.
+- The name lookup is by bare name, so any second enum, struct or const enum with the same name
+  anywhere in the program refuses the type.
+
+Accepted: `examples/value_call_arguments.elisa` covers:
+- a declared result;
+- two calls over one parameter;
+- a match payload beside its scrutinee;
+- a local copy;
+- a recursive enum with a struct payload.
+
+All 15 goals prove. On main, 5 of the 15 are unproven.
+
+Rejected: `examples/rejected_value_call_arguments.elisa` covers:
+- a `darray` payload;
+- an `sview` payload;
+- a hierarchy parent;
+- `common:` fields;
+- a binding lent by `&mut` between the calls.
+
+Each is `ensure-unproven`, with 0 replay gaps.
+
+Mutation checks:
+- making `proof_enum_in_hierarchy` always false and admitting every unknown type form proves
+  the container, hierarchy and common cases;
+- dropping the aliasing check in both `proof_value_argument_stable` and
+  `proof_value_binding_argument` proves `lent`. Either check alone keeps it refused.
+
+The `sview` case is refused by the name lookup, which is a separate path.
+
+Found and not changed (pre-existing, scalars too):
+- A summary whose ensure mentions a call (`ensure result <= size(n)`) is lost at the next call.
+- A statement call to a void, impure callee drops a guard fact over a local scalar.

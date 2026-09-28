@@ -3274,6 +3274,25 @@ if [[ "$rejected_bound_call_summaries_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A pure call over a by-value payload-enum binding keeps its summary across the next call.
+set +e
+run_json_report "$ROOT_DIR/examples/value_call_arguments.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+value_call_arguments_status=${PIPESTATUS[1]}
+set -e
+if [[ "$value_call_arguments_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call over a payload-enum value lost its summary at the next call\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_value_call_arguments.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("container", "ensure-unproven"), ("view", "ensure-unproven"), ("hierarchy", "ensure-unproven"), ("common_fields", "ensure-unproven"), ("lent", "ensure-unproven")}'
+rejected_value_call_arguments_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_value_call_arguments_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call over an enum a second path reaches kept its summary\n' >&2
+    exit 1
+fi
+
 # A join decides a fact over each arm value when an arm rebound a name over itself.
 set +e
 run_json_report "$ROOT_DIR/examples/rebind_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
