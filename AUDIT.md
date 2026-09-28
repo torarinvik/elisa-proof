@@ -7854,3 +7854,71 @@ constant is derived (`expression-unsupported`), a false ensure over a typed elem
 (`ensure-unproven`), and a contract over a derived-extent element (`contract-proposition-type`).
 Both fixtures are in `scripts/test.sh` and the dogfood probes, and the accepted one is also a
 replay fixture.
+
+### Values a nested call cannot reach (2026-09-28)
+
+A call nested inside an expression, such as `board.marks[slot] and open(board, slot)` in a
+local's initializer, forgot every symbolic value in the frame, while the same call as a statement
+forgets only what the callee can reach. A loop binder's value is its range atom, so after the
+nested call `slot` became an opaque identifier with no range facts, and every index over it on the
+same line or later in the body was reported `index-lower-unproven` and `index-upper-unproven`.
+
+The nested-call path now applies `proof_forget_values_after_call`, the rule a call statement
+applies and the one the fact side of the same boundary already used. A value survives only when
+the frame's alias analysis ran, its binding is not aliased, and the value is call-stable against
+the aliased names. A local lent to the callee, a reference binding, and a value built from a place
+the callee can write are all still forgotten. Without a usable alias set, nothing survives, as
+before.
+
+`examples/nested_call_kept_values.elisa` proves all 28 obligations with clean replay: an index
+before the call, an index after it, a call on the binder alone, and a two-index line inside a
+plain loop. The unpatched checker leaves 10 of them unproven. `examples/rejected_nested_call_kept_values.elisa`
+must fail with four `index-upper-unproven` findings: a copy of the binder lent to an advancing
+callee beside the index, the same lend in an earlier statement (its local is inlined and reported
+twice), and a guard over a field the callee writes. The accepted and rejected examples of
+`nested_call_value`, `rejected_nested_call_symbolic_value`, `call_stable_facts`,
+`condition_call_positions`, and `resource_nested_scalar_call` report the same results before and
+after the change. Both new examples are in `scripts/test.sh` and the dogfood probes, and the
+accepted one is also a replay fixture.
+
+### Indexing a local through its literal value (2026-09-28)
+
+A local bound to a collection literal has the literal as its recorded value, so a read
+`children[start]` reached the index checker as `[1, 2, 3][start]`. `proof_indexable_object`
+admitted only places, so the read was `index-bounds-opaque` whatever guarded it: a direct
+`return 0 if start >= children.count`, a loop over `0..<values.count`, or a summary guard. The
+previous entry exposed this in `examples/replay_literal_facts.elisa`: before it, the nested guard
+call happened to forget the literal, so the read was checked against the bare name, its lower
+bound was proved, and its upper bound could not match the guard's `[1, 2, 3].count`. Once the
+nested call kept the literal, all five lower bounds became opaque.
+
+The literal is now an indexable object. A literal is a value, not storage, so its count is its own
+length and nothing can alias or resize it. The value tracking that substitutes the literal already
+drops it on an element write, a push, a rebinding and a mutable lend. The goal is written over
+`[...].count`, the same term the guard facts use. That term needed a scalar witness, since
+`__elisa_primitive_scalar_type` is recorded for `children.count` and not for its substitution.
+`proof_scalar_term_witnessed` now admits the `count` of a collection literal as a `usize`, and
+`proof_kernel_replay_scalar_term_witnessed` mirrors it over a `field` node named `count` whose
+object is an `array` node. Non-empty literal lengths are still not read as constants (see "An
+empty literal is empty"), so `0 < [1, 2, 3].count` alone is still unproven.
+
+`examples/literal_index.elisa` proves all 18 obligations, with the 10 index bounds replayed: a
+direct guard, a loop over the literal's range, two literals each under its own guard, and a read
+behind a one-element range guard on an empty literal. No call satisfies that guard, so the read is
+unreachable and is proved from the summary's contradiction. The 162bd5d prover reports four of
+the five reads `index-bounds-opaque` and cannot bound the fifth.
+`examples/rejected_literal_index.elisa` must report exactly five `index-upper-unproven` findings:
+an unguarded read, a guard that admits `start == count`, a guard over a different literal, a guard
+taken before a rebinding, and a guard followed by a mutable lend.
+
+Two existing fixtures change. `examples/replay_literal_facts.elisa` again has its five proven,
+replayed lower bounds, and its upper bounds stay unproven for a different reason, now stated in the
+file: nothing derives `start < total` from `count <= total - start` with `count` at one. In
+`examples/rejected_replay_literal_facts.elisa`, `an_empty_literal_has_no_element` used the
+unsatisfiable one-element guard, so the new rule proves it vacuously. Its guard is now a
+zero-length range, which `start == 0` satisfies and which still gives no element, so it stays
+unproven. That file's findings are all `index-upper-unproven` now, because the rebound literal is
+checked rather than opaque.
+
+Open: a literal passed to a shared-reference parameter is still forgotten at the next call. The
+alias analysis records any bare name passed to a reference parameter, shared or mutable.

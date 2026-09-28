@@ -595,6 +595,10 @@ run_probe loop_accumulator examples/loop_accumulator.elisa 0
 run_probe rejected_loop_accumulator examples/rejected_loop_accumulator.elisa 1
 run_probe fixed_array_fields examples/fixed_array_fields.elisa 0
 run_probe rejected_fixed_array_fields examples/rejected_fixed_array_fields.elisa 1
+run_probe nested_call_kept_values examples/nested_call_kept_values.elisa 0
+run_probe rejected_nested_call_kept_values examples/rejected_nested_call_kept_values.elisa 1
+run_probe literal_index examples/literal_index.elisa 0
+run_probe rejected_literal_index examples/rejected_literal_index.elisa 1
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1

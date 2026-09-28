@@ -426,7 +426,7 @@ if [[ "$oversized_action_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: oversized tactic action report was incomplete\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant loop_accumulator arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_fields fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call; do
+for replay_fixture in replay_constant loop_accumulator arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_fields nested_call_kept_values literal_index fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call; do
     run_json_report "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -1192,6 +1192,32 @@ run_json_report "$ROOT_DIR/examples/rejected_fixed_array_fields.elisa" >"$reject
 rejected_fixed_array_fields_status=$?
 if [[ "$rejected_fixed_array_fields_status" -ne 1 ]] || ! python3 -c 'import json, sys; report = json.load(open(sys.argv[1])); assert report["status"] == "failed"; found = sorted((finding["name"], finding["kind"]) for finding in report["findings"]); assert found == [("rejected_derived_extent", "expression-unsupported"), ("rejected_derived_flag", "contract-proposition-type"), ("rejected_flag", "ensure-unproven"), ("rejected_off_by_one", "index-upper-unproven")], found; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0' "$rejected_fixed_array_fields_report"; then
     printf 'proof test matrix failed: rejected_fixed_array_fields=%s\n' "$rejected_fixed_array_fields_status" >&2
+    exit 1
+fi
+run_json_report "$ROOT_DIR/examples/nested_call_kept_values.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 28; bounds = [goal for goal in report["goals"] if goal["rule"] in ("index-lower", "index-upper") and goal["name"] != "open"]; assert len(bounds) == 20 and all(goal["proven"] for goal in bounds); assert report["replay"]["gaps"] == 0'
+nested_call_kept_values_probe_status=${PIPESTATUS[1]}
+if [[ "$nested_call_kept_values_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: values a nested call cannot reach\n' >&2
+    exit 1
+fi
+rejected_nested_call_kept_values_report="$standalone_probe_dir/rejected-nested-call-kept-values.json"
+run_json_report "$ROOT_DIR/examples/rejected_nested_call_kept_values.elisa" >"$rejected_nested_call_kept_values_report"
+rejected_nested_call_kept_values_status=$?
+if [[ "$rejected_nested_call_kept_values_status" -ne 1 ]] || ! python3 -c 'import json, sys; report = json.load(open(sys.argv[1])); assert report["status"] == "failed"; found = sorted((finding["line"], finding["name"], finding["kind"]) for finding in report["findings"]); assert found == [(24, "rejected_lent_copy", "index-upper-unproven"), (31, "rejected_lent_before", "index-upper-unproven"), (31, "rejected_lent_before", "index-upper-unproven"), (36, "rejected_written_field", "index-upper-unproven")], found; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0' "$rejected_nested_call_kept_values_report"; then
+    printf 'proof test matrix failed: rejected_nested_call_kept_values=%s\n' "$rejected_nested_call_kept_values_status" >&2
+    exit 1
+fi
+run_json_report "$ROOT_DIR/examples/literal_index.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 18; bounds = [goal for goal in report["goals"] if goal["rule"] in ("index-lower", "index-upper")]; assert len(bounds) == 10 and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in bounds); assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []'
+literal_index_probe_status=${PIPESTATUS[1]}
+if [[ "$literal_index_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a literal-bound local was not indexed through its literal\n' >&2
+    exit 1
+fi
+rejected_literal_index_report="$standalone_probe_dir/rejected-literal-index.json"
+run_json_report "$ROOT_DIR/examples/rejected_literal_index.elisa" >"$rejected_literal_index_report"
+rejected_literal_index_status=$?
+if [[ "$rejected_literal_index_status" -ne 1 ]] || ! python3 -c 'import json, sys; report = json.load(open(sys.argv[1])); assert report["status"] == "failed"; found = sorted((finding["line"], finding["name"], finding["kind"]) for finding in report["findings"]); assert found == [(8, "unguarded", "index-upper-unproven"), (14, "off_by_one", "index-upper-unproven"), (21, "other_literal", "index-upper-unproven"), (28, "rebound", "index-upper-unproven"), (38, "lent_after_guard", "index-upper-unproven")], found; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0' "$rejected_literal_index_report"; then
+    printf 'proof test matrix failed: rejected_literal_index=%s\n' "$rejected_literal_index_status" >&2
     exit 1
 fi
 run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==28 and r["summary"]["obligations"]==28; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'
@@ -3214,7 +3240,7 @@ if [[ "$replay_literal_facts_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-bounds-opaque", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_rebound_literal_loses_its_guard"] == "body-unverified"; assert reasons["a_guard_for_one_literal_is_not_a_guard_for_another"] == "body-unverified"; assert reasons["an_empty_literal_has_no_element"] == "body-unverified"'
+run_json_report "$ROOT_DIR/examples/rejected_replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_rebound_literal_loses_its_guard"] == "body-unverified"; assert reasons["a_guard_for_one_literal_is_not_a_guard_for_another"] == "body-unverified"; assert reasons["an_empty_literal_has_no_element"] == "body-unverified"'
 rejected_replay_literal_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_replay_literal_facts_status" -ne 0 ]]; then
