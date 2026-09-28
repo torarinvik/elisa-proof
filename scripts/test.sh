@@ -3293,6 +3293,25 @@ if [[ "$rejected_value_call_arguments_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A witnessed pure call result is generalized like a field place and keeps its declared width.
+set +e
+run_json_report "$ROOT_DIR/examples/call_result_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+call_result_places_status=${PIPESTATUS[1]}
+set -e
+if [[ "$call_result_places_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a bounded pure call result was not generalized\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_call_result_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wraps", "ensure-unproven"), ("other_argument", "ensure-unproven"), ("stale_argument", "ensure-unproven")}'
+rejected_call_result_places_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_call_result_places_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call result was bounded or identified too loosely\n' >&2
+    exit 1
+fi
+
 # A join decides a fact over each arm value when an arm rebound a name over itself.
 set +e
 run_json_report "$ROOT_DIR/examples/rebind_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'

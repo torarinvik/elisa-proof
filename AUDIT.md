@@ -9336,3 +9336,58 @@ The `sview` case is refused by the name lookup, which is a separate path.
 Found and not changed (pre-existing, scalars too):
 - A summary whose ensure mentions a call (`ensure result <= size(n)`) is lost at the next call.
 - A statement call to a void, impure callee drops a guard fact over a local scalar.
+
+## Pure call results are generalized like field places (2026-09-28)
+
+A comparison over a pure call's result, such as `small(n) + 1 >= 1` given `small(n) >= 0` and
+`small(n) < 1000`, did not prove. The interval, difference and affine tiers read only bare
+names, and no call term had a signed width, so `small(n) + 1` could not be shown not to wrap.
+
+What changed:
+- The field-place rule (`proof_field_place_goal` and its kernel mirror
+  `proof_kernel_replay_field_place_goal`) now also generalizes a call of a named function to a
+  fresh `__elisa_field_place_N` name. The call must carry a pure-call witness
+  (`__elisa_primitive_scalar_type(call)`). Type markers and other internal names never count as
+  calls here. In the kernel, a call node may carry no argument names or exactly one per argument.
+- The producer adds `__elisa_signed_place_type_bound(call, w)` beside the pure-call witness.
+  `w` is the signed width of the callee's declared return type. The bare callee name must
+  select exactly one source declaration; otherwise no width is recorded.
+- The kernel's signed place marker now also accepts a named identifier as its term. That is the
+  form a field place or call result takes after generalization, and it states what
+  `__elisa_signed_type_bound` states for a bare name.
+
+Why generalization is sound: a witnessed pure call is a function of its arguments. Within one
+proof state every occurrence of the same call text denotes one value. Replacing every
+occurrence with one fresh name therefore turns a proof of the generalized goal into a proof of
+the original, by instantiating the name back. Quantifier bodies are not rewritten, which only
+withholds information. A call nested inside another generalized term stays as it is, which
+also only withholds information.
+
+Accepted: `examples/call_result_places.elisa` covers:
+- a call plus a constant;
+- a call against a looser constant;
+- the sum of two calls over different arguments;
+- two bound results summed;
+- a result kept across another call;
+- one call cancelling itself.
+
+All 22 goals prove and replay. On main, 6 of them are unproven.
+
+Rejected: `examples/rejected_call_result_places.elisa` covers:
+- a call with no upper bound, whose successor can wrap;
+- two calls over different arguments treated as one;
+- the same call text over a name rebound between the calls.
+
+All three stay unproven with no replay gaps.
+
+Mutation checks, run on development probes with the same shapes as the accepted cases:
+- Without the kernel's call collection, 4 of 16 probe goals become replay gaps.
+- Without the kernel's identifier width, 4 of 16 probe goals become replay gaps.
+- Without the producer's width marker, 5 probe goals become unproven.
+- With the producer's signed-overflow gate forced open, the wrapping case proves in the
+  producer, and the kernel still refuses it as a replay gap.
+
+Two reads of the call-term width marker turned out to be unnecessary and were removed: the
+signed width of an unreduced call term, and a stability rule keeping the marker across calls.
+Once the call is generalized, the width is read under its fresh name. The marker is also
+re-derived for any call the goal still mentions.
