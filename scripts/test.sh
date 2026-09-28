@@ -78,6 +78,7 @@ python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 python3 "$ROOT_DIR/scripts/test_safe_constant_replay.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_disjunction.py"
 python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
+python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
 
