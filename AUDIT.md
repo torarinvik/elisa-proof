@@ -8029,3 +8029,71 @@ verifies a `_: pass` arm that keeps `depth <= 127` for the call after the match.
 `examples/rejected_no_op_statement.elisa` keeps the same two functions with the arm written as
 `with value`, a dropped prefix form. Both are still refused, and the refusal still discards the
 state after the match.
+
+### Cancellation over differences of two names (2026-09-28)
+
+A counting loop's measure did not verify. `decreases x - count` needs `x - (count + 1) < x - count`
+after a step and `x - count >= 0` at entry. The affine tier reads a side as one name plus an
+offset, so a side naming two names stopped it, and the difference tier saw the same wall. The
+post-loop ensure `result == x` fell with it, since the loop exit was not credited. Of the 25
+obligations in the counting fixture, the old prover proved 14.
+
+`proof_normalized_difference_goal` reads `left - right` as a sum of signed occurrences of names
+and non-negative literals under `+`, `-` and their unary forms. Equal names cancel, and the
+literals fold into one offset. The tier accepts the result only when at most one name is left of
+each sign, each with coefficient one. It hands that on to the difference tier as `first - second`
+with the offset on `first`. A coefficient of two or a third name is outside difference logic and
+is declined.
+
+Reading a side as a sum over the integers is only valid when none of its operations wrapped, and
+the tier does not decide that. It runs after the goal's wrap guards, which have certified every
+`+`, `-` and unary minus in the goal. It also runs after `proof_primitive_comparison`, which keeps
+an unwitnessed subterm from slipping past the signed guard's width-0 escape. The collector admits
+an operator node only when it carries a signed or unsigned width, which is what the guard decided
+it under. A node made only of literals, whose type the source leaves to inference, is declined.
+Because of that argument, `proof_difference_affine_goal` takes the normal forms with
+`certified = true` and skips its own evaluation checks. The pre-existing entry,
+`proof_difference_goal`, still passes `false`.
+
+The second change is for an unsigned counter's rebind. `next == count + 1` joins the unsigned
+subtraction guard's orders only beside a strict peer `count < bound` of the same unsigned width,
+which rules out the step wrapping. This is the argument the difference collector already applies
+when it imports the same equality. A modular equality with no peer, such as `y == x + 1` at
+`x == 255` in `u8`, stays out.
+
+The kernel mirrors both in `kernel_replay/normalized_differences.elisa`. It has its own
+collector over the flat arena, where the encoder has already removed source parentheses, so a
+`paren` node was built by some other rule and is declined. The tier line in `resource_model`
+sits after the difference comparison and behind the same primitive-comparison gate. The rebind
+import in `unsigned_bounds` runs after the type-marker facts, which it needs for the width.
+
+`examples/counting_loop_measure.elisa` proves all 27 obligations with every certificate replayed
+and no trusted assumption:
+- a signed and an unsigned counting loop;
+- a transposed difference;
+- an unsigned gap;
+- shared names that cancel;
+- a rebind beside its peer;
+- a sum of 15 cancelling groups just inside the term budget.
+
+`examples/rejected_counting_loop_measure.elisa` must report exactly these findings:
+- `flipped_descent`: a flipped measure, reported three ways, and an ensure after that loop. The
+  ensure holds, but no loop exit is credited past a failed measure. That refusal is conservative
+  and sound.
+- `unguarded_cancellation`: a `u8` difference whose wrap guard fails.
+- `doubled_name`: a doubled name.
+- `wrong_step`: a step taken the wrong way.
+- `rebind_without_peer`: a rebind with no strict peer.
+- `past_the_term_budget`: a true sum of 16 groups.
+
+The budget is `PROOF_NORMAL_TERM_LIMIT` = 64 occurrences, and the kernel has the same limit.
+The 66-occurrence sum is refused with `ensure-unproven`, not a timeout or a guess. Its 15-group
+twin with 62 occurrences is proved. Both collectors also stop at the analysis recursion depth.
+
+No certificate shape changes, so no new malformed-certificate case applies. The kernel derives
+the normal form again from the arena with its own collector and trusts nothing from the
+producer. The existing forged, junk and shape checks still cover the certificate itself, and
+the rejected claims produce no certificates.
+
+Open: the budget refusal reports `ensure-unproven`. A finding kind that names the budget would
+tell the author to split the claim.

@@ -1,0 +1,120 @@
+const PROOF_NORMAL_TERM_LIMIT: usize = 64
+
+extend ElisaProof:
+    public:
+        # One signed occurrence in a sum of names and literals. An empty name is a constant, so
+        # the collector needs no scalar accumulator: every occurrence is pushed, and the sums are
+        # formed once the whole comparison has been read.
+        struct ProofNormalTerm:
+            name: sview
+            coefficient: i64
+
+        # Read `expression` as a sum of signed names and literals, pushing each occurrence with
+        # `sign`. Only `+`, `-`, their unary forms and parentheses are admitted, and every
+        # operator node must carry an integer width. That width is what the goal's wrap guard
+        # decides each operation under, so no admitted operation is left unchecked, and a node
+        # made of literals alone -- whose type the source leaves to inference -- is declined.
+        def proof_collect_normal_terms(expression: Ast::Expr, sign: i64, facts: darray[Ast::Expr]&, terms: mutable darray[ProofNormalTerm]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or terms.count >= PROOF_NORMAL_TERM_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_collect_normal_terms(inner, sign, facts, terms, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return false if value < 0
+                    terms.push(ProofNormalTerm{name: "", coefficient: value if sign > 0 else 0 - value})
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return false if name == "" or not proof_normal_term_has_width(expression, facts)
+                    terms.push(ProofNormalTerm{name: name, coefficient: sign})
+                    return true
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    return false if not proof_normal_term_has_width(expression, facts)
+                    return proof_collect_normal_terms(operand, sign if operator == TokenKind.Plus else 0 - sign, facts, terms, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    return false if not proof_normal_term_has_width(expression, facts)
+                    return false if not proof_collect_normal_terms(left, sign, facts, terms, depth + 1)
+                    return proof_collect_normal_terms(right, sign if operator == TokenKind.Plus else 0 - sign, facts, terms, depth + 1)
+                _:
+                    return false
+
+        def proof_normal_term_has_width(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return proof_signed_width_in_expression(expression, facts) != 0 or proof_unsigned_width_in_expression(expression, facts) != 0
+
+        # `left - right` as `first - second` for two affine forms with a unit coefficient: the
+        # names left over once equal occurrences cancel, at most one of each sign, and every
+        # literal folded into the first form's offset. Anything else -- a coefficient of two, a
+        # third name -- is outside difference logic and is declined.
+        def proof_normal_difference(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, first: ProofAffine, second: ProofAffine):
+            empty: ProofAffine = ProofAffine{known: false, base: "", offset: 0, negative: false}
+            terms: mutable darray[ProofNormalTerm] = []
+            return (false, empty, empty) if not proof_collect_normal_terms(left, 1, facts, &terms, 0)
+            return (false, empty, empty) if not proof_collect_normal_terms(right, -1, facts, &terms, 0)
+            constant: mutable i64 = 0
+            positive: mutable sview = ""
+            negative: mutable sview = ""
+            for index in 0..<terms.count |index, terms, constant, positive, negative|:
+                term: ProofNormalTerm = terms[index]
+                if term.name == "":
+                    folded: (known: bool, value: i64) = proof_add_safe(constant, term.coefficient)
+                    return (false, empty, empty) if not folded.known
+                    constant <- folded.value
+                    continue
+                seen: mutable bool = false
+                for earlier in 0..<index |earlier, index, terms, term, seen|:
+                    seen <- true if terms[earlier].name == term.name
+                continue if seen
+                # Coefficients are unit and the term count is capped, so this sum cannot overflow.
+                total: mutable i64 = 0
+                for later in index..<terms.count |later, terms, term, total|:
+                    total <- total + terms[later].coefficient if terms[later].name == term.name
+                continue if total == 0
+                return (false, empty, empty) if total != 1 and total != -1
+                if total == 1:
+                    return (false, empty, empty) if positive != ""
+                    positive <- term.name
+                else:
+                    return (false, empty, empty) if negative != ""
+                    negative <- term.name
+            return (true, ProofAffine{known: true, base: positive, offset: constant, negative: false}, ProofAffine{known: true, base: negative, offset: 0, negative: false})
+
+        # Cancellation. `x - (count + 1) < x - count` and `x - count >= 0` are difference claims
+        # the affine tier cannot read, because each side mentions two names; normalized, they are
+        # `-1 < 0` and `count <= x`. Reading a side as a sum over the integers is only valid when
+        # none of its operations wrapped, and this tier does not decide that: it runs after the
+        # goal's wrap guard has certified every operation it admits, and after the primitive
+        # witness gate that keeps an unwitnessed subterm from slipping past that guard. That is
+        # why the affine forms are handed on as certified -- their own evaluation never happens.
+        def proof_normalized_difference_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if not proof_is_comparison(operator) or operator == TokenKind.BangEq
+            normal: (known: bool, first: ProofAffine, second: ProofAffine) = proof_normal_difference(left, right, facts)
+            return false if not normal.known
+            return proof_difference_affine_goal(normal.first, operator, normal.second, facts, true)
+
+        # A counter's rebind, `next == count + 1`, is an order fact in disguise once the step is
+        # known not to wrap: it then says `next - count == 1` over the integers. The strict peer
+        # `count < bound` of the same unsigned width decides that without an interval, which is the
+        # argument the difference collector applies when it imports the same equality. Both sides
+        # name only atoms and a unit step, so the unsigned subtraction guard can take it among its
+        # orders without being handed any arithmetic it is itself deciding. A modular equality with
+        # no such peer -- `y == x + 1` at `x == 255` -- stays out.
+        def proof_unsigned_peer_increment_equality(expression: Ast::Expr, orders: darray[Ast::Expr]&) -> bool:
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    return proof_unsigned_peer_increment_side(left, right, orders) or proof_unsigned_peer_increment_side(right, left, orders)
+                _:
+                    return false
+
+        def proof_unsigned_peer_increment_side(name_side: Ast::Expr, increment_side: Ast::Expr, orders: darray[Ast::Expr]&) -> bool:
+            return false if proof_ident_name(proof_strip_parens(name_side)) == ""
+            match proof_strip_parens(increment_side):
+                Ast::Expr.Binary(left, TokenKind.Plus, right, _):
+                    unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base(left, right)
+                    return false if not unit.known
+                    base_name: sview = proof_ident_name(proof_strip_parens(unit.base))
+                    return false if base_name == ""
+                    width: i64 = proof_unsigned_marker_width_for_name(orders, base_name)
+                    return width != 0 and proof_unsigned_increment_has_strict_peer(unit.base, width, orders)
+                _:
+                    return false

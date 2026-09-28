@@ -605,6 +605,8 @@ run_probe leaving_branch_join examples/leaving_branch_join.elisa 0
 run_probe rejected_leaving_branch_join examples/rejected_leaving_branch_join.elisa 1
 run_probe pass_statement examples/pass_statement.elisa 0
 run_probe rejected_pass_statement examples/rejected_pass_statement.elisa 1
+run_probe counting_loop_measure examples/counting_loop_measure.elisa 0
+run_probe rejected_counting_loop_measure examples/rejected_counting_loop_measure.elisa 1
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
