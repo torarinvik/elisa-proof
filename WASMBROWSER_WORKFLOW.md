@@ -93,17 +93,19 @@ the full matrix is not claimed passed. The helper was split into
 limit.
 
 Use the prover README's provenance checks and compiler snapshot workflow. The
-first local development build uses a private clean Stage0 copy in
-`build/wasmbrowser-elisac-stage0`, the expected backend revision recorded in
-`../WasmBrowser/proofs/WB-PROOF-001/STAGE0_REV`, and explicit runtime-check
-compilation. Strict compilation remains the default; report admission and
+first local development build uses a private clean Stage0 copy whose embedded
+revision matches this worktree's `ELISA_STAGE0_REV`. The currently verified
+copy is `build/elisac-stage0-a891`. Do not substitute
+`../WasmBrowser/proofs/WB-PROOF-001/STAGE0_REV`: it pins a different compiler
+build for product evidence. Explicit runtime-check compilation is only for
+development; strict compilation remains the default, and report admission plus
 certificate replay are required in either mode.
 
 ```sh
 DEVELOPER_DIR=/Library/Developer/CommandLineTools \
 ELISA_PROOF_COMPILE_MODE=runtime-checks \
-ELISA_COMPILER_BIN="$PWD/build/wasmbrowser-elisac-stage0" \
-ELISA_STAGE0_REV_FILE="$PWD/../WasmBrowser/proofs/WB-PROOF-001/STAGE0_REV" \
+ELISA_COMPILER_BIN="$PWD/build/elisac-stage0-a891" \
+ELISA_STAGE0_REV_FILE="$PWD/ELISA_STAGE0_REV" \
 bash scripts/build.sh
 ```
 
