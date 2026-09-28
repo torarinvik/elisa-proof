@@ -8266,3 +8266,34 @@ Open: a captured loop's invariant is checked at entry and on each step, but it i
 to the loop exit. After `while i < limit |i|: invariant i >= 0`, the goal `i >= 0` is unproven,
 while the same loop without a capture list proves it. This is incomplete but sound, and it
 blocks engine proofs that loop with capture lists.
+
+## Scalar references at `[0]` and unsigned disjunction introduction (from `codex/wasmbrowser-proof`)
+
+Ported from the wasmbrowser branch (31a5a57, and part of 47e3a61) instead of merging it. A
+full merge conflicted in 24 files that main had already reworked in parallel.
+
+A `T&` parameter whose target is a scalar is now a one-element place: `x[0]` reads and writes
+it, and `x[1]` is still refused. The kernel records such names under a new typing kind,
+`reference-value`. It is valid only with `parameter_by_reference`. Its index sort accepts only
+the literal `0`, and it is listed in `KERNEL_INVENTORY.md`.
+
+Disjunction introduction now runs before the unsigned-range tiers, in both the producer
+(`proof_goal_depth`) and replay (`goal_depth_remaining`). Each alternative is still tried
+through every operator and machine-range guard. The rule reads no arithmetic in the unused
+alternative, so `x + 1 > x or x == x` over `usize` proves through its identity. Both orders of
+`x + 1 > x or x != x` stay unproven (`examples/rejected_unsigned_disjunction.elisa`), since
+the wrapping alternative is still refused on its own. Replay spends one unit of `remaining`
+for each alternative, so this rule adds no new budget exposure. The `not A => B` mirror still
+runs after it for the split case.
+
+Dogfood found the first version of the kernel helper storing a conditional `sview` with no
+tracked backing region. It now pushes a literal kind on each branch. The kernel core
+self-proof grows from 15 to 16 obligations, and the fixture from 28 to 29.
+
+Also fixed: the `rejected_normalized_ground_difference` line from 3899efc ran while errexit
+was on, so its expected nonzero exit would have aborted `test.sh`. It is now wrapped in
+`set +e` and checks `PIPESTATUS` like its neighbours.
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass.
+`test_scalar_reference_index.py` and `test_unsigned_disjunction.py` pass. Refused cases:
+call-entry `old`, a nonzero offset, and both wrapping disjunctions.

@@ -80,6 +80,8 @@ python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_rejected_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
+python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_disjunction.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -1313,13 +1315,13 @@ if [[ "$rejected_counting_loop_measure_status" -ne 1 ]] || ! python3 -c 'import 
     printf 'proof test matrix failed: rejected_counting_loop_measure=%s\n' "$rejected_counting_loop_measure_status" >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==28 and r["summary"]["obligations"]==28; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'
+run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==29 and r["summary"]["obligations"]==29; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'
 dogfood_core_contract_probe_status=${PIPESTATUS[1]}
 if [[ "$dogfood_core_contract_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: direct calls to dogfood kernel contracts\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==15 and r["summary"]["obligations"]==15; assert r["findings"]==[] and r["summary"]["semantic_errors"]==0; assert r["replay"]["gaps"]==0 and r["kernel"]["independent_replay"] is True'
+run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==16 and r["summary"]["obligations"]==16; assert r["findings"]==[] and r["summary"]["semantic_errors"]==0; assert r["replay"]["gaps"]==0 and r["kernel"]["independent_replay"] is True'
 kernel_core_self_probe_status=${PIPESTATUS[1]}
 if [[ "$kernel_core_self_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: kernel core does not verify itself\n' >&2
@@ -4050,7 +4052,14 @@ if [[ "$rejected_budget_status" -ne 0 ]]; then
 fi
 
 # A certified cancellation replays its ground form only where the width guards decided every step.
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_normalized_ground_difference.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"]}; assert reasons == {"unsigned_cancellation_wraps": "body-unverified", "unbounded_signed_cancellation": "body-unverified", "bounded_signed_cancellation": "verified"}, reasons'
+normalized_ground_difference_status=${PIPESTATUS[1]}
+set -e
+if [[ "$normalized_ground_difference_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a ground difference replayed outside its width guards\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" --goal 1 "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "timeout"; assert report["failure"]["status"] == "timeout"; assert report["failure"]["counterexample_found"] is False'
 budget_goal_status=${PIPESTATUS[1]}
 if [[ "$budget_goal_status" -ne 0 ]]; then
