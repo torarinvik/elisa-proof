@@ -8896,3 +8896,87 @@ compiler does not yet check lifetimes on a tuple field. A compiler session repor
 point into the package buffer, which lives for the whole replay call, so the code is correct by
 construction rather than by the compiler. Once the compiler lands per-field `@r` on tuple fields,
 these returns become `sview @r`.
+
+## P2-02: checked correspondence (2026-09-28)
+
+`elisa-proof-replay --correspond <package> <source>` checks that a package proves what the source
+obliges. P2-01 replayed theorems but trusted the adapter for their hypotheses and for which goals
+the source raises. The correspondence checker (`src/correspondence/`, about 1.2k lines) removes
+that trust for a small sequential subset. It parses the source with the Elisa front end and walks
+each function with its own reference semantics, re-deriving every obligation: return ensures, call
+requires, loop preservation and branch joins. It then looks for a replayed theorem whose
+conclusion is the obligation and whose hypotheses are all facts of the walk at that point.
+DESIGN.md, "Checked correspondence", gives the semantics, the subset and the budgets.
+
+**Statuses.**
+- `checked`: every obligation of the function is concluded by a replayed theorem under facts the
+  walk established.
+- `unmatched`: some obligation has no such theorem. The result names the obligation kind and line.
+- `unsupported`: the function is outside the subset. The result names the first reason.
+
+A function that calls an unchecked callee is `unsupported` (`callee-unchecked`), so a checked
+caller never leans on a callee's unchecked ensures. The command exits 0 only when every function is
+checked.
+
+**What it trusts.** The kernel, the Elisa parser and type checker, and the checker's reference
+semantics. Terms carry no types, so the width of `x + 1` comes from the type facts the checker
+states for the operands' declared types; the type checker is what makes those facts true.
+`scripts/test_kernel_inventory.py` pins every function the checker calls outside itself and the
+kernel: the twelve package-reader entry points and three output helpers.
+
+**Adversarial matrix** (`scripts/test_correspondence.py`, run by `scripts/test.sh`):
+- Positive: four examples covering assignment, branch, call and a counting loop are fully checked.
+- Mutations are `unmatched`. Each case packages one source and checks the package against a
+  mutated one:
+  - a swapped, negated or weakened branch;
+  - an off-by-one bound (`x > 0` against `x >= 0`);
+  - an added guard hypothesis;
+  - a fact borrowed from another function's contract;
+  - a stale loop fact;
+  - a callee's weakened ensure;
+  - a call whose argument was swapped, which fails both its requires and the caller's ensure;
+  - an i64 sum's package against a u8 sum;
+  - a package with one theorem removed.
+- Unsupported, with the named reason: a while loop, division, a mutable parameter, recursion,
+  shadowing, a return inside a loop, a loop invariant, a nested call, a duplicated module name,
+  a type alias, and a lemma.
+- Refused: an inadmissible source (every status empty), malformed JSON, a forged statement, an
+  empty package. Usage errors and an absent package exit 2.
+- Budgets: 70 nested ifs (`nesting`) and a chain of 140 locals (`expression`).
+
+**Bug found by the sweep: a lemma was checked.** Running the checker on all 567 examples and
+matching its checked functions against the prover's findings flagged `rejected_lemma_result`'s
+`returning_fact`. That lemma returns a value, which the report rejects, yet the checker called it
+checked. The parser marks lemmas with an `__lemma` annotation, not in the declaration itself, so
+the checker walked it as an ordinary function. Lemmas are ghost declarations whose semantics the
+checker does not model; they are now `unsupported` (`lemma`). With that fix, no prover finding
+falls inside any checked function.
+
+**Width probes.** Unsigned arithmetic wraps, so a theorem about `x + 1` over i64 must not check a
+u8 function. Hand-forged packages confirmed that the kernel refuses:
+- arithmetic whose operand has no width witness;
+- arithmetic whose operand has only the `__elisa_primitive_scalar_type` witness;
+- a u8 increment with its `x <= 254` no-wrap hypothesis dropped.
+
+A genuine i64 package against the u8 source stays `unmatched`, because the u8 walk states u8 type
+facts and the theorem's hypotheses cite i64 ones.
+
+**Sweep.** All 567 examples were packaged and checked:
+- Packages: 457 replayed, 77 source-inadmissible, 23 with no theorems; the 10 runtime harnesses
+  timed out as in P2-01.
+- Functions: 90 checked, 96 unmatched, 889 unsupported. The main unsupported reasons are parameter
+  types (306), return types (205), names (76), contracts (68), effects (63), statements (51), local
+  types (41), expressions (37) and unchecked callees (27).
+- 48 of the 557 runs exit 0.
+
+**Limitations.**
+- Completeness, not soundness: `loop_counter_invariant`'s `increment_keeps_its_value` and
+  `two_counters` are proved by the prover but `unmatched`. The producer names an assigned value
+  with a fresh `__elisa_rebind_N` symbol and a binding equation. The checker substitutes the value
+  instead, so the conclusions differ syntactically.
+- The producer drops the return-ensure theorem for a chain of about 40 locals, which leaves that
+  function `unmatched`.
+- Loops whose preservation goal the prover does not prove (e.g. `total <- index`) are `unmatched`.
+  A loop's binder carries no type of its own, so arithmetic on it cannot replay without a width
+  witness.
+- Termination and arithmetic overflow are not established. The trust record says so.
