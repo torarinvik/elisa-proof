@@ -324,6 +324,14 @@ def nonzero_or_one(x: i64) -> i64:
 report = correspond(BRANCH, duplicate, 1)
 assert statuses(report) == {"nonzero_or_one": ("unsupported", "name")}, report
 
+# A lemma is a ghost declaration, not an executable function: it is never walked, even when its
+# obligations are proved. This source is admissible and its lemma's `ensure` is proved; the sweep
+# over examples/ once reported the lemma `checked`.
+lemma_source = ROOT / "examples/rejected_lemma_result.elisa"
+report = correspond(package(lemma_source), lemma_source, 1)
+assert report["source_admissible"] is True, report
+assert statuses(report) == {"returning_fact": ("unsupported", "lemma"), "unbound_result_fact": ("unsupported", "return-type")}, report
+
 # A type alias that renames a scalar type is not that scalar type.
 aliased = write("aliased", """alias i64 = i32
 
