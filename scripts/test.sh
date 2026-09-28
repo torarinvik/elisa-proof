@@ -3301,6 +3301,44 @@ if [[ "$rejected_guarded_conditional_arms_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A closed constant beside a strictly typed peer is read at the peers width.
+set +e
+run_json_report "$ROOT_DIR/examples/typed_wide_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+typed_wide_constants_status=${PIPESTATUS[1]}
+set -e
+if [[ "$typed_wide_constants_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a wide, folded or conditional constant beside a typed peer lost its bound\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_typed_wide_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrapped_bound", "ensure-unproven"), ("off_by_one", "ensure-unproven"), ("wide_then_arm", "ensure-unproven")}'
+rejected_typed_wide_constants_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_typed_wide_constants_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a constant typed at its peer width hid a wrap or a wrong bound\n' >&2
+    exit 1
+fi
+
+# The else arm of an if-expression is range-checked under the complement of its condition.
+set +e
+run_json_report "$ROOT_DIR/examples/complemented_else_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+complemented_else_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$complemented_else_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an else arm guarded by the failed condition was refused\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_complemented_else_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrong_complement", "ensure-unproven"), ("then_arm_unguarded", "ensure-unproven"), ("weak_complement", "ensure-unproven"), ("conjunction_complement", "ensure-unproven")}'
+rejected_complemented_else_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_complemented_else_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a complement guarded the wrong arm or more than it says\n' >&2
+    exit 1
+fi
+
 # A block-form captured loop keeps the invariants it checked after it.
 set +e
 run_json_report "$ROOT_DIR/examples/captured_block_exit.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'

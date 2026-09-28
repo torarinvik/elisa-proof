@@ -8955,3 +8955,44 @@ Accepted: `examples/guarded_conditional_arms.elisa`.
 Rejected: `examples/rejected_guarded_conditional_arms.elisa`:
 - the guard on the wrong arm;
 - a condition weaker than the subtraction needs.
+
+## Constants typed at their peer's width (2026-09-28)
+
+The ambiguity guard refused any closed constant past the i8 range, so `v < 200 / 2` over a
+`u64` gave no bound, and neither did `1000000000000000000 if v >= 100000000000000000 else 7`.
+A comparison's constants are now read at the width of a strictly typed peer:
+- `/` and `%` fold with the same zero and overflow checks as `+`, `-` and `*`;
+- an unsigned peer gives the unsigned range (width encoded as `-w`), so a signed and an
+  unsigned leaf never agree on a width;
+- an if-expression takes the width its two arms agree on, and its condition is checked the
+  same way.
+
+`u64` constants and their defining equalities (committed in a5ecf4b) are covered by the same
+examples. The kernel mirror (`kernel_replay/fixed_width_arithmetic.elisa`) folds the same
+operators at the same widths.
+
+Accepted: `examples/typed_wide_constants.elisa`.
+
+Rejected: `examples/rejected_typed_wide_constants.elisa`:
+- `100 - 200` at `u64` width wraps, so it bounds nothing;
+- a folded quotient one past the goal;
+- a wide then arm that breaks the bound.
+
+## Else arms checked under the complement (2026-09-28)
+
+This replaces the else-arm half of the entry above. The else arm of `a if c else b` is now
+checked again, when it is not safe on its own, with the bounds of `not c` added to the bounds
+but not to the facts. `not (p or q)` splits one level by De Morgan into `not p` and `not q`. A
+negated conjunction adds nothing. The kernel reads the same complement through
+`proof_kernel_replay_collect_negated_bounds`, so it still builds no negation node. The arm
+checks are inlined in the recursive safety check: helper functions calling back into it put a
+mutual-recursion edge outside the compiler's checked one-step-decrease subset.
+
+Accepted: `examples/complemented_else_arms.elisa`. It covers a saturating `v * 10 + 9` as an
+expression and as a captured-loop step.
+
+Rejected: `examples/rejected_complemented_else_arms.elisa`:
+- a complement that leaves the multiply free;
+- an unguarded then arm;
+- a complement one short;
+- the complement of a conjunction.

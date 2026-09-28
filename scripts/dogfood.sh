@@ -660,6 +660,10 @@ run_probe rejected_place_aliases examples/rejected_place_aliases.elisa 1
 run_probe field_places examples/field_places.elisa 0
 run_probe rejected_field_places examples/rejected_field_places.elisa 1
 run_probe guarded_differences examples/guarded_differences.elisa 0
+run_probe typed_wide_constants examples/typed_wide_constants.elisa 0
+run_probe rejected_typed_wide_constants examples/rejected_typed_wide_constants.elisa 1
+run_probe complemented_else_arms examples/complemented_else_arms.elisa 0
+run_probe rejected_complemented_else_arms examples/rejected_complemented_else_arms.elisa 1
 run_probe rejected_guarded_differences examples/rejected_guarded_differences.elisa 1
 run_probe shared_fixed_borrows examples/shared_fixed_borrows.elisa 0
 run_probe rejected_shared_fixed_borrows examples/rejected_shared_fixed_borrows.elisa 1
@@ -1515,6 +1519,8 @@ cases = (
     ("conditional_equality_split", {('clamp_off_by_one', 'ensure-unproven')}),
     ("place_aliases", {('other_element', 'ensure-unproven')}),
     ("field_places", {('non_strict', 'index-upper-unproven'), ('other_field', 'index-upper-unproven'), ('other_record', 'index-upper-unproven')}),
+    ("typed_wide_constants", {('wrapped_bound', 'ensure-unproven'), ('off_by_one', 'ensure-unproven'), ('wide_then_arm', 'ensure-unproven')}),
+    ("complemented_else_arms", {('wrong_complement', 'ensure-unproven'), ('then_arm_unguarded', 'ensure-unproven'), ('weak_complement', 'ensure-unproven'), ('conjunction_complement', 'ensure-unproven')}),
     ("guarded_differences", {('modular_sum_fact', 'ensure-unproven'), ('modular_sum_bound', 'index-upper-unproven'), ('unguarded_difference', 'ensure-unproven'), ('one_past_the_span', 'ensure-unproven'), ('one_past_in_text', 'index-upper-unproven')}),
     ("shared_fixed_borrows", {('with_a_mutable_parameter', 'call-requires-unproven'), ('with_a_reference_field', 'call-requires-unproven')}),
     ("bound_call_summaries", {('stronger_than_the_summary', 'ensure-unproven'), ('unproven_precondition', 'call-requires-unproven'), ('unproven_precondition', 'ensure-unproven')}),
