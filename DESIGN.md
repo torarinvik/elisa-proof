@@ -646,6 +646,103 @@ Budgets are checked before the work they bound:
 A shared DAG whose identity is exponential stops at the identity budget. Node values are decimal
 strings in canonical form, so every i64 value survives the round trip.
 
+### Checked correspondence
+
+A replayed package shows that some hypotheses entail some conclusions. It does not show that
+those are the source's obligations. `elisa-proof --correspondence <package.json> <file.elisa>`
+checks that link for a small sequential subset. It does not trust the prover that built the
+package; it trusts the checker's own reference semantics instead.
+
+The command:
+
+1. replays the package exactly as `--check-package` does. Any failure rejects the whole package,
+   and no obligation is weighed against it;
+2. keeps every replayed theorem of rule `goal` whose conclusion is not a quantifier, as the
+   sequent `hypotheses |- conclusion`;
+3. walks each top-level function of the source with the reference semantics in
+   `src/correspondence/`, listing its obligations as `facts |- goal`:
+   - each callee `requires` at a call (`call-requires`);
+   - each `ensure` at each `return` (`return-ensure`);
+   - each loop `invariant` on entry (`invariant-entry`) and after the body (`invariant-preserve`);
+4. matches an obligation when a kept theorem concludes exactly its goal from hypotheses that are
+   each exactly one of its facts, or when the goal is `a and b` and both conjuncts match.
+
+Terms are compared node by node against the replayed arena. The package's names, lines, origins,
+statements and fingerprints are never consulted. A theorem therefore counts only for what its
+terms say: a theorem built for another function or another path matches only where its hypotheses
+really hold.
+
+**The reference semantics.** A variable's value is a term over symbols. A symbol names a
+parameter's entry value, or a variable's value at the point where it was last resymbolized, which
+is a branch join or a loop head. Facts are propositions over the same symbols that hold on every
+execution reaching the current point.
+
+- A declaration adds the prover's type facts on the variable's symbol.
+- An `if` assumes the condition, or its negation, on each path. It also records one propositional
+  step: the conjuncts of a true `and`, the disjuncts of a false `or`, and the complement of a false
+  comparison.
+- At a join, a variable whose value or symbol differs on the two paths gets a fresh symbol. So does
+  any variable whose value mentions one of those.
+- Only facts established on both paths survive a join. A path that returned contributes nothing.
+- A `for v in lo..<hi` resymbolizes every variable its body may assign, then assumes the
+  invariants. Inside the body the binder carries `lo <= v` and `v < hi`, but only when neither
+  bound mentions a changed variable.
+- A call to an earlier function that is itself `checked` records its `requires` as obligations and
+  assumes its `ensure`s about the call term. When an `ensure` reads `result == e`, the value is `e`
+  with the arguments substituted.
+
+**The subset.** The walker handles:
+
+- top-level functions with scalar parameters and a scalar result, and no effects, decorators or
+  defaults;
+- leading `requires` and `ensure` clauses;
+- names declared once, which collide with no other declaration, type name or kernel spelling;
+- declarations, `<-` to a mutable local, `if`/`else`, `return`, and call statements;
+- `for` over a half-open range, whose invariants do not mention the binder and whose body does not
+  return;
+- the expressions built from integer and Boolean literals, names, `+`, `-`, `*`, unary `-`,
+  the six comparisons, `and`, `or` and `not`. Division and remainder are left out, because their
+  obligations belong to rules this checker does not model.
+
+Anything else leaves the function `unsupported` with the first reason found, for example
+`statement`, `expression`, `parameter-type`, `callee-unchecked`, `name`, `invariant`,
+`return-in-loop` or `nesting`. A partial walk's obligations are discarded. An unsupported function
+claims nothing, and its callers cannot use it.
+
+**Result.** Each function is reported as:
+
+- `checked`: every obligation matched;
+- `unmatched`, with the open obligations' lines and kinds;
+- `unsupported`, with its reason.
+
+An inadmissible source walks nothing. Exit 0 means the source is admissible, at least one function
+is `checked`, and none is `unmatched`. A package or source that cannot be read exits 2.
+
+The `trust` record states what the result rests on and what it does not establish:
+
+- It rests on the kernel, the Elisa parser and type checker, and the checker's reference
+  semantics. Terms carry no types. The width of `x + 1` is read from the type facts the
+  checker states for its operands, so it is the type checker that guarantees the operands really
+  have the declared types. Admission comes from the main run's gate: the compiler's
+  diagnostics and the report's own consistency checks.
+- It does not establish termination, arithmetic overflow, or anything about functions outside the
+  subset.
+
+**Budgets.** Checked before the work they bound:
+
+| Item | Limit |
+| --- | --- |
+| Term depth | 128 |
+| Term size | 4,096 nodes |
+| Terms | 262,144 |
+| Facts per state | 2,048 |
+| Variables | 512 |
+| Obligations | 4,096 |
+| Statement nesting | 64 |
+| Functions | 4,096 |
+
+An exceeded budget makes the function `unsupported`; it never truncates a claim.
+
 ## Current proof language
 
 The initial surface supports `requires`, `ensure`, `changes`, `preserves`, `invariant`,

@@ -239,6 +239,24 @@ expect(package(two_arguments), two_arguments, {"identity_nonnegative": ("checked
 report = expect(WORK / "two_arguments.pkg.json", other_argument, {"identity_nonnegative": ("checked", None), "caller_uses_summary": UNMATCHED}, 1)
 assert {item["kind"] for item in report["functions"][1]["unmatched"]} == {"call-requires", "return-ensure"}, report
 
+# Width: terms carry no types, so the width of `x + 1` is read from the operands' type facts. A
+# theorem proved under i64 arithmetic assumes x's i64 bound, which a u8 source does not supply;
+# at x == 255 the u8 sum wraps to 0.
+wide_sum = write("wide_sum", """def f(x: i64) -> i64:
+    requires x >= 0
+    requires x <= 255
+    ensure result >= 1
+    return x + 1
+""")
+narrow_sum = write("narrow_sum", """def f(x: u8) -> u8:
+    requires x >= 0
+    requires x <= 255
+    ensure result >= 1
+    return x + 1
+""")
+expect(package(wide_sum), wide_sum, {"f": ("checked", None)}, 0)
+expect(WORK / "wide_sum.pkg.json", narrow_sum, {"f": UNMATCHED}, 1)
+
 # A missing theorem: dropping one theorem from a replaying package leaves its obligation open.
 trimmed = json.loads(BRANCH.read_text())
 trimmed["theorems"] = [theorem for theorem in trimmed["theorems"] if theorem["line"] != 8]
