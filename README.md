@@ -21,6 +21,22 @@ PATH=/path/to/elisac-bin:$PATH scripts/build.sh
 build/elisa-proof examples/verified.elisa
 ```
 
+The default build requires static compiler contract discharge. During development,
+`ELISA_PROOF_COMPILE_MODE=runtime-checks scripts/build.sh` keeps unresolved compiler
+contracts as warnings and runtime checks (`-permissive`). Compiler provenance and
+the pinned parser snapshot are still checked. This mode does not relax proof-report
+admission or certificate replay, and does not establish a formal proof of the
+assistant's own implementation. Record the compile mode with any retained evidence.
+
+Every build writes `build/elisa-proof.manifest.json` (schema `elisa-proof-build-manifest-v1`,
+produced by `scripts/build_manifest.py`) beside the executable. It records the proof commit and
+whether `src/` was dirty, a digest of the snapshot sources actually compiled, the frontend
+revision and tree, the compiler stage with the digests of its driver and the product that
+emitted the object, the runtime and profiler objects linked in, the target triple, optimization
+level, compile mode and flags, and the digest of the signed executable. The manifest is evidence
+only: the proof checker never reads it. Keep it with any retained proof report so the result can
+be tied to the exact binary that produced it.
+
 When the fallback is used, `ELISA_STAGE0_REV` pins the expected Go VCS revision. The build reads
 the embedded revision and `vcs.modified` flag from `elisac-stage0` and refuses a missing, dirty, or
 mismatched binary, so a bootstrap result is never silently accepted from stale compiler sources.
