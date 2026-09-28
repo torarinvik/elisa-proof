@@ -1,0 +1,272 @@
+# Kernel inventory
+
+This is the reviewed inventory of the proof kernel's term language, certificate rules, fact
+provenance and trust boundary (implementation plan item P1-01). Every table between a pair of
+`<!-- inventory:... -->` markers is checked against the source by
+`scripts/test_kernel_inventory.py`, which extracts each closed set from the code and requires
+exact equality with the first column. A kind added to the kernel without a row here, or a row
+left behind after a kind is removed, fails `scripts/test.sh`.
+
+Paths are relative to `src/`. "Kernel" means `proof/kernel_core.elisa` plus
+`proof/kernel_replay/*`; "replay" means `proof/replay/*`.
+
+## Arena node kinds
+
+`ElisaProofKernelCore::ProofKernelNode` has ten fields: `kind`, `operator`, `left`, `right`,
+`auxiliary`, `children_start`, `children_count`, `value` (i64), `name`, `secondary_name`.
+`proof/kernel_replay/arena_shapes.elisa` admits exactly the kinds below and requires every field
+that the "Fields" column does not mention to be zero or empty. Any other kind makes
+`proof_kernel_replay_arena_shape_valid` false, which rejects the whole arena before any rule runs.
+
+Consumers are all kernel modules unless the row names specific ones. Structural equality
+(`quantifiers_and_arena.elisa`) and typing (`proposition_typing.elisa`) cover every kind.
+
+<!-- inventory:node-kinds -->
+| Kind | Family | Fields | Producer |
+|---|---|---|---|
+| `int` | scalar | `value`; `operator` = width tag `u64`/`usize` only with `value` < 0 (denotes `value` + 2^64), else empty | `proof/kernel.elisa` |
+| `bool` | scalar | `value` in {0,1} | `proof/kernel.elisa`, `check/kernel_proposition_environment.elisa` |
+| `float` | scalar | always rejected: NaN breaks reflexive equality | none |
+| `string` | scalar | `name` = literal text | `proof/kernel.elisa`, `check/kernel_proposition_environment.elisa` |
+| `char` | scalar | `name` = literal text | `proof/kernel.elisa` |
+| `ident` | scalar | `name` = identifier | `proof/kernel.elisa` |
+| `shorthand` | leaf | `name` = implicit field shorthand | `proof/kernel.elisa` |
+| `absent` | leaf | no fields; stands for an omitted optional operand | `proof/kernel.elisa` |
+| `unsupported` | leaf | `operator` = source tag; opaque to every rule | `proof/kernel.elisa` |
+| `unary` | unary | `operator`, `left` = operand | `proof/kernel.elisa` |
+| `move` | unary | `left` = moved operand | `proof/kernel.elisa` |
+| `field` | access | `left` = base, `name` = field | `proof/kernel.elisa`, `resources/places_and_calls.elisa` |
+| `scope` | access | `left` = qualifier, `name` = member | `proof/kernel.elisa`, `check/declaration_checks.elisa` |
+| `binary` | access | `operator`, `left`, `right` | `proof/kernel.elisa`, `resources/places_and_calls.elisa` |
+| `index` | access | `left` = container, `right` = index | `proof/kernel.elisa`, `resources/places_and_calls.elisa` |
+| `dict_entry` | access | `left` = key, `right` = value | `proof/kernel.elisa` |
+| `slice` | projection | `left` = base, `right`/`auxiliary` = low/high bound | `proof/kernel.elisa` |
+| `index-n` | projection | `left` = base, children = indices | `proof/kernel.elisa` |
+| `checked-index` | projection | `left` = container, `right` = index | `proof/kernel.elisa`, `check/index_checks.elisa` |
+| `checked-get` | projection | `left` = container access | `proof/kernel.elisa`, `check/index_checks.elisa` |
+| `if` | control | `left` = condition, `right` = then, `auxiliary` = else | `proof/kernel.elisa` |
+| `call_arg` | control | `left` = value, `name` = label | `proof/kernel.elisa` |
+| `field-init` | control | `left` = value, `name` = field | `proof/kernel.elisa` |
+| `construct` | aggregate | `left` = type, children = field inits | `proof/kernel.elisa` |
+| `record-update` | aggregate | `left` = base, children = field inits | `proof/kernel.elisa` |
+| `call` | aggregate | `left` = callee, children = arguments, `auxiliary` = 0 or argument count | `proof/kernel.elisa` |
+| `array` | aggregate | children = elements | `proof/kernel.elisa` |
+| `tuple` | aggregate | children = elements | `proof/kernel.elisa`, `check/kernel_proposition_environment.elisa` |
+| `set` | aggregate | children = elements | `proof/kernel.elisa` |
+| `dict` | aggregate | children = entries | `proof/kernel.elisa` |
+| `quantifier` | aggregate | `operator` in {forall, exists}, `name` = binder, `left` = range, `right` = body, `auxiliary` = body statement count (1 or 2) | `proof/kernel.elisa` |
+| `effect` | effect | `name` = effect | `check/declaration_checks.elisa` |
+| `effect-row` | effect | children = effects | `check/declaration_checks.elisa` |
+| `effect-call` | effect | `left` = callee row, `name` = callee | `check/declaration_checks.elisa` |
+| `effect-containment` | effect | `left` = declared row, children = calls, `name` = function | `check/declaration_checks.elisa` |
+| `resource-sview-param` | resource binding | `name`, `secondary_name` = region, `auxiliary` = sview flag | `resources/sview_certificates.elisa` |
+| `resource-bind` | resource binding | `operator` = mode, `left` = source, `auxiliary` = flags | `resources/state_and_regions.elisa` |
+| `resource-region-param` | resource binding | `operator` = external, `name` = region | `resources/statement_checker.elisa` |
+| `resource-region-return` | resource binding | `operator` in {param, param-call, sview, sview-call}; `param`/`sview` `left` = the returned root's own use or allocation, `param-call`/`sview-call` `left` = the immediately preceding call, `secondary_name` = the caller formal that replay re-derives from the callee summary; summaries are read with returns nested in branch scopes; an empty `name` is admitted only for a `param`/`param-call` reference return, whose `param` witness must be a use of a region-less reference formal of equal mutability | `resources/statement_checker.elisa`, `resources/return_witnesses.elisa`, `resources/sview_certificates.elisa` |
+| `resource-region-open` | resource region | `name` = region | `resources/statement_checker.elisa` |
+| `resource-region-close` | resource region | `name`, `auxiliary` = explicit destroy | `resources/state_and_regions.elisa`, `resources/statement_checker.elisa` |
+| `resource-region-alloc` | resource region | `name`, `secondary_name` = region, `auxiliary` = extent flags | `resources/state_and_regions.elisa` |
+| `resource-region-bind` | resource region | as alloc; sview flag allowed | `resources/state_and_regions.elisa`, `resources/sview_certificates.elisa` |
+| `resource-region-alloc-discard` | resource region | `left` = value, `secondary_name` = region | `resources/state_and_regions.elisa` |
+| `resource-region-return-alloc` | resource region | `left` = value, `secondary_name` = region | `resources/state_and_regions.elisa` |
+| `resource-region-call-alloc` | resource region | `left` = call, `secondary_name` = region | `resources/call_regions.elisa` |
+| `resource-region-rebind-alloc` | resource region | `left` = value, `name` = target, `secondary_name` = region | `resources/state_and_regions.elisa` |
+| `resource-region-assign` | resource region | `left` = value, `name` = target, `secondary_name` = region | `resources/region_flow.elisa` |
+| `resource-write` | resource event | `name` = place root, `left` = place | `resources/region_flow.elisa` |
+| `resource-move` | resource event | `name` = place root, `left` = place | `resources/expression_checker.elisa` |
+| `resource-use` | resource event | `name` = place root, `left` = place | `resources/expression_checker.elisa` |
+| `resource-call-arg` | resource event | `operator` in {value, borrow, reference, region-new}, `left` = argument | `resources/borrows_and_bindings.elisa`, `resources/call_regions.elisa` |
+| `resource-call-formal` | resource event | `operator` = formal mode, `name` = formal | `resources/borrows_and_bindings.elisa` |
+| `resource-call-lend` | resource call | children = lend pairs plus `right` extra roots | `resources/borrows_and_bindings.elisa` |
+| `resource-call` | resource call | `left` = call, children = arguments then `auxiliary` formals | `resources/call_regions.elisa` |
+| `resource-call-region` | resource call | `operator` = param, `name`/`secondary_name` = formal/actual region | `resources/borrows_and_bindings.elisa`, `resources/call_regions.elisa` |
+| `resource-call-result` | resource call | `operator` in {"", sview}, `left` = call, `auxiliary` = flags | `resources/statement_checker.elisa`, `resources/sview_certificates.elisa` |
+| `resource-scope` | resource summary | children = events in scope | `resources/state_and_regions.elisa` |
+| `resource-join-move` | resource summary | `name` = place, `auxiliary` = join count | `resources/state_and_regions.elisa` |
+| `resource-safety` | resource summary | `name` = function, children = events, `secondary_name` = `resource-v1` | `resources/state_and_regions.elisa` |
+| `resource-disjoint` | resource summary | `operator` = `!=`, `left`/`right` = places, children = premise facts | `resources/places_and_calls.elisa` |
+| `structural-argument` | structural | `operator` in {same, strict}, `name`/`secondary_name` = formal/actual, `value`/`auxiliary` = sizes | `check/flow_and_type_model.elisa` |
+| `structural-edge` | structural | `name`/`secondary_name` = caller/callee, children = arguments | `check/flow_and_type_model.elisa` |
+| `structural-safety` | structural | `name` = SCC root, children = edges, `secondary_name` = `structural-v1` | `check/flow_and_type_model.elisa` |
+<!-- /inventory:node-kinds -->
+
+## Typing binding kinds
+
+`ProofKernelTypingBinding` records are the only typing environment the kernel trusts. The
+validation lives in `proof_kernel_replay_typing_binding_valid` (`kernel_replay/type_environment.elisa`),
+and the source producer is `check/kernel_proposition_environment.elisa`.
+
+<!-- inventory:typing-kinds -->
+| Kind | Meaning | Required shape |
+|---|---|---|
+| `value` | a named value and its sort/type | no owner, no signature |
+| `function` | a callable, with signature identity | no owner; parameter count bounded |
+| `function-parameter` | one parameter of a signature | owner and signature identity set |
+| `proposition` | a named proposition | sort `proposition` |
+| `type` | a named or container type | `type_name == name`, type identity set |
+| `field` | a field of an owner type | owner and owner type identity set |
+| `enum-member` | an enum member value | owner is the enum; identities agree |
+| `enum-tag` | an enum tag used in `is` tests | owner is the enum; identities agree |
+<!-- /inventory:typing-kinds -->
+
+## Certificate rules
+
+`proof_replay_certificate_rule_valid` (`replay/certificate_validation.elisa`) is the closed rule
+protocol. `proof_replay_certificate_with_stack` (`replay/fact_trace_validation.elisa`) dispatches
+each certificate to one public kernel entry point, after it has tied the certificate to a proven
+goal attempt, bound every fact to a trace and re-matched the AST against the arena.
+
+<!-- inventory:certificate-rules -->
+| Rule | Kernel entry point | Notes |
+|---|---|---|
+| `goal` | `proof_kernel_replay_goal_report_with_workspace` | quantifier-rooted goals go to the quantifier report |
+| `index-lower` | `proof_kernel_replay_goal_report_with_workspace` | reusable by `check/certificate_reuse.elisa` under exact goal and fact equality |
+| `index-upper` | `proof_kernel_replay_goal_report_with_workspace` | same reuse rule as `index-lower` |
+| `slice-lower` | `proof_kernel_replay_goal_report_with_workspace` | |
+| `slice-upper` | `proof_kernel_replay_goal_report_with_workspace` | |
+| `slice-order` | `proof_kernel_replay_goal_report_with_workspace` | |
+| `checked-index` | `proof_kernel_replay_checked_index_report_with_workspace` | |
+| `checked-get` | `proof_kernel_replay_checked_get_report_with_workspace` | |
+| `quantifier-forall` | `proof_kernel_replay_quantifier_report_with_workspace` | mode `forall` |
+| `quantifier-exists` | `proof_kernel_replay_quantifier_report_with_workspace` | mode `exists` |
+| `resource-safety` | `proof_kernel_replay_resource_report_with_workspace` | trace certificate; source goal is literal `true`; root admitted by `proof/certificate_admission.elisa` (`resource-v1`); embedded facts checked by `proof_replay_resource_event_facts_with_owner` |
+| `structural-safety` | `proof_kernel_replay_structural_report_with_workspace` | trace certificate; root admitted as `structural-v1` |
+| `effect-containment` | `proof_kernel_replay_effect_report_with_workspace` | trace certificate |
+<!-- /inventory:certificate-rules -->
+
+## Fact trace kinds
+
+Each fact a certificate uses must be bound to a `ProofFactTrace` whose kernel expression is
+structurally equal to the fact.
+
+Boundary kinds are **trusted source facts**. They are sound only because the named producer in
+`check/` emits them for exactly the source construct in the table. Replay checks only their
+shape: `proof_replay_boundary_trace_shape_valid` requires no dependency and no premises, so a
+summary trace cannot be relabelled as one.
+
+<!-- inventory:boundary-trace-kinds -->
+| Kind | Producer | Source construct |
+|---|---|---|
+| `global-constant` | `check/global_constants.elisa` | a module constant's value (re-validated by `replay/global_constant_validation.elisa`) |
+| `precondition` | `check/declaration_checks.elisa` | a function `requires` clause |
+| `type-bound` | `check/bounds_and_facts.elisa` | the range of a parameter's machine-integer type |
+| `runtime-assert` | `check/returns/contracts.elisa` | a statement after an aborting `assert` |
+| `runtime-guard` | `check/returns/matches.elisa` | an early-return guard's negation |
+| `branch-condition` | `check/statement_checks.elisa`, `check/bounds_and_facts.elisa`, `check/returns/matches.elisa` | the condition of the taken branch |
+| `loop-condition` | `check/statement_checks.elisa`, `check/returns/loops.elisa` | a `while` condition inside the body |
+| `loop-invariant` | `check/statement_checks.elisa`, `check/returns/loops.elisa` | an invariant assumed at body entry (and proved separately) |
+| `loop-range` | `check/statement_checks.elisa` | a `for` index's range bounds |
+| `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
+<!-- /inventory:boundary-trace-kinds -->
+
+Derived kinds are never axioms. Their premises are themselves traced. Replay re-proves each step
+twice: with the AST `proof_replay_goal`, and, for its kernel expression, with the kernel goal
+report.
+
+<!-- inventory:derived-trace-kinds -->
+| Kind | Producer | Checked by |
+|---|---|---|
+| `proof-step` | `check/block_checker_and_patterns.elisa` | premises traced, step re-proved |
+| `lemma-step` | `check/returns/contracts.elisa` | premises traced, step re-proved |
+| `loop-invariant-step` | none: reserved, never emitted | premises traced, step re-proved |
+| `branch-conjunct` | `check/bounds_and_facts.elisa` | premises traced, step re-proved |
+<!-- /inventory:derived-trace-kinds -->
+
+Summary kinds import another declaration's proven contract. They need the exact theorem
+instance, with each substituted `requires` tied to a replayed certificate. They also need
+`proof_replay_dependency_is_checked`, which tracks the SCC stack with a depth limit of 16 so that
+circular reasoning fails.
+
+<!-- inventory:summary-trace-kinds -->
+| Kind | Producer |
+|---|---|
+| `lemma-summary` | `check/alias_stability.elisa` |
+| `function-summary` | `check/bounds_and_facts.elisa` |
+<!-- /inventory:summary-trace-kinds -->
+
+## Resource fact-free leaves
+
+A `resource-safety` certificate carries no top-level proposition, so logical facts can enter only
+through `resource-disjoint` children. `proof_replay_resource_event_facts_with_owner` walks the
+resource tree:
+
+- It requires each disjoint premise to be a traced fact.
+- It recurses through `resource-safety`, `resource-scope` and `resource-call`.
+- It accepts exactly the leaves below as carrying no facts.
+- Any other kind fails closed.
+
+<!-- inventory:resource-fact-free-leaves -->
+| Kind |
+|---|
+| `resource-region-open` |
+| `resource-region-close` |
+| `resource-region-alloc` |
+| `resource-region-bind` |
+| `resource-sview-param` |
+| `resource-region-alloc-discard` |
+| `resource-region-return-alloc` |
+| `resource-region-call-alloc` |
+| `resource-region-rebind-alloc` |
+| `resource-region-assign` |
+| `resource-region-return` |
+| `resource-region-param` |
+| `resource-write` |
+| `resource-move` |
+| `resource-use` |
+| `resource-join-move` |
+| `resource-call-arg` |
+| `resource-call-formal` |
+| `resource-call-region` |
+| `resource-call-result` |
+| `resource-call-lend` |
+| `resource-bind` |
+<!-- /inventory:resource-fact-free-leaves -->
+
+## Trust ledger
+
+Line counts are as of this inventory. `scripts/test_kernel_inventory.py` checks the dependency
+claims marked "(checked)".
+
+| Tier | Modules | Lines | Role |
+|---|---|---|---|
+| Trusted kernel | `proof/kernel_core.elisa`, `proof/kernel_replay.elisa`, `proof/kernel_replay/*` | ~7.9k | Decides every certificate from arena terms alone. Calls no `proof_*` function defined outside the kernel (checked). |
+| Trusted certificate admission | `proof/certificate_admission.elisa` | ~80 | Admits trace-certificate roots by kind and version tag. |
+| Trusted replay adapter | `proof/replay.elisa`, `proof/replay/*` | ~2.4k | Binds certificates to goals and facts to traces; re-proves derived steps. Calls into the kernel through public entry points, and calls only the external helpers listed under limitation 1 (checked). |
+| Trusted source adapter | `proof/kernel.elisa`, `proof/check/*`, `proof/resources/*`, `proof/expr/*` | ~18k | Lowers source to arena terms and emits boundary facts. Soundness depends on each boundary fact meaning what its row above says. |
+| Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | ~5k | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
+| Presentation | `app/*` except repair | ~2.8k | Output and CLI. Fingerprints are binding guards only (limitation 2). |
+
+## Known limitations
+
+1. **Shared helpers.** Replay calls exactly the functions below that are defined outside
+   `proof/replay`. The rows for `proof/linear` are a common-mode dependency on untrusted search
+   code: a bug there affects the solver and the AST replay together. The kernel's own guard
+   (`kernel_replay/safe_comparison_constants.elisa`) is independent, and every certificate also
+   passes kernel replay. A shared bug can therefore make replay reject but cannot make the
+   kernel accept. Moving these helpers into replay is tracked as a refactor, not a soundness fix.
+
+<!-- inventory:replay-external-calls -->
+| Function | Defined in | Tier |
+|---|---|---|
+| `proof_safe_comparison_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_has_ambiguous_integer_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_has_ambiguous_integer_constant_in` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
+| `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
+| `proof_integer_literal_tag` | `proof/expr/literal_types.elisa` | source adapter |
+| `proof_kernel_budget_note` | `proof/model.elisa` | report model |
+| `proof_kernel_report_append_allowed` | `proof/model.elisa` | report model |
+<!-- /inventory:replay-external-calls -->
+
+2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some
+   kinds (`field-init`, `resource-*`, `effect-*`) without their operand subtrees. Distinct goals
+   can therefore share a `goal_fingerprint`. The fingerprint is a staleness guard only:
+   - A targeted tactic run is replayed against the goal and facts regenerated from the imported
+     source (`app/cli.elisa`), not against the fingerprint.
+   - Certificate reuse requires exact `proof_expr_equal` of the goal and every fact.
+3. **No floating point.** `float` terms are rejected until IEEE semantics, including NaN, are
+   modelled.
+4. **Boundary facts are trusted, not replayed.** A producer bug that emits a boundary fact for the
+   wrong construct is outside the kernel's reach. The source-admission gate matrix (P1-05) and
+   the WP correspondence work (P2-02) narrow this.

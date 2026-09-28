@@ -8,6 +8,10 @@ diagnostic mode.
 
 ## Trust boundary
 
+[KERNEL_INVENTORY.md](KERNEL_INVENTORY.md) is the source-checked inventory of every arena node
+kind, typing binding, certificate rule, fact trace kind and cross-tier call, with the per-module
+trust ledger and known limitations.
+
 The proof kernel is intentionally fail-closed:
 
 ### Proposition admission

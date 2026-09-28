@@ -77,6 +77,9 @@ python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_rejected_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
+python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
+python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -321,10 +324,14 @@ if [[ "$rejected_overloaded_runtime_assert_compiler_status" -ne 0 ]]; then
     printf 'proof test matrix failed: compiler rejected the valid runtime-assert overload audit fixture\n' >&2
     exit 1
 fi
-"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >/dev/null 2>&1
-rejected_borrow_call_duplicate_alias_compiler_status=$?
-if [[ "$rejected_borrow_call_duplicate_alias_compiler_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: compiler rejected the runtime-valid duplicate mutable call-alias fixture\n' >&2
+rejected_borrow_call_duplicate_alias_report="$standalone_probe_dir/rejected-borrow-call-duplicate-alias.log"
+if "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-borrow-call-duplicate-alias.o" "$ROOT_DIR/examples/rejected_borrow_call_duplicate_alias.elisa" >"$rejected_borrow_call_duplicate_alias_report" 2>&1; then
+    printf 'proof test matrix failed: compiler accepted overlapping mutable call arguments\n' >&2
+    exit 1
+fi
+if ! grep -Fq 'call "write_pair" passes "x" to mutable reference parameter "right" while argument for "left" refers to overlapping memory' "$rejected_borrow_call_duplicate_alias_report"; then
+    printf 'proof test matrix failed: duplicate mutable call aliases lacked the expected overlap diagnostic\n' >&2
+    cat "$rejected_borrow_call_duplicate_alias_report" >&2
     exit 1
 fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-unsigned-overflow-goal.o" "$ROOT_DIR/examples/rejected_unsigned_overflow_goal.elisa" >/dev/null 2>&1
@@ -390,6 +397,13 @@ if [[ "$quantifier_tactic_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: portable quantifier tactic was not independently replayed\n' >&2
     exit 1
 fi
+# A range bound spelled as a wrapped literal may be an unsigned maximum, so the
+# range is not known to be empty and a vacuous forall must not be admitted.
+"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_rejected_ambiguous_range_quantifier.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["tactic"]["valid"] is False; assert report["tactic"]["solved"] is False; assert report["tactic"]["kernel_replayed"] is False' && ambiguous_range_quantifier_status=0 || ambiguous_range_quantifier_status=${PIPESTATUS[1]}
+if [[ "$ambiguous_range_quantifier_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a quantifier over an ambiguous range bound was admitted\n' >&2
+    exit 1
+fi
 for rejected_tactic_fixture in tactic_script_rejected_large_line tactic_script_rejected_large_expr_line; do
     rejected_tactic_report="$standalone_probe_dir/$rejected_tactic_fixture.json"
     "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/$rejected_tactic_fixture.json" "$ROOT_DIR/examples/verified.elisa" >"$rejected_tactic_report"
@@ -430,7 +444,7 @@ if [[ "$oversized_action_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: oversized tactic action report was incomplete\n' >&2
     exit 1
 fi
-for replay_fixture in replay_constant loop_accumulator arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_fields nested_call_kept_values literal_index disjunctive_goals leaving_branch_join pass_statement counting_loop_measure fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call body_ensures contract_placement; do
+for replay_fixture in replay_constant loop_accumulator arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_fields nested_call_kept_values literal_index disjunctive_goals leaving_branch_join pass_statement counting_loop_measure fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call body_ensures contract_placement replay_qualified_constant_argument; do
     run_json_report "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
     replay_probe_status=$?
     if [[ "$replay_probe_status" -ne 0 ]]; then
@@ -805,6 +819,29 @@ if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-s
     printf '%s\n' 'proof test matrix failed: call-return provenance was not replayed to the actual backing argument' >&2
     exit 1
 fi
+run_json_report "$ROOT_DIR/examples/reference_call_return_provenance.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0; nodes=report["kernel"]["nodes"]; assert any(n["kind"] == "resource-region-return" and n["operator"] == "param-call" and n["secondary_name"] == "second" for n in nodes)'
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_reference_call_return_wrong_provenance.elisa" >/tmp/elisa-proof-rejected-reference-call-provenance.json
+rejected_reference_call_provenance_status=$?
+set -e
+if [[ "$rejected_reference_call_provenance_status" -ne 1 ]] || ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-reference-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "resource-use-after-move" and f["status"] == "disproved" and f["line"] == 16 for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+    printf '%s\n' 'proof test matrix failed: a write to the reference call-return backing argument was accepted' >&2
+    exit 1
+fi
+# Wrong-region, mutability-upgrade and branch-dependent call returns must be refused.
+run_json_report "$ROOT_DIR/examples/regionless_reference_call_return_provenance.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0; nodes=report["kernel"]["nodes"]; assert any(n["kind"] == "resource-region-return" and n["operator"] == "param-call" and n["name"] == "" and n["secondary_name"] == "b" for n in nodes)'
+for rejected_call_return in rejected_regionless_reference_return_mutability_upgrade:region-return-witness-unsupported rejected_reference_call_return_region_mismatch:region-return-escape rejected_reference_call_return_mutability_upgrade:region-return-witness-unsupported rejected_nested_reference_return_provenance:region-return-witness-unsupported rejected_nested_sview_return_provenance:region-return-witness-unsupported; do
+    rejected_call_return_example="${rejected_call_return%%:*}"
+    rejected_call_return_kind="${rejected_call_return##*:}"
+    set +e
+    run_json_report "$ROOT_DIR/examples/$rejected_call_return_example.elisa" >/tmp/elisa-proof-rejected-call-return.json
+    rejected_call_return_status=$?
+    set -e
+    if [[ "$rejected_call_return_status" -ne 1 ]] || ! REJECTED_KIND="$rejected_call_return_kind" python3 -c 'import json, os; report=json.load(open("/tmp/elisa-proof-rejected-call-return.json")); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == os.environ["REJECTED_KIND"] for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+        printf 'proof test matrix failed: %s was not refused with %s\n' "$rejected_call_return_example" "$rejected_call_return_kind" >&2
+        exit 1
+    fi
+done
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_sview_return_after_region_destroy.elisa" >/tmp/elisa-proof-rejected-sview-return-destroy.json
 rejected_sview_return_destroy_status=$?
@@ -1702,6 +1739,14 @@ recursive_pure_contract_call_status=$?
 pure_default_contract_call_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/mutual_recursive_pure_contract_call.elisa" >/dev/null
 mutual_recursive_pure_contract_call_status=$?
+run_json_report "$ROOT_DIR/examples/structural_recursive_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["gaps"] == 0'
+structural_recursive_summary_status=${PIPESTATUS[1]}
+run_json_report "$ROOT_DIR/examples/rejected_structural_recursive_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] != "proved"; assert sorted((finding["kind"], finding["name"]) for finding in report["findings"]) == [("ensure-unproven", "rejected_shadowed_payload"), ("ensure-unproven", "rejected_structural_depth")]'
+rejected_structural_recursive_summary_status=${PIPESTATUS[1]}
+if [[ "$structural_recursive_summary_status" -ne 0 || "$rejected_structural_recursive_summary_status" -ne 0 ]]; then
+    printf 'structural recursive summary checks failed: proved=%s rejected=%s\n' "$structural_recursive_summary_status" "$rejected_structural_recursive_summary_status" >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/recursive_decreases.elisa" >/dev/null
 recursive_decreases_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/mutual_decreases.elisa" >/dev/null
@@ -2166,7 +2211,7 @@ import json, subprocess, sys
 def fingerprint(path):
     catalog = json.loads(subprocess.check_output([sys.argv[1], "--theorems", path]))
     theorem = next(item for item in catalog["theorems"] if item["name"] == "stable_identity")
-    assert theorem["theorem_fingerprint"]["algorithm"] == "fnv1a32-kernel-theorem-v1"
+    assert theorem["theorem_fingerprint"]["algorithm"] == "fnv1a32-kernel-theorem-v2"
     return theorem["theorem_fingerprint"]["value"]
 original = fingerprint(sys.argv[2])
 shifted = fingerprint(sys.argv[3])
@@ -2175,7 +2220,7 @@ assert original == shifted
 assert original != changed
 PY
 stable_theorem_fingerprint_status=$?
-"$ROOT_DIR/build/elisa-proof" --suggest 4 "$ROOT_DIR/examples/theorem_suggestions.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["format"] == "elisa-proof-suggestions-v1"; assert result["status"] == "ok"; assert result["source"]["admissible"] is True; assert result["goal_id"] == 4; assert result["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v1"; assert isinstance(result["goal_fingerprint"]["value"], int); assert len(result["candidates"]) == 1; candidate = result["candidates"][0]; assert candidate["theorem"] == "double_three"; assert candidate["ensure_index"] == 0; assert candidate["bindings"][0]["parameter"] == "value"; assert candidate["bindings"][0]["value"]["operator"] == "+"; assert candidate["premises"][0]["satisfied"] is True; assert candidate["premises_satisfied"] is True; assert candidate["applicable"] is True'
+"$ROOT_DIR/build/elisa-proof" --suggest 4 "$ROOT_DIR/examples/theorem_suggestions.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["format"] == "elisa-proof-suggestions-v1"; assert result["status"] == "ok"; assert result["source"]["admissible"] is True; assert result["goal_id"] == 4; assert result["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert isinstance(result["goal_fingerprint"]["value"], int); assert len(result["candidates"]) == 1; candidate = result["candidates"][0]; assert candidate["theorem"] == "double_three"; assert candidate["ensure_index"] == 0; assert candidate["bindings"][0]["parameter"] == "value"; assert candidate["bindings"][0]["value"]["operator"] == "+"; assert candidate["premises"][0]["satisfied"] is True; assert candidate["premises_satisfied"] is True; assert candidate["applicable"] is True'
 theorem_suggestion_statuses=("${PIPESTATUS[@]}")
 theorem_suggestion_status=${theorem_suggestion_statuses[0]}
 theorem_suggestion_json_status=${theorem_suggestion_statuses[1]}
@@ -2556,10 +2601,50 @@ if [[ "$writable_lend_calls_status" -ne 0 ]]; then
     exit 1
 fi
 
-# Two exclusive capabilities over one place, a shared one beside an exclusive one, and an
-# exclusive lend across a live borrow are each refused with no event recorded.
+# Signature types resolve across every block of a module, so an `extend` block's recursive
+# shared walk returning a sibling-declared scalar struct is a confined lend, while a sibling
+# struct that holds a reference still requires the callee's converged summary.
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_writable_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("borrow-call-opaque", "swap_pair") in findings; assert ("borrow-call-opaque", "read_and_write") in findings; assert ("borrow-call-opaque", "touch_borrowed") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'
+run_json_report "$ROOT_DIR/examples/module_extend_shared_lend.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'
+module_extend_lend_status=${PIPESTATUS[1]}
+run_json_report "$ROOT_DIR/examples/rejected_module_extend_shared_lend.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("borrow-call-opaque", "extend_escape") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'
+rejected_module_extend_lend_status=${PIPESTATUS[1]}
+set -e
+if [[ "$module_extend_lend_status" -ne 0 || "$rejected_module_extend_lend_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: module extend lend types\n' >&2
+    exit 1
+fi
+
+# A module constant passed by value is spelled by its module path in the resource trace, which
+# replay admits as static. A bare constant is qualified by the producer, also from an `extend`
+# block; a local that shadows it stays a bare binding.
+set +e
+run_json_report "$ROOT_DIR/examples/replay_qualified_constant_argument.elisa" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+assert report["status"] == "proved" and report["replay"]["gaps"] == 0
+nodes = report["kernel"]["nodes"]
+def spell(index):
+    node = nodes[index]
+    if node["kind"] == "scope":
+        return spell(node["left"]) + "::" + node["name"]
+    return node["name"] if node["kind"] == "ident" else node["kind"]
+spelled = [spell(node["left"]) for node in nodes if node["kind"] == "resource-call-arg" and node["name"] == "remaining"]
+assert spelled == ["binary", "Limits::DEPTH", "QualifiedArgument::LOCAL_DEPTH", "absent::ROOT_DEPTH", "LOCAL_DEPTH", "QualifiedArgument::LOCAL_DEPTH"], spelled
+'
+qualified_constant_status=${PIPESTATUS[1]}
+set -e
+if [[ "$qualified_constant_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: static constant spelling in resource traces\n' >&2
+    exit 1
+fi
+
+# Two exclusive capabilities over one place, a shared one beside an exclusive one, and an
+# exclusive lend across a live borrow are each refused with no event recorded. The pinned
+# frontend also reports the two call-site overlaps; the proof checker must refuse all three on
+# its own, including the live-borrow case the frontend does not see.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_writable_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert sorted((diagnostic["line"], diagnostic["actual"]) for diagnostic in report["semantic_diagnostics"]) == [(16, "swap_pair"), (35, "read_and_write")]; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("borrow-call-opaque", "swap_pair") in findings; assert ("borrow-call-opaque", "read_and_write") in findings; assert ("borrow-call-opaque", "touch_borrowed") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'
 rejected_writable_lend_calls_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_writable_lend_calls_status" -ne 0 ]]; then
@@ -2629,11 +2714,115 @@ fi
 # must not contradict the unsigned lower bound and make the bounded model vacuously prove a false
 # conclusion; ordinary unsigned reflexivity should remain provable.
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; assert not functions["u64_max_does_not_imply_zero"]["verified"]; assert not functions["usize_max_does_not_imply_zero"]["verified"]; assert functions["u64_reflexive_equality_remains_provable"]["verified"]; assert not functions["u64_max_is_not_less_than_zero"]["verified"]; assert not functions["usize_global_max_is_not_negative"]["verified"]; assert not functions["usize_local_max_is_not_negative"]["verified"]; refused = {f["name"]: f for f in report["findings"] if f["kind"] == "ensure-unproven"}; assert {"u64_max_does_not_imply_zero", "usize_max_does_not_imply_zero", "u64_max_is_not_less_than_zero", "usize_global_max_is_not_negative"} <= {name for name, finding in refused.items() if finding["status"] == "unknown"}; assert refused["usize_local_max_is_not_negative"]["status"] == "unknown" and not refused["usize_local_max_is_not_negative"]["counterexample_found"] and refused["usize_local_max_is_not_negative"]["counterexample"] == []'
+run_json_report "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; assert not functions["u64_max_does_not_imply_zero"]["verified"]; assert not functions["usize_max_does_not_imply_zero"]["verified"]; assert functions["u64_reflexive_equality_remains_provable"]["verified"]; assert not functions["u64_max_is_not_less_than_zero"]["verified"]; assert not functions["usize_global_max_is_not_negative"]["verified"]; assert not functions["usize_local_max_is_not_negative"]["verified"]; assert not functions["u8_overflow_is_not_unequal"]["verified"]; assert not functions["u8_shift_outside_width_is_not_zero"]["verified"]; assert not functions["u8_overflow_hidden_in_conditional_is_not_nonzero"]["verified"]; refused = {f["name"]: f for f in report["findings"] if f["kind"] == "ensure-unproven"}; assert {"u64_max_does_not_imply_zero", "usize_max_does_not_imply_zero", "u64_max_is_not_less_than_zero", "usize_global_max_is_not_negative", "u8_overflow_is_not_unequal", "u8_shift_outside_width_is_not_zero", "u8_overflow_hidden_in_conditional_is_not_nonzero"} <= {name for name, finding in refused.items() if finding["status"] == "unknown"}; assert refused["usize_local_max_is_not_negative"]["status"] == "unknown" and not refused["usize_local_max_is_not_negative"]["counterexample_found"] and refused["usize_local_max_is_not_negative"]["counterexample"] == []'
 rejected_u64_max_conflict_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_u64_max_conflict_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a reinterpreted u64 maximum created a vacuous proof\n' >&2
+    exit 1
+fi
+
+# The i64-backed arena must neither decide a negative u64 bit pattern using signed order nor
+# fold fixed-width unsigned arithmetic as unbounded signed arithmetic. Exercise both exact and
+# simp tactic replay against their false claims; either accepting one would be a kernel soundness
+# failure even if ordinary source analysis correctly reports the goal as unknown.
+readonly REJECTED_U64_MAX_GOAL_ID=7
+readonly REJECTED_U64_MAX_GOAL_FINGERPRINT=3748040360
+readonly REJECTED_U8_OVERFLOW_GOAL_ID=13
+readonly REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT=1229197265
+for tactic_fixture in rejected_u64_max_decide rejected_u8_overflow_decide rejected_u8_overflow_simp; do
+    case "$tactic_fixture" in
+        rejected_u64_max_decide)
+            tactic_source_goal="$REJECTED_U64_MAX_GOAL_ID"
+            tactic_goal_fingerprint="$REJECTED_U64_MAX_GOAL_FINGERPRINT"
+            ;;
+        rejected_u8_overflow_*)
+            tactic_source_goal="$REJECTED_U8_OVERFLOW_GOAL_ID"
+            tactic_goal_fingerprint="$REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT"
+            ;;
+    esac
+    tactic_report="$standalone_probe_dir/$tactic_fixture.json"
+    set +e
+    "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_$tactic_fixture.json" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$tactic_report"
+    tactic_exit=$?
+    set -e
+    if [[ "$tactic_exit" -ne 1 ]] || ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); t=r["tactic"]; binding=r["source_goal_binding"]; assert r["status"] == "failed" and binding["goal_id"] == int(sys.argv[2]); assert binding["fingerprint_match"] is True and binding["goal_fingerprint"]["value"] == int(sys.argv[3]); assert t["valid"] is False and t["solved"] is False; assert t["reason"] == "tactic action outcome contradicted the script'"'"'s expected acceptance" and t["action_count"] == 1 and t["accepted_count"] == 0' "$tactic_report" "$tactic_source_goal" "$tactic_goal_fingerprint"; then
+        printf 'proof test matrix failed: unsound unsigned tactic proof was accepted (%s)\n' "$tactic_fixture" >&2
+        exit 1
+    fi
+    # The same action declared as refused must be a well-formed script that runs the tactic and
+    # observes the refusal, so the rejection above cannot come from a malformed document.
+    refused_script="$standalone_probe_dir/$tactic_fixture.refused.json"
+    python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); [a.__setitem__("accepted", False) for a in s["actions"]]; json.dump(s, open(sys.argv[2], "w"))' "$ROOT_DIR/examples/tactic_script_$tactic_fixture.json" "$refused_script"
+    refused_report="$standalone_probe_dir/$tactic_fixture.refused.report.json"
+    set +e
+    "$ROOT_DIR/build/elisa-proof" --tactics "$refused_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$refused_report"
+    refused_exit=$?
+    set -e
+    if [[ "$refused_exit" -ne 1 ]] || ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); t=r["tactic"]; assert r["status"] == "failed"; assert t["valid"] is True and t["solved"] is False; assert t["action_count"] == 1 and t["accepted_count"] == 0' "$refused_report"; then
+        printf 'proof test matrix failed: unsigned tactic refusal was not observed as a refused action (%s)\n' "$tactic_fixture" >&2
+        exit 1
+    fi
+done
+
+# A `u64`/`usize` literal above the i64 range keeps its recorded type through proof search, the
+# kernel arena and replay: true orderings prove and replay, the orderings its wrapped payload
+# would satisfy under signed order stay refused, and no refusal claims a counterexample.
+set +e
+run_json_report "$ROOT_DIR/examples/typed_unsigned_literals.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; proved = {"u64_max_exceeds_zero", "u64_max_equals_itself", "u64_max_exceeds_high_bit", "usize_high_bit_at_least_small"}; refused = {"u64_max_is_not_below_zero", "u64_high_bit_is_not_below_max", "u64_max_is_not_zero", "untyped_wrapped_literal_is_not_ordered"}; assert all(functions[name]["verified"] for name in proved); assert not any(functions[name]["verified"] for name in refused); findings = {f["name"]: f for f in report["findings"] if f["kind"] == "ensure-unproven"}; assert set(findings) == refused; assert all(f["status"] == "unknown" and not f["counterexample_found"] for f in findings.values())'
+typed_unsigned_status=${PIPESTATUS[1]}
+set -e
+if [[ "$typed_unsigned_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: typed high-bit unsigned literal comparison\n' >&2
+    exit 1
+fi
+typed_goal_fingerprint() {
+    "$ROOT_DIR/build/elisa-proof" --goal "$1" "$ROOT_DIR/examples/typed_unsigned_literals.elisa" \
+        | python3 -c 'import json,sys; g=json.load(sys.stdin)["goal_fingerprint"]; assert g["algorithm"] == "fnv1a32-kernel-goal-v2"; print(g["value"])'
+}
+# Goal 1 is `0xFFFFFFFFFFFFFFFFu64 > 0u64` (true), goal 9 is `... < 0u64` (false). The
+# script names the literal only by its source offset; the type comes from the source table.
+for typed_goal in 1 9; do
+    typed_script="$standalone_probe_dir/typed_unsigned_decide_$typed_goal.json"
+    printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":%s,"goal_fingerprint":%s},"actions":[{"action":"decide"}]}' "$typed_goal" "$(typed_goal_fingerprint "$typed_goal")" >"$typed_script"
+    set +e
+    typed_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$typed_script" "$ROOT_DIR/examples/typed_unsigned_literals.elisa")"
+    set -e
+    if ! printf '%s' "$typed_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["source_goal_binding"]["fingerprint_match"] is True; expected = sys.argv[1] == "1"; assert t["valid"] is expected and t["solved"] is expected; assert (r["status"] == "proved") is expected; assert not expected or (t["kernel_replayed"] is True and t["certificate_replayed"] is True)' "$typed_goal"; then
+        printf 'proof test matrix failed: typed unsigned decide tactic on goal %s\n' "$typed_goal" >&2
+        exit 1
+    fi
+done
+# Migration: the v1 fingerprint recorded for the u64 maximum goal before literals carried their
+# type no longer binds, so a stale script cannot silently address the re-typed proposition.
+stale_script="$standalone_probe_dir/typed_unsigned_stale_v1.json"
+printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":7,"goal_fingerprint":515359733},"actions":[{"action":"decide","accepted":false}]}' >"$stale_script"
+set +e
+stale_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$stale_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa")"
+set -e
+if ! printf '%s' "$stale_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); b=r["source_goal_binding"]; assert r["status"] == "failed" and b["fingerprint_match"] is False and b["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert r["tactic"]["reason"] == "target.goal_fingerprint does not match the imported kernel goal and hypotheses"'; then
+    printf 'proof test matrix failed: a stale v1 goal fingerprint still bound a typed-literal goal\n' >&2
+    exit 1
+fi
+# A literal offset is a u32 source position; any other spelling makes the script malformed. A
+# portable script's offset names no source literal, so its wrapped payload stays undecidable.
+for typed_offset in '-3' '"x"' '4294967296' '120'; do
+    offset_script="$standalone_probe_dir/typed_unsigned_offset.json"
+    printf '{"format":"elisa-proof-tactics-v1","initial":{"facts":[],"goal":{"kind":"binary","operator":">","left":{"kind":"int","value":-1,"line":6,"offset":%s},"right":{"kind":"int","value":0}}},"actions":[{"action":"decide","accepted":false}]}' "$typed_offset" >"$offset_script"
+    set +e
+    offset_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$offset_script" "$ROOT_DIR/examples/verified.elisa")"
+    set -e
+    if ! printf '%s' "$offset_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["status"] == "failed" and t["solved"] is False; assert t["valid"] is (sys.argv[1] == "120"); assert t["valid"] or t["reason"] == "invalid proof script"' "$typed_offset"; then
+        printf 'proof test matrix failed: typed literal offset %s\n' "$typed_offset" >&2
+        exit 1
+    fi
+done
+
+# Safe small arithmetic remains available to tactics, and the independently replayed kernel
+# must accept the same bottom-up simplification as the source tactic.
+if ! "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_safe_small_constant_simp.json" "$ROOT_DIR/examples/replay_constant.elisa" \
+    | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["status"] == "proved"; assert t["valid"] is True and t["solved"] is True; assert t["kernel_trace_replayed"] is True and t["certificate_replayed"] is True'; then
+    printf 'proof test matrix failed: safe small-constant simp did not replay successfully\n' >&2
     exit 1
 fi
 
@@ -2826,8 +3015,10 @@ if [[ "$region_lifetime_free_callee_status" -ne 0 ]]; then
     exit 1
 fi
 
+# The pinned frontend also reports the overlapping actuals; the proof checker must refuse them on
+# its own as well.
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_region_lifetime_free_callee.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; assert ("a_lifetime_free_callee_may_not_return_a_reference", "region-call-opaque") in owners; assert ("overlapping_mutable_actuals", "borrow-call-alias") in owners; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lifetime_free_callee_may_not_return_a_reference"] != "verified"; assert reasons["overlapping_mutable_actuals"] != "verified"'
+run_json_report "$ROOT_DIR/examples/rejected_region_lifetime_free_callee.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert [(diagnostic["line"], diagnostic["actual"]) for diagnostic in report["semantic_diagnostics"]] == [(22, "two_arguments")]; assert report["replay"]["gaps"] == 0; owners = {(f["name"], f["kind"]) for f in report["findings"]}; assert ("a_lifetime_free_callee_may_not_return_a_reference", "region-call-opaque") in owners; assert ("overlapping_mutable_actuals", "borrow-call-alias") in owners; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lifetime_free_callee_may_not_return_a_reference"] != "verified"; assert reasons["overlapping_mutable_actuals"] != "verified"'
 rejected_region_lifetime_free_callee_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_region_lifetime_free_callee_status" -ne 0 ]]; then

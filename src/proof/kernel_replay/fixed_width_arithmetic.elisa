@@ -119,3 +119,80 @@ extend ElisaProofKernelReplay:
             if constraints.count <= PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS:
                 proof_kernel_replay_close_bounds_through_differences(constraints, &bounds)
             return proof_kernel_replay_signed_expression_safe_with_bounds(nodes, children, root, facts, bounds, 0)
+
+        # Mirror of the producer's `proof_strict_signed_width`: a width is reported only when
+        # every leaf is a witnessed scalar carrying a signed marker, so an unwitnessed operand
+        # never lends its declared width to a constant on the other side of a comparison.
+        def proof_kernel_replay_strict_signed_width(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, depth: usize) -> i64:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return 0 if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth) or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "ident" or node.kind == "field" or node.kind == "index" or node.kind == "index-n":
+                return 0 if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, root, 0)
+                return proof_kernel_replay_signed_marker_width_for_term(nodes, children, facts, root)
+            if node.kind == "paren":
+                return proof_kernel_replay_strict_signed_width(nodes, children, facts, node.left, depth + 1)
+            if node.kind == "unary":
+                return 0 if node.operator != "-" and node.operator != "+"
+                return proof_kernel_replay_strict_signed_width(nodes, children, facts, node.left, depth + 1)
+            if node.kind == "binary":
+                return 0 if node.operator != "+" and node.operator != "-" and node.operator != "*" and node.operator != "/" and node.operator != "%"
+                left_closed: bool = proof_kernel_replay_constant_int(nodes, node.left, depth + 1).known
+                right_closed: bool = proof_kernel_replay_constant_int(nodes, node.right, depth + 1).known
+                return 0 if left_closed and right_closed
+                left_width: mutable i64 = 0
+                right_width: mutable i64 = 0
+                left_width <- proof_kernel_replay_strict_signed_width(nodes, children, facts, node.left, depth + 1) if not left_closed
+                right_width <- proof_kernel_replay_strict_signed_width(nodes, children, facts, node.right, depth + 1) if not right_closed
+                return 0 if (not left_closed and left_width == 0) or (not right_closed and right_width == 0)
+                return 0 if left_width != 0 and right_width != 0 and left_width != right_width
+                return left_width if left_width != 0
+                return right_width
+            return 0
+
+        # The exact value of a closed expression evaluated at a signed width, refusing any leaf or
+        # intermediate result outside that width. A literal with a negative payload is a wrapped
+        # large literal and is refused; negative values are only reached through unary minus.
+        def proof_kernel_replay_signed_constant_at_width(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, width: i64, depth: usize) -> ProofKernelReplayInt:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth) or not proof_kernel_replay_valid(nodes, root)
+            return empty if width <= 0
+            minimum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_min(width)
+            maximum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_max(width)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            result: mutable ProofKernelReplayInt = empty
+            if node.kind == "int":
+                return empty if node.value < 0 or node.value > maximum
+                return ProofKernelReplayInt{known: true, value: node.value}
+            if node.kind == "paren":
+                return proof_kernel_replay_signed_constant_at_width(nodes, node.left, width, depth + 1)
+            if node.kind == "unary":
+                inner: ProofKernelReplayInt = proof_kernel_replay_signed_constant_at_width(nodes, node.left, width, depth + 1)
+                return empty if not inner.known
+                return inner if node.operator == "+"
+                return empty if node.operator != "-"
+                result <- proof_kernel_replay_sub_safe(0, inner.value)
+            if node.kind == "binary":
+                left: ProofKernelReplayInt = proof_kernel_replay_signed_constant_at_width(nodes, node.left, width, depth + 1)
+                right: ProofKernelReplayInt = proof_kernel_replay_signed_constant_at_width(nodes, node.right, width, depth + 1)
+                return empty if not left.known or not right.known
+                result <- proof_kernel_replay_add_safe(left.value, right.value) if node.operator == "+"
+                result <- proof_kernel_replay_sub_safe(left.value, right.value) if node.operator == "-"
+                result <- proof_kernel_replay_mul_safe(left.value, right.value) if node.operator == "*"
+            return empty if not result.known or result.value < minimum or result.value > maximum
+            return result
+
+        # The value of `constant_root` when it is a closed expression that the width-free interval
+        # refuses and `peer_root` is strictly typed at a signed width. A safe constant keeps its
+        # width-free interval, so this only ever widens what the interval already decided.
+        def proof_kernel_replay_typed_comparison_constant(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], constant_root: usize, peer_root: usize) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if not proof_kernel_replay_constant_int(nodes, constant_root, 0).known
+            return empty if proof_kernel_replay_safe_comparison_constant(nodes, constant_root).known
+            return empty if proof_kernel_replay_constant_int(nodes, peer_root, 0).known
+            width: i64 = proof_kernel_replay_strict_signed_width(nodes, children, facts, peer_root, 0)
+            return empty if width == 0
+            return proof_kernel_replay_signed_constant_at_width(nodes, constant_root, width, 0)

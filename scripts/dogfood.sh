@@ -1006,7 +1006,10 @@ if any(formal["kind"] != "resource-call-formal" for formal in formals):
     raise SystemExit("dogfood failed: a confined lend recorded no callee parameter modes")
 with open(rejected, encoding="utf-8") as handle:
     report = json.load(handle)
-if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or report["replay"]["gaps"]:
+# The pinned frontend reports the two call-site overlaps itself; the checker must still refuse
+# all three, including the live-borrow case the frontend does not see.
+frontend = sorted((diagnostic["line"], diagnostic["actual"]) for diagnostic in report["semantic_diagnostics"])
+if report["status"] != "failed" or frontend != [(16, "swap_pair"), (35, "read_and_write")] or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: exclusive-lend boundary fixture did not fail cleanly")
 if any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"]):
     raise SystemExit("dogfood failed: an unconfined exclusive capability was recorded as a lend")
@@ -2679,7 +2682,7 @@ else
     link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$runtime_dir/runtime-support.o"
 fi
 "$runtime_dir/comparison-runtime"
-printf 'dogfood comparison_runtime: six witnessed comparisons checked, and unwitnessed reflexivity refused\n'
+printf 'dogfood comparison_runtime: witnessed comparisons, typed negative constants, width-tagged unsigned literals, and every range-quantifier instance checked; unwitnessed reflexivity refused\n'
 
 # Congruence closure is exercised against the kernel directly: every participating former must
 # carry an equality, and every excluded former (call, move, address-of, namespace path, guarded

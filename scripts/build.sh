@@ -3,6 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OPT_LEVEL="${ELISA_OPT_LEVEL:-O0}"
+COMPILE_MODE="${ELISA_PROOF_COMPILE_MODE:-strict}"
+CONTRACT_FLAG=""
+case "$COMPILE_MODE" in
+    strict) ;;
+    runtime-checks) CONTRACT_FLAG="-permissive" ;;
+    *) printf 'ELISA_PROOF_COMPILE_MODE must be strict or runtime-checks\n' >&2; exit 2 ;;
+esac
 case "$OPT_LEVEL" in
     O0|O1|O2|O3) ;;
     *) printf 'ELISA_OPT_LEVEL must be O0, O1, O2, or O3 (got %s)\n' "$OPT_LEVEL" >&2; exit 2 ;;
@@ -92,7 +99,7 @@ PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$DEFAULT_PROFILE_HOOKS_OBJ}"
 PROFILE_HOOKS_TEMP="$ROOT_DIR/build/profile_hooks.$BUILD_TOKEN.o"
 
 cleanup_build() {
-    rm -f "$STAGE_OBJECT" "$PROOF_BINARY" "$PROFILE_HOOKS_TEMP" "$BUILD_LOCK/pid"
+    rm -f "$STAGE_OBJECT" "$PROOF_BINARY" "$PROOF_BINARY.manifest.json" "$PROFILE_HOOKS_TEMP" "$BUILD_LOCK/pid"
     rmdir "$BUILD_LOCK" 2>/dev/null || true
 }
 trap cleanup_build EXIT
@@ -128,9 +135,41 @@ if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_O
     clang -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
 fi
-"$COMPILER" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/src/main.elisa"
+if [[ -n "$CONTRACT_FLAG" ]]; then
+    "$COMPILER" "$CONTRACT_FLAG" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/src/main.elisa"
+else
+    "$COMPILER" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/src/main.elisa"
+fi
 LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
 [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
 clang -Wl,-dead_strip -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+# Sign before hashing so the manifest digest names the exact executable that runs.
+if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+    codesign -s - --force "$PROOF_BINARY" 2>/dev/null
+fi
 mv -f "$STAGE_OBJECT" "$ROOT_DIR/build/elisa-proof-stage.o"
+MANIFEST_TEMP="$PROOF_BINARY.manifest.json"
+COMPILER_PRODUCT="$COMPILER"
+if [[ -n "${stage1_root:-}" && -x "${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}" ]]; then
+    COMPILER_PRODUCT="${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}"
+fi
+python3 "$ROOT_DIR/scripts/build_manifest.py" \
+    --binary "$PROOF_BINARY" \
+    --compiler "$COMPILER" \
+    --compiler-product "$COMPILER_PRODUCT" \
+    --compiler-root "${stage1_root:-}" \
+    --stage "$([[ "$COMPILER_IS_STAGE1" -eq 1 ]] && echo stage1 || echo stage0)" \
+    --stage1-revision "${stage1_revision:-}" \
+    --runtime "${RUNTIME_OBJ:-}" \
+    --profile-hooks "$PROFILE_HOOKS_OBJ" \
+    --frontend-repo "$COMPILER_SRC" \
+    --frontend-revision "$RESOLVED_REV" \
+    --proof-root "$ROOT_DIR" \
+    --snapshot-root "$SNAPSHOT_ROOT" \
+    --opt-level "$OPT_LEVEL" \
+    --compile-mode "$COMPILE_MODE" \
+    --contract-flag "$CONTRACT_FLAG" \
+    --installed-as "$PROOF_OUTPUT" \
+    --output "$MANIFEST_TEMP"
 mv -f "$PROOF_BINARY" "$PROOF_OUTPUT"
+mv -f "$MANIFEST_TEMP" "$PROOF_OUTPUT.manifest.json"

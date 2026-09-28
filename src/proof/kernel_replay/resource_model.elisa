@@ -85,7 +85,14 @@ extend ElisaProofKernelReplay:
 
         def proof_kernel_replay_goal_depth(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            remaining: usize = ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal_root, split_depth, depth, remaining)
+
+        def proof_kernel_replay_goal_depth_remaining(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
             return false if not ElisaProofKernelCore::depth_valid(depth)
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return false if not proof_kernel_replay_valid(nodes, goal_root)
@@ -99,7 +106,8 @@ extend ElisaProofKernelReplay:
             # them before arithmetic/model tiers inspect the erased block representation; those
             # tiers deliberately do not know how to interpret a quantifier range.
             if goal_identity.kind == "quantifier":
-                return proof_kernel_replay_quantifier(nodes, children, goal_identity.operator, facts, goal_root, depth + 1)
+                return false if remaining <= 1
+                return proof_kernel_replay_quantifier_remaining(nodes, children, goal_identity.operator, facts, goal_root, depth + 1, remaining: remaining - 1)
             if goal_identity.kind == "binary" and proof_kernel_replay_primitive_comparison(nodes, children, facts, goal_identity.left, goal_identity.right):
                 # Having a comparison negation does not make an operator reflexive:
                 # strict orders and disequality are false on identical operands.
@@ -110,9 +118,10 @@ extend ElisaProofKernelReplay:
             # the fixed-width guard and lets a refuted branch close without range-safe facts.
             return true if proof_kernel_replay_facts_propositionally_inconsistent(nodes, children, facts, depth + 1)
             if split_depth < PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT:
-                for index in 0..<facts.count |index, facts, nodes, children, goal_root, split_depth, depth|:
+                for index in 0..<facts.count |index, facts, nodes, children, goal_root, split_depth, depth, remaining|:
                     candidate: (known: bool, left: usize, right: usize) = proof_kernel_replay_find_disjunction(nodes, facts[index], depth)
                     if candidate.known:
+                        return false if remaining <= 1
                         left_facts: mutable darray[usize] = []
                         right_facts: mutable darray[usize] = []
                         for fact_index in 0..<facts.count |fact_index, facts, candidate, left_facts, right_facts|:
@@ -122,10 +131,11 @@ extend ElisaProofKernelReplay:
                             else:
                                 left_facts.push(facts[fact_index])
                                 right_facts.push(facts[fact_index])
-                        return proof_kernel_replay_goal_depth(nodes, children, left_facts, goal_root, split_depth + 1, depth + 1) and proof_kernel_replay_goal_depth(nodes, children, right_facts, goal_root, split_depth + 1, depth + 1)
+                        return proof_kernel_replay_goal_depth_remaining(nodes, children, left_facts, goal_root, split_depth + 1, depth + 1, remaining: remaining - 1) and proof_kernel_replay_goal_depth_remaining(nodes, children, right_facts, goal_root, split_depth + 1, depth + 1, remaining: remaining - 1)
             # Mirror: nonnegativity holds under both readings of a fixed-width term and reads no
             # premise, only the traced type markers, so it runs before the fixed-width guards.
             return true if proof_kernel_replay_unsigned_nonnegative_shape(nodes, children, facts, goal_root)
+            return true if proof_kernel_replay_unsigned_subtraction_upper_shape(nodes, children, facts, goal_root)
             # Equality congruence preserves deterministic fixed-width operations under wrap. It
             # establishes identity, not an unbounded-integer order or range claim.
             if goal_identity.kind == "binary" and goal_identity.operator == "==":
@@ -176,9 +186,11 @@ extend ElisaProofKernelReplay:
                     if inner.kind == "binary":
                         return proof_kernel_replay_negated_constant_comparison(nodes, inner.left, inner.operator, inner.right)
             if node.kind == "binary" and node.operator == "and":
-                return proof_kernel_replay_goal_depth(nodes, children, facts, node.left, split_depth, depth + 1) and proof_kernel_replay_goal_depth(nodes, children, facts, node.right, split_depth, depth + 1)
+                return false if remaining <= 1
+                return proof_kernel_replay_goal_depth_remaining(nodes, children, facts, node.left, split_depth, depth + 1, remaining: remaining - 1) and proof_kernel_replay_goal_depth_remaining(nodes, children, facts, node.right, split_depth, depth + 1, remaining: remaining - 1)
             if node.kind == "binary" and node.operator == "or":
-                return true if proof_kernel_replay_goal_depth(nodes, children, facts, node.left, split_depth, depth + 1) or proof_kernel_replay_goal_depth(nodes, children, facts, node.right, split_depth, depth + 1)
+                return false if remaining <= 1
+                return true if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, node.left, split_depth, depth + 1, remaining: remaining - 1) or proof_kernel_replay_goal_depth_remaining(nodes, children, facts, node.right, split_depth, depth + 1, remaining: remaining - 1)
                 # Mirror: `A or B` is `not A => B`. The premise is `P` itself when the left
                 # disjunct is `not P`, and it spends the split budget like a conditional does.
                 return false if split_depth >= PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT
@@ -191,14 +203,16 @@ extend ElisaProofKernelReplay:
                 negated_facts: mutable darray[usize] = []
                 negated_facts.extend(facts)
                 negated_facts.push(negated_left)
-                return proof_kernel_replay_goal_depth(nodes, children, negated_facts, node.right, split_depth + 1, depth + 1)
+                return proof_kernel_replay_goal_depth_remaining(nodes, children, negated_facts, node.right, split_depth + 1, depth + 1, remaining: remaining - 1)
             if node.kind == "binary" and node.operator == "=>":
+                return false if remaining <= 1
                 implication_facts: mutable darray[usize] = []
                 implication_facts.extend(facts)
                 implication_facts.push(node.left)
-                return proof_kernel_replay_goal_depth(nodes, children, implication_facts, node.right, split_depth, depth + 1)
+                return proof_kernel_replay_goal_depth_remaining(nodes, children, implication_facts, node.right, split_depth, depth + 1, remaining: remaining - 1)
             if node.kind == "binary" and (node.operator == ">" or node.operator == ">=" or node.operator == "<" or node.operator == "<=" or node.operator == "==" or node.operator == "!=") and split_depth < PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT:
                 if node.left < nodes.count and nodes[node.left].kind == "if":
+                    return false if remaining <= 1
                     conditional: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
                     then_facts: mutable darray[usize] = []
                     else_facts: mutable darray[usize] = []
@@ -211,8 +225,9 @@ extend ElisaProofKernelReplay:
                     else_goal: usize = ElisaProofKernelCore::add_node(nodes, "binary", node.operator, conditional.auxiliary, node.right, 0, 0, 0, 0, "", "")
                     # A failed case split proves nothing either way, so it must not consume the
                     # goal: later tiers, including congruence, still get to decide it.
-                    return true if proof_kernel_replay_goal_depth(nodes, children, then_facts, then_goal, split_depth + 1, depth + 1) and proof_kernel_replay_goal_depth(nodes, children, else_facts, else_goal, split_depth + 1, depth + 1)
+                    return true if proof_kernel_replay_goal_depth_remaining(nodes, children, then_facts, then_goal, split_depth + 1, depth + 1, remaining: remaining - 1) and proof_kernel_replay_goal_depth_remaining(nodes, children, else_facts, else_goal, split_depth + 1, depth + 1, remaining: remaining - 1)
                 if node.right < nodes.count and nodes[node.right].kind == "if":
+                    return false if remaining <= 1
                     conditional: ElisaProofKernelCore::ProofKernelNode = nodes[node.right]
                     then_facts: mutable darray[usize] = []
                     else_facts: mutable darray[usize] = []
@@ -223,7 +238,7 @@ extend ElisaProofKernelReplay:
                     else_facts.push(negated_condition)
                     then_goal: usize = ElisaProofKernelCore::add_node(nodes, "binary", node.operator, node.left, conditional.right, 0, 0, 0, 0, "", "")
                     else_goal: usize = ElisaProofKernelCore::add_node(nodes, "binary", node.operator, node.left, conditional.auxiliary, 0, 0, 0, 0, "", "")
-                    return true if proof_kernel_replay_goal_depth(nodes, children, then_facts, then_goal, split_depth + 1, depth + 1) and proof_kernel_replay_goal_depth(nodes, children, else_facts, else_goal, split_depth + 1, depth + 1)
+                    return true if proof_kernel_replay_goal_depth_remaining(nodes, children, then_facts, then_goal, split_depth + 1, depth + 1, remaining: remaining - 1) and proof_kernel_replay_goal_depth_remaining(nodes, children, else_facts, else_goal, split_depth + 1, depth + 1, remaining: remaining - 1)
             if node.kind == "binary":
                 readable: darray[usize] = facts
                 if proof_kernel_replay_negation_supported(node.operator) and proof_kernel_replay_primitive_comparison(nodes, children, readable, node.left, node.right) and proof_kernel_replay_definitionally_equal(nodes, children, node.left, node.right, 0):

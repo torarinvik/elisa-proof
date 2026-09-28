@@ -35,6 +35,12 @@ extend ElisaProof:
             right: mutable darray[usize]
             has_branch: mutable darray[bool]
 
+        # One slot owns both branch states as distinct fields, making their non-aliasing
+        # structural instead of relying on arithmetic analysis of adjacent array indices.
+        struct ProofTacticJsonBranchScratch:
+            left: mutable ProofTacticState
+            right: mutable ProofTacticState
+
         def proof_tactic_state_in_arena[@r](arena: mutable Arena& @r) -> mutable ProofTacticState& @r:
             in arena:
                 empty: mutable darray[Ast::Expr] = []
@@ -221,9 +227,11 @@ extend ElisaProof:
             state.pending_has_argument_index <- false
             state.pending_detail <- ""
 
-        def proof_tactic_json_run_actions[@r](root: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticState]& @r, depth: usize, allow_branch: bool, source_bound: bool) -> ProofTacticJsonResult:
+        def proof_tactic_json_run_actions[@r](root: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, depth: usize, allow_branch: bool, source_bound: bool) -> ProofTacticJsonResult:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "invalid proof script", tree_node: 0}
-            return invalid if tree.states.count >= PROOF_JSON_MAX_TREE_NODES
+            # Budget exhaustion is its own non-proof outcome, distinct from a malformed document.
+            exhausted: ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "tactic script exhausted its branch depth or tree node budget", tree_node: 0}
+            return exhausted if tree.states.count >= PROOF_JSON_MAX_TREE_NODES
             actions_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(root, "actions")
             return invalid if not actions_field.known or not ElisaProofJson::is_array(actions_field.value)
             count: i64 = ElisaProofJson::array_len(actions_field.value)
@@ -254,27 +262,37 @@ extend ElisaProof:
                 if action.value == "split" or action.value == "cases":
                     return invalid if not allow_branch
                     return invalid if index + 1 != count
-                    return invalid if depth >= PROOF_JSON_BRANCH_DEPTH_LIMIT
+                    return exhausted if depth >= PROOF_JSON_BRANCH_DEPTH_LIMIT
                     branches: (known: bool, left: JsonValueHandle[r], right: JsonValueHandle[r]) = proof_tactic_json_branch_scripts(item)
                     return invalid if not branches.known
-                    left_branch_state: mutable ProofTacticState = proof_tactic_state(state.facts, state.goal)
-                    right_branch_state: mutable ProofTacticState = proof_tactic_state(state.facts, state.goal)
-                    actual <- proof_tactic_split(state, &left_branch_state, &right_branch_state) if action.value == "split" and branches.known
-                    actual <- proof_tactic_cases(state, &left_branch_state, &right_branch_state) if action.value == "cases" and branches.known
+                    # Borrow distinct fields from one preallocated region-owned slot. Stack
+                    # child values cannot satisfy the shared @r lifetime of recursive calls.
+                    return exhausted if depth >= scratch.count
+                    left_branch_state: mutable ProofTacticState& = &scratch[depth].left
+                    right_branch_state: mutable ProofTacticState& = &scratch[depth].right
+                    actual <- proof_tactic_split(state, left_branch_state, right_branch_state) if action.value == "split" and branches.known
+                    actual <- proof_tactic_cases(state, left_branch_state, right_branch_state) if action.value == "cases" and branches.known
                     if actual:
                         branch_present <- true
                         return invalid if ElisaProofJson::has(branches.left, "initial") or ElisaProofJson::has(branches.left, "target") or ElisaProofJson::has(branches.right, "initial") or ElisaProofJson::has(branches.right, "target")
-                        left_result: ProofTacticJsonResult = proof_tactic_json_run_actions(branches.left, annotations, &left_branch_state, tree, scratch, depth + 1, true, source_bound)
-                        right_result: ProofTacticJsonResult = proof_tactic_json_run_actions(branches.right, annotations, &right_branch_state, tree, scratch, depth + 1, true, source_bound)
+                        left_result: ProofTacticJsonResult = proof_tactic_json_run_actions(branches.left, annotations, left_branch_state, tree, scratch, depth + 1, true, source_bound)
+                        # An invalid child invalidates the whole script and keeps its own reason; a
+                        # malformed or exhausted branch must not be reported as a merely open goal.
+                        return left_result if not left_result.valid
+                        right_result: ProofTacticJsonResult = proof_tactic_json_run_actions(branches.right, annotations, right_branch_state, tree, scratch, depth + 1, true, source_bound)
+                        return right_result if not right_result.valid
                         branch_trace_ok <- left_result.trace_replayed and right_result.trace_replayed
                         branch_kernel_trace_ok <- left_result.kernel_trace_replayed and right_result.kernel_trace_replayed
                         branch_kernel_ok <- left_result.kernel_replayed and right_result.kernel_replayed
                         branch_left_node <- left_result.tree_node
                         branch_right_node <- right_result.tree_node
-                        branch_certificate_ok <- left_result.valid and right_result.valid and left_result.certificate_replayed and right_result.certificate_replayed and proof_tactic_kernel_branch_transition_replay(state, &left_branch_state, &right_branch_state, annotations)
+                        branch_certificate_ok <- left_result.valid and right_result.valid and left_result.certificate_replayed and right_result.certificate_replayed and proof_tactic_kernel_branch_transition_replay(state, left_branch_state, right_branch_state, annotations)
                 else:
                     actual <- proof_tactic_json_action(state, action.value, argument.value, argument_field.known, secondary.value, secondary_field.known, parsed_index.value.usize(), index_field.known, annotations, source_bound)
-                return invalid if actual != expected.value
+                # A refused action is a well-formed script whose claimed outcome is false; report it
+                # separately from malformed input so a client can tell which part to repair.
+                contradicted: ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: state.action_count, accepted_count: accepted_count, reason: "tactic action outcome contradicted the script's expected acceptance", tree_node: 0}
+                return contradicted if actual != expected.value
                 accepted_count <- accepted_count + 1 if actual
             trace_ok: mutable bool = proof_tactic_replay(state, annotations)
             kernel_trace_ok: mutable bool = proof_tactic_kernel_trace_replay(state, annotations)
@@ -306,7 +324,7 @@ extend ElisaProof:
         # Source-bound scripts start from the exact facts and goal captured by the imported
         # checker. The JSON document cannot replace that state, which prevents a valid proof of a
         # different proposition from being relabeled as a proof of a source obligation.
-        def proof_tactic_json_run_source[@r](root: JsonValueHandle[r], source_state: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticState]& @r, report: ProofReport&, goal_id: usize) -> ProofTacticJsonResult:
+        def proof_tactic_json_run_source[@r](root: JsonValueHandle[r], source_state: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, report: ProofReport&, goal_id: usize) -> ProofTacticJsonResult:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "invalid source-bound proof script", tree_node: 0}
             format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(root, "format")
             format: (known: bool, value: sview) @r = proof_tactic_json_text(format_field.value)
@@ -342,7 +360,7 @@ extend ElisaProof:
             proof_tactic_json_initialize_state(state, facts, goal.value, "state initialized from imported source goal")
             return proof_tactic_json_run_actions(root, annotations, state, tree, scratch, 0, true, true)
 
-        def proof_tactic_json_run[@r](root: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticState]& @r) -> ProofTacticJsonResult:
+        def proof_tactic_json_run[@r](root: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r) -> ProofTacticJsonResult:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{valid: false, solved: false, trace_replayed: false, kernel_trace_replayed: false, kernel_replayed: false, certificate_replayed: false, branch_present: false, branch_certificate_replayed: false, action_count: 0, accepted_count: 0, reason: "invalid proof script", tree_node: 0}
             format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(root, "format")
             format: (known: bool, value: sview) @r = proof_tactic_json_text(format_field.value)

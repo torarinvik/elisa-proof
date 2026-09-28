@@ -213,45 +213,22 @@ module ElisaProofKernelReplay:
                     right: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining(nodes, nodes[root].right, remaining - 1)
                     return proof_kernel_replay_constant_binary(nodes[root].operator, left, right)
                 _:
+                    # A tagged literal's payload is not its value; only the typed comparison
+                    # rule in safe_comparison_constants interprets it.
+                    return empty if proof_kernel_replay_int_tagged(nodes[root])
                     return proof_kernel_replay_constant_leaf(nodes, nodes[root].kind, nodes[root].name, nodes[root].left, nodes[root].value)
 
-        def proof_kernel_replay_constant_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
-            left: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, left_root, 0)
-            right: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, right_root, 0)
-            return false if not left.known or not right.known
-            return left.value == right.value if operator == "=="
-            return left.value != right.value if operator == "!="
-            return left.value < right.value if operator == "<"
-            return left.value > right.value if operator == ">"
-            return left.value <= right.value if operator == "<="
-            return left.value >= right.value if operator == ">="
-            return false
-
-        def proof_kernel_replay_negated_constant_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
-            return proof_kernel_replay_constant_comparison(nodes, left_root, "!=", right_root) if operator == "=="
-            return proof_kernel_replay_constant_comparison(nodes, left_root, "==", right_root) if operator == "!="
-            return proof_kernel_replay_constant_comparison(nodes, left_root, ">=", right_root) if operator == "<"
-            return proof_kernel_replay_constant_comparison(nodes, left_root, ">", right_root) if operator == "<="
-            return proof_kernel_replay_constant_comparison(nodes, left_root, "<=", right_root) if operator == ">"
-            return proof_kernel_replay_constant_comparison(nodes, left_root, "<", right_root) if operator == ">="
-            return false
-
-        # Direct nonnegative integer literals cannot overflow under any admitted primitive
-        # integer type. Replay these ground comparisons before inspecting unrelated premises;
-        # otherwise one irrelevant wrapping expression can block a tautological kernel check.
-        # Keep this narrower than constant evaluation, since compound constant arithmetic may
-        # wrap in a contextually inferred unsigned type.
+        # Keep the fast path explicit at its call site too: only direct, nonnegative literals
+        # can be compared without the erased integer-width/type metadata.
         def proof_kernel_replay_direct_literal_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
             return false if left_root >= nodes.count or right_root >= nodes.count
-            # Read only the discriminator from each already-guarded arena place. Routing these
-            # scalar checks through the tuple-returning node helper creates irrelevant borrow
-            # summary obligations for copies of the full node record.
             return false if nodes[left_root].kind != "int" or nodes[right_root].kind != "int"
+            return false if nodes[left_root].value < 0 or nodes[right_root].value < 0
             return proof_kernel_replay_constant_comparison(nodes, left_root, operator, right_root)
 
         # Mirror the exact closed rewrites performed by `proof_tactic_simplify_expression`.
-        # This is deliberately narrower than logical entailment: only literals and Boolean
-        # connectives may fold, and arithmetic folds use the replay kernel's checked evaluator.
+        # Integer arithmetic is intentionally not folded: this arena has no width/signedness
+        # metadata, so checked i64 arithmetic is not enough to model fixed-width Elisa values.
         # Non-binary formers are opaque to the source tactic too, so their children are not
         # traversed here. The caller validates the complete input state before this bounded walk.
         def proof_kernel_replay_simplify(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, root: usize, depth: usize) -> ProofKernelReplaySimplified:
@@ -274,8 +251,7 @@ module ElisaProofKernelReplay:
                     if operand_node.node.kind == "unary" and operand_node.node.operator == "not":
                         return ProofKernelReplaySimplified{known: true, changed: true, root: operand_node.node.left}
                 if node.operator == "+" or node.operator == "-":
-                    candidate: usize = ElisaProofKernelCore::add_node(nodes, "unary", node.operator, operand_root, 0, 0, 0, 0, 0, "", "")
-                    constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, candidate, depth + 1)
+                    constant: ProofKernelReplayInt = proof_kernel_replay_small_nonnegative_constant(nodes, root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
                     if constant.known:
                         result: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, constant.value, "", "")
                         return ProofKernelReplaySimplified{known: true, changed: true, root: result}
@@ -292,16 +268,19 @@ module ElisaProofKernelReplay:
                 left_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, left_root)
                 right_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, right_root)
                 return empty if not left_node.known or not right_node.known
-                if (node.operator == "==" or node.operator == "!=" or node.operator == "<" or node.operator == ">" or node.operator == "<=" or node.operator == ">=") and left_node.node.kind == "int" and right_node.node.kind == "int":
-                    comparison: mutable bool = false
-                    comparison <- left_node.node.value == right_node.node.value if node.operator == "=="
-                    comparison <- left_node.node.value != right_node.node.value if node.operator == "!="
-                    comparison <- left_node.node.value < right_node.node.value if node.operator == "<"
-                    comparison <- left_node.node.value <= right_node.node.value if node.operator == "<="
-                    comparison <- left_node.node.value > right_node.node.value if node.operator == ">"
-                    comparison <- left_node.node.value >= right_node.node.value if node.operator == ">="
-                    result: usize = ElisaProofKernelCore::add_node(nodes, "bool", "", 0, 0, 0, 0, 0, 1 if comparison else 0, "", "")
-                    return ProofKernelReplaySimplified{known: true, changed: true, root: result}
+                if node.operator == "==" or node.operator == "!=" or node.operator == "<" or node.operator == ">" or node.operator == "<=" or node.operator == ">=":
+                    left_constant: ProofKernelReplayInt = proof_kernel_replay_safe_comparison_constant(nodes, left_root)
+                    right_constant: ProofKernelReplayInt = proof_kernel_replay_safe_comparison_constant(nodes, right_root)
+                    if left_constant.known and right_constant.known:
+                        comparison: mutable bool = false
+                        comparison <- left_constant.value == right_constant.value if node.operator == "=="
+                        comparison <- left_constant.value != right_constant.value if node.operator == "!="
+                        comparison <- left_constant.value < right_constant.value if node.operator == "<"
+                        comparison <- left_constant.value <= right_constant.value if node.operator == "<="
+                        comparison <- left_constant.value > right_constant.value if node.operator == ">"
+                        comparison <- left_constant.value >= right_constant.value if node.operator == ">="
+                        result: usize = ElisaProofKernelCore::add_node(nodes, "bool", "", 0, 0, 0, 0, 0, 1 if comparison else 0, "", "")
+                        return ProofKernelReplaySimplified{known: true, changed: true, root: result}
                 if (node.operator == "==" or node.operator == "!=") and left_node.node.kind == "bool" and right_node.node.kind == "bool":
                     comparison: mutable bool = left_node.node.value == right_node.node.value
                     comparison <- not comparison if node.operator == "!="
@@ -314,9 +293,8 @@ module ElisaProofKernelReplay:
                     result_value <- (left_node.node.value == 0) or (right_node.node.value != 0) if node.operator == "=>"
                     result: usize = ElisaProofKernelCore::add_node(nodes, "bool", "", 0, 0, 0, 0, 0, 1 if result_value else 0, "", "")
                     return ProofKernelReplaySimplified{known: true, changed: true, root: result}
-                if node.operator == "+" or node.operator == "-" or node.operator == "*" or node.operator == "/" or node.operator == "%" or node.operator == "&" or node.operator == "|" or node.operator == "^" or node.operator == "<<" or node.operator == ">>":
-                    candidate: usize = ElisaProofKernelCore::add_node(nodes, "binary", node.operator, left_root, right_root, 0, 0, 0, 0, "", "")
-                    constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, candidate, depth + 1)
+                if proof_kernel_replay_integer_arithmetic_operator(node.operator):
+                    constant: ProofKernelReplayInt = proof_kernel_replay_small_nonnegative_constant(nodes, root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
                     if constant.known:
                         result: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, constant.value, "", "")
                         return ProofKernelReplaySimplified{known: true, changed: true, root: result}
