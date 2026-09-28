@@ -7784,6 +7784,97 @@ behavior. examples/rejected_sview_call_return_wrong_provenance.elisa captures th
 permutation and attempted write; it must fail with zero semantic errors and complete certificate
 replay. A kernel-linked return witness is the follow-up needed to recover this expressiveness.
 
+
+### Replay exact reference call-return witnesses and nested return markers (2026-09-28)
+
+P1-03 replaces every name-based or "last read" provenance guess for returned references and
+sviews with a witness the kernel re-derives. A wrapper that returns a call result now emits a
+`resource-region-return` marker with operator `param-call` (or `sview-call`). Its `left` must be
+the immediately preceding `resource-call` event. Replay then does the following:
+
+- reads the callee's replayed summary for its single returned formal and region;
+- maps that formal through the call's own argument list and that region through the call's
+  own region map;
+- follows the actual's borrow chain to a caller formal;
+- requires that formal to equal the marker's `secondary_name`, with the mapped region, live,
+  unmoved, not mutably borrowed elsewhere, and with the summary's mutability.
+
+The producer uses the same exact summary reader
+(`proof_resource_reference_summary_return_at`, in `resources/return_witnesses.elisa`). The
+removed helpers each authorized a resource fact without a witness:
+
+- `proof_resource_summary_returns_direct_formal` matched any `resource-use` of the formal's
+  *name*.
+- `proof_resource_summary_returns_only_fresh_allocations` did not bind the region.
+- The call-argument remapping in `region_flow.elisa` re-derived provenance from
+  `return_reference_parameters` rather than from the replayed summary.
+
+Holes found and closed while doing this:
+
+- **Wrong region.** A marker could claim a region the call never mapped. Both producer and
+  replay now require the mapped region to equal the marker's region and to be active.
+  `rejected_reference_call_return_region_mismatch` fails with `region-return-escape`.
+- **Nested returns.** Summary readers only scanned a summary's top-level children, so a `return`
+  of a different formal inside a branch was invisible. Readers now collect markers through
+  nested scopes, and conflicting markers pin nothing. `rejected_nested_reference_return_provenance`
+  and `rejected_nested_sview_return_provenance` fail with `region-return-witness-unsupported`.
+- **Syntactic scan.** The frontend's syntactic return scan now fails closed on any compound
+  statement, because the statement may hide a nested return.
+- **Stale sentinel.** The checker used "witness index < node count" as its found-witness
+  sentinel. That value goes stale as nodes are appended, which produced `param-call` markers
+  with empty formals and could skip the region-ful failing obligation. An explicit
+  `return_witness_found` flag replaces it.
+- **Region-less upgrade.** `def upgrade(a: i64&) -> mutable i64&: return a` was proved. The
+  compiler accepts it too. A mutable region-less reference return now needs an exact witness to
+  a replayed mutable reference formal; `rejected_regionless_reference_return_mutability_upgrade`
+  fails with `region-return-witness-unsupported`, zero semantic errors and zero gaps.
+  `rejected_reference_call_return_mutability_upgrade` covers the call-return form.
+
+Region-less reference returns (`keep(value: T&) -> T&`) previously emitted no marker, so
+wrappers over them could not compose. They now emit an empty-name `param`/`param-call` marker.
+The kernel (`proof_kernel_replay_resource_regionless_return`) admits the direct form only when
+the witness is a use of a region-less reference formal (by slot, not by name) of equal
+mutability. The arena shape check allows an empty lifetime only for these reference markers;
+an `sview` marker must always name its lifetime.
+
+Evidence:
+
+- **Positive examples.** `reference_call_return_provenance`, `regionless_reference_call_return_provenance`
+  and `sview_call_return_provenance` prove with full certificate replay.
+- **Rejected examples.** `rejected_reference_call_return_wrong_provenance` (argument
+  permutation followed by a write through the other formal) and
+  `rejected_sview_call_return_wrong_provenance` are disproved.
+- **Arena harness.** `examples/kernel_arena_runtime/reference_call_returns.elisa` adds cases
+  201–222: valid wrappers, a swapped formal, flipped mutability, unmapped region, `param` vs
+  `param-call` confusion, an ambiguous callee summary, a region-less keep/wrap, and
+  non-formal or region-carrying witnesses. It builds separate nodes rather than rewriting the
+  arena's immutable fields; the stage0 compiler enforces this and stage1 does not.
+- **Mutation evidence.** Deleting the formal check from the region-less kernel rule makes the
+  harness exit 215.
+- **Suites.** `scripts/test.sh` passes (run in chunks); `scripts/dogfood.sh` passes, including
+  the stage0-built arena harness. `test_kernel_inventory.py` reports 132 entries.
+
+### Stop leaking AST nodes from the propositional inconsistency probe (2026-09-28)
+
+A diagnostic allocation collector (scratch only, linked in place of the weak profiling hooks)
+tracked live bytes per allocation in the process arena, with temporary phase markers around
+parsing, source preparation, each scheduled function check, replay and JSON rendering. On
+`examples/kernel_replay_standalone.elisa` live bytes were 143 MB before function checking,
+1,374 MB after it, 1,438 MB after replay and 1,580 MB after rendering: the checker phase, not the
+report, owned the peak. A size histogram showed 1,125 MB in 29,693 blocks of exactly 37,888
+bytes; LLDB placed those in `ctx_aos_store_alloc`, the AST node store, which never releases a
+node. Sampled backtraces of those allocations during checking were 13 of 17 in
+`proof_negated_operand`, reached from `proof_fact_denies` through
+`proof_facts_propositionally_inconsistent`, which runs for every fact pair of every goal. Its
+miss path constructed a fresh `Ast::Expr.Invalid`, and constructing any AST value appends a node.
+
+The miss path now returns the input handle. `operand` is read only when `known` is true (its sole
+caller is `proof_fact_denies`), so no decision changes. Measured on the same target: the complete
+report is byte-identical to the baseline (1,669 obligations, 1,179 proven, 611 expected failures,
+0 replay gaps), and the watchdog's phys_footprint peak fell from 1,623,185 KB to 845,617 KB
+against the 1,700,000-KB limit. The remaining store growth (336 MB in 8,882 chunks at exit) comes
+from other checker paths that build AST values and is still to be attributed.
+
 ### Loop-header accumulators and tail value blocks (2026-09-28)
 
 Two holes showed up while proving elisa-engine's audio code. Both made the assistant reject correct
@@ -8296,3 +8387,4 @@ forged `reference-value` binding without it is refused. Disjunction introduction
 existing `remaining` budget per alternative.
 
 The merged tree first failed test.sh's standalone replay audit: it peaked at 1,776,033 KB against the 1,700,000 KB watchdog. The cause was the `proof_negated_operand` AST-node leak, which main fixed in 0ab60f5 after db44b78 was taken. That fix is applied here as-is, and the standalone audit now peaks at 918,065 KB in 41.6 s. test.sh and dogfood pass on the combined tree.
+
