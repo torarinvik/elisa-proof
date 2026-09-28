@@ -8388,3 +8388,91 @@ existing `remaining` budget per alternative.
 
 The merged tree first failed test.sh's standalone replay audit: it peaked at 1,776,033 KB against the 1,700,000 KB watchdog. The cause was the `proof_negated_operand` AST-node leak, which main fixed in 0ab60f5 after db44b78 was taken. That fix is applied here as-is, and the standalone audit now peaks at 918,065 KB in 41.6 s. test.sh and dogfood pass on the combined tree.
 
+
+### Pure call guards survive element writes and bound short-circuit operands (2026-09-28)
+
+The engine's `AudioVirtual` slot accessors guard with a pure call, `live(t, s)`, whose
+postcondition is `not result or s < CAPACITY`. Two gaps kept those guards from bounding later
+accesses:
+
+- **Element writes dropped the resolved bound.** After `raise E if not live(t, s)`, the facts
+  hold both `live(t, s)` and `not live(t, s) or s < CAPACITY`. The first write `t.live[s] <- x`
+  clears every fact that is not call-stable. The disjunction mentions `t` and was dropped, so
+  the second write's index was unproven. `proof_resolve_disjunctive_facts`
+  (`check/symbol_and_move_state.elisa`) now runs before that clear. For each fact `A or B`
+  where another fact is the syntactic negation of `A` (or of `B`), it records the other side as
+  a derived fact of kind `unit-resolution`, over exactly those two premises. The clear then
+  keeps `s < CAPACITY` because it is call-stable in its own right.
+- **Short-circuit guards with a call recorded nothing.** `live(t, s) and t.real[s]` and
+  `not live(t, s) or now < t.stamp[s]` checked the right operand without the guard. The guard
+  is now recorded when every call in it is pure and the right operand calls nothing impure.
+  With no state change between guard and access, the call term denotes one value. The guard's
+  own call summaries are also added: `proof_add_guard_call_summaries` in
+  `check/guard_summaries.elisa`. The statement records them only after the whole expression,
+  too late for the operand. Only calls on the guard's unconditional path qualify. A call in the
+  right operand of a nested `and`/`or`/`else` may not run, so its postcondition may not hold.
+
+Accepted: `examples/call_guard_summaries.elisa` (a write after a guard, an `and` guard, an `or`
+early return).
+
+Rejected: `examples/rejected_call_guard_summaries.elisa`:
+- an inverted raise guard;
+- `(flag or live(t, s)) and t.real[s]`, where the call may not run;
+- an inverted `or` guard.
+
+All three stay `index-upper-unproven`, and no `unit-resolution` fact appears.
+`rejected_short_circuit_guard`'s `guard_has_a_call` still fails, because `bound` states no
+postcondition. Its comment now says so.
+
+Malformed certificates: `unit-resolution` joins `proof-step`, `lemma-step`,
+`loop-invariant-step` and `branch-conjunct` as a derived kind in both certificate validators.
+Replay requires each premise to be an independently valid trace in the same owner, and it
+re-proves the resolvent from the premises in the kernel. A forged resolvent, or a premise
+without a trace, fails closed. `report_output` counts `unit-resolution` as a derivation, not a
+trusted boundary. `KERNEL_INVENTORY.md` lists the kind.
+
+Budget: resolution is quadratic in the facts standing at one element write, and each resolvent
+goes through the existing `proof_kernel_report_append_allowed` gates. Guard summaries descend at
+most 16 expression levels, and each ensure is admitted through `proof_add_function_summary_fact`.
+The callee's requires are certified against the pre-guard facts, and a refused precondition
+adds nothing.
+
+`scripts/test.sh` now also wraps main's `rejected_normalized_ground_difference` probe in
+`set +e`. Unwrapped, its expected exit 1 ended the run silently under `set -e` right after the
+standalone audit.
+
+### Resolve a call's arguments once, so loop binders meet callee preconditions (2026-09-28)
+
+Every call inside a range loop failed its callee's `requires` over the binder. This affected
+`best <- slot if better(pool, slot, best)`, the block `if`, a declaration initializer and a
+short-circuit operand, even though the index accesses on the same line proved.
+
+A range binder's value is a versioned symbol `(slot, k)`. The call sites resolved the call in
+the caller's environment and then handed it to `proof_apply_function`, which resolves the
+arguments again. Resolution is idempotent for ordinary values, but not for a value that
+mentions its own name. The goal became `((slot, k), k) < CAP`, which no fact about the binder
+matches.
+
+`proof_call_source` (`check/function_contracts_and_frames.elisa`) now gives
+`proof_apply_function` the call as written, at every site:
+- nested calls in `check/block_checker_and_patterns.elisa`;
+- declarations and plain assignments in `check/returns/declarations.elisa`;
+- call statements in `check/returns/contracts.elisa`.
+
+The resolved call is still the result term. A source that is not itself a call (a local whose
+value is a call term) keeps the resolved form, as before.
+
+Accepted: `examples/loop_binder_call_requires.elisa` (four call positions).
+
+Rejected: `examples/rejected_loop_binder_call_requires.elisa`:
+- a range one past `CAP`;
+- a call with `slot + 1`.
+
+Both stay `call-requires-unproven`.
+
+Malformed certificates: no certificate shape changed. The requires goal and the summary facts
+record the singly resolved arguments, which are the ones replay re-derives from.
+
+Budget: unchanged, and one substitution pass fewer per call.
+
+Found while proving the engine's `AudioVirtual.next_virtual`.

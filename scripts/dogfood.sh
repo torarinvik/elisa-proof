@@ -647,6 +647,10 @@ run_probe region_lifetime_free_callee examples/region_lifetime_free_callee.elisa
 run_probe rejected_region_lifetime_free_callee examples/rejected_region_lifetime_free_callee.elisa 1
 run_probe short_circuit_guard examples/short_circuit_guard.elisa 0
 run_probe rejected_short_circuit_guard examples/rejected_short_circuit_guard.elisa 1
+run_probe call_guard_summaries examples/call_guard_summaries.elisa 0
+run_probe rejected_call_guard_summaries examples/rejected_call_guard_summaries.elisa 1
+run_probe loop_binder_call_requires examples/loop_binder_call_requires.elisa 0
+run_probe rejected_loop_binder_call_requires examples/rejected_loop_binder_call_requires.elisa 1
 run_probe bound_propagation examples/bound_propagation.elisa 0
 run_probe rejected_bound_propagation examples/rejected_bound_propagation.elisa 1
 run_probe strict_shift examples/strict_shift.elisa 0
@@ -1424,6 +1428,53 @@ if ("a_lifetime_free_callee_may_not_return_a_reference", "region-call-opaque") n
 if ("overlapping_mutable_actuals", "borrow-call-alias") not in owners:
     raise SystemExit("dogfood failed: two overlapping mutable actuals were admitted")
 print("dogfood region_lifetime_free_callee: a lifetime-free callee may borrow a region, not keep it")
+PY
+
+python3 - "$REPORT_DIR/loop_binder_call_requires.json" "$REPORT_DIR/rejected_loop_binder_call_requires.json" <<'PY'
+import json
+import sys
+
+bounded, unbounded = sys.argv[1:]
+with open(bounded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: loop binder precondition fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a loop binder precondition certificate was left unreplayed")
+with open(unbounded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: loop binder boundary fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+for owner in ("one_past", "successor"):
+    if (owner, "call-requires-unproven") not in owners:
+        raise SystemExit("dogfood failed: %s established a precondition for an unbounded slot" % owner)
+print("dogfood loop_binder_call_requires: a binder's bound reaches a callee precondition once")
+PY
+
+python3 - "$REPORT_DIR/call_guard_summaries.json" "$REPORT_DIR/rejected_call_guard_summaries.json" <<'PY'
+import json
+import sys
+
+guarded, unguarded = sys.argv[1:]
+with open(guarded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: call guard summary fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a call guard certificate was left unreplayed")
+origins = {origin["kind"] for goal in report["goals"] for origin in goal["fact_origins"] if origin}
+if "unit-resolution" not in origins:
+    raise SystemExit("dogfood failed: the write after a call guard did not use a resolved fact")
+with open(unguarded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: call guard boundary fixture did not fail cleanly")
+owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}
+for owner in ("write_after_inverted_guard", "conditional_guard_call", "inverted_or_guard"):
+    if (owner, "index-upper-unproven") not in owners:
+        raise SystemExit("dogfood failed: %s bounded an access its guard call does not certify" % owner)
+print("dogfood call_guard_summaries: a pure guard call bounds exactly the path it certifies")
 PY
 
 python3 - "$REPORT_DIR/short_circuit_guard.json" "$REPORT_DIR/rejected_short_circuit_guard.json" <<'PY'

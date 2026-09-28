@@ -1,0 +1,72 @@
+extend ElisaProof:
+    private:
+        # A short-circuit guard runs before its right operand, so every call the guard always
+        # evaluates has returned by the time the operand runs. `live(t, s) and t.flags[s]` needs
+        # the callee's summary `not live(t, s) or s < CAP` beside the guard itself; the statement
+        # records that summary only after the whole expression, which is too late for the operand.
+        # Only calls on the guard's unconditional path qualify: the right operand of a nested
+        # `and`/`or`/`else` may not run, and neither may its callee's postcondition.
+        def proof_add_guard_call_summaries(guard: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, guarded_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, depth: usize) -> void:
+            return if depth >= 16
+            match guard:
+                Ast::Expr.Paren(inner, _):
+                    proof_add_guard_call_summaries(inner, facts, functions, annotations, guarded_facts, report, owner, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_add_guard_call_summaries(operand, facts, functions, annotations, guarded_facts, report, owner, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    proof_add_guard_call_summaries(left, facts, functions, annotations, guarded_facts, report, owner, depth + 1)
+                    if operator != TokenKind.And and operator != TokenKind.Or and operator != TokenKind.Else:
+                        proof_add_guard_call_summaries(right, facts, functions, annotations, guarded_facts, report, owner, depth + 1)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |facts, functions, annotations, guarded_facts, report, owner, depth|:
+                        proof_add_guard_call_summaries(argument, facts, functions, annotations, guarded_facts, report, owner, depth + 1)
+                    proof_add_call_summary_facts(guard, facts, functions, annotations, guarded_facts, report, owner)
+                _:
+                    pass
+
+        # Every ensure of a verified pure callee whose requires hold at the guard, instantiated
+        # with the call itself as `result`. Each fact is a function-summary trace, so replay
+        # re-derives it from the callee's contract and the recorded precondition goals.
+        def proof_add_call_summary_facts(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, summary_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview) -> void:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    function_name: sview = proof_callable_name(callee)
+                    function_index: usize = proof_function_index(functions, function_name)
+                    return if function_name == "" or function_index >= functions.names.count
+                    return if function_index >= functions.pure.count or not functions.pure[function_index]
+                    return if function_index >= functions.verified.count or not functions.verified[function_index]
+                    return if function_index >= functions.param_counts.count or arguments.count > functions.param_counts[function_index]
+                    parameter_names: mutable darray[sview] = []
+                    parameter_start: usize = functions.param_starts[function_index]
+                    for parameter_index in 0..<functions.param_counts[function_index] |parameter_names, functions, parameter_start|:
+                        parameter_names.push(functions.all_params[parameter_start + parameter_index])
+                    default_flags: mutable darray[bool] = []
+                    default_values: mutable darray[Ast::Expr] = []
+                    for parameter_index in 0..<functions.param_counts[function_index] |default_flags, default_values, functions, parameter_start|:
+                        default_flags.push(functions.all_has_defaults[parameter_start + parameter_index])
+                        default_values.push(functions.all_defaults[parameter_start + parameter_index])
+                    mapped_arguments: mutable darray[Ast::Expr] = []
+                    return if not proof_map_runtime_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions)
+                    requires_start: usize = functions.requires_starts[function_index] if function_index < functions.requires_starts.count else functions.all_requires.count
+                    requires_count: usize = functions.requires_counts[function_index] if function_index < functions.requires_counts.count else 0
+                    return if requires_start > functions.all_requires.count or requires_count > functions.all_requires.count - requires_start
+                    require_goal_ids: mutable darray[usize] = []
+                    for requires_index in 0..<requires_count |requires_index, functions, requires_start, parameter_names, mapped_arguments, facts, annotations, report, position, owner, require_goal_ids|:
+                        required: Ast::Expr = proof_substitute(functions.all_requires[requires_start + requires_index], parameter_names, mapped_arguments)
+                        return if proof_expr_has_old(required)
+                        required_proven: bool = proof_certify_goal(facts, required, report, position.line, owner, annotations)
+                        require_goal_ids.push(report.goal_attempts.count - 1) if report.goal_attempts.count > 0
+                        return if not required_proven
+                    ensures_start: usize = functions.ensure_starts[function_index] if function_index < functions.ensure_starts.count else functions.all_ensures.count
+                    ensures_count: usize = functions.ensure_counts[function_index] if function_index < functions.ensure_counts.count else 0
+                    return if ensures_start > functions.all_ensures.count or ensures_count > functions.all_ensures.count - ensures_start
+                    result_name: darray[sview] = ["result"]
+                    result_value: darray[Ast::Expr] = [expression]
+                    for ensures_index in 0..<ensures_count |ensures_index, functions, ensures_start, parameter_names, mapped_arguments, result_name, result_value, expression, summary_facts, report, position, owner, function_name, require_goal_ids|:
+                        ensured: Ast::Expr = proof_substitute(functions.all_ensures[ensures_start + ensures_index], parameter_names, mapped_arguments)
+                        continue if proof_expr_has_old(ensured)
+                        instantiated: Ast::Expr = proof_substitute(ensured, result_name, result_value)
+                        continue if any existing in summary_facts where proof_expr_equal(existing, instantiated)
+                        proof_add_function_summary_fact(summary_facts, report, instantiated, position.line, owner, function_name, parameter_names, mapped_arguments, expression, require_goal_ids, ensures_index)
+                _:
+                    pass

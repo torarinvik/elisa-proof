@@ -3048,6 +3048,47 @@ if [[ "$rejected_short_circuit_guard_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A pure callee's disjunctive postcondition survives the guard that uses it: an element write
+# after `raise ... if not live(t, s)` keeps `s < CAPACITY` by unit resolution, and a
+# short-circuit operand sees the guard call's summary. Inverted or conditional guards do not.
+set +e
+run_json_report "$ROOT_DIR/examples/call_guard_summaries.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}; assert {("write_after_guard", "index-upper"), ("and_guard", "index-upper"), ("or_guard", "index-upper")} <= proven; origins = {origin["kind"] for goal in report["goals"] for origin in goal["fact_origins"] if origin}; assert "unit-resolution" in origins'
+call_guard_summaries_status=${PIPESTATUS[1]}
+set -e
+if [[ "$call_guard_summaries_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a pure call guard did not carry its summary to the access it guards\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_call_guard_summaries.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert {("write_after_inverted_guard", "index-upper-unproven"), ("conditional_guard_call", "index-upper-unproven"), ("inverted_or_guard", "index-upper-unproven")} <= owners; assert not any(origin["kind"] == "unit-resolution" for goal in report["goals"] for origin in goal["fact_origins"] if origin)'
+rejected_call_guard_summaries_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_call_guard_summaries_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call guard bounded an access on a path where it did not certify the slot\n' >&2
+    exit 1
+fi
+
+# A range-loop binder's bound reaches a callee's `requires` from every call position: the
+# binder's versioned value is resolved once, not twice. An unbounded range or successor does not.
+set +e
+run_json_report "$ROOT_DIR/examples/loop_binder_call_requires.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+loop_binder_call_requires_status=${PIPESTATUS[1]}
+set -e
+if [[ "$loop_binder_call_requires_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a range-loop binder did not establish a callee precondition\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_loop_binder_call_requires.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert {("one_past", "call-requires-unproven"), ("successor", "call-requires-unproven")} <= owners'
+rejected_loop_binder_call_requires_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_loop_binder_call_requires_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a callee precondition was established for an unbounded slot\n' >&2
+    exit 1
+fi
+
 # A difference constraint carries an interval to the name the overflow guard asks about.
 set +e
 run_json_report "$ROOT_DIR/examples/bound_propagation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; proven = {(g["name"], g["rule"]) for g in report["goals"] if g["proven"]}; assert all((owner, "goal") in proven for owner in ("increment_under_a_bounded_limit", "increment_through_a_chain", "lower_bound_travels", "unsigned_increment_under_a_strict_peer", "unsigned_increment_under_a_reversed_peer", "strict_fact_needs_no_upper_bound", "strict_fact_needs_no_related_bound"))'
@@ -4053,7 +4094,14 @@ if [[ "$rejected_budget_status" -ne 0 ]]; then
 fi
 
 # A certified cancellation replays its ground form only where the width guards decided every step.
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_normalized_ground_difference.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"]}; assert reasons == {"unsigned_cancellation_wraps": "body-unverified", "unbounded_signed_cancellation": "body-unverified", "bounded_signed_cancellation": "verified"}, reasons'
+rejected_normalized_ground_difference_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_normalized_ground_difference_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an undecided signed or unsigned cancellation replayed its ground form\n' >&2
+    exit 1
+fi
 "$ROOT_DIR/build/elisa-proof" --goal 1 "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "timeout"; assert report["failure"]["status"] == "timeout"; assert report["failure"]["counterexample_found"] is False'
 budget_goal_status=${PIPESTATUS[1]}
 if [[ "$budget_goal_status" -ne 0 ]]; then
