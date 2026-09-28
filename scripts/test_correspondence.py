@@ -26,7 +26,7 @@ def write(name, text):
 def package(source):
     result = subprocess.run([str(BINARY), "--package", str(source)], capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, (source, result.stdout[-400:], result.stderr[-400:])
-    path = source.with_suffix(".pkg.json")
+    path = WORK / f"{source.stem}.pkg.json"
     path.write_text(result.stdout)
     return path
 
