@@ -8323,3 +8323,41 @@ Adversarial probes, all of them refused:
 
 Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass, and so does
 `test_fixed_array_constant_indices.py`.
+
+## Exact comparison complements before the wrap guards (from `codex/wasmbrowser-proof` edef742)
+
+`not (a OP b)` proves `a OP' b`, where OP' is OP's complement. It now does so before the
+fixed-width range guards, in both the producer (`proof_goal_depth`) and replay
+(`goal_depth_remaining`), rather than as the last comparison tier. It still requires:
+- an operator with a defined complement (`proof_kernel_replay_negation_supported`);
+- operands witnessed as primitive scalars on both sides.
+
+The rule reads no arithmetic, because both sides compare the same evaluated terms. Floats are
+still refused (NaN), and the struct-order cases still fail formation.
+
+Global `u64` constants that a contract names now get a source-traced primitive-scalar witness.
+They are not substituted, because the i64 literal pin cannot encode `U64_MAX`. This lets
+`delay <= U64_MAX - now` close from its early-return guard.
+
+Two earlier fixtures had been refusing exactly this rule:
+- `a_wrapping_sum_is_no_index` in `rejected_unsigned_nonnegative_sum.elisa`;
+- `a_negated_modular_guard_bounds_nothing` in `rejected_negated_guard_range.elisa`.
+
+Both used `return 0 if s >= values.count; values[s]` with `s` a possibly wrapping sum. Their
+comments said the guard bounds nothing about the mathematical sum. That is true, but the index
+reads the machine value the guard compared, so the exact complement is the in-range fact the
+access needs. Any later numeric use of that fact still meets the wrap guards, which refuse a
+wrapping premise.
+
+The exact form moved to the positive fixtures:
+- `an_exact_guard_bounds_its_own_sum`;
+- `negated_guard_range.elisa::a_modular_guard_bounds_its_own_sum`.
+
+The rejected fixtures keep their names with an off-by-one `>` guard. The complement of that
+guard is `s <= count`, and both are still refused.
+
+Not ported: edef742's tactic scratch-pair refactor. Main had already reworked that code
+(`ProofTacticJsonBranchScratch`), and the refactor adds no proof capability.
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass, and so does
+`test_return_branch_path_fact.py`. The strict `<` claim and the float NaN control are refused.
