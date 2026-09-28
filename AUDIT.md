@@ -7984,3 +7984,48 @@ calling `clear`, and `clear` in a condition and in a scrutinee.
 
 No certificate shape or budget changes. The facts at each goal are still recorded and replayed
 as before, and the join does no extra exploration.
+
+
+### `pass` is a no-op and `assert ?` is an open obligation (2026-09-28)
+
+The parser lowers `pass`, an explicit `assert ?` hole, and several constructs that error recovery
+dropped to the same `Stmt.Expr(Expr.Invalid)` node. The checker could not tell them apart, so it
+refused every one as an unmodeled operator and cleared the state after it. A `_: pass` arm then
+lost every fact the function had built. `pass` made a helper impure, and it made a lemma or
+proof block impure. An `assert ?` hole failed as an unsupported expression, not as a hole.
+
+The node alone still cannot say which source produced it, so the evidence now comes from the
+source itself. The CLI keeps the byte offset of every `pass` token the lexer produced, and
+`proof_check_core` copies the parsed file's `assert ?` spans into the report.
+`proof_inert_statement_kind` classifies an invalid statement as `pass` only when its span is
+exactly four bytes and starts at a recorded `pass` offset. It classifies it as a hole only when
+its span equals a recorded hole span. Everything else stays unsupported. That includes the
+prefix-block recovery node, which the parser emits without a diagnostic and whose position
+carries no byte span.
+
+- The return checker skips `pass`. It records a hole as a failed obligation with a `proof-hole`
+  finding and keeps the state, since the hole runs nothing.
+- The pure-summary scan skips `pass`.
+- Proof-block and lemma purity accept `pass` and holes. The proof steps report a hole inside a
+  proof block, and the return checker reports one in a lemma body, so each is counted once.
+
+Entry points that build a report without the CLI, such as tactic harnesses, record no `pass`
+offsets and keep refusing `pass`. That is sound, and only less complete.
+
+`examples/pass_statement.elisa` proves all 19 obligations with every certificate replayed. Its
+`pass` statements sit in a branch, in match arms after a call scrutinee, after a call condition,
+in a loop body, in a pure helper used by a contract, in a lemma and in a proof block.
+`examples/rejected_pass_statement.elisa` must report exactly six findings:
+- a false ensure after `pass` arms;
+- four `proof-hole` findings, for holes in a body, a branch, a lemma and a proof block;
+- `expression-unsupported` for `with x` without a colon, which the parser drops silently.
+
+Malformed-certificate and budget cases do not apply. No certificate shape changes: `pass` adds
+no fact and no goal, and a hole adds a failed obligation that has no certificate. Classifying a
+statement is a bounded scan of the recorded offsets.
+
+This supersedes the refusal pinned on 2026-09-07. `examples/no_op_statement.elisa` now also
+verifies a `_: pass` arm that keeps `depth <= 127` for the call after the match.
+`examples/rejected_no_op_statement.elisa` keeps the same two functions with the arm written as
+`with value`, a dropped prefix form. Both are still refused, and the refusal still discards the
+state after the match.
