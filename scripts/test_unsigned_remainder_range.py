@@ -1,4 +1,4 @@
-"""Unsigned remainder safety uses a positive divisor's modular range only."""
+"""Replay unsigned remainder, successor, and safely scaled-product bounds."""
 import json
 import os
 from pathlib import Path
@@ -15,13 +15,14 @@ assert data["replay"]["gaps"] == 0, data
 assert data["replay"]["certificates"] == data["replay"]["replayed"] > 0, data
 functions = {d["name"]: d for d in data["declaration_details"] if d.get("kind") == "function"}
 for name in ("remainder_below_positive_divisor", "conditional_rounded_quotient",
-             "quotient_successor_lower_bound", "quotient_successor_upper_bound"):
+             "quotient_successor_lower_bound", "quotient_successor_upper_bound",
+             "bounded_scaled_product"):
     assert functions[name]["verified"], (name, functions[name])
     assert not any(g["name"] == name and not g["proven"] for g in data["goals"]), name
 negative = functions["untrue_tighter_remainder_bound"]
 assert not negative["verified"], negative
 assert any(g["name"] == "untrue_tighter_remainder_bound" and not g["proven"] for g in data["goals"]), data
-for name in ("wrapping_successor_control",):
+for name in ("wrapping_successor_control", "mismatched_scaled_product_control"):
     assert not functions[name]["verified"], functions[name]
     assert any(g["name"] == name and not g["proven"] for g in data["goals"]), data
-print("unsigned remainder/successor: bounded claims replay; tighter and wrapping controls stay open")
+print("unsigned arithmetic: remainder, successor, and scaled-product bounds replay; false controls stay open")
