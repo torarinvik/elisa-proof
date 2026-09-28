@@ -9426,3 +9426,36 @@ Merge adjustments:
 Mutation check: with the producer's caller-purity gate removed,
 `reference_observe_after_impure_call` proves in the producer, and replay refuses it (1 gap of
 32 certificates). All 18 test chunks and all 9 dogfood chunks pass.
+
+## Loop-scaled array indices (2026-09-29)
+
+Ported from `codex/wasmbrowser-proof`: 29efb2d "Prove bounded loop-scaled array indices" and
+061ee94 "Reject shadowed loop bounds in index proofs". Only part of 29efb2d was taken.
+
+**What was kept.** A loop binder is a witnessed primitive integer with no width marker. An
+arithmetic term over such a binder is now range-safe when its interval lies in [0, 127]. That
+range fits every primitive integer type, signed or unsigned, so no width has to be known. The
+rule is added to both the producer and the kernel. It is what proves
+`sources[index * 4 + 3]` for `index in 0..<2`.
+
+**What was left out.** The branch also keyed interval bounds on the binder's `(name, offset)`
+tuple atom, in both the linear tier and the kernel. On main that machinery is redundant: the
+field-place generalization (19848f6) already renames the tuple atom to a fresh name that the
+name-keyed bounds read.
+- With the kernel atom rule disabled, all 16 probe goals still replayed.
+- With the linear atom rule disabled, all 16 probe goals still proved.
+
+It was therefore not ported, which keeps the trusted surface smaller.
+
+**Evidence.**
+- `examples/vector_index_arithmetic_probe.elisa`: 16 of 16 goals prove and replay.
+- Rejected cases:
+  - `rejected_vector_index_arithmetic`: the last iteration reaches index 11 of 8;
+  - `rejected_vector_index_underflow`: `index - 1`;
+  - `rejected_vector_index_shadowing`: an inner `index` shadows the outer one.
+
+  All three are refused with no replay gaps.
+- Mutation checks:
+  - Without the kernel rule, 4 of 16 goals become replay gaps.
+  - Without the producer rule, only 8 of 16 obligations prove.
+- All 18 test chunks and all 9 dogfood chunks pass.
