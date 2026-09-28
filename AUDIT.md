@@ -8268,6 +8268,100 @@ to the loop exit. After `while i < limit |i|: invariant i >= 0`, the goal `i >= 
 while the same loop without a capture list proves it. This is incomplete but sound, and it
 blocks engine proofs that loop with capture lists.
 
+## Scalar references at `[0]` and unsigned disjunction introduction (from `codex/wasmbrowser-proof`)
+
+Ported from the wasmbrowser branch (31a5a57, and part of 47e3a61) instead of merging it. A
+full merge conflicted in 24 files that main had already reworked in parallel.
+
+A `T&` parameter whose target is a scalar is now a one-element place: `x[0]` reads and writes
+it, and `x[1]` is still refused. The kernel records such names under a new typing kind,
+`reference-value`. It is valid only with `parameter_by_reference`. Its index sort accepts only
+the literal `0`, and it is listed in `KERNEL_INVENTORY.md`.
+
+Disjunction introduction now runs before the unsigned-range tiers, in both the producer
+(`proof_goal_depth`) and replay (`goal_depth_remaining`). Each alternative is still tried
+through every operator and machine-range guard. The rule reads no arithmetic in the unused
+alternative, so `x + 1 > x or x == x` over `usize` proves through its identity. Both orders of
+`x + 1 > x or x != x` stay unproven (`examples/rejected_unsigned_disjunction.elisa`), since
+the wrapping alternative is still refused on its own. Replay spends one unit of `remaining`
+for each alternative, so this rule adds no new budget exposure. The `not A => B` mirror still
+runs after it for the split case.
+
+Dogfood found the first version of the kernel helper storing a conditional `sview` with no
+tracked backing region. It now pushes a literal kind on each branch. The kernel core
+self-proof grows from 15 to 16 obligations, and the fixture from 28 to 29.
+
+Also fixed: the `rejected_normalized_ground_difference` line from 3899efc ran while errexit
+was on, so its expected nonzero exit would have aborted `test.sh`. It is now wrapped in
+`set +e` and checks `PIPESTATUS` like its neighbours.
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass.
+`test_scalar_reference_index.py` and `test_unsigned_disjunction.py` pass. Refused cases:
+call-entry `old`, a nonzero offset, and both wrapping disjunctions.
+
+## Closed safe-constant comparisons under unrelated unsigned facts (from `codex/wasmbrowser-proof` 0b47131)
+
+`values[1]` on an `array[usize, 28]&` used to stay unproven once `usize` facts such as
+`value_count % 4 == 0` were in scope. The index bound `1 < 28` is closed, but the only rule that
+decided closed comparisons (`proof_closed_signed_i64_comparison`) requires a signed-only context.
+
+`proof_closed_safe_constant_comparison` now decides comparisons whose operands are both safe
+constants:
+- a nonnegative literal; or
+- compound arithmetic whose every intermediate lies in the nonnegative i8 range.
+
+Such a comparison has the same truth value at every supported width, and it consumes no
+premise. The rule keeps the kernel's ambiguity guard over the goal and the facts. The
+kernel's existing `proof_kernel_replay_constant_comparison` replays it with no new rule.
+
+Adversarial probes, all of them refused:
+- `200 + 100 > 250` under a `u8` fact;
+- `4294967296 * 4294967296 > 0`;
+- the full-width literal `18446744073709551615 > 0`, a negative payload and so ambiguous;
+- `3 > 5`.
+
+`values[28]` stays refused (`examples/rejected_fixed_array_constant_index.elisa`).
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass, and so does
+`test_fixed_array_constant_indices.py`.
+
+## Exact comparison complements before the wrap guards (from `codex/wasmbrowser-proof` edef742)
+
+`not (a OP b)` proves `a OP' b`, where OP' is OP's complement. It now does so before the
+fixed-width range guards, in both the producer (`proof_goal_depth`) and replay
+(`goal_depth_remaining`), rather than as the last comparison tier. It still requires:
+- an operator with a defined complement (`proof_kernel_replay_negation_supported`);
+- operands witnessed as primitive scalars on both sides.
+
+The rule reads no arithmetic, because both sides compare the same evaluated terms. Floats are
+still refused (NaN), and the struct-order cases still fail formation.
+
+Global `u64` constants that a contract names now get a source-traced primitive-scalar witness.
+They are not substituted, because the i64 literal pin cannot encode `U64_MAX`. This lets
+`delay <= U64_MAX - now` close from its early-return guard.
+
+Two earlier fixtures had been refusing exactly this rule:
+- `a_wrapping_sum_is_no_index` in `rejected_unsigned_nonnegative_sum.elisa`;
+- `a_negated_modular_guard_bounds_nothing` in `rejected_negated_guard_range.elisa`.
+
+Both used `return 0 if s >= values.count; values[s]` with `s` a possibly wrapping sum. Their
+comments said the guard bounds nothing about the mathematical sum. That is true, but the index
+reads the machine value the guard compared, so the exact complement is the in-range fact the
+access needs. Any later numeric use of that fact still meets the wrap guards, which refuse a
+wrapping premise.
+
+The exact form moved to the positive fixtures:
+- `an_exact_guard_bounds_its_own_sum`;
+- `negated_guard_range.elisa::a_modular_guard_bounds_its_own_sum`.
+
+The rejected fixtures keep their names with an off-by-one `>` guard. The complement of that
+guard is `s <= count`, and both are still refused.
+
+Not ported: edef742's tactic scratch-pair refactor. Main had already reworked that code
+(`ProofTacticJsonBranchScratch`), and the refactor adds no proof capability.
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass, and so does
+`test_return_branch_path_fact.py`. The strict `<` claim and the float NaN control are refused.
 ### Replay exact reference call-return witnesses and nested return markers (2026-09-28)
 
 P1-03 replaces every name-based or "last read" provenance guess for returned references and
@@ -8584,3 +8678,23 @@ premises do not re-prove it, fails replay closed, like `branch-conjunct`.
 
 Budget: candidates are bounded by the arm facts times 3. Each is checked with the existing
 `proof_goal` budget per arm, and only while both arms rebind the same name set.
+
+## Merge of elisa-engine-proof through 6930911 (2026-09-28)
+
+Both lines ported the same wasmbrowser gains independently (main in 7ca04f3, 6683562 and
+212c3de; the engine branch in ed4db77). Where the two versions were equivalent, main's code
+was kept.
+
+The one real difference was `proof_closed_safe_constant_comparison`. It had been defined twice,
+and the engine's one-argument form was kept. That form does not refuse because a premise holds
+an ambiguous constant. The comparison consumes no premise, and the kernel's constant-comparison
+rule runs before any fact guard, so the extra refusal protected nothing.
+
+The engine's other gains come in unchanged:
+- disjunctive-fact resolution at return sites;
+- pure call guard summaries;
+- one-time argument resolution;
+- `test.sh` failing on rejected-probe errors.
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass on the merged tree, along with
+every focused wasmbrowser test.

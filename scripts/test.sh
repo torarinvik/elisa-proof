@@ -77,12 +77,13 @@ python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_rejected_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
-python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
-python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_disjunction.py"
 python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
+python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
+python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
+python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -3650,7 +3651,7 @@ if [[ "$unsigned_nonnegative_sum_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_unsigned_nonnegative_sum.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert set(reasons) == {"a_signed_sum_may_be_negative", "an_unguarded_difference_is_nonnegative", "a_nested_difference_is_nonnegative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"}; assert reasons["an_unguarded_difference_is_nonnegative"] == "verified"; assert reasons["a_nested_difference_is_nonnegative"] == "verified"; assert all(reasons[name] == "body-unverified" for name in ("a_signed_sum_may_be_negative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"))'
+run_json_report "$ROOT_DIR/examples/rejected_unsigned_nonnegative_sum.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert set(reasons) == {"a_signed_sum_may_be_negative", "an_unguarded_difference_is_nonnegative", "a_nested_difference_is_nonnegative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index", "an_exact_guard_bounds_its_own_sum"}; assert reasons["an_unguarded_difference_is_nonnegative"] == "verified"; assert reasons["an_exact_guard_bounds_its_own_sum"] == "verified"; assert reasons["a_nested_difference_is_nonnegative"] == "verified"; assert all(reasons[name] == "body-unverified" for name in ("a_signed_sum_may_be_negative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"))'
 rejected_unsigned_nonnegative_sum_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_unsigned_nonnegative_sum_status" -ne 0 ]]; then
@@ -3662,7 +3663,7 @@ fi
 # spelling, so the ordinary early-return range check was stated and unreadable. Complementarity is
 # what the negation gives; transitivity and a modular comparison are not.
 set +e
-run_json_report "$ROOT_DIR/examples/negated_guard_range.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"a_negated_range_check", "the_same_check_as_a_condition", "two_places"}'
+run_json_report "$ROOT_DIR/examples/negated_guard_range.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"a_negated_range_check", "the_same_check_as_a_condition", "two_places", "a_modular_guard_bounds_its_own_sum"}'
 negated_guard_range_status=${PIPESTATUS[1]}
 set -e
 if [[ "$negated_guard_range_status" -ne 0 ]]; then
@@ -4195,10 +4196,10 @@ fi
 # A certified cancellation replays its ground form only where the width guards decided every step.
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_normalized_ground_difference.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"]}; assert reasons == {"unsigned_cancellation_wraps": "body-unverified", "unbounded_signed_cancellation": "body-unverified", "bounded_signed_cancellation": "verified"}, reasons'
-rejected_normalized_ground_difference_status=${PIPESTATUS[1]}
+normalized_ground_difference_status=${PIPESTATUS[1]}
 set -e
-if [[ "$rejected_normalized_ground_difference_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: an undecided signed or unsigned cancellation replayed its ground form\n' >&2
+if [[ "$normalized_ground_difference_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a ground difference replayed outside its width guards\n' >&2
     exit 1
 fi
 "$ROOT_DIR/build/elisa-proof" --goal 1 "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "timeout"; assert report["failure"]["status"] == "timeout"; assert report["failure"]["counterexample_found"] is False'

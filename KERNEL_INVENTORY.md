@@ -100,7 +100,7 @@ and the source producer is `check/kernel_proposition_environment.elisa`.
 | Kind | Meaning | Required shape |
 |---|---|---|
 | `value` | a named value and its sort/type | no owner, no signature |
-| `reference-value` | a by-reference scalar parameter and its sort/type; only subscript `0` is typed (`kernel_replay/scalar_reference_typing.elisa`) | no owner, no signature, by-reference flag required |
+| `reference-value` | a by-reference scalar parameter or local, indexable only at `[0]` | no owner, no signature; marked `parameter_by_reference` |
 | `function` | a callable, with signature identity | no owner; parameter count bounded |
 | `function-parameter` | one parameter of a signature | owner and signature identity set |
 | `proposition` | a named proposition | sort `proposition` |

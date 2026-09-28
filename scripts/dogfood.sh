@@ -2142,6 +2142,8 @@ reasons = {d["name"]: d["verification_reason"] for d in report["declaration_deta
 for owner in ("an_unguarded_difference_is_nonnegative", "a_nested_difference_is_nonnegative"):
     if reasons.get(owner) != "verified":
         raise SystemExit("dogfood failed: unsigned result nonnegativity was lost for %s" % owner)
+if reasons.get("an_exact_guard_bounds_its_own_sum") != "verified":
+    raise SystemExit("dogfood failed: an exact guard no longer bounds its own sum")
 for owner in ("a_signed_sum_may_be_negative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"):
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s was admitted by the nonnegativity rule" % owner)
@@ -2159,7 +2161,7 @@ with open(read, encoding="utf-8") as handle:
 if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: negated guard fixture did not prove cleanly")
 verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
-for owner in ("a_negated_range_check", "the_same_check_as_a_condition", "two_places"):
+for owner in ("a_negated_range_check", "the_same_check_as_a_condition", "two_places", "a_modular_guard_bounds_its_own_sum"):
     if owner not in verified:
         raise SystemExit("dogfood failed: %s could not read its own guard" % owner)
 with open(refused, encoding="utf-8") as handle:
