@@ -8649,3 +8649,111 @@ Tests:
   the raw byte offset, the bottom-up arena order, and a source that does not parse.
 
 Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass.
+
+### Disequalities at an interval endpoint narrow the interval (2026-09-28)
+
+The engine's `AudioVirtual` position helper returns early on `length == 0` and then reads
+`length - 1`. The unsigned fallthrough fact is `length != 0`, and the interval solver threw it
+away, so the subtraction's lower bound was unproven. `proof_tighten_disequality_bounds`
+(`linear/disequality_bounds.elisa`) now runs at the end of `proof_close_equalities`. For
+`x != c` or `not (x == c)` with a primitive-typed comparison, it raises x's lower bound to
+`c + 1` when that bound is exactly c. It lowers the upper bound to `c - 1` when that bound is
+exactly c. Overflowing steps add nothing. The kernel mirror is
+`proof_kernel_replay_tighten_disequality_bounds` (`kernel_replay/disequality_bounds.elisa`), run
+from the kernel's `close_equalities`. A certificate that relies on the step is replayed from the
+same facts, not trusted.
+
+Only disequality facts are scanned. Passes repeat while one moves a bound, at most once per
+disequality (`x != 0, x != 1` reaches `x >= 2`). The first version scanned every fact
+`facts.count` times on every closure. That made `kernel_replay_standalone` take 188 s against
+the 180 s watchdog. With the filter and the early stop it takes 52 s.
+
+Accepted: `examples/disequality_bounds.elisa` (`predecessor`, `next_below`).
+
+Rejected: `examples/rejected_disequality_bounds.elisa`. `interior` has a disequality inside the
+interval, and `not_endpoint` has one at a value that is not the bound. Both stay
+`ensure-unproven`.
+
+### Equalities with a conditional value split into their arms (2026-09-28)
+
+`x == if c then a else b` is now a case split in `proof_find_disjunction`
+(`linear/model_and_congruence.elisa`): `c and x == a` or `not c and x == b`. The replay
+substitution mirror and kernel congruence decompose the same shape. This lets a clamp's result
+inherit each arm's bound.
+
+Accepted: `examples/conditional_equality_split.elisa` (`clamp_below`).
+
+Rejected: `examples/rejected_conditional_equality_split.elisa` (`clamp_off_by_one`,
+`ensure-unproven`).
+
+### Local aliases of a place carry facts to that place (2026-09-28)
+
+`last: T = xs[i]` followed by a goal over `xs[i]` (or the reverse) did not see the local's facts.
+`proof_place_alias_goal` (`linear/place_aliases.elisa`) rewrites the goal through recorded
+`local == place` equalities. The rewrite, `proof_replace_place`, is depth-limited and
+syntactic. The goal is then re-proved from the same facts. The kernel mirror is
+`kernel_replay/place_aliases.elisa`.
+
+Accepted: `examples/place_aliases.elisa` (`last_frame`).
+
+Rejected: `examples/rejected_place_aliases.elisa`. `other_element` aliases a different index,
+and its ensure stays unproven.
+
+### Global constants survive fact clears and reach tail-loop invariants (2026-09-28)
+
+Two gaps dropped module constants such as `MAX_SOUNDS`:
+
+- `proof_clear_facts_keep_type_bounds` (`check/symbol_and_move_state.elisa`) cleared the
+  `NAME == literal` fact that a `global-constant` trace introduced. It now keeps a fact of that
+  exact shape when its trace kind is `global-constant`. The shape is checked first, so ordinary
+  facts do not pay for a trace lookup.
+- `proof_global_constant_contract_mentions_name` (`check/global_constants.elisa`) did not look
+  inside a tail accumulator loop. Such a loop arrives as `Return(Block(...))`, so a constant
+  named only in its invariant was never imported. The `Return` arm now descends into the block.
+
+Accepted: `examples/global_constant_loop_exit.elisa` (`last_slot`).
+
+Rejected: `examples/rejected_global_constant_loop_exit.elisa`. `last_slot` claims
+`result <= 7` against a constant of 8.
+
+### Branch joins keep facts both arms establish; stale atoms no longer leak (2026-09-28)
+
+**Join.** When both arms of an `if` rebind a name, the join forgets its value, and every fact
+over it was lost. That included facts both arms prove, such as `best < CAPACITY` when each arm
+assigns a bounded slot. `proof_restore_branch_implied_facts` (`check/call_and_branch_state.elisa`)
+collects candidates:
+
+- each arm's facts;
+- those facts with the arm's value renamed to the joined name;
+- for `name == X`, X renamed to name.
+
+A candidate is kept when it mentions a joined name and is call-stable. Each arm, with that
+arm's values substituted, must also re-prove it through `proof_goal`. At least one arm's
+substituted form must equal the candidate itself. The fact is then recorded in each arm as a
+derived `branch-join` fact over that arm's facts, and the kernel re-checks it. `branch-join` is
+listed as a derived kind in both certificate validators and in `report_output`. `report_output`
+now also lists `branch-conjunct`, which it had counted as a trusted boundary. `KERNEL_INVENTORY.md`
+lists `branch-join`.
+
+**Soundness fix (pre-existing at 6930911).** A self-referential rebind (`b <- b + 1`) gets a
+fresh symbol, but the join's forget step names the post-join value `Ident(b)`. Facts about the
+old atom `b`, such as `b == best` from before the arm, were restored at the join as if they
+described the new b. At HEAD this proved `result <= 8` for a function that can return 9.
+`proof_join_reads` now drops, at every join restore site, each fact that mentions a name whose
+post-join value is `Ident(name)` while the arm's value was something else. That covers
+single-arm restores, the one-arm-terminates paths and the stable-fact restores.
+
+Accepted: `examples/branch_join.elisa` (`pick_if`, `pick_live`, `keep_or_replace`).
+
+Rejected: `examples/rejected_branch_join.elisa`:
+- `replace_too_far`, where one arm exceeds the bound;
+- `not_always_kept`, where only one arm proves the fact;
+- `stale_rebind`, the soundness regression.
+
+All three stay `ensure-unproven`.
+
+Malformed certificates: a `branch-join` trace whose step differs from its fact, or whose
+premises do not re-prove it, fails replay closed, like `branch-conjunct`.
+
+Budget: candidates are bounded by the arm facts times 3. Each is checked with the existing
+`proof_goal` budget per arm, and only while both arms rebind the same name set.

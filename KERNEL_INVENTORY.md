@@ -172,6 +172,7 @@ report.
 | `loop-invariant-step` | none: reserved, never emitted | premises traced, step re-proved |
 | `branch-conjunct` | `check/bounds_and_facts.elisa` | premises traced, step re-proved |
 | `unit-resolution` | `check/symbol_and_move_state.elisa` | premises traced, step re-proved |
+| `branch-join` | `check/call_and_branch_state.elisa` | premises traced, step re-proved |
 <!-- /inventory:derived-trace-kinds -->
 
 Summary kinds import another declaration's proven contract. They need the exact theorem
