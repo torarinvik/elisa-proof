@@ -8131,3 +8131,48 @@ Neither change alters a certificate shape. The forged `scope` node is the malfor
 the first. The second adds no replay rule, and the kernel re-derives every admitted comparison.
 No budget is involved: the qualified path is bounded by the replay depth limit, and the cast
 witness recurses under the existing depth.
+
+### Plural postconditions and contract placement (2026-09-28)
+
+Two ways a written claim went unchecked while the function was still reported as proved.
+
+The parser keeps a body contract's head as written, and `ensures` is accepted as the plural
+spelling of `ensure`. The checker only matched the singular spelling. So a body `ensures` was
+never checked on any return, and callers never read it. A false one proved silently:
+`plural_false` claims `result == 2` and returns 1 on both paths. `proof_is_ensure_kind` now
+treats both spellings as one contract kind. The sites that match the kind use it: the
+postcondition list, the callee summary, pure-function and lemma admission, the logical-call
+check and the resource statement checker. `examples/body_ensures.elisa` proves the plural head
+on every return and through a caller. `examples/rejected_body_ensures.elisa` fails each return
+that breaks it, including a false plural claim beside a true singular one.
+
+The checker also reads each contract kind only at fixed positions:
+- postconditions and frame clauses at the top of a function body;
+- a measure there or at the top of a `while` body;
+- invariants at the top of a loop body.
+
+A contract anywhere else was dropped without a word. That covered an `ensure` inside an `if`,
+an invariant outside any loop, a measure in a `for` body and a frame clause in a match arm.
+`proof_check_contract_placement` now walks the body and rejects each such contract with
+`contract-placement-unsupported`. It recurses through branches, match arms, blocks and captured
+loops.
+
+Three kinds stay allowed anywhere:
+- `requires` off the top level is a runtime check the prover never assumes;
+- `assert` is checked where it stands;
+- an `assert ... by` block polices its own contracts.
+
+Captured loops arrive wrapped in a block expression, so the placement walk and the logical-call
+check both unwrap them. A writing call in a captured loop's invariant was accepted before; it is
+now rejected as it is in a plain loop. `examples/contract_placement.elisa` keeps every supported
+position proving, and `examples/rejected_contract_placement.elisa` has one case for each
+unsupported position.
+
+Neither change adds a certificate shape or a replay rule. The kernel replays the same goals as
+before, so there is no new malformed-certificate case. No search is involved either: the
+placement walk is linear in the body, so there is no budget case.
+
+Open: a captured loop's invariant is checked at entry and on each step, but it is not exported
+to the loop exit. After `while i < limit |i|: invariant i >= 0`, the goal `i >= 0` is unproven,
+while the same loop without a capture list proves it. This is incomplete but sound, and it
+blocks engine proofs that loop with capture lists.

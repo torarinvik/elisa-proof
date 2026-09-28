@@ -722,6 +722,10 @@ run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
 run_probe rejected_effect_containment examples/rejected_effect_containment.elisa 1
+run_probe body_ensures examples/body_ensures.elisa 0
+run_probe rejected_body_ensures examples/rejected_body_ensures.elisa 1
+run_probe contract_placement examples/contract_placement.elisa 0
+run_probe rejected_contract_placement examples/rejected_contract_placement.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.
