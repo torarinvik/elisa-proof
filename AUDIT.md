@@ -8297,3 +8297,29 @@ was on, so its expected nonzero exit would have aborted `test.sh`. It is now wra
 Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass.
 `test_scalar_reference_index.py` and `test_unsigned_disjunction.py` pass. Refused cases:
 call-entry `old`, a nonzero offset, and both wrapping disjunctions.
+
+## Closed safe-constant comparisons under unrelated unsigned facts (from `codex/wasmbrowser-proof` 0b47131)
+
+`values[1]` on an `array[usize, 28]&` used to stay unproven once `usize` facts such as
+`value_count % 4 == 0` were in scope. The index bound `1 < 28` is closed, but the only rule that
+decided closed comparisons (`proof_closed_signed_i64_comparison`) requires a signed-only context.
+
+`proof_closed_safe_constant_comparison` now decides comparisons whose operands are both safe
+constants:
+- a nonnegative literal; or
+- compound arithmetic whose every intermediate lies in the nonnegative i8 range.
+
+Such a comparison has the same truth value at every supported width, and it consumes no
+premise. The rule keeps the kernel's ambiguity guard over the goal and the facts. The
+kernel's existing `proof_kernel_replay_constant_comparison` replays it with no new rule.
+
+Adversarial probes, all of them refused:
+- `200 + 100 > 250` under a `u8` fact;
+- `4294967296 * 4294967296 > 0`;
+- the full-width literal `18446744073709551615 > 0`, a negative payload and so ambiguous;
+- `3 > 5`.
+
+`values[28]` stays refused (`examples/rejected_fixed_array_constant_index.elisa`).
+
+Evidence: all 17 test.sh chunks and all 9 dogfood.sh chunks pass, and so does
+`test_fixed_array_constant_indices.py`.
