@@ -1,0 +1,170 @@
+# Producer-side sharing of structurally identical kernel terms.
+#
+# Every goal re-encodes its facts, so the same source term was appended to the report arena once
+# per certificate. After a checked encoding, its fresh suffix is rewritten bottom-up onto nodes
+# that already hold exactly the same data. This is not a trust boundary: replay admits the arena
+# node by node, children always precede parents, and provenance compares terms structurally, so
+# a shared node is indistinguishable from an identical copy. The one in-place rewrite of an
+# encoded term, binding a quantifier's kind, is excluded by never sharing a quantifier: an
+# encoding that contains any kind listed as not shareable keeps its fresh nodes unchanged.
+extend ElisaProof:
+    public:
+        # The number of node-reference fields among left, right, and auxiliary, in that order,
+        # for each kind the encoder emits and this module may share. Children ranges are node
+        # references as well, and are handled separately. The sentinel marks every other kind.
+        const PROOF_KERNEL_INTERN_UNSHAREABLE: usize = 4
+
+        def proof_kernel_intern_reference_fields(kind: sview) -> usize:
+            return 0 if kind == "int" or kind == "absent" or kind == "bool" or kind == "string" or kind == "char" or kind == "ident" or kind == "shorthand"
+            return 0 if kind == "array" or kind == "tuple" or kind == "set" or kind == "dict"
+            return 1 if kind == "unary" or kind == "move" or kind == "call_arg" or kind == "field" or kind == "scope" or kind == "checked-get" or kind == "field-init"
+            return 1 if kind == "call" or kind == "index-n" or kind == "construct" or kind == "record-update"
+            return 2 if kind == "binary" or kind == "index" or kind == "checked-index" or kind == "dict_entry"
+            return 3 if kind == "if" or kind == "slice"
+            return PROOF_KERNEL_INTERN_UNSHAREABLE
+
+        def proof_kernel_intern_has_children(kind: sview) -> bool:
+            return kind == "call" or kind == "index-n" or kind == "array" or kind == "tuple" or kind == "set" or kind == "dict" or kind == "construct" or kind == "record-update"
+
+        # Rewrite the nodes appended since `node_start` (and the children appended since
+        # `child_start`) onto existing identical terms, and return the root's final index. The
+        # suffix is left exactly as encoded when any node in it is not shareable or does not have
+        # the bottom-up shape the encoder produces.
+        def proof_kernel_intern_encoded(report: mutable ProofReport&, node_start: usize, child_start: usize, root: usize) -> usize:
+            node_end: usize = report.kernel_nodes.count
+            return root if root < node_start or root >= node_end
+            return root if not proof_kernel_intern_suffix_shareable(report, node_start, child_start)
+            proof_kernel_intern_reserve(report, node_end - node_start)
+            final_index: mutable darray[usize] = []
+            write: mutable usize = node_start
+            for index in node_start..<node_end |index, report, node_start, write, final_index|:
+                node: ElisaProofKernelCore::ProofKernelNode = proof_kernel_intern_remapped(report, index, node_start, final_index)
+                existing: (known: bool, index: usize) = proof_kernel_intern_find(report, node, write)
+                if existing.known:
+                    final_index.push(existing.index)
+                else:
+                    report.kernel_nodes[write] <- node
+                    proof_kernel_intern_insert(report, write)
+                    final_index.push(write)
+                    write <- write + 1
+            report.kernel_interned_nodes <- report.kernel_interned_nodes + (node_end - write)
+            report.kernel_nodes <- report.kernel_nodes.truncate(write)
+            # With every fresh node shared, the fresh children are referenced by nothing.
+            report.kernel_children <- report.kernel_children.truncate(child_start) if write == node_start
+            return final_index[root - node_start]
+
+    private:
+        def proof_kernel_intern_suffix_shareable(report: ProofReport&, node_start: usize, child_start: usize) -> bool:
+            for index in node_start..<report.kernel_nodes.count |index, report, node_start, child_start|:
+                node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[index]
+                fields: usize = proof_kernel_intern_reference_fields(node.kind)
+                return false if fields == PROOF_KERNEL_INTERN_UNSHAREABLE
+                # Every reference must point strictly below its parent, as replay requires.
+                return false if fields >= 1 and node.left >= index
+                return false if fields >= 2 and node.right >= index
+                return false if fields >= 3 and node.auxiliary >= index
+                if proof_kernel_intern_has_children(node.kind):
+                    # A fresh parent owns only fresh children entries; anything else is a shape
+                    # this rewrite does not understand.
+                    return false if node.children_start < child_start or node.children_start > report.kernel_children.count
+                    return false if node.children_count > report.kernel_children.count - node.children_start
+                    for offset in 0..<node.children_count |offset, node, report, index|:
+                        return false if report.kernel_children[node.children_start + offset] >= index
+                else:
+                    return false if node.children_count != 0
+            return true
+
+        def proof_kernel_intern_final(value: usize, node_start: usize, final_index: darray[usize]&) -> usize:
+            return value if value < node_start
+            return final_index[value - node_start]
+
+        # Returns node `index` with its references moved to their final indices. The children of a
+        # fresh node are rewritten in place, since no other node refers to those entries.
+        def proof_kernel_intern_remapped(report: mutable ProofReport&, index: usize, node_start: usize, final_index: darray[usize]&) -> ElisaProofKernelCore::ProofKernelNode:
+            node: mutable ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[index]
+            fields: usize = proof_kernel_intern_reference_fields(node.kind)
+            left: usize = proof_kernel_intern_final(node.left, node_start, final_index) if fields >= 1 else node.left
+            right: usize = proof_kernel_intern_final(node.right, node_start, final_index) if fields >= 2 else node.right
+            auxiliary: usize = proof_kernel_intern_final(node.auxiliary, node_start, final_index) if fields >= 3 else node.auxiliary
+            for offset in 0..<node.children_count |offset, node, report, node_start, final_index|:
+                slot: usize = node.children_start + offset
+                report.kernel_children[slot] <- proof_kernel_intern_final(report.kernel_children[slot], node_start, final_index)
+            return ElisaProofKernelCore::ProofKernelNode{kind: node.kind, operator: node.operator, left: left, right: right, auxiliary: auxiliary, children_start: node.children_start, children_count: node.children_count, value: node.value, name: node.name, secondary_name: node.secondary_name}
+
+        # Exact identity of everything replay can observe in a node. The children range is
+        # compared by content, because two copies of one term own different entries.
+        def proof_kernel_intern_same(report: ProofReport&, stored: ElisaProofKernelCore::ProofKernelNode, node: ElisaProofKernelCore::ProofKernelNode) -> bool:
+            return false if stored.kind != node.kind or stored.operator != node.operator or stored.name != node.name or stored.secondary_name != node.secondary_name
+            return false if stored.left != node.left or stored.right != node.right or stored.auxiliary != node.auxiliary or stored.value != node.value
+            return false if stored.children_count != node.children_count
+            return false if stored.children_start > report.kernel_children.count or stored.children_count > report.kernel_children.count - stored.children_start
+            for offset in 0..<node.children_count |offset, stored, node, report|:
+                return false if report.kernel_children[stored.children_start + offset] != report.kernel_children[node.children_start + offset]
+            return true
+
+        def proof_kernel_intern_mix(hash: u32, value: i64) -> u32:
+            low: i64 = value & 4294967295
+            return (((hash.i64() ^ low) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
+
+        def proof_kernel_intern_hash(report: ProofReport&, node: ElisaProofKernelCore::ProofKernelNode) -> u32:
+            hash: mutable u32 = proof_name_hash(node.kind)
+            hash <- proof_kernel_intern_mix(hash, proof_name_hash(node.operator).i64())
+            hash <- proof_kernel_intern_mix(hash, proof_name_hash(node.name).i64())
+            hash <- proof_kernel_intern_mix(hash, proof_name_hash(node.secondary_name).i64())
+            hash <- proof_kernel_intern_mix(hash, node.left.i64())
+            hash <- proof_kernel_intern_mix(hash, node.right.i64())
+            hash <- proof_kernel_intern_mix(hash, node.auxiliary.i64())
+            hash <- proof_kernel_intern_mix(hash, node.value)
+            hash <- proof_kernel_intern_mix(hash, node.value >> 32)
+            hash <- proof_kernel_intern_mix(hash, node.children_count.i64())
+            for offset in 0..<node.children_count |offset, node, report, hash|:
+                hash <- proof_kernel_intern_mix(hash, report.kernel_children[node.children_start + offset].i64())
+            return hash
+
+        # Open addressing over node indices. A slot is only a candidate: a hit must also lie below
+        # `limit` (the settled prefix of the arena) and match field by field, so a slot left stale
+        # by an arena truncation elsewhere can never alias a different term.
+        def proof_kernel_intern_find(report: ProofReport&, node: ElisaProofKernelCore::ProofKernelNode, limit: usize) -> (known: bool, index: usize):
+            capacity: usize = report.kernel_intern_slots.count
+            return (false, 0) if capacity == 0
+            empty: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            slot: mutable usize = (proof_kernel_intern_hash(report, node).i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, capacity, empty, report, node, limit|:
+                candidate: usize = report.kernel_intern_slots[slot]
+                return (false, 0) if candidate == empty
+                if candidate < limit and candidate < report.kernel_nodes.count:
+                    return (true, candidate) if proof_kernel_intern_same(report, report.kernel_nodes[candidate], node)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 0)
+
+        def proof_kernel_intern_insert(report: mutable ProofReport&, index: usize) -> void:
+            capacity: usize = report.kernel_intern_slots.count
+            return if capacity == 0
+            empty: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            slot: mutable usize = (proof_kernel_intern_hash(report, report.kernel_nodes[index]).i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, capacity, empty, report, index|:
+                if report.kernel_intern_slots[slot] == empty:
+                    report.kernel_intern_slots[slot] <- index
+                    report.kernel_intern_used <- report.kernel_intern_used + 1
+                    return
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+
+        # Keep the table at most half full for `additional` more insertions. Growing rehashes the
+        # recorded indices that still lie inside the arena; the rest were truncated away.
+        def proof_kernel_intern_reserve(report: mutable ProofReport&, additional: usize) -> void:
+            needed: usize = (report.kernel_intern_used + additional) * 2
+            return if needed <= report.kernel_intern_slots.count
+            capacity: usize = proof_index_capacity(needed)
+            previous: darray[usize] = report.kernel_intern_slots
+            empty: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            report.kernel_intern_slots <- []
+            report.kernel_intern_slots.resize(capacity)
+            for slot in 0..<capacity |slot, report, empty|:
+                report.kernel_intern_slots[slot] <- empty
+            report.kernel_intern_used <- 0
+            for index in previous |report, empty|:
+                proof_kernel_intern_insert(report, index) if index != empty and index < report.kernel_nodes.count

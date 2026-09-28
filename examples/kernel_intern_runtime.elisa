@@ -1,0 +1,235 @@
+# Executable boundary test for producer-side kernel term sharing. The report is reduced to the
+# fields kernel_intern.elisa reads and writes. The name hash below sends every name to the same
+# value, so every lookup collides on names and only the exact field comparison can tell terms apart.
+include "../src/proof/kernel_core.elisa"
+
+module ElisaProof:
+    public:
+        struct ProofReport:
+            kernel_nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]
+            kernel_children: mutable darray[usize]
+            kernel_intern_slots: mutable darray[usize]
+            kernel_intern_used: mutable usize
+            kernel_interned_nodes: mutable usize
+
+        def proof_name_hash(value: sview) -> u32:
+            return 7
+
+        def proof_index_capacity(count: usize) -> usize:
+            return 0 if count == 0
+            capacity: mutable usize = 1
+            while capacity < count |capacity, count|:
+                capacity <- capacity * 2
+            return capacity
+
+include "../src/proof/kernel_intern.elisa"
+
+using ElisaProof
+using ElisaProofKernelCore
+
+# Exit status for each broken sharing property.
+const module Failure:
+    FIRST_TERM_CHANGED: i64 = 1
+    REPEATED_TERM_NOT_SHARED: i64 = 2
+    SHARED_SUBTERM_NOT_REUSED: i64 = 3
+    HIGH_VALUE_BITS_CONFLATED: i64 = 4
+    OPERATOR_CONFLATED: i64 = 5
+    NAME_CONFLATED: i64 = 6
+    CALL_NOT_ENCODED: i64 = 7
+    REPEATED_CALL_NOT_SHARED: i64 = 8
+    CHILD_ORDER_CONFLATED: i64 = 9
+    QUANTIFIER_SHARED: i64 = 10
+    QUANTIFIER_BINDING_LEAKED: i64 = 11
+    FORWARD_REFERENCE_REWRITTEN: i64 = 12
+    FOREIGN_CHILDREN_REWRITTEN: i64 = 13
+    STRAY_CHILDREN_REWRITTEN: i64 = 14
+    FOREIGN_ROOT_REWRITTEN: i64 = 15
+    STALE_SLOT_ALIASED: i64 = 16
+    TABLE_OVERLOADED: i64 = 17
+    LOADED_TABLE_MISSED_TERM: i64 = 18
+    SHARED_CHILDREN_WRONG: i64 = 19
+    UNSETTLED_NODE_ANSWERED: i64 = 20
+
+const module Fixture:
+    LOAD_TERMS: usize = 3000
+    LOAD_VALUE_BASE: i64 = 10000
+    HIGH_BIT_VALUE: i64 = 4294967297
+
+# Appends a node and returns its index. Stage0 cannot infer the region of `add_node` for an arena
+# that is a field of the report, so nodes are appended here instead.
+def push(report: mutable ProofReport&, kind: sview, operator: sview, left: usize, right: usize, auxiliary: usize, children_start: usize, children_count: usize, value: i64, name: sview, secondary_name: sview) -> usize can[Memory.Allocate]:
+    report.kernel_nodes.push(ProofKernelNode{kind: kind, operator: operator, left: left, right: right, auxiliary: auxiliary, children_start: children_start, children_count: children_count, value: value, name: name, secondary_name: secondary_name})
+    return report.kernel_nodes.count - 1
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    report: mutable ProofReport = ProofReport{kernel_nodes: [], kernel_children: [], kernel_intern_slots: [], kernel_intern_used: 0, kernel_interned_nodes: 0}
+
+    # x + 1, encoded into an empty arena, is kept exactly as encoded.
+    x0: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    one0: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    sum0: usize = push(&report, "binary", "+", x0, one0, 0, 0, 0, 0, "", "")
+    first: usize = proof_kernel_intern_encoded(&report, 0, 0, sum0)
+    return Failure::FIRST_TERM_CHANGED if first != sum0 or report.kernel_nodes.count != 3 or report.kernel_interned_nodes != 0
+
+    # The same term again collapses onto the first copy, and the arena shrinks back.
+    start: mutable usize = report.kernel_nodes.count
+    x1: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    one1: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    sum1: usize = push(&report, "binary", "+", x1, one1, 0, 0, 0, 0, "", "")
+    again: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, sum1)
+    return Failure::REPEATED_TERM_NOT_SHARED if again != sum0 or report.kernel_nodes.count != 3 or report.kernel_interned_nodes != 3
+
+    # x + 2 reuses x only; the new parent must point at the shared x.
+    start <- report.kernel_nodes.count
+    x2: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    two2: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 2, "", "")
+    sum2: usize = push(&report, "binary", "+", x2, two2, 0, 0, 0, 0, "", "")
+    partial: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, sum2)
+    return Failure::SHARED_SUBTERM_NOT_REUSED if partial != 4 or report.kernel_nodes.count != 5 or report.kernel_nodes[partial].left != x0 or report.kernel_nodes[partial].right != 3
+
+    # 1 and 1 + 2^32 agree in their low 32 bits and must stay distinct.
+    start <- report.kernel_nodes.count
+    wide: usize = push(&report, "int", "", 0, 0, 0, 0, 0, Fixture::HIGH_BIT_VALUE, "", "")
+    wide_root: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, wide)
+    return Failure::HIGH_VALUE_BITS_CONFLATED if wide_root == one0 or report.kernel_nodes[wide_root].value != Fixture::HIGH_BIT_VALUE
+
+    start <- report.kernel_nodes.count
+    x3: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    one3: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    difference: usize = push(&report, "binary", "-", x3, one3, 0, 0, 0, 0, "", "")
+    difference_root: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, difference)
+    return Failure::OPERATOR_CONFLATED if difference_root == sum0 or report.kernel_nodes[difference_root].operator != "-"
+
+    start <- report.kernel_nodes.count
+    y: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "y", "")
+    y_root: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, y)
+    return Failure::NAME_CONFLATED if y_root == x0 or report.kernel_nodes[y_root].name != "y"
+
+    # f(x, 1): the callee is new, the arguments are shared, and the fresh children entries are
+    # rewritten to the shared indices.
+    start <- report.kernel_nodes.count
+    child_start: mutable usize = report.kernel_children.count
+    f4: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "f", "")
+    x4: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    one4: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    report.kernel_children.push(x4)
+    report.kernel_children.push(one4)
+    call4: usize = push(&report, "call", "", f4, 0, 0, child_start, 2, 0, "", "")
+    call_root: usize = proof_kernel_intern_encoded(&report, start, child_start, call4)
+    return Failure::CALL_NOT_ENCODED if report.kernel_nodes.count != start + 2 or call_root != start + 1
+    return Failure::SHARED_CHILDREN_WRONG if report.kernel_children.count != child_start + 2 or report.kernel_children[child_start] != x0 or report.kernel_children[child_start + 1] != one0
+    nodes_after_call: usize = report.kernel_nodes.count
+    children_after_call: usize = report.kernel_children.count
+
+    # The same call again: a different children range with the same content. Everything is
+    # shared, so the fresh children entries are released as well.
+    start <- report.kernel_nodes.count
+    child_start <- report.kernel_children.count
+    f5: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "f", "")
+    x5: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    one5: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    report.kernel_children.push(x5)
+    report.kernel_children.push(one5)
+    call5: usize = push(&report, "call", "", f5, 0, 0, child_start, 2, 0, "", "")
+    call_again: usize = proof_kernel_intern_encoded(&report, start, child_start, call5)
+    return Failure::REPEATED_CALL_NOT_SHARED if call_again != call_root or report.kernel_nodes.count != nodes_after_call or report.kernel_children.count != children_after_call
+
+    # f(1, x) has the same children as a multiset and must not be identified with f(x, 1).
+    start <- report.kernel_nodes.count
+    child_start <- report.kernel_children.count
+    f6: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "f", "")
+    one6: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    x6: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    report.kernel_children.push(one6)
+    report.kernel_children.push(x6)
+    call6: usize = push(&report, "call", "", f6, 0, 0, child_start, 2, 0, "", "")
+    swapped: usize = proof_kernel_intern_encoded(&report, start, child_start, call6)
+    return Failure::CHILD_ORDER_CONFLATED if swapped == call_root or report.kernel_children[report.kernel_nodes[swapped].children_start] != one0
+
+    # A quantifier's kind is bound in place after encoding, so an encoding containing one keeps
+    # every fresh node, even when an identical quantifier already exists.
+    start <- report.kernel_nodes.count
+    x7: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    one7: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    body7: usize = push(&report, "binary", "+", x7, one7, 0, 0, 0, 0, "", "")
+    forall7: usize = push(&report, "quantifier", "forall", body7, 0, 0, 0, 0, 0, "i", "")
+    kept: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, forall7)
+    return Failure::QUANTIFIER_SHARED if kept != forall7 or report.kernel_nodes.count != start + 4 or report.kernel_nodes[forall7].left != body7
+    start <- report.kernel_nodes.count
+    x8: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    one8: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    body8: usize = push(&report, "binary", "+", x8, one8, 0, 0, 0, 0, "", "")
+    forall8: usize = push(&report, "quantifier", "forall", body8, 0, 0, 0, 0, 0, "i", "")
+    second: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, forall8)
+    return Failure::QUANTIFIER_SHARED if second != forall8 or second == forall7 or report.kernel_nodes.count != start + 4
+    report.kernel_nodes[second].operator <- "exists"
+    return Failure::QUANTIFIER_BINDING_LEAKED if report.kernel_nodes[forall7].operator != "forall"
+
+    # Shapes the encoder never produces are left exactly as they are.
+    start <- report.kernel_nodes.count
+    forward: usize = push(&report, "binary", "+", start, x0, 0, 0, 0, 0, "", "")
+    forward_root: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, forward)
+    return Failure::FORWARD_REFERENCE_REWRITTEN if forward_root != forward or report.kernel_nodes.count != start + 1 or report.kernel_nodes[forward].left != start
+
+    start <- report.kernel_nodes.count
+    child_start <- report.kernel_children.count
+    f9: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "f", "")
+    foreign: usize = push(&report, "call", "", f9, 0, 0, children_after_call - 2, 2, 0, "", "")
+    foreign_root: usize = proof_kernel_intern_encoded(&report, start, child_start, foreign)
+    return Failure::FOREIGN_CHILDREN_REWRITTEN if foreign_root != foreign or report.kernel_nodes.count != start + 2
+
+    start <- report.kernel_nodes.count
+    child_start <- report.kernel_children.count
+    report.kernel_children.push(x0)
+    stray: usize = push(&report, "binary", "+", x0, one0, 0, child_start, 1, 0, "", "")
+    stray_root: usize = proof_kernel_intern_encoded(&report, start, child_start, stray)
+    return Failure::STRAY_CHILDREN_REWRITTEN if stray_root != stray or report.kernel_nodes.count != start + 1 or report.kernel_children.count != child_start + 1
+
+    start <- report.kernel_nodes.count
+    x10: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    outside: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, sum0)
+    return Failure::FOREIGN_ROOT_REWRITTEN if outside != sum0 or report.kernel_nodes.count != start + 1 or report.kernel_nodes[x10].name != "x"
+
+    # A truncation elsewhere leaves a table slot naming an index that now holds another term.
+    start <- report.kernel_nodes.count
+    old_term: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 777, "", "")
+    old_root: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, old_term)
+    report.kernel_nodes <- report.kernel_nodes.truncate(start)
+    new_term: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 888, "", "")
+    new_root: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, new_term)
+    return Failure::STALE_SLOT_ALIASED if old_root != start or new_root != start or report.kernel_nodes[new_root].value != 888
+    reencoded: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 777, "", "")
+    reencoded_root: usize = proof_kernel_intern_encoded(&report, start + 1, report.kernel_children.count, reencoded)
+    return Failure::STALE_SLOT_ALIASED if reencoded_root != start + 1 or report.kernel_nodes[reencoded_root].value != 777
+    back: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 888, "", "")
+    back_root: usize = proof_kernel_intern_encoded(&report, start + 2, report.kernel_children.count, back)
+    return Failure::STALE_SLOT_ALIASED if back_root != start or report.kernel_nodes.count != start + 2
+
+    # A stale slot can name a position inside the suffix being rewritten, where a not yet
+    # compacted node holds exactly the term looked up. Only the settled prefix may answer.
+    start <- report.kernel_nodes.count
+    pad: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 555, "", "")
+    later: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 999, "", "")
+    pair: usize = push(&report, "binary", "+", pad, later, 0, 0, 0, 0, "", "")
+    proof_kernel_intern_encoded(&report, start, report.kernel_children.count, pair)
+    report.kernel_nodes <- report.kernel_nodes.truncate(start)
+    shared_pad: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    raw: usize = push(&report, "int", "", 0, 0, 0, 0, 0, 999, "", "")
+    raw_pair: usize = push(&report, "binary", "-", shared_pad, raw, 0, 0, 0, 0, "", "")
+    settled: usize = proof_kernel_intern_encoded(&report, start, report.kernel_children.count, raw_pair)
+    return Failure::UNSETTLED_NODE_ANSWERED if settled >= report.kernel_nodes.count or report.kernel_nodes.count != start + 2
+    return Failure::UNSETTLED_NODE_ANSWERED if report.kernel_nodes[start].value != 999 or report.kernel_nodes[settled].right != start or report.kernel_nodes[settled].left != one0
+
+    # Many distinct terms keep the table at most half full, and each is still found afterwards.
+    load_start: usize = report.kernel_nodes.count
+    for offset in 0..<Fixture::LOAD_TERMS |offset, report|:
+        term: usize = push(&report, "int", "", 0, 0, 0, 0, 0, Fixture::LOAD_VALUE_BASE + offset.i64(), "", "")
+        proof_kernel_intern_encoded(&report, term, report.kernel_children.count, term)
+    return Failure::TABLE_OVERLOADED if report.kernel_nodes.count != load_start + Fixture::LOAD_TERMS or report.kernel_intern_used * 2 > report.kernel_intern_slots.count
+    missed: mutable bool = false
+    for offset in 0..<Fixture::LOAD_TERMS |offset, report, missed, load_start|:
+        term: usize = push(&report, "int", "", 0, 0, 0, 0, 0, Fixture::LOAD_VALUE_BASE + offset.i64(), "", "")
+        found: usize = proof_kernel_intern_encoded(&report, term, report.kernel_children.count, term)
+        missed <- true if found != load_start + offset
+    return Failure::LOADED_TABLE_MISSED_TERM if missed or report.kernel_nodes.count != load_start + Fixture::LOAD_TERMS
+    return 0
