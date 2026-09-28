@@ -7922,3 +7922,38 @@ checked rather than opaque.
 
 Open: a literal passed to a shared-reference parameter is still forgotten at the next call. The
 alias analysis records any bare name passed to a reference parameter, shared or mutable.
+
+
+### Disjunctive goals through the negated left disjunct (2026-09-28)
+
+A disjunctive goal was proved only when one of its disjuncts held on its own. An ensure of the
+shape `not result or slot < CAPACITY` states what a true result implies, and a body such as
+`slot < CAPACITY and table.live[slot]` establishes it only by cases: a false result satisfies the
+left disjunct, and a true one carries the bound. Neither disjunct follows from the body alone, so
+the ensure stayed unproven, the summary stayed unverified, and a caller that indexed after
+`return false if not live(table, slot)` lost the bound with it.
+
+`proof_goal_depth` now tries each disjunct and then proves `A or B` as `not A => B`: the right
+disjunct under the left one's negation. When the left disjunct is `not P`, the premise is `P`
+itself, so the summary shape above needs no double negation. The premise opens a case, so it
+spends the case-split budget as a conditional goal does, and a refused split marks the attempt
+budget-exhausted instead of proving anything. `proof_kernel_replay_goal_depth` mirrors the rule,
+adding a `not` node when the left disjunct is not already a negation, and
+`proof_replay_goal_at_depth` mirrors it for the replay checker.
+
+`examples/disjunctive_goals.elisa` proves all 13 obligations with every certificate replayed: the
+`live` summary above, two pure implications, a caller that indexes after
+`return false if not live(table, slot)`, and `chained_order`, whose four nested disjunctions
+use the whole case-split budget. Before this change the four ensures, the caller's
+summary and its upper bound were unproven. `examples/rejected_disjunctive_goals.elisa` must
+report exactly three `ensure-unproven` findings, one for each ensure that some input falsifies.
+The last would pass if the rule assumed the left disjunct instead of its negation.
+
+A split the budget refuses is a timeout, not a disproof. `too_deep_disjunctive_goal` in
+`examples/rejected_budget.elisa` needs a fifth nested premise, so it must be reported with status
+`timeout` and no counterexample. The kernel and replay mirrors refuse the same fifth split, so a
+certificate that claimed it could not replay.
+
+Open: the arithmetic guard still checks a right disjunct under the facts alone, not under the
+left one's negation. `ensure a >= 100 or a + 1 <= 100` stays unproven for an unbounded `a`, even
+though `a + 1` is evaluated only when `a < 100`.

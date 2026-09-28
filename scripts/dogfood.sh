@@ -599,6 +599,8 @@ run_probe nested_call_kept_values examples/nested_call_kept_values.elisa 0
 run_probe rejected_nested_call_kept_values examples/rejected_nested_call_kept_values.elisa 1
 run_probe literal_index examples/literal_index.elisa 0
 run_probe rejected_literal_index examples/rejected_literal_index.elisa 1
+run_probe disjunctive_goals examples/disjunctive_goals.elisa 0
+run_probe rejected_disjunctive_goals examples/rejected_disjunctive_goals.elisa 1
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
@@ -772,6 +774,7 @@ expected = {
     "too_many_congruence_rounds": "timeout",
     "too_many_disjunctions": "timeout",
     "too_deep_conditional": "timeout",
+    "too_deep_disjunctive_goal": "timeout",
 }
 if status != expected:
     raise SystemExit("dogfood failed: verdict states collapsed, got %s" % sorted(status.items()))
