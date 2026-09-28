@@ -9218,3 +9218,55 @@ facts and the theorem's hypotheses cite i64 ones.
   A loop's binder carries no type of its own, so arithmetic on it cannot replay without a width
   witness.
 - Termination and arithmetic overflow are not established. The trust record says so.
+
+## Literals wrapped by their width (2026-09-28)
+
+This fixes a soundness hole on main. The source type checker refuses a literal that does not
+fit its width only when the literal's peer is a bare name. So `a + 0 == 256` with `a: u8`
+compiles, and the literal wraps to 0. The kernel read the literal as exactly 256. Beside the
+type range `a <= 255` the fact was unsatisfiable and closed any goal. At 919bb94,
+`requires a + 0 == 256` proved `ensure a == 7`, and so did `a * 1 == 300` and the guarded
+difference `b - a == 256`.
+
+Now every proposition state admitted by kernel replay must pass
+`proof_kernel_replay_state_literals_fit` (`kernel_replay/literal_widths.elisa`), whose rules are:
+- A closed constant under a comparison or integer arithmetic operator must fit the width
+  witnessed for that node: unsigned and signed, every leaf and every intermediate.
+- A comparison uses only its own width. An arithmetic node without a witness of its own inherits
+  the width of the arithmetic around it.
+- `not`, `if` conditions and quantifier bodies start a fresh context.
+- A negated literal is checked as one value, so `-128` fits i8 although `128` does not.
+- A negative literal with no width tag fits a signed width only when it lies inside it. It
+  never fits an unsigned width.
+- A width-tagged high-bit literal is a typed value, which the typed comparison rule already
+  handles.
+
+The check covers every goal, tactic step, tactic branch and quantifier state. The producer
+mirror (`linear/literal_widths.elisa`) refuses the same states in `proof_goal_with_operator_mask`,
+so the solver gives up instead of emitting a certificate that the kernel would refuse. Every
+probe below ends with 0 replay gaps.
+
+Nothing on main was found to wrap through a call, an if-expression, an index or a field peer.
+Each of those forms is unproven both at 919bb94 and now. The check does not depend on that.
+
+Accepted: `examples/literal_widths.elisa`. It covers:
+- the u8 maximum;
+- the i8 minimum as a negated literal;
+- a signed step down;
+- a guarded exact difference;
+- a small shift.
+
+Rejected: `examples/rejected_literal_widths.elisa`:
+- `a + 0 == 256`, `a * 1 == 300` and a guarded difference of 256 at u8 (all proved at 919bb94);
+- a wide sum;
+- `-1` at u8;
+- 200 and -129 at i8;
+- 128 in a goal at i8.
+
+Kernel adversaries: suite 12 of `examples/kernel_arena_runtime` (codes 230-239) builds each
+state directly, with the type ranges the producer supplies. Mutation checks:
+- disabling the whole check fails with 230;
+- admitting any bare negative payload fails with 236;
+- admitting any negated literal fails with 235.
+The signed cases need the primitive scalar witness that source states carry. Without it the
+kernel refuses them for another reason, and the cases would test nothing.

@@ -1,0 +1,77 @@
+extend ElisaProof:
+    private:
+        # Mirror of the replay kernel's literal-width check. The type checker refuses a literal
+        # that does not fit only when its peer is a bare name, so `a + 0 == 256` with `a: u8`
+        # compiles and the literal wraps to 0. A closed constant under a witnessed fixed width
+        # must fit that width, leaf and intermediate alike, or no goal is proved from the state.
+        def proof_literal_width_arithmetic(operator: TokenKind) -> bool:
+            return true if operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent
+            return operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret or operator == TokenKind.LShift or operator == TokenKind.RShift
+
+        # A closed constant as the kernel reads it: a high-bit literal carrying its recorded type
+        # is a typed value, not an untyped constant, so it is left to the typed comparison rule.
+        def proof_literal_width_closed(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return proof_integer_literal_tag(expression, annotations) == ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_literal_width_closed(inner, annotations, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_literal_width_closed(operand, annotations, depth + 1) and proof_constant_int(expression).known
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_literal_width_closed(left, annotations, depth + 1) and proof_literal_width_closed(right, annotations, depth + 1) and proof_constant_int(expression).known
+                _:
+                    return proof_constant_int(expression).known
+
+        def proof_constant_fits_width(expression: Ast::Expr, width: i64) -> bool:
+            return true if width == 0 or proof_small_nonnegative_constant(expression).known
+            match expression:
+                Ast::Expr.Field(_, _, _):
+                    # The empty literal's count, 0 at every width, as in the small-constant rule.
+                    return proof_constant_int(expression).known
+                Ast::Expr.IntLit(value, _):
+                    # A bare negative payload keeps its value only when it fits a signed width.
+                    return width > 0 and value >= ElisaProofKernelCore::proof_kernel_signed_width_min(width) if value < 0
+                Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(value, _), _):
+                    # The minimum of a signed width is written as a negated literal.
+                    return value >= 0 and 0 - value >= ElisaProofKernelCore::proof_kernel_signed_width_min(width) if width > 0
+                _:
+                    pass
+            return proof_signed_constant_at_width(expression, width, 0).known
+
+        def proof_literals_fit(expression: Ast::Expr, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, unsigned_width: i64, signed_width: i64, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_literals_fit(inner, facts, annotations, unsigned_width, signed_width, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    return proof_literals_fit(operand, facts, annotations, 0, 0, depth + 1) if operator == TokenKind.Not
+                    return proof_literals_fit(operand, facts, annotations, unsigned_width, signed_width, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_literals_fit(condition, facts, annotations, 0, 0, depth + 1) and proof_literals_fit(then_expression, facts, annotations, unsigned_width, signed_width, depth + 1) and proof_literals_fit(else_expression, facts, annotations, unsigned_width, signed_width, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    comparison: bool = proof_is_comparison(operator)
+                    if not comparison and not proof_literal_width_arithmetic(operator):
+                        return proof_literals_fit(left, facts, annotations, 0, 0, depth + 1) and proof_literals_fit(right, facts, annotations, 0, 0, depth + 1)
+                    left_closed: bool = proof_literal_width_closed(left, annotations, depth + 1)
+                    right_closed: bool = proof_literal_width_closed(right, annotations, depth + 1)
+                    return true if left_closed and right_closed
+                    own_unsigned: i64 = proof_unsigned_width_in_expression(expression, facts)
+                    own_signed: i64 = proof_signed_width_in_expression(expression, facts)
+                    context_unsigned: i64 = own_unsigned if own_unsigned != 0 or comparison else unsigned_width
+                    context_signed: i64 = own_signed if own_signed != 0 or comparison else signed_width
+                    return false if left_closed and (not proof_constant_fits_width(left, 0 - context_unsigned) or not proof_constant_fits_width(left, context_signed))
+                    return false if right_closed and (not proof_constant_fits_width(right, 0 - context_unsigned) or not proof_constant_fits_width(right, context_signed))
+                    return false if not left_closed and not proof_literals_fit(left, facts, annotations, context_unsigned, context_signed, depth + 1)
+                    return false if not right_closed and not proof_literals_fit(right, facts, annotations, context_unsigned, context_signed, depth + 1)
+                    return true
+                _:
+                    return true
+
+    public:
+        def proof_state_literals_fit(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if not proof_literals_fit(goal, facts, annotations, 0, 0, 0)
+            for fact in facts |fact, facts, annotations|:
+                return false if not proof_literals_fit(fact, facts, annotations, 0, 0, 0)
+            return true

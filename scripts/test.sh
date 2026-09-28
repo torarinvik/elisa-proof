@@ -3192,6 +3192,23 @@ if [[ "$rejected_guarded_differences_status" -ne 0 ]]; then
 fi
 printf 'guarded differences: exact differences and plain orders bound goal sums; modular and unguarded forms refused\n'
 set +e
+run_json_report "$ROOT_DIR/examples/literal_widths.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; proven = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] == "goal"}; assert proven == {"unsigned_maximum", "signed_minimum", "signed_step_down", "exact_difference", "small_shift"}'
+literal_widths_status=${PIPESTATUS[1]}
+set -e
+if [[ "$literal_widths_status" -ne 0 ]]; then
+  printf 'proof test matrix failed: a literal that fits its width was refused\n' >&2
+  exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_literal_widths.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("plus_zero", "ensure-unproven"), ("times_one", "ensure-unproven"), ("wide_difference", "ensure-unproven"), ("wide_sum", "ensure-unproven"), ("negative_unsigned", "ensure-unproven"), ("wide_signed", "ensure-unproven"), ("below_signed_minimum", "ensure-unproven"), ("wide_goal", "ensure-unproven")}'
+rejected_literal_widths_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_literal_widths_status" -ne 0 ]]; then
+  printf 'proof test matrix failed: a literal wrapped by its width was read exactly\n' >&2
+  exit 1
+fi
+printf 'literal widths: literals that fit their width prove; wrapped literals prove nothing\n'
+set +e
 run_json_report "$ROOT_DIR/examples/field_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
 field_places_status=${PIPESTATUS[1]}
 set -e
