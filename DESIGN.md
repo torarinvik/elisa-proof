@@ -586,6 +586,66 @@ summary counters, findings, replay coverage, every logical goal attempt (includi
     to depth 32 and represented by a flat postorder certificate tree; child state injection and
     malformed tree edges remain rejected.
 
+### Portable replay packages
+
+`elisa-proof --package <source>` exports the proved goals of one run as an
+`elisa-proof-package-v1` file, and `elisa-proof-replay <package>` re-checks it. The checker is
+built from `src/replay_main.elisa` with `ELISA_PROOF_MAIN=src/replay_main.elisa scripts/build.sh`.
+It links the kernel, the JSON reader and the package reader. It does not link the compiler front
+end, the search engine, the tactic language or an AI client.
+
+Each theorem is a sequent: hypothesis roots, a conclusion root and a rule, all over the exported
+arena. The checker:
+
+1. reads the package under exact schemas, where a missing, extra or duplicated key is malformed;
+2. admits the whole arena with `proof_kernel_replay_arena_all_report`, so kinds are known, child
+   ranges are in bounds, and there are no forward or cyclic references;
+3. recomputes each sequent's canonical identity and requires the stated `statement` byte for byte
+   and its FNV-1a `goal_fingerprint`;
+4. replays the sequent with the kernel rule the theorem names. The dispatch is the same one host
+   replay uses.
+
+Exit 0 means every theorem of a nonempty package replayed. Otherwise the first failing verdict is
+reported, and each theorem keeps its own status.
+
+What the result does not establish is stated in its `trust` record:
+
+- `hypotheses: adapter`. A package carries no derivation of its hypotheses. They are the facts the
+  source adapter supplied (contracts, guards, type witnesses), and the checker takes them as given.
+  A theorem is "these facts entail this conclusion under this rule", not "the source is correct".
+- `source_correspondence: adapter`. Nothing in the package proves that the arena terms are the
+  meaning of the source file. `source.admissible` records the adapter's admission verdict; an
+  inadmissible source exports no theorems and no arena. `source.authenticated` is always false,
+  and a package that claims otherwise is malformed.
+- `fingerprints: identity-hint`. FNV-1a binds a statement to its sequent for caching and
+  cross-reference. It is not a digest, and the recomputed identity is what the checker compares.
+- `package_reader: trusted`. The JSON parser and the package reader are in the trusted base of
+  this checker, alongside the kernel.
+
+Some identities are scalar. Atoms and certificate roots (`resource-*`, `structural-*`,
+`effect-*`) encode only their own fields, not their children. For those rules the statement names
+the certificate root, and the event structure under it is checked by kernel replay itself. How
+that structure corresponds to the source is adapter trust, like any other hypothesis.
+
+The package carries only the arena prefix its theorems reach. Host replay appends derived roots to
+the arena, such as quantifier instances and binder markers. Exporting those would hand the checker
+marker nodes that the quantifier kernel must refuse to reuse. The arena has no forward references,
+so the prefix ending at the highest exported root is closed.
+
+Budgets are checked before the work they bound:
+
+| Item | Limit |
+| --- | --- |
+| Nodes, children | The kernel budgets (1M and 4M) |
+| Theorems per package | 65,536 |
+| Hypotheses per theorem | 4,096 |
+| String length | 64 KiB |
+| Identity bytes per statement | 16 MiB |
+| Identity bytes per package | 64 MiB |
+
+A shared DAG whose identity is exponential stops at the identity budget. Node values are decimal
+strings in canonical form, so every i64 value survives the round trip.
+
 ## Current proof language
 
 The initial surface supports `requires`, `ensure`, `changes`, `preserves`, `invariant`,

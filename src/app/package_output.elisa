@@ -1,0 +1,119 @@
+# Portable replay package (`--package`). The package carries the prefix of the source-neutral
+# kernel arena that its theorems reach and, for every goal whose certificate replayed here, the sequent that certificate claims:
+# its hypothesis roots, its conclusion root, its rule, and the canonical identity of the sequent.
+# `elisa-proof-replay` re-checks each sequent with the kernel alone, without the compiler front
+# end, the search engine, or any AI client.
+#
+# Host replay appends derived roots (quantifier instances, binder markers) after the certificate
+# roots. Those are replay scratch, not premises: exporting them would hand the checker marker
+# nodes it must refuse to reuse. The arena admits no forward references, so every node a theorem
+# reaches lies below its highest root, and the prefix ending there is closed.
+#
+# The package does not carry a derivation of its hypotheses or of the correspondence between the
+# conclusion and the source. Both stay with the adapter that produced it, and the package says so
+# in its `trust` record. A source that is not admissible yields no theorems at all.
+const PROOF_PACKAGE_FORMAT: sview = "elisa-proof-package-v1"
+
+# Node values are full i64 values; JSON numbers are binary64 and would round those above 2^53,
+# so the package writes every value as a decimal string.
+def proof_push_package_kernel_node(buffer: mutable darray[u8]&, node: ElisaProofKernelCore::ProofKernelNode) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"kind\":")
+    proof_push_json_string(buffer, node.kind)
+    proof_push(buffer, ",\"operator\":")
+    proof_push_json_string(buffer, node.operator)
+    proof_push(buffer, ",\"left\":")
+    proof_push_number(buffer, node.left.u32())
+    proof_push(buffer, ",\"right\":")
+    proof_push_number(buffer, node.right.u32())
+    proof_push(buffer, ",\"auxiliary\":")
+    proof_push_number(buffer, node.auxiliary.u32())
+    proof_push(buffer, ",\"children_start\":")
+    proof_push_number(buffer, node.children_start.u32())
+    proof_push(buffer, ",\"children_count\":")
+    proof_push_number(buffer, node.children_count.u32())
+    proof_push(buffer, ",\"value\":\"")
+    proof_push_json_i64(buffer, node.value)
+    proof_push(buffer, "\",\"name\":")
+    proof_push_json_string(buffer, node.name)
+    proof_push(buffer, ",\"secondary_name\":")
+    proof_push_json_string(buffer, node.secondary_name)
+    proof_push(buffer, "}")
+
+def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, attempt: ProofGoalAttempt) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if attempt.kernel_facts_start > report.kernel_certificate_facts.count or attempt.kernel_facts_count > report.kernel_certificate_facts.count - attempt.kernel_facts_start
+    statement: mutable darray[u8] = []
+    valid: bool = proof_portable_sequent_identity(&statement, report.kernel_nodes, report.kernel_children, report.kernel_certificate_facts, attempt.kernel_facts_start, attempt.kernel_facts_count, attempt.kernel_goal)
+    return false if not valid
+    proof_push(buffer, "{\"goal_id\":")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, ",\"name\":")
+    proof_push_json_string(buffer, attempt.name)
+    proof_push(buffer, ",\"line\":")
+    proof_push_number(buffer, attempt.line)
+    proof_push(buffer, ",\"rule\":")
+    proof_push_json_string(buffer, attempt.rule)
+    proof_push(buffer, ",\"hypotheses\":[")
+    for index in 0..<attempt.kernel_facts_count |index, attempt, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_number(buffer, report.kernel_certificate_facts[attempt.kernel_facts_start + index].u32())
+    proof_push(buffer, "],\"hypothesis_origins\":[")
+    for index in 0..<attempt.facts_count |index, attempt, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_json_fact_origin(buffer, report, attempt.facts_start + index, attempt.name)
+    proof_push(buffer, "],\"conclusion\":")
+    proof_push_number(buffer, attempt.kernel_goal.u32())
+    proof_push(buffer, ",\"statement\":")
+    proof_push_json_bytes(buffer, statement)
+    proof_push(buffer, ",\"goal_fingerprint\":")
+    proof_push_number(buffer, proof_source_fingerprint(statement))
+    proof_push(buffer, "}")
+    return true
+
+# Returns the number of theorems written. A replayed goal whose sequent has no identity (an
+# unknown node kind) is left out rather than exported under a partial statement.
+def proof_push_json_package(buffer: mutable darray[u8]&, report: ProofReport&, source_path: darray[u8]&, source_bytes: usize, source_fingerprint: u32, source_admissible: bool) -> usize can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    theorems: mutable darray[u8] = []
+    written: mutable usize = 0
+    node_end: mutable usize = 0
+    if source_admissible:
+        for goal_id in 0..<report.goal_attempts.count |goal_id, report, theorems, written, node_end|:
+            attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+            continue if not attempt.proven or not proof_replay_attempt_certificate_replayed(report, attempt)
+            theorem: mutable darray[u8] = []
+            continue if not proof_push_package_theorem(&theorem, report, goal_id, attempt)
+            proof_push(&theorems, ",") if written > 0
+            theorems.extend(theorem)
+            written <- written + 1
+            node_end <- attempt.kernel_goal + 1 if attempt.kernel_goal >= node_end
+            for index in 0..<attempt.kernel_facts_count |index, attempt, report, node_end|:
+                fact: usize = report.kernel_certificate_facts[attempt.kernel_facts_start + index]
+                node_end <- fact + 1 if fact >= node_end
+    node_end <- report.kernel_nodes.count if node_end > report.kernel_nodes.count
+    child_end: mutable usize = 0
+    for index in 0..<node_end |index, report, child_end|:
+        node: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[index]
+        child_end <- node.children_start + node.children_count if node.children_start + node.children_count > child_end
+    child_end <- report.kernel_children.count if child_end > report.kernel_children.count
+    proof_push(buffer, "{\"format\":\"")
+    proof_push(buffer, PROOF_PACKAGE_FORMAT)
+    proof_push(buffer, "\",\"source\":{\"path\":")
+    proof_push_json_bytes(buffer, source_path)
+    proof_push(buffer, ",\"bytes\":")
+    proof_push_number(buffer, source_bytes.u32())
+    proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
+    proof_push_number(buffer, source_fingerprint)
+    proof_push(buffer, "},\"admissible\":")
+    proof_push(buffer, "true" if source_admissible else "false")
+    proof_push(buffer, ",\"authenticated\":false},\"trust\":{\"hypotheses\":\"adapter\",\"source_correspondence\":\"adapter\",\"fingerprints\":\"identity-hint\"},\"kernel\":{\"nodes\":[")
+    for index in 0..<node_end |index, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_package_kernel_node(buffer, report.kernel_nodes[index])
+    proof_push(buffer, "],\"children\":[")
+    for index in 0..<child_end |index, report, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push_number(buffer, report.kernel_children[index].u32())
+    proof_push(buffer, "]},\"theorems\":[")
+    for index in 0..<theorems.count |index, theorems, buffer|:
+        buffer.push(theorems[index])
+    proof_push(buffer, "]}\n")
+    return written

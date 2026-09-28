@@ -1,0 +1,357 @@
+"""Portable replay packages: `--package` exports, `elisa-proof-replay` re-checks with the kernel.
+
+The checker links no compiler front end, search engine or AI client, so these tests drive it
+only through package files. Positive packages come from real examples; every forgery below is
+made consistent (statement and fingerprint recomputed) so that the kernel, not a checksum, is
+what refuses it.
+"""
+import copy
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
+WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-portable-"))
+
+# One example per kernel rule family, each small enough to keep the suite quick.
+POSITIVE = {
+    "global_constant_module": {"goal", "resource-safety"},
+    "verified": {"goal"},
+    "collection_quantifier": {"quantifier-forall", "quantifier-exists"},
+    "checked_index_fallback": {"checked-index"},
+    "getelse_recovery": {"checked-get"},
+    "effect_containment": {"effect-containment"},
+    "implicit_structural_decreases": {"structural-safety"},
+    "early_return_index_guard": {"index-lower", "index-upper"},
+    "fixed_array_slice_bounds": {"slice-lower", "slice-upper", "slice-order"},
+}
+TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
+         "source_correspondence": "adapter", "fingerprints": "identity-hint",
+         "source_authenticated": False}
+# Kinds whose identity is scalar: atoms, and certificate roots whose structure the dedicated
+# kernel replays. Mirrors `proof_push_kernel_identity`.
+SCALAR_KINDS = {
+    "absent", "bool", "char", "effect", "effect-call", "effect-containment", "effect-row",
+    "field-init", "float", "ident", "int", "resource-bind", "resource-call", "resource-call-arg",
+    "resource-call-formal", "resource-call-lend", "resource-call-region", "resource-call-result",
+    "resource-disjoint", "resource-join-move", "resource-move", "resource-region-alloc",
+    "resource-region-alloc-discard", "resource-region-assign", "resource-region-bind",
+    "resource-region-call-alloc", "resource-region-close", "resource-region-open",
+    "resource-region-param", "resource-region-rebind-alloc", "resource-region-return",
+    "resource-region-return-alloc", "resource-safety", "resource-scope", "resource-use",
+    "resource-write", "resource-write-readonly", "shorthand", "string", "structural-argument",
+    "structural-edge", "structural-safety", "unsupported",
+}
+LEFT = {"unary", "move", "field", "scope", "call_arg", "checked-get"}
+LEFT_RIGHT = {"binary", "index", "checked-index", "dict_entry"}
+THREE = {"if", "slice"}
+HEAD_CHILDREN = {"call", "index-n", "construct", "record-update"}
+CHILDREN = {"array", "tuple", "set", "dict"}
+
+
+def json_string(text):
+    out = ['"']
+    for char in text:
+        code = ord(char)
+        if char in '"\\':
+            out.append("\\" + char)
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t":
+            out.append("\\t")
+        elif code < 32:
+            out.append("\\u%04x" % code)
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
+
+
+def identity(nodes, children, root, depth=0):
+    assert depth < 128 and root < len(nodes)
+    node = nodes[root]
+    kind = node["kind"]
+    text = "(%s:%s:%s:%s:%s" % (kind, node["operator"], node["value"],
+                                json_string(node["name"]), json_string(node["secondary_name"]))
+    parts = []
+    if kind in LEFT:
+        parts = [node["left"]]
+    elif kind in LEFT_RIGHT:
+        parts = [node["left"], node["right"]]
+    elif kind in THREE:
+        parts = [node["left"], node["right"], node["auxiliary"]]
+    elif kind in HEAD_CHILDREN or kind in CHILDREN:
+        start, count = node["children_start"], node["children_count"]
+        parts = ([node["left"]] if kind in HEAD_CHILDREN else []) + children[start:start + count]
+    elif kind == "quantifier":
+        text += ":%d" % node["auxiliary"]
+        parts = [node["left"], node["right"]]
+    else:
+        assert kind in SCALAR_KINDS, kind
+    return text + "".join(identity(nodes, children, part, depth + 1) for part in parts) + ")"
+
+
+def statement(package, hypotheses, conclusion):
+    nodes, children = package["kernel"]["nodes"], package["kernel"]["children"]
+    return ("elisa-proof-goal-v1:" + "".join("F" + identity(nodes, children, h) for h in hypotheses)
+            + "G" + identity(nodes, children, conclusion))
+
+
+def fnv1a32(text):
+    value = 2166136261
+    for byte in text.encode("utf-8"):
+        value = ((value ^ byte) * 16777619) % 2**32
+    return value
+
+
+def reseal(package, theorem):
+    """Recompute a theorem's statement and fingerprint after a forgery."""
+    theorem["statement"] = statement(package, theorem["hypotheses"], theorem["conclusion"])
+    theorem["goal_fingerprint"] = fnv1a32(theorem["statement"])
+    theorem["hypothesis_origins"] = theorem["hypothesis_origins"][:len(theorem["hypotheses"])]
+    while len(theorem["hypothesis_origins"]) < len(theorem["hypotheses"]):
+        theorem["hypothesis_origins"].append({"kind": "forged"})
+    return theorem
+
+
+def export(example):
+    run = subprocess.run([str(BINARY), "--package", str(ROOT / "examples" / (example + ".elisa"))],
+                         capture_output=True, text=True, timeout=120)
+    assert run.returncode in (0, 1), (example, run.returncode, run.stderr)
+    return json.loads(run.stdout)
+
+
+def replay_text(text, name):
+    path = WORK / (name + ".json")
+    path.write_text(text)
+    run = subprocess.run([str(REPLAY), str(path)], capture_output=True, text=True, timeout=120)
+    result = json.loads(run.stdout)
+    assert result["format"] == "elisa-proof-replay-result-v1", result
+    if run.returncode == 2:
+        return run.returncode, result
+    assert result["trust"] == TRUST, result
+    expected_exit = 0 if result["status"] == "replayed" else 1
+    assert run.returncode == expected_exit, (name, run.returncode, result["status"])
+    return run.returncode, result
+
+
+def replay(package, name):
+    return replay_text(json.dumps(package), name)
+
+
+def refused(package_or_text, name, status, reason):
+    if isinstance(package_or_text, str):
+        code, result = replay_text(package_or_text, name)
+    else:
+        code, result = replay(package_or_text, name)
+    assert code == 1 and result["status"] == status and result["reason"] == reason, (name, result)
+    return result
+
+
+def with_theorem(package, theorem):
+    forged = copy.deepcopy(package)
+    forged["theorems"] = [copy.deepcopy(theorem)]
+    return forged
+
+
+def append_node(package, kind, operator="", left=0, right=0, value="0"):
+    nodes = package["kernel"]["nodes"]
+    nodes.append({"kind": kind, "operator": operator, "left": left, "right": right,
+                  "auxiliary": 0, "children_start": 0, "children_count": 0, "value": value,
+                  "name": "", "secondary_name": ""})
+    return len(nodes) - 1
+
+
+# Positive: every exported theorem replays, and the Python encoder agrees with the exporter.
+packages = {}
+for example, rules in POSITIVE.items():
+    package = export(example)
+    packages[example] = package
+    assert package["format"] == "elisa-proof-package-v1" and package["source"]["admissible"], example
+    assert package["source"]["authenticated"] is False, example
+    seen = {theorem["rule"] for theorem in package["theorems"]}
+    assert rules <= seen, (example, rules, seen)
+    for theorem in package["theorems"]:
+        assert theorem["statement"] == statement(package, theorem["hypotheses"], theorem["conclusion"]), (example, theorem["name"])
+        assert theorem["goal_fingerprint"] == fnv1a32(theorem["statement"]), (example, theorem["name"])
+    code, result = replay(package, example)
+    assert code == 0 and result["status"] == "replayed", (example, result)
+    assert result["summary"] == {"theorems": len(package["theorems"]),
+                                 "replayed": len(package["theorems"]), "not_replayed": 0}, result
+    report = json.loads(subprocess.run([str(BINARY), "--json", str(ROOT / "examples" / (example + ".elisa"))],
+                                       capture_output=True, text=True, timeout=120).stdout)
+    replayed_goals = [goal for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed"]
+    assert len(package["theorems"]) == len(replayed_goals), (example, len(package["theorems"]), len(replayed_goals))
+
+# Replay scratch (quantifier binder markers) is not exported: the arena ends at the last root.
+quantified = packages["collection_quantifier"]
+last_root = max(max([t["conclusion"]] + t["hypotheses"]) for t in quantified["theorems"])
+assert len(quantified["kernel"]["nodes"]) == last_root + 1, (len(quantified["kernel"]["nodes"]), last_root)
+assert not any(node["name"].startswith("__elisa_kernel_quantifier") for node in quantified["kernel"]["nodes"])
+
+base = packages["verified"]
+assumption = next(t for t in base["theorems"] if t["rule"] == "goal" and t["conclusion"] in t["hypotheses"])
+code, result = replay(with_theorem(base, assumption), "assumption")
+assert code == 0, result
+
+# Consistent forgeries: the kernel itself must refuse them.
+dropped = copy.deepcopy(assumption)
+dropped["hypotheses"] = [h for h in dropped["hypotheses"] if h != dropped["conclusion"]]
+forged = with_theorem(base, dropped)
+refused(with_theorem(base, reseal(forged, forged["theorems"][0])), "dropped-hypothesis", "rejected", "kernel-rejected")
+
+false_goal = copy.deepcopy(base)
+one = append_node(false_goal, "int", value="1")
+two = append_node(false_goal, "int", value="2")
+wrong = append_node(false_goal, "binary", "<", two, one)
+right = append_node(false_goal, "binary", "<", one, two)
+claim = copy.deepcopy(assumption)
+claim["conclusion"] = wrong
+false_goal["theorems"] = [reseal(false_goal, claim)]
+refused(false_goal, "false-conclusion", "rejected", "kernel-rejected")
+control = copy.deepcopy(false_goal)
+control["theorems"][0]["conclusion"] = right
+reseal(control, control["theorems"][0])
+assert replay(control, "true-conclusion")[0] == 0
+
+relabeled = copy.deepcopy(assumption)
+relabeled["rule"] = "resource-safety"
+refused(with_theorem(base, relabeled), "wrong-rule", "rejected", "kernel-rejected")
+unknown = copy.deepcopy(assumption)
+unknown["rule"] = "trust-me"
+refused(with_theorem(base, unknown), "unknown-rule", "rejected", "unknown-rule")
+
+# Inconsistent forgeries: the statement and fingerprint bind the sequent that was checked.
+mismatch = copy.deepcopy(assumption)
+mismatch["statement"] = mismatch["statement"].replace("x", "y", 1)
+refused(with_theorem(base, mismatch), "statement-mismatch", "rejected", "statement-mismatch")
+fingerprint = copy.deepcopy(assumption)
+fingerprint["goal_fingerprint"] = (fingerprint["goal_fingerprint"] + 1) % 2**32
+refused(with_theorem(base, fingerprint), "fingerprint-mismatch", "rejected", "fingerprint-mismatch")
+out_of_range = copy.deepcopy(assumption)
+out_of_range["conclusion"] = len(base["kernel"]["nodes"])
+refused(with_theorem(base, out_of_range), "root-out-of-range", "rejected", "root-out-of-range")
+
+# Forged arenas: unknown kinds, bad child ranges, cycles and forward references.
+unknown_kind = copy.deepcopy(base)
+unknown_kind["kernel"]["nodes"][assumption["conclusion"]]["kind"] = "oracle"
+refused(with_theorem(unknown_kind, assumption), "unknown-kind", "malformed", "arena-inadmissible")
+bad_children = copy.deepcopy(base)
+call = next(i for i, n in enumerate(bad_children["kernel"]["nodes"]) if n["kind"] == "call")
+bad_children["kernel"]["nodes"][call]["children_count"] = len(bad_children["kernel"]["children"]) + 1
+refused(with_theorem(bad_children, assumption), "bad-children", "malformed", "arena-inadmissible")
+for name, left in (("cycle", None), ("forward", "next")):
+    cyclic = copy.deepcopy(base)
+    root = assumption["conclusion"]
+    cyclic["kernel"]["nodes"][root]["left"] = root if left is None else len(cyclic["kernel"]["nodes"]) - 1
+    if left is not None:
+        assert len(cyclic["kernel"]["nodes"]) - 1 > root
+    refused(with_theorem(cyclic, assumption), name, "malformed", "arena-inadmissible")
+
+# An exponential DAG is linear in the arena but not in its identity: the budget stops it.
+dag = copy.deepcopy(base)
+dag["kernel"] = {"nodes": [], "children": []}
+top = append_node(dag, "int", value="1")
+for _ in range(40):
+    top = append_node(dag, "binary", "+", top, top)
+goal = append_node(dag, "binary", "==", top, top)
+dag["theorems"] = [{"goal_id": 0, "name": "dag", "line": 1, "rule": "goal", "hypotheses": [],
+                    "hypothesis_origins": [], "conclusion": goal, "statement": "",
+                    "goal_fingerprint": 0}]
+refused(dag, "exponential-dag", "over-budget", "identity-budget")
+
+# Header, trust and schema: nothing is inferred, over-claimed or accepted twice.
+text = json.dumps(with_theorem(base, assumption))
+refused(text.replace('{"format": ', '{"format": "elisa-proof-package-v1", "format": ', 1),
+        "duplicate-key", "malformed", "package-schema")
+extra = with_theorem(base, assumption)
+extra["kernel"]["nodes"][0]["proof"] = True
+refused(extra, "extra-node-key", "malformed", "node-schema")
+extra = with_theorem(base, assumption)
+extra["theorems"][0]["trusted"] = True
+refused(extra, "extra-theorem-key", "malformed", "theorem-schema")
+for key, value in (("hypotheses", "kernel"), ("source_correspondence", "checked"), ("fingerprints", "digest")):
+    claim = with_theorem(base, assumption)
+    claim["trust"][key] = value
+    refused(claim, "trust-" + key, "malformed", "trust-schema")
+claim = with_theorem(base, assumption)
+claim["source"]["authenticated"] = True
+refused(claim, "authenticated", "malformed", "source-schema")
+claim = with_theorem(base, assumption)
+claim["source"]["admissible"] = False
+refused(claim, "inadmissible", "rejected", "source-inadmissible")
+claim = with_theorem(base, assumption)
+claim["format"] = "elisa-proof-package-v2"
+refused(claim, "format", "malformed", "format")
+for bad in ("01", "-0", "+1", "", " 1", "9223372036854775808", "-9223372036854775809", "1e3"):
+    claim = with_theorem(base, assumption)
+    claim["kernel"]["nodes"][0]["value"] = bad
+    refused(claim, "value-" + bad, "malformed", "node-schema")
+claim = with_theorem(base, assumption)
+claim["kernel"]["nodes"][0]["value"] = 0
+refused(claim, "value-number", "malformed", "node-schema")
+for bad in (1.5, -1, 2**53, "3", True):
+    claim = with_theorem(base, assumption)
+    claim["theorems"][0]["conclusion"] = bad
+    refused(claim, "index-%r" % (bad,), "malformed", "theorem-schema")
+claim = with_theorem(base, assumption)
+claim["theorems"][0]["hypothesis_origins"] = []
+refused(claim, "origins", "malformed", "theorem-schema")
+refused(with_theorem(base, assumption) | {"theorems": []}, "empty", "rejected", "no-theorems")
+refused(text[:-2], "truncated", "malformed", "json")
+refused("", "empty-file", "malformed", "json")
+
+# Extreme i64 values round-trip exactly as decimal strings.
+extreme = copy.deepcopy(base)
+low = append_node(extreme, "int", value="-9223372036854775808")
+high = append_node(extreme, "int", value="9223372036854775807")
+claim = copy.deepcopy(assumption)
+claim["conclusion"] = append_node(extreme, "binary", "<", low, high)
+extreme["theorems"] = [reseal(extreme, claim)]
+assert "(int::-9223372036854775808:" in extreme["theorems"][0]["statement"]
+# The kernel may decline to compare width-ambiguous constants; the reader must still read them
+# exactly, so the recomputed statement matches, and a value one off does not.
+code, result = replay(extreme, "extreme-values")
+assert result["reason"] in (None, "kernel-rejected"), result
+extreme["kernel"]["nodes"][high]["value"] = "9223372036854775806"
+refused(extreme, "extreme-value-off-by-one", "rejected", "statement-mismatch")
+
+# Budgets are checked before the work they bound.
+huge = with_theorem(base, assumption)
+huge["kernel"]["nodes"] = [{}] * 1000001
+refused(huge, "node-budget", "over-budget", "node-budget")
+huge = with_theorem(base, assumption)
+huge["kernel"]["children"] = [0] * 4000001
+refused(huge, "child-budget", "over-budget", "child-budget")
+many = copy.deepcopy(assumption)
+many["hypotheses"] = [0] * 4097
+many["hypothesis_origins"] = [{}] * 4097
+refused(with_theorem(base, many), "hypothesis-budget", "over-budget", "hypothesis-budget")
+flood = with_theorem(base, assumption)
+flood["theorems"] = [{}] * 65537
+refused(flood, "theorem-budget", "over-budget", "theorem-budget")
+
+# One bad theorem among good ones fails the package and is named; the rest still replay.
+mixed = copy.deepcopy(packages["global_constant_module"])
+bad = copy.deepcopy(mixed["theorems"][0])
+bad["goal_fingerprint"] = (bad["goal_fingerprint"] + 1) % 2**32
+mixed["theorems"].insert(1, bad)
+result = refused(mixed, "mixed", "rejected", "fingerprint-mismatch")
+assert result["summary"] == {"theorems": len(mixed["theorems"]), "replayed": len(mixed["theorems"]) - 1,
+                             "not_replayed": 1}, result
+assert [t["status"] for t in result["theorems"]].count("rejected") == 1, result
+
+# Usage and unreadable input exit 2.
+usage = subprocess.run([str(REPLAY)], capture_output=True, text=True, timeout=30)
+assert usage.returncode == 2 and "usage" in usage.stdout, usage
+missing = subprocess.run([str(REPLAY), str(WORK / "missing.json")], capture_output=True, text=True, timeout=30)
+assert missing.returncode == 2 and json.loads(missing.stdout)["status"] == "unreadable", missing
+
+print("portable replay: %d packages replay; forgeries, forged arenas, schema, trust and budgets are refused"
+      % len(packages))

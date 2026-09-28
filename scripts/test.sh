@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 "$ROOT_DIR/scripts/build.sh"
+# The portable package checker is its own small product built from the same snapshot.
+ELISA_PROOF_MAIN=src/replay_main.elisa ELISA_PROOF_OUTPUT="$ROOT_DIR/build/elisa-proof-replay" "$ROOT_DIR/scripts/build.sh"
 
 # The marker-decoder regression must finish under the normal watchdog. Completion
 # is not proof: unresolved obligations remain visible in the report.
@@ -88,6 +90,7 @@ python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_remainder_range.py"
+python3 "$ROOT_DIR/scripts/test_portable_replay.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.

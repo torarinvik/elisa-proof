@@ -1,0 +1,336 @@
+# Source-neutral I/O and JSON rendering shared by the proof tool and the portable replay
+# checker. Nothing here may depend on the compiler AST, the lexer, or the ElisaProof report:
+# the replay executable includes this file without the compiler front end.
+extern open(path: cstr, flags: i64, ...) -> i64
+extern close(fd: i64) -> i64
+extern read(fd: i64, buf: u8&, count: usize) -> i64
+
+const PROOF_INPUT_FILE_MAX_BYTES: usize = 67108864
+const PROOF_INPUT_FILE_CHUNK_SIZE: usize = 65536
+const PROOF_RUNTIME_IDENTITY_DEPTH_LIMIT: usize = 128
+# Shared subterms are expanded, so a small DAG can name an exponentially long identity. Every
+# visit appends at least one byte, which makes this byte bound a bound on the visits too.
+const PROOF_RUNTIME_IDENTITY_BYTE_LIMIT: usize = 16777216
+const PROOF_POSIX_READ_ONLY_FLAGS: i64 = 0
+const PROOF_POSIX_DEFAULT_MODE: i64 = 0
+const PROOF_STDOUT_DESCRIPTOR: i64 = 1
+const PROOF_SYSCALL_FAILURE: i64 = -1
+
+def proof_read_file_checked(path: cstr) -> (ok: bool, contents: darray[u8]) can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    contents: mutable darray[u8] = []
+    descriptor: i64 = open(path, PROOF_POSIX_READ_ONLY_FLAGS, PROOF_POSIX_DEFAULT_MODE)
+    return (false, contents) if descriptor == PROOF_SYSCALL_FAILURE
+    chunk: mutable darray[u8] = []
+    chunk.resize(PROOF_INPUT_FILE_CHUNK_SIZE)
+    while true |contents, chunk, descriptor|:
+        amount: i64 = read(descriptor, &chunk[0], PROOF_INPUT_FILE_CHUNK_SIZE)
+        if amount == PROOF_SYSCALL_FAILURE:
+            _ = close(descriptor)
+            return (false, [])
+        break if amount == 0
+        amount_bytes: usize = amount.usize()
+        if amount_bytes > chunk.count or amount_bytes > PROOF_INPUT_FILE_MAX_BYTES - contents.count:
+            _ = close(descriptor)
+            return (false, [])
+        # The read buffer is already bounded and owns the bytes returned by `read`. Set its
+        # logical extent to the exact syscall result, then use the runtime's bulk darray copy.
+        # Copying one byte at a time made full compiler imports spend most of their time in
+        # allocator growth and element hooks without changing the source semantics.
+        chunk.count <- amount_bytes
+        contents.extend(chunk)
+        chunk.count <- PROOF_INPUT_FILE_CHUNK_SIZE
+    _ = close(descriptor)
+    return (true, contents)
+
+def proof_read_file(path: cstr) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    result: (ok: bool, contents: darray[u8]) = proof_read_file_checked(path)
+    return result.contents if result.ok
+    return []
+
+def proof_write(text: darray[u8]&) -> void can[Console, Unsafe.PointerCast]:
+    return if text.count == 0
+    raw: void& = (&text[0]).cast[void&] can Unsafe.PointerCast
+    _ = write(PROOF_STDOUT_DESCRIPTOR, raw, text.count)
+
+def proof_push(buffer: mutable darray[u8]&, text: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    for index in 0..<sview_len(text) |buffer|:
+        buffer.push(sview_at(text, index))
+
+def proof_push_number(buffer: mutable darray[u8]&, value: u32) -> void can[Memory.Allocate, Abort.Panic]:
+    digits: mutable darray[u8] = []
+    remaining: mutable u32 = value
+    if remaining == 0:
+        buffer.push('0'.u8())
+        return
+    while remaining > 0 |digits, remaining|:
+        digits.push(('0'.u8()) + (remaining % 10).u8())
+        remaining <- remaining / 10
+    index: mutable usize = digits.count
+    while index > 0 |buffer, digits, index|:
+        index <- index - 1
+        buffer.push(digits[index])
+
+def proof_source_fingerprint(source: darray[u8]&) -> u32:
+    # FNV-1a over the exact expanded bytes handed to the parser. This is an identity hint for
+    # proof caches and AI clients, not a cryptographic digest or a kernel acceptance condition.
+    hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+    for byte in source |hash|:
+        hash <- ((hash ^ byte.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+    return hash.u32()
+
+# Canonical identity encoding for one source-neutral kernel term. Arena indices and unrelated
+# source positions are deliberately excluded, so inserting an unrelated declaration does not
+# invalidate a cached target proof. This fingerprint is an incremental cache/binding guard, not a
+# cryptographic proof; the independently replayed term remains the admission authority.
+def proof_push_kernel_identity(buffer: mutable darray[u8]&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+    requires depth <= PROOF_RUNTIME_IDENTITY_DEPTH_LIMIT
+    decreases PROOF_RUNTIME_IDENTITY_DEPTH_LIMIT - depth
+    return false if depth >= PROOF_RUNTIME_IDENTITY_DEPTH_LIMIT or root >= nodes.count or buffer.count > PROOF_RUNTIME_IDENTITY_BYTE_LIMIT
+    node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+    proof_push(buffer, "(")
+    proof_push(buffer, node.kind)
+    proof_push(buffer, ":")
+    proof_push(buffer, node.operator)
+    proof_push(buffer, ":")
+    proof_push_json_i64(buffer, node.value)
+    proof_push(buffer, ":")
+    proof_push_json_string(buffer, node.name)
+    proof_push(buffer, ":")
+    proof_push_json_string(buffer, node.secondary_name)
+    valid: mutable bool = true
+    match node.kind:
+        "unary":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "move":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "field":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "scope":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "call_arg":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "checked-get":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+        "binary":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "index":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "checked-index":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "dict_entry":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "if":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.auxiliary, depth + 1) and valid
+        "slice":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.auxiliary, depth + 1) and valid
+        "call":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "index-n":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "construct":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "record-update":
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "array":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "tuple":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "set":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "dict":
+            valid <- false if node.children_start > children.count or node.children_count > children.count - node.children_start
+            if valid:
+                for index in 0..<node.children_count |index, node, children, nodes, buffer, depth, valid|:
+                    valid <- proof_push_kernel_identity(buffer, nodes, children, children[node.children_start + index], depth + 1) and valid
+        "quantifier":
+            proof_push(buffer, ":")
+            proof_push_json_i64(buffer, node.auxiliary.i64())
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.left, depth + 1)
+            valid <- proof_push_kernel_identity(buffer, nodes, children, node.right, depth + 1) and valid
+        "absent" | "bool" | "char" | "effect" | "effect-call" | "effect-containment" | "effect-row" | "field-init" | "float" | "ident" | "int" | "resource-bind" | "resource-call" | "resource-call-arg" | "resource-call-formal" | "resource-call-lend" | "resource-call-region" | "resource-call-result" | "resource-disjoint" | "resource-join-move" | "resource-move" | "resource-region-alloc" | "resource-region-alloc-discard" | "resource-region-assign" | "resource-region-bind" | "resource-region-call-alloc" | "resource-region-close" | "resource-region-open" | "resource-region-param" | "resource-region-rebind-alloc" | "resource-region-return" | "resource-region-return-alloc" | "resource-safety" | "resource-scope" | "resource-use" | "resource-write" | "resource-write-readonly" | "shorthand" | "string" | "structural-argument" | "structural-edge" | "structural-safety" | "unsupported":
+            # These are recognized source-neutral atoms or certificate roots whose detailed
+            # replay semantics are checked by their dedicated kernel. Their existing identity
+            # encoding is intentionally scalar; do not mistake them for unknown node kinds.
+            pass
+        _:
+            # Fingerprints are only cache/binding guards, but an unknown kernel kind must
+            # still fail closed rather than receive a plausible identity encoding. Replay
+            # remains the admission authority; this prevents malformed future nodes from
+            # being treated as valid by the surrounding fingerprint protocol.
+            valid <- false
+    proof_push(buffer, ")")
+    return valid
+
+const PROOF_JSON_U32_MAX_PREFIX: u32 = 429496729
+const PROOF_JSON_U32_MAX_LAST_DIGIT: u32 = 5
+const PROOF_ASCII_DIGIT_ZERO: u8 = '0'.u8()
+const PROOF_ASCII_DIGIT_NINE: u8 = '9'.u8()
+const PROOF_JSON_BYTE_BASE: u8 = 16
+const PROOF_JSON_CONTROL_LIMIT: u8 = 32
+const PROOF_I64_MIN: i64 = 0 - 9223372036854775807 - 1
+const PROOF_JSON_RENDER_DEPTH_LIMIT: usize = 63
+
+def proof_cstr_equals(left: cstr, right: sview) -> bool:
+    index: mutable usize = 0
+    right_length: usize = sview_len(right)
+    while index < right_length |index, left, right|:
+        return false if left[index] == 0 or left[index] != sview_at(right, index)
+        index <- index + 1
+    return left[index] == 0
+
+def proof_cstr_u32(value: cstr) -> (valid: bool, parsed: u32):
+    return (false, 0) if value[0] == 0
+    result: mutable u32 = 0
+    index: mutable usize = 0
+    while value[index] != 0 |value, result, index|:
+        byte: u8 = value[index]
+        return (false, 0) if byte < PROOF_ASCII_DIGIT_ZERO or byte > PROOF_ASCII_DIGIT_NINE
+        digit: u32 = (byte - PROOF_ASCII_DIGIT_ZERO).u32()
+        return (false, 0) if result > PROOF_JSON_U32_MAX_PREFIX or result == PROOF_JSON_U32_MAX_PREFIX and digit > PROOF_JSON_U32_MAX_LAST_DIGIT
+        result <- result * 10 + digit
+        index <- index + 1
+    return (true, result)
+
+def proof_push_json_byte_escape(buffer: mutable darray[u8]&, byte: u8) -> void can[Memory.Allocate, Abort.Panic]:
+    # JSON strings must escape controls. Invalid source bytes are represented as their
+    # corresponding U+00XX code point so a byte-oriented Elisa name cannot corrupt JSON.
+    proof_push(buffer, "\\u00")
+    high_digit: u8 = (byte / PROOF_JSON_BYTE_BASE)
+    low_digit: u8 = (byte % PROOF_JSON_BYTE_BASE)
+    buffer.push('0'.u8() + high_digit) if high_digit < 10
+    buffer.push('a'.u8() + (high_digit - 10)) if high_digit >= 10
+    buffer.push('0'.u8() + low_digit) if low_digit < 10
+    buffer.push('a'.u8() + (low_digit - 10)) if low_digit >= 10
+
+def proof_json_utf8_width(value: sview, index: usize) -> usize:
+    length: usize = sview_len(value)
+    return 0 if index >= length
+    first: u8 = sview_at(value, index)
+    return 1 if first < 0x80
+    has_second: bool = index + 1 < length
+    has_third: bool = index + 2 < length
+    has_fourth: bool = index + 3 < length
+    second: u8 = sview_at(value, index + 1) if has_second else 0
+    third: u8 = sview_at(value, index + 2) if has_third else 0
+    fourth: u8 = sview_at(value, index + 3) if has_fourth else 0
+    second_continuation: bool = second in 0x80..0xBF
+    third_continuation: bool = third in 0x80..0xBF
+    fourth_continuation: bool = fourth in 0x80..0xBF
+    return 2 if first in 0xC2..0xDF and has_second and second_continuation
+    return 3 if first == 0xE0 and has_second and has_third and second in 0xA0..0xBF and third_continuation
+    return 3 if first in 0xE1..0xEC and has_second and has_third and second_continuation and third_continuation
+    return 3 if first == 0xED and has_second and has_third and second in 0x80..0x9F and third_continuation
+    return 3 if first in 0xEE..0xEF and has_second and has_third and second_continuation and third_continuation
+    return 4 if first == 0xF0 and has_second and has_third and has_fourth and second in 0x90..0xBF and third_continuation and fourth_continuation
+    return 4 if first in 0xF1..0xF3 and has_second and has_third and has_fourth and second_continuation and third_continuation and fourth_continuation
+    return 4 if first == 0xF4 and has_second and has_third and has_fourth and second in 0x80..0x8F and third_continuation and fourth_continuation
+    return 0
+
+def proof_push_json_string(buffer: mutable darray[u8]&, value: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    buffer.push('"'.u8())
+    length: usize = sview_len(value)
+    index: mutable usize = 0
+    while index < length |index, buffer, value|:
+        byte: u8 = sview_at(value, index)
+        if byte >= 0x80:
+            utf8_width: usize = proof_json_utf8_width(value, index)
+            if utf8_width == 0:
+                proof_push_json_byte_escape(buffer, byte)
+                index <- index + 1
+            else:
+                for byte_index in index..<(index + utf8_width) |buffer, value, index, utf8_width|:
+                    buffer.push(sview_at(value, byte_index))
+                index <- index + utf8_width
+        else:
+            if byte == '"'.u8() or byte == '\\'.u8():
+                buffer.push('\\'.u8())
+                buffer.push(byte)
+            elif byte == '\n'.u8():
+                proof_push(buffer, "\\n")
+            elif byte == '\r'.u8():
+                proof_push(buffer, "\\r")
+            elif byte == '\t'.u8():
+                proof_push(buffer, "\\t")
+            elif byte < PROOF_JSON_CONTROL_LIMIT:
+                proof_push_json_byte_escape(buffer, byte)
+            else:
+                buffer.push(byte)
+            index <- index + 1
+    buffer.push('"'.u8())
+
+def proof_push_json_bytes(buffer: mutable darray[u8]&, value: darray[u8]&) -> void can[Memory.Allocate, Abort.Panic]:
+    # Diagnostics are owned byte arrays, so borrow their live storage as an sview and share
+    # the same UTF-8/control-byte validation path as ordinary report strings.
+    if value.count == 0:
+        proof_push_json_string(buffer, sview("", 0, 0))
+        return
+    text: sview = ElisaProofJson::bytes_range_ref(value, 0, value.count)
+    proof_push_json_string(buffer, text)
+
+def proof_push_json_i64(buffer: mutable darray[u8]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    if value == PROOF_I64_MIN:
+        proof_push(buffer, "-9223372036854775808")
+        return
+    working: mutable i64 = value
+    if working < 0:
+        buffer.push('-'.u8())
+        working <- 0 - working
+    digits: mutable darray[u8] = []
+    remaining: mutable i64 = working
+    if remaining == 0:
+        buffer.push('0'.u8())
+        return
+    while remaining > 0 |digits, remaining|:
+        digits.push(('0'.u8()) + (remaining % 10).u8())
+        remaining <- remaining / 10
+    index: mutable usize = digits.count
+    while index > 0 |buffer, digits, index|:
+        index <- index - 1
+        buffer.push(digits[index])
+
+# Canonical identity of one sequent: its hypothesis roots in order, then its conclusion. The goal
+# fingerprint a report prints is the FNV-1a hash of exactly these bytes, so a portable package and
+# the report that produced it name the same goal the same way.
+def proof_portable_sequent_identity(buffer: mutable darray[u8]&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize]&, facts_start: usize, facts_count: usize, goal: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if facts_start > facts.count or facts_count > facts.count - facts_start
+    proof_push(buffer, "elisa-proof-goal-v1:")
+    valid: mutable bool = true
+    for index in 0..<facts_count |index, facts, facts_start, nodes, children, buffer, valid|:
+        proof_push(buffer, "F")
+        valid <- proof_push_kernel_identity(buffer, nodes, children, facts[facts_start + index], 0) and valid
+    proof_push(buffer, "G")
+    valid <- proof_push_kernel_identity(buffer, nodes, children, goal, 0) and valid
+    return valid

@@ -48,6 +48,7 @@ def routes(directory, source, proof=None):
         ("repair-all", ["--repair-all", source]),
         ("tactics", ["--tactics", ROOT / "examples/tactic_script_target.json", source]),
         ("script", ["--script", directory / "control.script", source]),
+        ("package", ["--package", source]),
     ]
 
 
@@ -79,6 +80,9 @@ def check_refused(variant, name, process):
         assert all(goal["status"] == "unrepaired" and goal["script"] is None for goal in payload["goals"]), variant
     if name in ("tactics", "script"):
         assert payload["status"] == "failed", (variant, name, payload["status"])
+    if name == "package":
+        # An inadmissible source exports no theorem for the portable checker to replay.
+        assert payload["theorems"] == [] and payload["kernel"]["nodes"] == [], (variant, len(payload["theorems"]))
     if name == "check-proof":
         assert payload["status"] in ("diverges", "not_found"), (variant, payload["status"])
 

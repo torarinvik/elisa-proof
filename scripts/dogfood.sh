@@ -81,6 +81,10 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
 fi
 
 ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" "$ROOT_DIR/scripts/build.sh"
+# The portable checker links only the kernel and the package reader; build it with the same
+# compiler so the self-audit packages below replay outside the tool that produced them.
+ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" ELISA_PROOF_MAIN=src/replay_main.elisa \
+    ELISA_PROOF_OUTPUT="$ROOT_DIR/build/elisa-proof-replay" "$ROOT_DIR/scripts/build.sh"
 # build.sh has just refreshed the snapshot; the executable harnesses below that
 # include compiler sources must compile from the same pinned export.
 # shellcheck source=scripts/compiler_snapshot.sh
@@ -162,6 +166,29 @@ for path, proven in zip(sys.argv[1:], (16, 29)):
     assert report["summary"]["obligations"] == proven
     assert report["findings"] == []
 PY
+# The kernel's own audit, exported as a package, replays in the separate checker theorem by
+# theorem: the package carries every replayed goal, and the checker trusts no fingerprint.
+for probe in kernel_core:src/proof/kernel_core.elisa kernel_core_fixture:examples/dogfood_kernel_core.elisa; do
+    label="${probe%%:*}"
+    "$ROOT_DIR/build/elisa-proof" --package "$ROOT_DIR/${probe#*:}" >"$REPORT_DIR/$label.package.json"
+    "$ROOT_DIR/build/elisa-proof-replay" "$REPORT_DIR/$label.package.json" >"$REPORT_DIR/$label.replay.json" || {
+        printf 'dogfood failed: %s package did not replay in the portable checker\n' "$label" >&2
+        exit 1
+    }
+    python3 - "$label" "$REPORT_DIR/$label.json" "$REPORT_DIR/$label.package.json" "$REPORT_DIR/$label.replay.json" <<'PY'
+import json
+import sys
+
+label = sys.argv[1]
+report, package, result = (json.load(open(path, encoding="utf-8")) for path in sys.argv[2:])
+replayed = sum(1 for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed")
+if not (result["status"] == "replayed" and result["trust"]["kernel"] == "checked"
+        and len(result["theorems"]) == len(package["theorems"]) == replayed > 0
+        and all(theorem["status"] == "replayed" for theorem in result["theorems"])):
+    raise SystemExit(f"dogfood failed: {label} package replay disagrees with its report")
+print(f"dogfood {label}: {replayed} packaged theorems replay in the portable checker")
+PY
+done
 python3 - "$REPORT_DIR/source_context_scope.json" <<'PY'
 import json
 import sys
