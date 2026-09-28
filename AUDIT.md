@@ -7873,3 +7873,396 @@ report is byte-identical to the baseline (1,669 obligations, 1,179 proven, 611 e
 0 replay gaps), and the watchdog's phys_footprint peak fell from 1,623,185 KB to 845,617 KB
 against the 1,700,000-KB limit. The remaining store growth (336 MB in 8,882 chunks at exit) comes
 from other checker paths that build AST values and is still to be attributed.
+
+### Loop-header accumulators and tail value blocks (2026-09-28)
+
+Two holes showed up while proving elisa-engine's audio code. Both made the assistant reject correct
+programs; neither admitted a false proof.
+
+A loop-header accumulator, `for value in values |count: usize = 0| -> count:`, is a local that the
+loop assigns. The parser declares it with its bare type and records the accumulator only in the
+`__loop_header_accumulator` side table. The resource checker read the declaration alone and
+reported every `count <- ...` in the body as `resource-write-readonly`. The function table now
+collects that side table, keyed by binding name and declaration offset, and the resource checker
+marks exactly those bindings writable. An ordinary `count: usize = 0` that a later `|count|` loop
+captures keeps its immutable type, so writing it is still rejected.
+
+A loop whose value is its accumulator reaches a tail `return` as a value block. Such a block is
+`return Block(statements, value)`, which went to the unmodeled-operator gate and left the function
+unsupported. The return checker now checks it as the body `statements ++ [return value]`, in a
+private copy of the state, so the block's declarations stay local. Index obligations, loop
+invariants, and the function's `ensure` clauses all apply to that body. A block without a value
+still goes through the old admission gate.
+
+`examples/loop_accumulator.elisa` proves a counting loop, a `break index` search, and an
+invariant-carrying total, with clean replay and no trusted assumptions. The three functions in
+`examples/rejected_loop_accumulator.elisa` must stay unverified. They fail on an out-of-range index
+inside an accumulator loop (`index-upper-unproven`), a false `ensure` on the accumulator value
+(`ensure-unproven`), and a write to an ordinary immutable local (`resource-write-readonly`). Both
+fixtures are in `scripts/test.sh` and the dogfood probes, and the accepted one is also a replay
+fixture. The full `scripts/test.sh` passed, including O2/O3 replay.
+
+### Fixed-array fields and qualified extents (2026-09-28)
+
+Proving elisa-engine's audio voice pool exposed four holes in fixed-array bounds and contracts.
+Each made the assistant reject a correct index or contract; none admitted a false proof.
+
+Only a parameter whose own type is a fixed array had a known element count. A field of a struct
+parameter, `pool.live[slot]` over `live: bool[M::N]`, got no count. Fixed-array places are now the
+parameter and every field chain reachable from it through uniquely declared structs, up to three
+projections deep and 64 visited places per function (`check/fixed_array_places.elisa`). The index
+checker matches the indexed object against those places by parameter name and field names. This
+is sound because the extent belongs to the type: assignment replaces elements, never the count,
+and the compiler rejects a local that reuses a parameter's name, so a place spelled from a
+parameter always denotes it.
+
+An extent had to be an integer literal. A qualified constant, `bool[Slots::CAPACITY]`, now
+resolves when exactly one immutable integer constant of that name is declared directly in a
+module of that name, with a non-negative literal initializer. Two candidates, a mutable constant,
+a derived initializer (`WIDTH * 2`), or a bare identifier (possibly a generic parameter) leave the
+extent unknown, and the `T[N]` spelling then stays an unmodeled generic application. The shape
+reader and the scalar-witness element reader use the same resolution. `bool` and `char` joined the
+scalar heads, matching the compiler's fixed-array shorthand.
+
+The function-boundary importer unfolds a `usize` global constant only where a contract names it.
+It now also unfolds the constants a fixed-array place's extent names, so a body guard spelled
+`slot < CAPACITY` meets the count fact `live.count == 8`. The scalar-witness budget rose from 12 to
+16 markers, enough for a record of seven fixed-array fields.
+
+The kernel's proposition typing gave a container element type only to `T[literal]` and
+`array[T, literal]`, so a contract such as `ensure result == pool.live[slot]` over a
+`bool[M::N]` field failed with `contract-proposition-type`. The typing now accepts the same
+qualified extents as the bounds checker, and for the `T[N]` spelling only over a scalar head,
+since `Name[M::N]` over any other head may be a generic application.
+
+`examples/fixed_array_fields.elisa` proves reads and writes through struct fields, a nested
+`shelf.table.weight[slot]`, a two-dimensional `array[array[i64, 3], 2]` field, and an ensure over
+a `bool[Slots::CAPACITY]` element, all 26 obligations with clean replay. Without the typing change
+the ensure fails with `contract-proposition-type`. `examples/rejected_fixed_array_fields.elisa`
+must fail with four findings: an off-by-one guard (`index-upper-unproven`), an extent whose
+constant is derived (`expression-unsupported`), a false ensure over a typed element
+(`ensure-unproven`), and a contract over a derived-extent element (`contract-proposition-type`).
+Both fixtures are in `scripts/test.sh` and the dogfood probes, and the accepted one is also a
+replay fixture.
+
+### Values a nested call cannot reach (2026-09-28)
+
+A call nested inside an expression, such as `board.marks[slot] and open(board, slot)` in a
+local's initializer, forgot every symbolic value in the frame, while the same call as a statement
+forgets only what the callee can reach. A loop binder's value is its range atom, so after the
+nested call `slot` became an opaque identifier with no range facts, and every index over it on the
+same line or later in the body was reported `index-lower-unproven` and `index-upper-unproven`.
+
+The nested-call path now applies `proof_forget_values_after_call`, the rule a call statement
+applies and the one the fact side of the same boundary already used. A value survives only when
+the frame's alias analysis ran, its binding is not aliased, and the value is call-stable against
+the aliased names. A local lent to the callee, a reference binding, and a value built from a place
+the callee can write are all still forgotten. Without a usable alias set, nothing survives, as
+before.
+
+`examples/nested_call_kept_values.elisa` proves all 28 obligations with clean replay: an index
+before the call, an index after it, a call on the binder alone, and a two-index line inside a
+plain loop. The unpatched checker leaves 10 of them unproven. `examples/rejected_nested_call_kept_values.elisa`
+must fail with four `index-upper-unproven` findings: a copy of the binder lent to an advancing
+callee beside the index, the same lend in an earlier statement (its local is inlined and reported
+twice), and a guard over a field the callee writes. The accepted and rejected examples of
+`nested_call_value`, `rejected_nested_call_symbolic_value`, `call_stable_facts`,
+`condition_call_positions`, and `resource_nested_scalar_call` report the same results before and
+after the change. Both new examples are in `scripts/test.sh` and the dogfood probes, and the
+accepted one is also a replay fixture.
+
+### Indexing a local through its literal value (2026-09-28)
+
+A local bound to a collection literal has the literal as its recorded value, so a read
+`children[start]` reached the index checker as `[1, 2, 3][start]`. `proof_indexable_object`
+admitted only places, so the read was `index-bounds-opaque` whatever guarded it: a direct
+`return 0 if start >= children.count`, a loop over `0..<values.count`, or a summary guard. The
+previous entry exposed this in `examples/replay_literal_facts.elisa`: before it, the nested guard
+call happened to forget the literal, so the read was checked against the bare name, its lower
+bound was proved, and its upper bound could not match the guard's `[1, 2, 3].count`. Once the
+nested call kept the literal, all five lower bounds became opaque.
+
+The literal is now an indexable object. A literal is a value, not storage, so its count is its own
+length and nothing can alias or resize it. The value tracking that substitutes the literal already
+drops it on an element write, a push, a rebinding and a mutable lend. The goal is written over
+`[...].count`, the same term the guard facts use. That term needed a scalar witness, since
+`__elisa_primitive_scalar_type` is recorded for `children.count` and not for its substitution.
+`proof_scalar_term_witnessed` now admits the `count` of a collection literal as a `usize`, and
+`proof_kernel_replay_scalar_term_witnessed` mirrors it over a `field` node named `count` whose
+object is an `array` node. Non-empty literal lengths are still not read as constants (see "An
+empty literal is empty"), so `0 < [1, 2, 3].count` alone is still unproven.
+
+`examples/literal_index.elisa` proves all 18 obligations, with the 10 index bounds replayed: a
+direct guard, a loop over the literal's range, two literals each under its own guard, and a read
+behind a one-element range guard on an empty literal. No call satisfies that guard, so the read is
+unreachable and is proved from the summary's contradiction. The 162bd5d prover reports four of
+the five reads `index-bounds-opaque` and cannot bound the fifth.
+`examples/rejected_literal_index.elisa` must report exactly five `index-upper-unproven` findings:
+an unguarded read, a guard that admits `start == count`, a guard over a different literal, a guard
+taken before a rebinding, and a guard followed by a mutable lend.
+
+Two existing fixtures change. `examples/replay_literal_facts.elisa` again has its five proven,
+replayed lower bounds, and its upper bounds stay unproven for a different reason, now stated in the
+file: nothing derives `start < total` from `count <= total - start` with `count` at one. In
+`examples/rejected_replay_literal_facts.elisa`, `an_empty_literal_has_no_element` used the
+unsatisfiable one-element guard, so the new rule proves it vacuously. Its guard is now a
+zero-length range, which `start == 0` satisfies and which still gives no element, so it stays
+unproven. That file's findings are all `index-upper-unproven` now, because the rebound literal is
+checked rather than opaque.
+
+Open: a literal passed to a shared-reference parameter is still forgotten at the next call. The
+alias analysis records any bare name passed to a reference parameter, shared or mutable.
+
+
+### Disjunctive goals through the negated left disjunct (2026-09-28)
+
+A disjunctive goal was proved only when one of its disjuncts held on its own. An ensure of the
+shape `not result or slot < CAPACITY` states what a true result implies, and a body such as
+`slot < CAPACITY and table.live[slot]` establishes it only by cases: a false result satisfies the
+left disjunct, and a true one carries the bound. Neither disjunct follows from the body alone, so
+the ensure stayed unproven, the summary stayed unverified, and a caller that indexed after
+`return false if not live(table, slot)` lost the bound with it.
+
+`proof_goal_depth` now tries each disjunct and then proves `A or B` as `not A => B`: the right
+disjunct under the left one's negation. When the left disjunct is `not P`, the premise is `P`
+itself, so the summary shape above needs no double negation. The premise opens a case, so it
+spends the case-split budget as a conditional goal does, and a refused split marks the attempt
+budget-exhausted instead of proving anything. `proof_kernel_replay_goal_depth` mirrors the rule,
+adding a `not` node when the left disjunct is not already a negation, and
+`proof_replay_goal_at_depth` mirrors it for the replay checker.
+
+`examples/disjunctive_goals.elisa` proves all 13 obligations with every certificate replayed: the
+`live` summary above, two pure implications, a caller that indexes after
+`return false if not live(table, slot)`, and `chained_order`, whose four nested disjunctions
+use the whole case-split budget. Before this change the four ensures, the caller's
+summary and its upper bound were unproven. `examples/rejected_disjunctive_goals.elisa` must
+report exactly three `ensure-unproven` findings, one for each ensure that some input falsifies.
+The last would pass if the rule assumed the left disjunct instead of its negation.
+
+A split the budget refuses is a timeout, not a disproof. `too_deep_disjunctive_goal` in
+`examples/rejected_budget.elisa` needs a fifth nested premise, so it must be reported with status
+`timeout` and no counterexample. The kernel and replay mirrors refuse the same fifth split, so a
+certificate that claimed it could not replay.
+
+Open: the arithmetic guard still checks a right disjunct under the facts alone, not under the
+left one's negation. `ensure a >= 100 or a + 1 <= 100` stays unproven for an unbounded `a`, even
+though `a + 1` is evaluated only when `a < 100`.
+
+
+### Branches that leave do not weaken the join (2026-09-28)
+
+An `if` or `match` whose branch could modify state cleared the facts after the join, even when
+that branch never reached it. A guard such as `raise E if not live(table, slot)` parses as an
+`if` whose branch is a call-shaped raise, so the bound that `live`'s summary gives the
+surviving path was dropped before the read on the next line. A branch that called a mutator and
+then raised or returned had the same effect.
+
+Only a branch that falls through reaches the statement after the join. A return or continue
+checks its own state, a raise leaves the function, and a loop exit reached by a break keeps only
+the invariants the break re-establishes. The `if` join in `proof_check_return_contracts` now
+weakens only for a branch that falls through and may modify state, and the `match` join does the
+same per arm. A guard's call still weakens a `match` join, because it runs whenever its pattern
+matches, even when a later arm is taken. A call in the condition or scrutinee is applied before
+the branches fork, so it still reaches every path.
+
+`examples/leaving_branch_join.elisa` proves all 24 obligations with every certificate replayed:
+postfix, block and bound-local guards before a read, a `match` whose raising arm precedes a read,
+and three branches that call `clear` before raising or returning. Before this change the four
+guarded reads and the three ensures were unproven. `examples/rejected_leaving_branch_join.elisa`
+must report exactly five findings: an inverted guard, a branch and an arm that fall through after
+calling `clear`, and `clear` in a condition and in a scrutinee.
+
+No certificate shape or budget changes. The facts at each goal are still recorded and replayed
+as before, and the join does no extra exploration.
+
+
+### `pass` is a no-op and `assert ?` is an open obligation (2026-09-28)
+
+The parser lowers `pass`, an explicit `assert ?` hole, and several constructs that error recovery
+dropped to the same `Stmt.Expr(Expr.Invalid)` node. The checker could not tell them apart, so it
+refused every one as an unmodeled operator and cleared the state after it. A `_: pass` arm then
+lost every fact the function had built. `pass` made a helper impure, and it made a lemma or
+proof block impure. An `assert ?` hole failed as an unsupported expression, not as a hole.
+
+The node alone still cannot say which source produced it, so the evidence now comes from the
+source itself. The CLI keeps the byte offset of every `pass` token the lexer produced, and
+`proof_check_core` copies the parsed file's `assert ?` spans into the report.
+`proof_inert_statement_kind` classifies an invalid statement as `pass` only when its span is
+exactly four bytes and starts at a recorded `pass` offset. It classifies it as a hole only when
+its span equals a recorded hole span. Everything else stays unsupported. That includes the
+prefix-block recovery node, which the parser emits without a diagnostic and whose position
+carries no byte span.
+
+- The return checker skips `pass`. It records a hole as a failed obligation with a `proof-hole`
+  finding and keeps the state, since the hole runs nothing.
+- The pure-summary scan skips `pass`.
+- Proof-block and lemma purity accept `pass` and holes. The proof steps report a hole inside a
+  proof block, and the return checker reports one in a lemma body, so each is counted once.
+
+Entry points that build a report without the CLI, such as tactic harnesses, record no `pass`
+offsets and keep refusing `pass`. That is sound, and only less complete.
+
+`examples/pass_statement.elisa` proves all 19 obligations with every certificate replayed. Its
+`pass` statements sit in a branch, in match arms after a call scrutinee, after a call condition,
+in a loop body, in a pure helper used by a contract, in a lemma and in a proof block.
+`examples/rejected_pass_statement.elisa` must report exactly six findings:
+- a false ensure after `pass` arms;
+- four `proof-hole` findings, for holes in a body, a branch, a lemma and a proof block;
+- `expression-unsupported` for `with x` without a colon, which the parser drops silently.
+
+Malformed-certificate and budget cases do not apply. No certificate shape changes: `pass` adds
+no fact and no goal, and a hole adds a failed obligation that has no certificate. Classifying a
+statement is a bounded scan of the recorded offsets.
+
+This supersedes the refusal pinned on 2026-09-07. `examples/no_op_statement.elisa` now also
+verifies a `_: pass` arm that keeps `depth <= 127` for the call after the match.
+`examples/rejected_no_op_statement.elisa` keeps the same two functions with the arm written as
+`with value`, a dropped prefix form. Both are still refused, and the refusal still discards the
+state after the match.
+
+### Cancellation over differences of two names (2026-09-28)
+
+A counting loop's measure did not verify. `decreases x - count` needs `x - (count + 1) < x - count`
+after a step and `x - count >= 0` at entry. The affine tier reads a side as one name plus an
+offset, so a side naming two names stopped it, and the difference tier saw the same wall. The
+post-loop ensure `result == x` fell with it, since the loop exit was not credited. Of the 25
+obligations in the counting fixture, the old prover proved 14.
+
+`proof_normalized_difference_goal` reads `left - right` as a sum of signed occurrences of names
+and non-negative literals under `+`, `-` and their unary forms. Equal names cancel, and the
+literals fold into one offset. The tier accepts the result only when at most one name is left of
+each sign, each with coefficient one. It hands that on to the difference tier as `first - second`
+with the offset on `first`. A coefficient of two or a third name is outside difference logic and
+is declined.
+
+Reading a side as a sum over the integers is only valid when none of its operations wrapped, and
+the tier does not decide that. It runs after the goal's wrap guards, which have certified every
+`+`, `-` and unary minus in the goal. It also runs after `proof_primitive_comparison`, which keeps
+an unwitnessed subterm from slipping past the signed guard's width-0 escape. The collector admits
+an operator node only when it carries a signed or unsigned width, which is what the guard decided
+it under. A node made only of literals, whose type the source leaves to inference, is declined.
+Because of that argument, `proof_difference_affine_goal` takes the normal forms with
+`certified = true` and skips its own evaluation checks. The pre-existing entry,
+`proof_difference_goal`, still passes `false`.
+
+The second change is for an unsigned counter's rebind. `next == count + 1` joins the unsigned
+subtraction guard's orders only beside a strict peer `count < bound` of the same unsigned width,
+which rules out the step wrapping. This is the argument the difference collector already applies
+when it imports the same equality. A modular equality with no peer, such as `y == x + 1` at
+`x == 255` in `u8`, stays out.
+
+The kernel mirrors both in `kernel_replay/normalized_differences.elisa`. It has its own
+collector over the flat arena, where the encoder has already removed source parentheses, so a
+`paren` node was built by some other rule and is declined. The tier line in `resource_model`
+sits after the difference comparison and behind the same primitive-comparison gate. The rebind
+import in `unsigned_bounds` runs after the type-marker facts, which it needs for the width.
+
+`examples/counting_loop_measure.elisa` proves all 27 obligations with every certificate replayed
+and no trusted assumption:
+- a signed and an unsigned counting loop;
+- a transposed difference;
+- an unsigned gap;
+- shared names that cancel;
+- a rebind beside its peer;
+- a sum of 15 cancelling groups just inside the term budget.
+
+`examples/rejected_counting_loop_measure.elisa` must report exactly these findings:
+- `flipped_descent`: a flipped measure, reported three ways, and an ensure after that loop. The
+  ensure holds, but no loop exit is credited past a failed measure. That refusal is conservative
+  and sound.
+- `unguarded_cancellation`: a `u8` difference whose wrap guard fails.
+- `doubled_name`: a doubled name.
+- `wrong_step`: a step taken the wrong way.
+- `rebind_without_peer`: a rebind with no strict peer.
+- `past_the_term_budget`: a true sum of 16 groups.
+
+The budget is `PROOF_NORMAL_TERM_LIMIT` = 64 occurrences, and the kernel has the same limit.
+The 66-occurrence sum is refused with `ensure-unproven`, not a timeout or a guess. Its 15-group
+twin with 62 occurrences is proved. Both collectors also stop at the analysis recursion depth.
+
+No certificate shape changes, so no new malformed-certificate case applies. The kernel derives
+the normal form again from the arena with its own collector and trusts nothing from the
+producer. The existing forged, junk and shape checks still cover the certificate itself, and
+the rejected claims produce no certificates.
+
+Open: the budget refusal reports `ensure-unproven`. A finding kind that names the budget would
+tell the author to split the claim.
+
+### Merged from wasmbrowser-proof: qualified constants and numeric casts (2026-09-28)
+
+Two gains from the `codex/wasmbrowser-proof` branch were cherry-picked. The third commit on that
+branch, 31a5a57 (scalar reference index zero), is held back: at that commit its own regression,
+`scripts/test_scalar_reference_index.py`, fails. It passes only with work that branch has not
+committed yet.
+
+0d32407 replays module-qualified constants as call arguments. The resource replay used to read a
+`scope` node like a field, so `Fixture::VALUE` passed as a value argument looked like a runtime
+place. It now accepts a chain of non-empty identifiers and scopes only when no identifier in the
+chain names a binding in the current resource state. The kernel arena test covers both sides: a
+qualified constant is admitted, and a `scope` node rooted at the live binding `owner` is refused
+(code 52), so a shadowed resource cannot be erased as a harmless qualifier.
+
+d89902c witnesses `x.u64()`, `x.i32()` and the other built-in numeric casts as primitive scalar
+terms. They are compiler primitives, not protocol calls, so a comparison around one is no longer
+refused as possibly overloaded. It applies only to an empty argument list, a modeled integer
+target and a receiver that is witnessed itself. The acceptance case is
+`examples/numeric_cast_operator.elisa`.
+
+The branch had no false-claim case for casts. `examples/rejected_numeric_cast_operator.elisa` adds
+three:
+- `x.u64() < 5` from `x < 5`, which is false at `x == -1`;
+- `value.u8() > 200` from `value > 255`, which is false at 300;
+- `value.u8() > 0` from `value > 0`, which is false at 256.
+
+Each must fail with `ensure-unproven` and no replay gap. The witness only licenses admission.
+The cast's value stays an opaque term, and no receiver fact reaches it.
+
+Neither change alters a certificate shape. The forged `scope` node is the malformed-term case for
+the first. The second adds no replay rule, and the kernel re-derives every admitted comparison.
+No budget is involved: the qualified path is bounded by the replay depth limit, and the cast
+witness recurses under the existing depth.
+
+### Plural postconditions and contract placement (2026-09-28)
+
+Two ways a written claim went unchecked while the function was still reported as proved.
+
+The parser keeps a body contract's head as written, and `ensures` is accepted as the plural
+spelling of `ensure`. The checker only matched the singular spelling. So a body `ensures` was
+never checked on any return, and callers never read it. A false one proved silently:
+`plural_false` claims `result == 2` and returns 1 on both paths. `proof_is_ensure_kind` now
+treats both spellings as one contract kind. The sites that match the kind use it: the
+postcondition list, the callee summary, pure-function and lemma admission, the logical-call
+check and the resource statement checker. `examples/body_ensures.elisa` proves the plural head
+on every return and through a caller. `examples/rejected_body_ensures.elisa` fails each return
+that breaks it, including a false plural claim beside a true singular one.
+
+The checker also reads each contract kind only at fixed positions:
+- postconditions and frame clauses at the top of a function body;
+- a measure there or at the top of a `while` body;
+- invariants at the top of a loop body.
+
+A contract anywhere else was dropped without a word. That covered an `ensure` inside an `if`,
+an invariant outside any loop, a measure in a `for` body and a frame clause in a match arm.
+`proof_check_contract_placement` now walks the body and rejects each such contract with
+`contract-placement-unsupported`. It recurses through branches, match arms, blocks and captured
+loops.
+
+Three kinds stay allowed anywhere:
+- `requires` off the top level is a runtime check the prover never assumes;
+- `assert` is checked where it stands;
+- an `assert ... by` block polices its own contracts.
+
+Captured loops arrive wrapped in a block expression, so the placement walk and the logical-call
+check both unwrap them. A writing call in a captured loop's invariant was accepted before; it is
+now rejected as it is in a plain loop. `examples/contract_placement.elisa` keeps every supported
+position proving, and `examples/rejected_contract_placement.elisa` has one case for each
+unsupported position.
+
+Neither change adds a certificate shape or a replay rule. The kernel replays the same goals as
+before, so there is no new malformed-certificate case. No search is involved either: the
+placement walk is linear in the body, so there is no budget case.
+
+Open: a captured loop's invariant is checked at entry and on each step, but it is not exported
+to the loop exit. After `while i < limit |i|: invariant i >= 0`, the goal `i >= 0` is unproven,
+while the same loop without a capture list proves it. This is incomplete but sound, and it
+blocks engine proofs that loop with capture lists.

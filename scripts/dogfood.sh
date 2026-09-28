@@ -591,6 +591,22 @@ run_probe rejected_region_bind_mutable_external examples/rejected_region_bind_mu
 run_probe rejected_region_call_result_duplicate_owner examples/rejected_region_call_result_duplicate_owner.elisa 1
 run_probe rejected_for_invariant examples/rejected_for_invariant.elisa 1
 run_probe rejected_for_invariant_scope examples/rejected_for_invariant_scope.elisa 1
+run_probe loop_accumulator examples/loop_accumulator.elisa 0
+run_probe rejected_loop_accumulator examples/rejected_loop_accumulator.elisa 1
+run_probe fixed_array_fields examples/fixed_array_fields.elisa 0
+run_probe rejected_fixed_array_fields examples/rejected_fixed_array_fields.elisa 1
+run_probe nested_call_kept_values examples/nested_call_kept_values.elisa 0
+run_probe rejected_nested_call_kept_values examples/rejected_nested_call_kept_values.elisa 1
+run_probe literal_index examples/literal_index.elisa 0
+run_probe rejected_literal_index examples/rejected_literal_index.elisa 1
+run_probe disjunctive_goals examples/disjunctive_goals.elisa 0
+run_probe rejected_disjunctive_goals examples/rejected_disjunctive_goals.elisa 1
+run_probe leaving_branch_join examples/leaving_branch_join.elisa 0
+run_probe rejected_leaving_branch_join examples/rejected_leaving_branch_join.elisa 1
+run_probe pass_statement examples/pass_statement.elisa 0
+run_probe rejected_pass_statement examples/rejected_pass_statement.elisa 1
+run_probe counting_loop_measure examples/counting_loop_measure.elisa 0
+run_probe rejected_counting_loop_measure examples/rejected_counting_loop_measure.elisa 1
 run_probe congruence examples/congruence.elisa 0
 run_probe rejected_congruence examples/rejected_congruence.elisa 1
 run_probe rejected_reflexivity examples/rejected_reflexivity.elisa 1
@@ -706,6 +722,10 @@ run_probe rejected_aggregate_equality examples/rejected_aggregate_equality.elisa
 run_probe rejected_budget examples/rejected_budget.elisa 1
 run_probe effect_containment examples/effect_containment.elisa 0
 run_probe rejected_effect_containment examples/rejected_effect_containment.elisa 1
+run_probe body_ensures examples/body_ensures.elisa 0
+run_probe rejected_body_ensures examples/rejected_body_ensures.elisa 1
+run_probe contract_placement examples/contract_placement.elisa 0
+run_probe rejected_contract_placement examples/rejected_contract_placement.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.
@@ -764,6 +784,7 @@ expected = {
     "too_many_congruence_rounds": "timeout",
     "too_many_disjunctions": "timeout",
     "too_deep_conditional": "timeout",
+    "too_deep_disjunctive_goal": "timeout",
 }
 if status != expected:
     raise SystemExit("dogfood failed: verdict states collapsed, got %s" % sorted(status.items()))
@@ -1705,8 +1726,8 @@ for owner in ("a_capture_the_body_assigns_is_forgotten", "a_capture_handed_to_a_
 print("dogfood captured_scalar: a read-only capture keeps its facts, a written binding does not")
 PY
 
-# A statement the checker cannot read is refused and havocs what follows it; a match whose arms
-# agree, written as one condition, keeps the state before it.
+# A statement the checker cannot read is refused and havocs what follows it; a `pass` arm, and a
+# match whose arms agree, keep the state before it.
 python3 - "$REPORT_DIR/no_op_statement.json" "$REPORT_DIR/rejected_no_op_statement.json" <<'PY'
 import json
 import sys
@@ -1717,7 +1738,7 @@ with open(readable, encoding="utf-8") as handle:
 if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: no-op statement fixture did not prove cleanly")
 verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
-for owner in ("a_condition_keeps_the_state", "every_arm_returning_keeps_it_too"):
+for owner in ("a_condition_keeps_the_state", "every_arm_returning_keeps_it_too", "a_pass_arm_keeps_the_state"):
     if owner not in verified:
         raise SystemExit("dogfood failed: %s lost the state before a match" % owner)
 with open(unreadable, encoding="utf-8") as handle:
@@ -1727,10 +1748,10 @@ if report["status"] != "failed" or report["replay"]["gaps"]:
 if {f["kind"] for f in report["findings"]} != {"expression-unsupported"}:
     raise SystemExit("dogfood failed: an unreadable statement was not reported as unsupported")
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("a_pass_arm_is_refused", "the_refusal_reaches_past_the_match"):
+for owner in ("a_dropped_arm_is_refused", "the_refusal_reaches_past_the_match"):
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s admitted a statement the checker cannot read" % owner)
-print("dogfood no_op_statement: an unreadable statement is refused, and a plain condition is not")
+print("dogfood no_op_statement: an unreadable statement is refused, and `pass` or a plain condition is not")
 PY
 
 # A call is modelled at a statement boundary; buried in a larger value it has none and is refused.

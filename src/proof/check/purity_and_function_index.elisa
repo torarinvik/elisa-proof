@@ -90,7 +90,7 @@ extend ElisaProof:
                         return true
             return false
 
-        def proof_pure_body_direct(body: darray[Ast::Stmt]&) -> bool:
+        def proof_pure_body_direct(body: darray[Ast::Stmt]&, report: ProofReport&) -> bool:
             for statement in body:
                 match statement:
                     Ast::Stmt.Return(value, _):
@@ -98,6 +98,7 @@ extend ElisaProof:
                             return false if not proof_expr_supported(returned)
                             return false if not proof_pure_expression_shape(returned)
                     Ast::Stmt.Expr(expression, _):
+                        continue if proof_inert_statement_kind(statement, report) == PROOF_INERT_PASS
                         return false if not proof_expr_supported(expression)
                         return false if not proof_pure_expression_shape(expression)
                     Ast::Stmt.VarDecl(_, _, initializer, _):
@@ -108,7 +109,7 @@ extend ElisaProof:
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         return false if not proof_expr_supported(condition)
                         return false if not proof_pure_expression_shape(condition)
-                        return false if not proof_pure_body_direct(then_body) or not proof_pure_body_direct(else_body)
+                        return false if not proof_pure_body_direct(then_body, report) or not proof_pure_body_direct(else_body, report)
                     Ast::Stmt.Match(scrutinee, arms, _):
                         return false if not proof_expr_supported(scrutinee)
                         return false if not proof_pure_expression_shape(scrutinee)
@@ -119,7 +120,7 @@ extend ElisaProof:
                                     pass
                                 _:
                                     return false if proof_expr_has_old(arm.guard) or not proof_expr_supported(arm.guard) or not proof_pure_expression_shape(arm.guard)
-                            return false if not proof_pure_body_direct(arm.body)
+                            return false if not proof_pure_body_direct(arm.body, report)
                     Ast::Stmt.While(_, _, _):
                         return false
                     Ast::Stmt.For(_, _, _, _, _):
@@ -127,7 +128,7 @@ extend ElisaProof:
                     Ast::Stmt.Block(_, _, _, _, _):
                         return false
                     Ast::Stmt.Contract(kind, expression, _):
-                        return false if kind != "requires" and kind != "ensure" and kind != "decreases" and kind != "decreases*"
+                        return false if kind != "requires" and not proof_is_ensure_kind(kind) and kind != "decreases" and kind != "decreases*"
                         return false if proof_expr_has_old(expression) or proof_expr_has_call(expression) or not proof_expr_supported(expression)
                     Ast::Stmt.Break(_, _):
                         return false
@@ -139,7 +140,7 @@ extend ElisaProof:
                         return false
             return true
 
-        def proof_function_is_directly_pure(functions: ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, mutable_globals: darray[sview]&) -> bool:
+        def proof_function_is_directly_pure(functions: ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, mutable_globals: darray[sview]&, report: ProofReport&) -> bool:
             return false if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
             return false if function_index >= functions.requires_counts.count or function_index >= functions.changes_counts.count or function_index >= functions.preserves_counts.count
             return false if functions.requires_counts[function_index] > 0 or functions.changes_counts[function_index] > 0 or functions.preserves_counts[function_index] > 0
@@ -158,7 +159,7 @@ extend ElisaProof:
                     return false if proof_expr_has_old(parameters[parameter_index].default_value)
                     return false if proof_expr_mentions_any_global(parameters[parameter_index].default_value, mutable_globals)
             return false if proof_pure_body_reads_mutable_global(body, mutable_globals)
-            return proof_pure_body_direct(body)
+            return proof_pure_body_direct(body, report)
 
         def proof_recursive_purity_eligible(functions: ProofFunctionTable&, function_index: usize) -> bool:
             return false if function_index >= functions.recursive.count or not functions.recursive[function_index]
@@ -214,8 +215,8 @@ extend ElisaProof:
         # Compute declaration-local purity before the call-graph fixed point. This pass must cover
         # the complete table first: otherwise a mutually recursive pair would be classified based
         # on declaration order rather than on the properties of the entire component.
-        def proof_mark_direct_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, mutable_globals: darray[sview]&) -> void:
-            for declaration in declarations |file, functions, cursor, mutable_globals|:
+        def proof_mark_direct_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, mutable_globals: darray[sview]&, report: ProofReport&) -> void:
+            for declaration in declarations |file, functions, cursor, mutable_globals, report|:
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, body, effects, _, _):
                         # The executable table already excludes lemmas. Resolve the declaration
@@ -224,11 +225,11 @@ extend ElisaProof:
                         function_index: usize = cursor
                         cursor <- cursor + 1
                         if function_index < functions.direct_pure.count:
-                            functions.direct_pure[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, mutable_globals)
+                            functions.direct_pure[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, mutable_globals, report)
                     Ast::Decl.Module(_, module_body, _):
-                        proof_mark_direct_pure_functions_pass(file, module_body, functions, cursor, mutable_globals)
+                        proof_mark_direct_pure_functions_pass(file, module_body, functions, cursor, mutable_globals, report)
                     Ast::Decl.Scoped(scoped_body, _):
-                        proof_mark_direct_pure_functions_pass(file, scoped_body, functions, cursor, mutable_globals)
+                        proof_mark_direct_pure_functions_pass(file, scoped_body, functions, cursor, mutable_globals, report)
                     _:
                         pass
 
@@ -258,7 +259,7 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_mark_pure_functions(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&) -> void:
+        def proof_mark_pure_functions(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, report: ProofReport&) -> void:
             functions.direct_pure.clear()
             for _ in 0..<functions.names.count |functions|:
                 functions.direct_pure.push(false)
@@ -267,7 +268,7 @@ extend ElisaProof:
                 if annotation.name == "__global_mutable" and not (any existing in mutable_global_names where existing == annotation.owner):
                     mutable_global_names.push(annotation.owner)
             direct_cursor: mutable usize = 0
-            proof_mark_direct_pure_functions_pass(file, declarations, functions, direct_cursor, mutable_global_names)
+            proof_mark_direct_pure_functions_pass(file, declarations, functions, direct_cursor, mutable_global_names, report)
             functions.pure.clear()
             for _ in 0..<functions.names.count |functions|:
                 functions.pure.push(false)
@@ -334,6 +335,14 @@ extend ElisaProof:
                         functions.local_region_binding_names.push(binding.name)
                         functions.local_region_binding_regions.push(binding.region)
                         functions.local_region_binding_lines.push(binding.line)
+
+        # A loop-header accumulator is declared with its bare type, so only the parser's side
+        # table records that the loop assigns it. Key each row by name and source offset.
+        def proof_collect_loop_accumulators(file: Ast::File&, functions: mutable ProofFunctionTable&) -> void:
+            for annotation in file.enum_annotations |file, functions|:
+                continue if annotation.name != "__loop_header_accumulator"
+                functions.loop_accumulator_names.push(annotation.owner)
+                functions.loop_accumulator_offsets.push(annotation.offset)
 
         # Collect executable function contracts for modular call checking. The callee's
         # contract is the only fact an ordinary call may contribute; its body is checked in the
@@ -454,7 +463,7 @@ extend ElisaProof:
                                     if kind == "requires":
                                         functions.all_requires <- functions.all_requires.push(expression)
                                         requires_count <- requires_count + 1
-                                    if kind == "ensure":
+                                    if proof_is_ensure_kind(kind):
                                         functions.all_ensures <- functions.all_ensures.push(expression)
                                         ensures_count <- ensures_count + 1
                                 _:

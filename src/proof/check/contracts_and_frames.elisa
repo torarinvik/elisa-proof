@@ -200,7 +200,7 @@ extend ElisaProof:
             for statement in body |functions, report, name|:
                 match statement:
                     Ast::Stmt.Contract(kind, expression, position):
-                        logical: bool = kind == "requires" or kind == "ensure" or kind == "invariant" or kind == "decreases" or kind == "decreases*"
+                        logical: bool = kind == "requires" or proof_is_ensure_kind(kind) or kind == "invariant" or kind == "decreases" or kind == "decreases*"
                         if logical:
                             if proof_expr_has_move(expression):
                                 report.proof_obligation(false)
@@ -224,6 +224,58 @@ extend ElisaProof:
                             proof_check_logical_contract_calls(arm.body, functions, report, name)
                     Ast::Stmt.Block(_, _, _, block_body, _):
                         proof_check_logical_contract_calls(block_body, functions, report, name)
+                    Ast::Stmt.Expr(_, _):
+                        # A loop with a capture list reaches here wrapped in a captured block.
+                        captured: (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) = proof_captured_block_statement(statement)
+                        proof_check_logical_contract_calls(captured.body, functions, report, name) if captured.known
+                    _:
+                        pass
+
+        # A contract is read only where the checker looks for it: postconditions and frame
+        # clauses at the top of a function body, a measure there or at the top of a `while`
+        # body, and invariants at the top of a loop body. Anywhere else nothing would check the
+        # claim, so it fails closed. `requires` off the top level is a runtime check that the
+        # prover never assumes, `assert` is checked where it stands, and proof blocks police
+        # their own contracts.
+        const PROOF_CONTRACT_PLACE_FUNCTION: u8 = 0
+        const PROOF_CONTRACT_PLACE_WHILE: u8 = 1
+        const PROOF_CONTRACT_PLACE_FOR: u8 = 2
+        const PROOF_CONTRACT_PLACE_NESTED: u8 = 3
+
+        def proof_contract_placement_supported(kind: sview, place: u8) -> bool:
+            if kind == "assert" or kind == "requires" or kind == "uses":
+                return true
+            if proof_is_ensure_kind(kind) or kind == "changes" or kind == "preserves":
+                return place == PROOF_CONTRACT_PLACE_FUNCTION
+            if kind == "decreases" or kind == "decreases*":
+                return place == PROOF_CONTRACT_PLACE_FUNCTION or place == PROOF_CONTRACT_PLACE_WHILE
+            if kind == "invariant":
+                return place == PROOF_CONTRACT_PLACE_WHILE or place == PROOF_CONTRACT_PLACE_FOR
+            return false
+
+        def proof_check_contract_placement(body: darray[Ast::Stmt]&, place: u8, report: mutable ProofReport&, name: sview) -> void:
+            for statement in body |place, report, name|:
+                match statement:
+                    Ast::Stmt.Contract(kind, _, position):
+                        if not proof_contract_placement_supported(kind, place):
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "contract-placement-unsupported", position.line, name, "this contract is not read at this position, so its claim would go unchecked")
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        proof_check_contract_placement(then_body, PROOF_CONTRACT_PLACE_NESTED, report, name)
+                        proof_check_contract_placement(else_body, PROOF_CONTRACT_PLACE_NESTED, report, name)
+                    Ast::Stmt.While(_, while_body, _):
+                        proof_check_contract_placement(while_body, PROOF_CONTRACT_PLACE_WHILE, report, name)
+                    Ast::Stmt.For(_, _, _, for_body, _):
+                        proof_check_contract_placement(for_body, PROOF_CONTRACT_PLACE_FOR, report, name)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |report, name|:
+                            proof_check_contract_placement(arm.body, PROOF_CONTRACT_PLACE_NESTED, report, name)
+                    Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                        proof_check_contract_placement(block_body, PROOF_CONTRACT_PLACE_NESTED, report, name) if block_kind != "assert_by"
+                    Ast::Stmt.Expr(_, _):
+                        # A loop with a capture list reaches here wrapped in a captured block.
+                        captured: (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) = proof_captured_block_statement(statement)
+                        proof_check_contract_placement(captured.body, PROOF_CONTRACT_PLACE_NESTED, report, name) if captured.known
                     _:
                         pass
 

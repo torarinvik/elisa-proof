@@ -1,0 +1,111 @@
+const PROOF_KERNEL_REPLAY_NORMAL_TERM_LIMIT: usize = 64
+
+extend ElisaProofKernelReplay:
+    private:
+        # Mirror of the producer's signed occurrence. An empty name is a constant.
+        struct ProofKernelReplayNormalTerm:
+            name: sview
+            coefficient: i64
+
+        # Mirror of the producer's collector: a sum of names and non-negative literals under `+`,
+        # `-` and their unary forms, every operator node carrying an integer width for the goal's
+        # wrap guard to have decided it under. The encoder removes source parentheses, so a
+        # `paren` node here was built by some other rule and is declined rather than read.
+        def proof_kernel_replay_collect_normal_terms(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, sign: i64, facts: darray[usize], terms: mutable darray[ProofKernelReplayNormalTerm]&, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return false if terms.count >= PROOF_KERNEL_REPLAY_NORMAL_TERM_LIMIT
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            match node.kind:
+                "int":
+                    return false if node.value < 0
+                    terms.push(ProofKernelReplayNormalTerm{name: "", coefficient: node.value if sign > 0 else 0 - node.value})
+                    return true
+                "ident":
+                    return false if node.name == "" or not proof_kernel_replay_normal_term_has_width(nodes, children, root, facts)
+                    terms.push(ProofKernelReplayNormalTerm{name: node.name, coefficient: sign})
+                    return true
+                "unary":
+                    return false if node.operator != "+" and node.operator != "-"
+                    return false if not proof_kernel_replay_normal_term_has_width(nodes, children, root, facts)
+                    return proof_kernel_replay_collect_normal_terms(nodes, children, node.left, sign if node.operator == "+" else 0 - sign, facts, terms, depth + 1)
+                "binary":
+                    return false if node.operator != "+" and node.operator != "-"
+                    return false if not proof_kernel_replay_normal_term_has_width(nodes, children, root, facts)
+                    return false if not proof_kernel_replay_collect_normal_terms(nodes, children, node.left, sign, facts, terms, depth + 1)
+                    return proof_kernel_replay_collect_normal_terms(nodes, children, node.right, sign if node.operator == "+" else 0 - sign, facts, terms, depth + 1)
+                _:
+                    return false
+
+        def proof_kernel_replay_normal_term_has_width(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize]) -> bool:
+            return proof_kernel_replay_signed_width_in_expression(nodes, children, facts, root, 0) != 0 or proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, 0) != 0
+
+        # Mirror of the producer's normal form: `left - right` as `first - second`, one unit name
+        # of each sign at most, every literal folded into the first form's offset.
+        def proof_kernel_replay_normal_difference(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, facts: darray[usize]) -> (known: bool, first: ProofKernelReplayAffine, second: ProofKernelReplayAffine):
+            empty: ProofKernelReplayAffine = ProofKernelReplayAffine{known: false, base: "", offset: 0, negative: false}
+            terms: mutable darray[ProofKernelReplayNormalTerm] = []
+            return (false, empty, empty) if not proof_kernel_replay_collect_normal_terms(nodes, children, left_root, 1, facts, &terms, 0)
+            return (false, empty, empty) if not proof_kernel_replay_collect_normal_terms(nodes, children, right_root, -1, facts, &terms, 0)
+            constant: mutable i64 = 0
+            positive: mutable sview = ""
+            negative: mutable sview = ""
+            for index in 0..<terms.count |index, terms, constant, positive, negative|:
+                term: ProofKernelReplayNormalTerm = terms[index]
+                if term.name == "":
+                    folded: ProofKernelReplayInt = proof_kernel_replay_add_safe(constant, term.coefficient)
+                    return (false, empty, empty) if not folded.known
+                    constant <- folded.value
+                    continue
+                seen: mutable bool = false
+                for earlier in 0..<index |earlier, index, terms, term, seen|:
+                    seen <- true if terms[earlier].name == term.name
+                continue if seen
+                # Unit coefficients under a capped term count: this sum cannot overflow.
+                total: mutable i64 = 0
+                for later in index..<terms.count |later, terms, term, total|:
+                    total <- total + terms[later].coefficient if terms[later].name == term.name
+                continue if total == 0
+                return (false, empty, empty) if total != 1 and total != -1
+                if total == 1:
+                    return (false, empty, empty) if positive != ""
+                    positive <- term.name
+                else:
+                    return (false, empty, empty) if negative != ""
+                    negative <- term.name
+            return (true, ProofKernelReplayAffine{known: true, base: positive, offset: constant, negative: false}, ProofKernelReplayAffine{known: true, base: negative, offset: 0, negative: false})
+
+        # Mirror of the producer's cancellation tier. It is reached only after the goal's wrap
+        # guards and the primitive witness gate, which is what licenses reading each side as a
+        # sum over the integers, so the normal forms are handed on as certified.
+        def proof_kernel_replay_normalized_difference_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize]) -> bool:
+            return false if operator != "==" and operator != "<" and operator != "<=" and operator != ">" and operator != ">="
+            normal: (known: bool, first: ProofKernelReplayAffine, second: ProofKernelReplayAffine) = proof_kernel_replay_normal_difference(nodes, children, left_root, right_root, facts)
+            return false if not normal.known
+            return proof_kernel_replay_difference_affine_comparison(nodes, children, normal.first, operator, normal.second, facts, true)
+
+        # Mirror of the producer's counter rebind import: `next == count + 1` joins the unsigned
+        # subtraction guard's orders only beside a strict peer `count < bound` of the same width,
+        # which is what rules out the step wrapping. A modular equality with no peer stays out.
+        def proof_kernel_replay_unsigned_peer_increment_equality(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, orders: darray[usize]) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return false if node.kind != "binary" or node.operator != "=="
+            return proof_kernel_replay_unsigned_peer_increment_side(nodes, children, node.left, node.right, orders) or proof_kernel_replay_unsigned_peer_increment_side(nodes, children, node.right, node.left, orders)
+
+        def proof_kernel_replay_unsigned_peer_increment_side(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, name_side: usize, increment_side: usize, orders: darray[usize]) -> bool:
+            return false if proof_kernel_replay_ident_name(nodes, name_side) == ""
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, increment_side)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return false if node.kind != "binary" or node.operator != "+"
+            unit: (known: bool, base: usize) = proof_kernel_replay_unsigned_unit_increment_base(nodes, node.left, node.right)
+            return false if not unit.known
+            base_name: sview = proof_kernel_replay_ident_name(nodes, unit.base)
+            return false if base_name == ""
+            width: i64 = proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, orders, base_name)
+            return width != 0 and proof_kernel_replay_unsigned_increment_has_strict_peer(nodes, children, unit.base, width, orders)
