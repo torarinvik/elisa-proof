@@ -73,6 +73,7 @@ run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'im
 # Missing lifetime/place information is unsupported, not a demonstrated violation.
 python3 "$ROOT_DIR/scripts/test_overlap_diagnostics.py"
 python3 "$ROOT_DIR/scripts/test_certificate_reuse.py"
+python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 
