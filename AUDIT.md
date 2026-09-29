@@ -9537,3 +9537,18 @@ This was a replay gap that already existed with plain parameters.
   - Without the kernel field-place step, the three call-sum goals are replay gaps.
   - Without the kernel `readable_order` reading, `capped_pair:15` and `plain_capped:30` are gaps.
 - The full test and dogfood suites pass.
+
+## Port: parameter-heavy return analysis budget (2026-09-29)
+
+This ports wasmbrowser-proof `047daad`. A function with at least 12 parameters and at most 16 body
+statements now gets the fact-state entry cap (128) as its return-analysis snapshot budget. Every
+other function keeps its ordinary budget. The cap is a resource bound, not a proof rule, so it
+adds no facts.
+
+`examples/parameter_heavy_return_analysis_over_limit.elisa` still pins the refusal at 65 facts over
+a limit of 64. In the peer probe, main drops the unannotated contract wrapper. Main counts the
+wrapper's 14 `ensures` as obligations, and they cannot hold without a callee summary; the peer
+binary never counted them.
+
+Evidence: before the port the route function was refused with `control-flow-analysis-budget`; now
+it verifies and replays. The full test and dogfood suites pass.
