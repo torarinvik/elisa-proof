@@ -10068,3 +10068,17 @@ Not done, each refused conservatively today (never unsound): variant disjointnes
 `Module::CONST`, tuple-field `@r` for package_reader, and signed parameter range facts. Each needs a
 new kernel rule with its own soundness argument; none is started. Negative-literal typing was
 re-probed (`return -x` with `x >= 0` proves `result <= 0`) and works.
+
+### Probe results for two deferred items (2026-09-29)
+
+- **Bool equality:** `ensure result == (a and b)` and `ensure result == a` over `bool` prove today
+  (the replay typer admits `==`/`!=` between two boolean sorts). What is refused is `is` between two
+  bools (`ensure result == (a is b)`), because `is` is the type/enum-tag test, not an equality.
+  The gap is in the item's wording, not the kernel; no change is needed.
+- **Qualified module constants:** `Limits::TOP` used outside module `Limits` stays opaque
+  (`return Limits::TOP` does not establish `result == 100`). Cause: `proof_import_global_constant_facts`
+  in `check/global_constants.elisa` imports only constants of the function's own namespace and the
+  root, as bare `Ident` facts, and the replay validator (`replay/global_constant_validation.elisa`)
+  resolves a fact's owner by that same bare-name scope rule. Importing a qualified constant needs
+  a `Scope`-keyed fact, substitution over `Ast::Expr.Scope`, and a matching replay lookup by
+  path; that is a change to both producer and independent checker and is not started.
