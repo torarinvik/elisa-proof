@@ -108,9 +108,61 @@ extend ElisaProof:
                 _:
                     return expression
 
-        def proof_qualified_constants_collect(file: Ast::File&, declarations: darray[Ast::Decl]&, current: darray[sview]&, contracts: mutable darray[Ast::Expr]&, parameters: darray[Ast::ParamDecl]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, depth: usize) -> void:
+        # Body statements that carry a qualified constant: returns, local initializers and `if`
+        # branches. Other statements are left as written, so their mentions stay unimported.
+        def proof_qualified_body_mentioned(body: darray[Ast::Stmt]&, scope: darray[sview]&, name: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            for statement in body |scope, name, depth|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return true if proof_qualified_constant_mentioned(returned, scope, name, 0)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return true if proof_qualified_constant_mentioned(initializer, scope, name, 0)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_qualified_constant_mentioned(condition, scope, name, 0)
+                        return true if proof_qualified_body_mentioned(then_body, scope, name, depth + 1)
+                        return true if proof_qualified_body_mentioned(else_body, scope, name, depth + 1)
+                    _:
+                        pass
+            return false
+
+        # A local spelled like the module would make `Limits::TOP` name something else.
+        def proof_qualified_body_declares(body: darray[Ast::Stmt]&, name: sview, depth: usize) -> bool:
+            return true if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            for statement in body |name, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, _, _, _):
+                        return true if local_name == name
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        return true if proof_qualified_body_declares(then_body, name, depth + 1) or proof_qualified_body_declares(else_body, name, depth + 1)
+                    _:
+                        pass
+            return false
+
+        def proof_qualified_body_rewrite(body: darray[Ast::Stmt]&, scope: darray[sview]&, name: sview, value: Ast::Expr, depth: usize) -> darray[Ast::Stmt]:
+            rewritten: mutable darray[Ast::Stmt] = []
+            for statement in body |rewritten, scope, name, value, depth|:
+                match statement:
+                    Ast::Stmt.Return(returned_value, position):
+                        if returned_value is returned and depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.Return(proof_qualified_constant_rewrite(returned, scope, name, value, 0), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                        rewritten.push(Ast::Stmt.VarDecl(local_name, type_expression, proof_qualified_constant_rewrite(initializer, scope, name, value, 0), position))
+                    Ast::Stmt.If(condition, then_body, else_body, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.If(proof_qualified_constant_rewrite(condition, scope, name, value, 0), proof_qualified_body_rewrite(then_body, scope, name, value, depth + 1), proof_qualified_body_rewrite(else_body, scope, name, value, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    _:
+                        rewritten.push(statement)
+            return rewritten
+
+        def proof_qualified_constants_collect(file: Ast::File&, declarations: darray[Ast::Decl]&, current: darray[sview]&, contracts: mutable darray[Ast::Expr]&, function_body: mutable darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, depth: usize) -> void:
             return if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
-            for declaration in declarations |file, current, contracts, parameters, facts, report, function_name, depth|:
+            for declaration in declarations |file, current, contracts, function_body, parameters, facts, report, function_name, depth|:
                 match declaration:
                     Ast::Decl.Const(constant_name, constant_type, initializer, constant_mutable, position):
                         if current.count > 0 and constant_mutable == false and (any parameter in parameters where parameter.name == current[0]) == false:
@@ -118,6 +170,7 @@ extend ElisaProof:
                             mentioned: mutable bool = false
                             for contract in contracts |current, constant_name, mentioned|:
                                 mentioned <- true if proof_qualified_constant_mentioned(contract, current, constant_name, 0)
+                            mentioned <- true if proof_qualified_body_mentioned(function_body, current, constant_name, 0) and not proof_qualified_body_declares(function_body, current[0], 0)
                             counted_from: mutable darray[sview] = []
                             declared_once: bool = proof_qualified_constant_declared_count(file.top_decls, current, constant_name, &counted_from, 0) == 1
                             if imported.known and mentioned and declared_once:
@@ -125,21 +178,22 @@ extend ElisaProof:
                                 fact: Ast::Expr = Ast::Expr.Binary(term, TokenKind.EqEq, Ast::Expr.IntLit(imported.value, position), position)
                                 proof_add_traced_fact(facts, report, fact, "global-constant", position.line, function_name)
                                 proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(term, position), position.line, function_name)
+                                function_body <- proof_qualified_body_rewrite(function_body, current, constant_name, Ast::Expr.IntLit(imported.value, position), 0)
                                 for contract_index in 0..<contracts.count |contract_index, contracts, current, constant_name, position, imported|:
                                     contracts[contract_index] <- proof_qualified_constant_rewrite(contracts[contract_index], current, constant_name, Ast::Expr.IntLit(imported.value, position), 0)
                     Ast::Decl.Module(module_name, body, _):
                         next_scope: mutable darray[sview] = []
                         next_scope.extend(current)
                         next_scope.push(module_name)
-                        proof_qualified_constants_collect(file, body, &next_scope, contracts, parameters, facts, report, function_name, depth + 1)
+                        proof_qualified_constants_collect(file, body, &next_scope, contracts, function_body, parameters, facts, report, function_name, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_qualified_constants_collect(file, body, current, contracts, parameters, facts, report, function_name, depth + 1)
+                        proof_qualified_constants_collect(file, body, current, contracts, function_body, parameters, facts, report, function_name, depth + 1)
                     _:
                         pass
 
         # Only a function declared at the root and named uniquely resolves its qualified paths from
         # the root; a function inside a module could see a nearer module of the same name.
-        def proof_import_qualified_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, preconditions: mutable darray[Ast::Expr]&, postconditions: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos) -> void:
+        def proof_import_qualified_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, preconditions: mutable darray[Ast::Expr]&, postconditions: mutable darray[Ast::Expr]&, function_body: mutable darray[Ast::Stmt]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos) -> void:
             function_scope: mutable darray[sview] = []
             root_scope: mutable darray[sview] = []
             name_matches: mutable usize = 0
@@ -149,7 +203,7 @@ extend ElisaProof:
             contracts: mutable darray[Ast::Expr] = []
             contracts.extend(preconditions)
             contracts.extend(postconditions)
-            proof_qualified_constants_collect(file, file.top_decls, &root_scope, &contracts, parameters, facts, report, function_name, 0)
+            proof_qualified_constants_collect(file, file.top_decls, &root_scope, &contracts, function_body, parameters, facts, report, function_name, 0)
             for index in 0..<preconditions.count |index, preconditions, contracts|:
                 preconditions[index] <- contracts[index]
             for index in 0..<postconditions.count |index, postconditions, contracts, preconditions|:

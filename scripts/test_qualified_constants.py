@@ -28,4 +28,14 @@ code, data = run("rejected_qualified_shadow.elisa")
 assert code == 1 and data["status"] == "failed" and data["replay"]["gaps"] == 0, data["findings"]
 assert [f["name"] for f in data["findings"]] == ["shadowed"], data["findings"]
 
+code, data = run("qualified_constants_body.elisa")
+assert code == 0 and data["status"] == "proved" and data["findings"] == [], data["findings"]
+assert data["summary"]["proven"] == 4 and data["replay"]["gaps"] == 0
+
+for name, function in (("rejected_qualified_constants_body.elisa", "too_small"),
+                       ("rejected_qualified_body_shadow.elisa", "shadowed")):
+    code, data = run(name)
+    assert code == 1 and data["status"] == "failed" and data["replay"]["gaps"] == 0, data["findings"]
+    assert [f["name"] for f in data["findings"]] == [function], data["findings"]
+
 print("qualified constants: contract uses prove, wrong module/value/shadowing refuse")

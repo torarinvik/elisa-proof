@@ -10065,7 +10065,7 @@ the test catches it. Full suite chunks 00-18 and dogfood chunks 00-08 pass.
 Not done, each refused conservatively today (never unsound; variant disjointness has since landed,
 see "Variant exclusion after a match arm"): `parse_twice_agrees`, the c4 scalar witness, bool equality in contracts
 (`ensure result == (a is b)` reports `contract-proposition-type`), returned_chain, qualified
-`Module::CONST`, tuple-field `@r` for package_reader, and signed parameter range facts. Each needs a
+`Module::CONST` in bodies (since landed for returns, local initializers and `if` branches; see below), tuple-field `@r` for package_reader, and signed parameter range facts. Each needs a
 new kernel rule with its own soundness argument; none is started. Negative-literal typing was
 re-probed (`return -x` with `x >= 0` proves `result <= 0`) and works.
 
@@ -10126,3 +10126,13 @@ the `is` terms. Tests: `scripts/test_variant_exclusion.py` (positive; the matche
 an enum name declared twice, which produces no fact). Only return-position `match` statements emit
 the fact; value matches in `statement_checks.elisa` do not yet, and the shorthand `.V` pattern
 (no enum name) is skipped.
+
+## Qualified module constants in function bodies
+
+`Limits::TOP` in a `return`, a local initializer, an `if` condition or its branches now imports the
+same traced, replay-validated `global-constant` fact and is rewritten to the literal in a copy of
+the body that only return analysis reads (`checked_body` in `declaration_checks.elisa`). Other
+statement kinds (loops, matches, assignments) are not rewritten and their mentions do not trigger
+an import, so they stay refused. A local declared with the module's first segment as its name
+disables the import (`rejected_qualified_body_shadow.elisa`). Tests are in
+`scripts/test_qualified_constants.py`.
