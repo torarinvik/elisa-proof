@@ -10090,8 +10090,7 @@ re-probed (`return -x` with `x >= 0` proves `result <= 0`) and works.
 literal so the arithmetic engines can bound it. The independent replay validator re-derives the
 constant from `report.source_declarations`. Refused: a parameter named like the module, mutable
 or duplicate constants, functions declared inside a module, non-integer initializers.
-Not covered: a qualified constant used in a function *body* (e.g. `return Limits::TOP`) is not
-rewritten and stays unproven.
+Function bodies are covered separately (see "Qualified module constants in function bodies").
 Tests: `scripts/test_qualified_constants.py`.
 
 ### Signed parameter range facts: probed, not landed (2026-09-29)
@@ -10136,3 +10135,11 @@ statement kinds (loops, matches, assignments) are not rewritten and their mentio
 an import, so they stay refused. A local declared with the module's first segment as its name
 disables the import (`rejected_qualified_body_shadow.elisa`). Tests are in
 `scripts/test_qualified_constants.py`.
+
+## Signed parameter upper bound (partial landing)
+
+A signed parameter of 8, 16 or 32 bits now gets the traced `type-bound` fact `v <= MAX`
+(`proof_add_signed_upper_bound_fact`). The lower bound stays out because of the regression recorded
+above, so `v >= MIN` is still unavailable. Sound by the parameter's type. The front end reports
+its own "could not be proven statically" diagnostic for such postconditions, so the test
+(`scripts/test_signed_upper_bound.py`) reads the engine's obligations rather than the overall status.
