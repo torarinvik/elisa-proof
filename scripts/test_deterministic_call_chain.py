@@ -42,3 +42,10 @@ assert data["replay"]["gaps"] == 0 and data["summary"]["proven"] > 0, data["summ
 assert {f["kind"] for f in data["findings"]} <= {"control-flow-analysis-budget"}, data["findings"]
 
 print("deterministic call chain: precondition-only callees keep summaries; effects, globals, borrows refused")
+
+# BACKLOG B-04: the "c4 scalar witness" probe, a kept summary beside a widened u8 argument.
+data = run(ROOT / "examples/widened_call_result.elisa")
+assert data["summary"]["failed"] == 0 and data["replay"]["gaps"] == 0 and data["summary"]["proven"] == 9, data["summary"]
+data = run(ROOT / "examples/rejected_widened_call_result.elisa")
+assert [(f["name"], f["line"]) for f in data["findings"]] == [("too_tight", 13)] and data["replay"]["gaps"] == 0, data["findings"]
+print("widened call result: the c4 probe proves, and its bound is tight")

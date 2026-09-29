@@ -10218,3 +10218,11 @@ same gap recorded for parameter type bounds. No bound beyond the type is added; 
 about a label comes from the callee's instantiated summaries. `package_reader` itself stays
 unproven: its `Json::` compiler builtins and `ElisaProofJson` calls have no summaries. The front
 end reports no diagnostic for a label the callee does not declare; such a label gets no witness.
+
+## The "c4 scalar witness" item (BACKLOG B-04)
+
+The deferred P2-03 list named "the c4 scalar witness" after scratch probe `c4`: a caller binds
+`later: i64 = base(x)` for a callee with a `requires`, then returns `later + d.i64()`. The result
+had no scalar witness because `base` was not pure, so its summary was lost. B-02's deterministic
+call witnesses close it; `examples/widened_call_result.elisa` is the probe and
+`examples/rejected_widened_call_result.elisa` shows its bound is tight.
