@@ -514,6 +514,7 @@ extend ElisaProof:
                 Ast::Expr.Call(callee, arguments, _, position):
                     for argument in arguments |facts, functions, report, line, owner, depth|:
                         proof_add_pure_call_witnesses(argument, facts, functions, report, line, owner, depth + 1)
+                    proof_add_widening_cast_witnesses(expression, callee, arguments.count, facts, functions, report, line, owner, position)
                     return if not proof_contract_calls_are_pure(expression, functions)
                     called: usize = proof_function_index(functions, proof_callable_name(callee))
                     return if called >= functions.return_scalar.count or not functions.return_scalar[called]
@@ -535,3 +536,35 @@ extend ElisaProof:
 
         # Zero means a non-unsigned type; -1 means alias resolution is ambiguous or too
         # deep. Never silently treat a failed resolution as ordinary signed arithmetic.
+
+        # A widening integer conversion `name.T()` keeps its receiver's value: a receiver whose
+        # type marker bounds it within `T`'s range converts without truncation or wrapping. Only
+        # a bare name with a type marker, and a target no source function shadows, qualifies;
+        # narrowing and sign-changing conversions keep an opaque value.
+        def proof_add_widening_cast_witnesses(expression: Ast::Expr, callee: Ast::Expr, argument_count: usize, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void:
+            conversion: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, argument_count, functions)
+            return if not conversion.known
+            receiver_name: sview = proof_ident_name(conversion.receiver)
+            return if receiver_name == ""
+            target: Ast::Expr = Ast::Expr.Ident(proof_cast_target_name(callee), position)
+            target_unsigned: i64 = proof_unsigned_primitive_width(target)
+            target_signed: i64 = proof_signed_primitive_width(target)
+            receiver_unsigned: i64 = proof_unsigned_marker_width_for_name(facts, receiver_name)
+            receiver_signed: i64 = proof_signed_marker_width_for_term(facts, conversion.receiver)
+            widening: mutable bool = false
+            if receiver_unsigned > 0:
+                widening <- (target_unsigned > 0 and target_unsigned >= receiver_unsigned) or (target_signed > 0 and target_signed > receiver_unsigned)
+            elif receiver_signed > 0:
+                widening <- target_signed > 0 and target_signed >= receiver_signed
+            return if not widening
+            proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(expression, target_unsigned, position), line, owner) if target_unsigned > 0
+            proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
+            proof_add_scalar_type_witness(facts, report, proof_signed_type_marker(expression, target_signed, position), line, owner) if target_signed > 0
+            proof_add_scalar_type_witness(facts, report, Ast::Expr.Binary(expression, TokenKind.EqEq, conversion.receiver, position), line, owner)
+
+        def proof_cast_target_name(callee: Ast::Expr) -> sview:
+            match callee:
+                Ast::Expr.Field(_, target, _):
+                    return target
+                _:
+                    return ""

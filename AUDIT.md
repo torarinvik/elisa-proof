@@ -9613,3 +9613,57 @@ conversion is a witnessed scalar when its receiver is witnessed. Main's rule tha
 does not need it: main's disjunction case split, `not A => B`, already proves and replays that
 peer's example. Only the example, its refused same-constant control and the test are ported, as
 regression coverage; no rule is added. The full test and dogfood suites pass with both.
+
+## Widening integer conversions keep their receiver's value (2026-09-29)
+
+Fourth P2-03 slice: a token walker sums `later + value.i64()` over `Number(value: u8, rest)`. A
+conversion had been witnessed as a primitive scalar, but its value stayed opaque, so no bound on
+`value` reached the sum.
+
+**Rule.** `proof_add_widening_cast_witnesses` fires for `name.T()` only when all of these hold:
+- `T` is an integer type that no source function or method shadows (`proof_runtime_numeric_conversion`
+  counts both).
+- The receiver is a bare name with a type marker.
+- `T` holds every value of the receiver's type: unsigned into a wider-or-equal unsigned or a
+  strictly wider signed type, or signed into a wider-or-equal signed type.
+
+It then adds the target's type markers and `name.T() == name`. Narrowing and sign-changing
+conversions add nothing, so their value stays opaque, as `rejected_numeric_cast_operator` already
+requires.
+
+**Plumbing, each checked by mutation.**
+- The kernel's field-place collector accepts a witnessed call whose callee is a field (the
+  conversion), as well as a named pure call.
+- The pure-summary rewrite refuses field-callee calls. Rewriting `name.T() == name` would move the
+  receiver into the wider arithmetic and change the width every guard reads.
+- A local declaration or a return whose only calls are conversions skips summary application,
+  forgetting and fact clearing. It runs no source function.
+- A conversion's receiver is not counted as lent to a call, so the binder stays stable across a
+  later call statement.
+- A conversion is not an untrusted operator operand, because a primitive integer cannot be a struct
+  protocol receiver.
+
+**Evidence.**
+- `examples/widening_cast.elisa`: 36 of 36 goals prove and replay. It covers u8 into i64 and u16,
+  i8 into i64, conversions in match arms, and conversions before and after a kept call result.
+- `examples/rejected_widening_cast.elisa`: every ensure is refused with no replay gaps. The
+  controls are u32 into u8, i64 into u64, u64 into i64, an i8 widening claimed non-negative, a u8
+  widening claimed below 255, and a protocol method named `i64` that returns -1.
+- `scripts/test_widening_cast.py` is wired into `scripts/test.sh`.
+- `rejected_conditional_conversions` had pinned `b.u64() if b >= 48 else 0` with
+  `ensure result <= 255` as unproven. That claim is true for `b: u8` and now proves, so it moved
+  to `conditional_conversions`. The control now claims `<= 254`, which is false at `b = 255`.
+- Mutation checks:
+  - Without the kernel collector change, 10 goals are replay gaps.
+  - Without the producer, 11 ensures are unproven.
+  - Without the alias exemption, the two after-call functions are unproven.
+  - Without the declaration and return skips, 7 ensures are unproven.
+  - Without the summary refusal, `widen_sum` and `bound_first` are unproven.
+  - Without the operator-operand exemption, the match-arm functions are unproven or unsupported.
+  - A frame-walker skip and a post-return clear skip were also tried. Neither changed any probe, so
+    both were dropped.
+- The full test and dogfood suites pass.
+
+Two limits remain. A signed parameter has no range facts from its type, so `value >= -128` for an
+`i8` is still unproven. A guard like `later > 1000000 - 255` over a call-bound local is also
+unproven, while the folded literal `999745` proves.
