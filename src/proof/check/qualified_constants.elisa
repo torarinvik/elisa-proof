@@ -1,0 +1,156 @@
+# Literal integer constants of a root module, named by their qualified path (`Limits::TOP`) from a
+# function at the root. Only a constant a contract of the function names is imported, as an exact
+# fact about the qualified term itself, so the qualified spelling stays one atom and no name is
+# substituted. The independent replay validator resolves the same path from the source declarations.
+extend ElisaProof:
+    private:
+        const PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT: usize = 32
+
+        def proof_qualified_constant_term(scope: darray[sview]&, name: sview, position: Ast::Pos) -> Ast::Expr:
+            path: mutable Ast::Expr = Ast::Expr.Ident(scope[0], position)
+            for index in 1..<scope.count |index, scope, position, path|:
+                path <- Ast::Expr.Scope(path, scope[index], position)
+            return Ast::Expr.Scope(path, name, position)
+
+        def proof_qualified_constant_flatten(expression: Ast::Expr, path: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(identifier, _):
+                    path.push(identifier)
+                    return true
+                Ast::Expr.Scope(base, leaf, _):
+                    return false if not proof_qualified_constant_flatten(base, path, depth + 1)
+                    path.push(leaf)
+                    return true
+                _:
+                    return false
+
+        # True when `expression` is exactly the path `scope::name`.
+        def proof_qualified_constant_is_term(expression: Ast::Expr, scope: darray[sview]&, name: sview) -> bool:
+            path: mutable darray[sview] = []
+            return false if not proof_qualified_constant_flatten(expression, &path, 0)
+            return false if path.count != scope.count + 1
+            for index in 0..<scope.count |index, scope, path|:
+                return false if path[index] != scope[index]
+            return path[scope.count] == name
+
+        def proof_qualified_constant_mentioned(expression: Ast::Expr, scope: darray[sview]&, name: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            return true if proof_qualified_constant_is_term(expression, scope, name)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_qualified_constant_mentioned(inner, scope, name, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_qualified_constant_mentioned(operand, scope, name, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_qualified_constant_mentioned(left, scope, name, depth + 1) or proof_qualified_constant_mentioned(right, scope, name, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return proof_qualified_constant_mentioned(condition, scope, name, depth + 1) or proof_qualified_constant_mentioned(then_value, scope, name, depth + 1) or proof_qualified_constant_mentioned(else_value, scope, name, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_qualified_constant_mentioned(object, scope, name, depth + 1) or proof_qualified_constant_mentioned(index, scope, name, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_qualified_constant_mentioned(object, scope, name, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    for argument in arguments |scope, name, depth|:
+                        return true if proof_qualified_constant_mentioned(argument, scope, name, depth + 1)
+                    return false
+                _:
+                    return false
+
+        def proof_qualified_constant_declared_count(declarations: darray[Ast::Decl]&, scope: darray[sview]&, name: sview, current: darray[sview]&, depth: usize) -> usize:
+            return 0 if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            in_scope: bool = proof_global_constant_scope_equal(scope, current)
+            found: mutable usize = 0
+            for declaration in declarations |scope, name, current, depth, in_scope, found|:
+                match declaration:
+                    Ast::Decl.Const(constant_name, _, _, _, _):
+                        found <- found + 1 if in_scope and constant_name == name
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: mutable darray[sview] = []
+                        next_scope.extend(current)
+                        next_scope.push(module_name)
+                        found <- found + proof_qualified_constant_declared_count(body, scope, name, &next_scope, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        found <- found + proof_qualified_constant_declared_count(body, scope, name, current, depth + 1)
+                    _:
+                        pass
+            return found
+
+        # The value of a literal constant the replay validator would also accept, or no value.
+        def proof_qualified_constant_value(constant_type: Ast::Expr, initializer: Ast::Expr) -> (known: bool, value: i64):
+            type_name: sview = match constant_type:
+                Ast::Expr.Ident(name, _): name
+                _: ""
+            return (false, 0) if type_name != "i64" and type_name != "usize" and type_name != "u8" and type_name != "u64"
+            match initializer:
+                Ast::Expr.IntLit(literal, _):
+                    return (false, 0) if literal < 0 and type_name != "i64"
+                    return (false, 0) if literal < 0
+                    return (false, 0) if type_name == "u8" and literal > 255
+                    return (true, literal)
+                Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(magnitude, _), _):
+                    return (type_name == "i64" and magnitude >= 0, 0 - magnitude)
+                _:
+                    return (false, 0)
+
+        # Replace an occurrence of a qualified constant by its value, so the arithmetic engines see a literal;
+        # the traced equality fact records why the replacement is sound. Unlisted shapes are left as written.
+        def proof_qualified_constant_rewrite(expression: Ast::Expr, scope: darray[sview]&, name: sview, value: Ast::Expr, depth: usize) -> Ast::Expr:
+            return expression if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            return value if proof_qualified_constant_is_term(expression, scope, name)
+            match expression:
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_qualified_constant_rewrite(left, scope, name, value, depth + 1), operator, proof_qualified_constant_rewrite(right, scope, name, value, depth + 1), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_qualified_constant_rewrite(operand, scope, name, value, depth + 1), position)
+                Ast::Expr.If(condition, then_expr, else_expr, position):
+                    return Ast::Expr.If(proof_qualified_constant_rewrite(condition, scope, name, value, depth + 1), proof_qualified_constant_rewrite(then_expr, scope, name, value, depth + 1), proof_qualified_constant_rewrite(else_expr, scope, name, value, depth + 1), position)
+                _:
+                    return expression
+
+        def proof_qualified_constants_collect(file: Ast::File&, declarations: darray[Ast::Decl]&, current: darray[sview]&, contracts: mutable darray[Ast::Expr]&, parameters: darray[Ast::ParamDecl]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, depth: usize) -> void:
+            return if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            for declaration in declarations |file, current, contracts, parameters, facts, report, function_name, depth|:
+                match declaration:
+                    Ast::Decl.Const(constant_name, constant_type, initializer, constant_mutable, position):
+                        if current.count > 0 and constant_mutable == false and (any parameter in parameters where parameter.name == current[0]) == false:
+                            imported: (known: bool, value: i64) = proof_qualified_constant_value(constant_type, initializer)
+                            mentioned: mutable bool = false
+                            for contract in contracts |current, constant_name, mentioned|:
+                                mentioned <- true if proof_qualified_constant_mentioned(contract, current, constant_name, 0)
+                            counted_from: mutable darray[sview] = []
+                            declared_once: bool = proof_qualified_constant_declared_count(file.top_decls, current, constant_name, &counted_from, 0) == 1
+                            if imported.known and mentioned and declared_once:
+                                term: Ast::Expr = proof_qualified_constant_term(current, constant_name, position)
+                                fact: Ast::Expr = Ast::Expr.Binary(term, TokenKind.EqEq, Ast::Expr.IntLit(imported.value, position), position)
+                                proof_add_traced_fact(facts, report, fact, "global-constant", position.line, function_name)
+                                proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(term, position), position.line, function_name)
+                                for contract_index in 0..<contracts.count |contract_index, contracts, current, constant_name, position, imported|:
+                                    contracts[contract_index] <- proof_qualified_constant_rewrite(contracts[contract_index], current, constant_name, Ast::Expr.IntLit(imported.value, position), 0)
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: mutable darray[sview] = []
+                        next_scope.extend(current)
+                        next_scope.push(module_name)
+                        proof_qualified_constants_collect(file, body, &next_scope, contracts, parameters, facts, report, function_name, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_qualified_constants_collect(file, body, current, contracts, parameters, facts, report, function_name, depth + 1)
+                    _:
+                        pass
+
+        # Only a function declared at the root and named uniquely resolves its qualified paths from
+        # the root; a function inside a module could see a nearer module of the same name.
+        def proof_import_qualified_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, preconditions: mutable darray[Ast::Expr]&, postconditions: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos) -> void:
+            function_scope: mutable darray[sview] = []
+            root_scope: mutable darray[sview] = []
+            name_matches: mutable usize = 0
+            matches: mutable usize = 0
+            proof_global_constant_find_function_scope(file.top_decls, function_name, position.line, &root_scope, &function_scope, &name_matches, &matches, 0)
+            return if name_matches != 1 or matches != 1 or function_scope.count != 0
+            contracts: mutable darray[Ast::Expr] = []
+            contracts.extend(preconditions)
+            contracts.extend(postconditions)
+            proof_qualified_constants_collect(file, file.top_decls, &root_scope, &contracts, parameters, facts, report, function_name, 0)
+            for index in 0..<preconditions.count |index, preconditions, contracts|:
+                preconditions[index] <- contracts[index]
+            for index in 0..<postconditions.count |index, postconditions, contracts, preconditions|:
+                postconditions[index] <- contracts[preconditions.count + index]

@@ -83,9 +83,67 @@ extend ElisaProof:
                     _:
                         pass
 
+        def proof_replay_qualified_path(expression: Ast::Expr, path: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    path.push(name)
+                    return true
+                Ast::Expr.Scope(base, leaf, _):
+                    return false if not proof_replay_qualified_path(base, path, depth + 1)
+                    path.push(leaf)
+                    return true
+                _:
+                    return false
+
+        # A qualified constant resolves from the root only for a root function that is the sole
+        # function of its name and has no parameter spelled like the path's first segment.
+        def proof_replay_qualified_function_count(declarations: darray[Ast::Decl]&, function_name: sview, first: sview, in_module: bool, total: mutable usize&, rooted: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |function_name, first, in_module, total, rooted, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate_name, parameters, _, _, _, _, _):
+                        if candidate_name == function_name:
+                            total <- total + 1
+                            rooted <- rooted + 1 if in_module == false and not (any parameter in parameters where parameter.name == first)
+                    Ast::Decl.Module(_, body, _):
+                        proof_replay_qualified_function_count(body, function_name, first, true, total, rooted, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_qualified_function_count(body, function_name, first, in_module, total, rooted, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_qualified_constant_fact_is_valid(report: ProofReport&, trace: ProofFactTrace, path: darray[sview]&, expected_value: i64) -> bool:
+            return false if path.count < 2
+            total: mutable usize = 0
+            rooted: mutable usize = 0
+            proof_replay_qualified_function_count(report.source_declarations, trace.name, path[0], false, &total, &rooted, 0)
+            return false if total != 1 or rooted != 1
+            wanted_scope: mutable darray[sview] = []
+            for index in 0..<path.count - 1 |index, path, wanted_scope|:
+                wanted_scope.push(path[index])
+            empty_scope: mutable darray[sview] = []
+            visible: mutable bool = false
+            valid: mutable bool = false
+            matches: mutable usize = 0
+            proof_replay_global_constant_lookup(report.source_declarations, &wanted_scope, &empty_scope, path[path.count - 1], trace.line, expected_value, &visible, &valid, &matches, 0)
+            return matches == 1 and valid
+
         def proof_replay_global_constant_fact_is_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             match trace.expression:
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    qualified_path: mutable darray[sview] = []
+                    qualified_left: bool = match left:
+                        Ast::Expr.Scope(_, _, _): proof_replay_qualified_path(left, &qualified_path, 0)
+                        _: false
+                    if qualified_left:
+                        qualified_value: i64 = match right:
+                            Ast::Expr.IntLit(value, _): value
+                            _: 0
+                        qualified_literal: bool = match right:
+                            Ast::Expr.IntLit(_, _): true
+                            _: false
+                        return qualified_literal and proof_replay_qualified_constant_fact_is_valid(report, trace, &qualified_path, qualified_value)
                     constant_name: sview = match left:
                         Ast::Expr.Ident(name, _): name
                         _: ""
