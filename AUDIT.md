@@ -9780,3 +9780,35 @@ places.
   - Dropping the kernel's rewrite leaves 3 replay gaps.
 - The full test and dogfood suites pass.
 
+## ADT proof library (P2-03 slice, 2026-09-29)
+
+`examples/adt_library.elisa` is the first library of inductive proofs over `IntList`, `Tree` and a
+token stream:
+- list length and nonnegative-element count;
+- tree size, height and maximum above a floor;
+- token-stream sum and length;
+- a totality-only parser step, `skip_plus`.
+
+Every recursive function carries `decreases` over the enum it matches, and each recursive call
+passes a binder from that match. That is the totality evidence: structural descent on a finite
+value, checked by both the proof checker and the compiler. Counters saturate at `ADT_CAP`, so the
+induction step never overflows. `tree_max_or` needed the nested-call generalization above. All
+70 certificates replay.
+
+`examples/rejected_adt_library.elisa` covers the M6 negatives:
+- a hypothesis that does not survive the step (`count_is_zero`, `shallow`, `length_below_cap`);
+- recursion on the matched value itself (`spin`, `tree_spin`), refused by the structural check
+  and by the compiler;
+- a claim true for one constructor only (`wrong_constructor`);
+- a bound the recursion breaks (`max_below_floor`).
+
+Where the checker closed a goal in those functions with the function's own summary, replay leaves
+a gap. Replay accepts a summary only from a function whose goals are all proven, so a false
+hypothesis never supports a proof that the kernel accepts. `scripts/test_adt_library.py` pins
+both files, and checks that every gap lies in a failing function.
+
+Two things are still missing:
+- Named-tuple results such as `(numbers: i64, operators: i64)` are not projected from a
+  positional tuple literal, so `ensure result.numbers >= 0` does not prove.
+- A match's `_` arm records no negated-variant facts, so `not (result is Token.Plus)` does not
+  prove for `skip_plus`.
