@@ -82,6 +82,7 @@ python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
 python3 "$ROOT_DIR/scripts/test_parameter_heavy_return_analysis.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_contract.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_distinct_constants.py"
 python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
 python3 "$ROOT_DIR/scripts/test_vector_index_arithmetic.py"
 
