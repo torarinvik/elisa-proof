@@ -26,8 +26,8 @@ assert positive["status"] == positive["verification_state"] == "proved", positiv
 assert positive["summary"]["proven"] == positive["summary"]["obligations"]
 functions = {entry["name"]: entry for entry in positive["declaration_details"]
              if entry.get("kind") == "function"}
-assert functions["decode_status"]["verified"] and functions["decode_status"]["ensures"] == 4
-assert functions["wrapper_status"]["verified"] and functions["wrapper_status"]["ensures"] == 4
+assert functions["decode_status"]["verified"] and functions["decode_status"]["ensures"] == 5
+assert functions["wrapper_status"]["verified"] and functions["wrapper_status"]["ensures"] == 5
 assert any(trace["kind"] == "function-summary" and
            trace["dependency"] == "decode_status" and
            trace["name"] == "wrapper_status"

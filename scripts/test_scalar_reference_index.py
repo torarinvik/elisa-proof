@@ -13,7 +13,7 @@ data = json.loads(run.stdout)
 assert data["summary"]["semantic_errors"] == 0, data
 assert data["replay"]["gaps"] == 0, data
 assert data["replay"]["certificates"] == data["replay"]["replayed"], data
-for name in ("reference_read", "reference_update", "reference_disjunctive_update",
+for name in ("reference_read", "reference_update", "reference_byte_cast", "reference_disjunctive_update",
              "reference_observe_entry", "reference_observe_through_call"):
     assert not any(f["name"] == name and f["kind"] in
                    ("expression-unsupported", "contract-proposition-type", "index-bounds-opaque")
