@@ -32,5 +32,5 @@ assert over_limit["replay"]["gaps"] == 0, over_limit["replay"]
 assert over_limit["replay"]["certificates"] == over_limit["replay"]["replayed"], over_limit["replay"]
 budget = next(f for f in over_limit["findings"]
               if f["kind"] == "control-flow-analysis-budget")
-assert budget["budget"] == {"dimension": "facts", "observed": 65, "limit": 64}, budget
-print("parameter-heavy return analysis: all obligations and certificates replay")
+assert budget["budget"] == {"dimension": "steps", "observed": 65, "limit": 64}, budget
+print("parameter-heavy return analysis: fact headroom stays bounded by the independent step cap")
