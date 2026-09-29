@@ -1,0 +1,79 @@
+extend ElisaProof:
+    private:
+        # Prioritize disjunctions whose branches match the postcondition. Guarded selectors
+        # accumulate unrelated fall-through facts, while the case-split budget is deliberately
+        # shallow.
+        def proof_comparison_disjunct_shape(expression: Ast::Expr) -> (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, left, operator, right) if proof_is_comparison(operator)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match proof_strip_parens(operand):
+                        Ast::Expr.Binary(left, operator, right, _):
+                            complement: TokenKind = proof_comparison_negation(operator)
+                            return (true, left, complement, right) if complement != TokenKind.Eof
+                        _:
+                            pass
+                _:
+                    pass
+            return (false, Ast::Expr.Absent, TokenKind.Eof, Ast::Expr.Absent)
+
+        def proof_disjunct_terms_equivalent(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return true if proof_expr_equal(left, right)
+            for fact in facts:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(name, TokenKind.EqEq, value, _):
+                        return true if proof_expr_equal(left, name) and proof_expr_equal(right, value)
+                        return true if proof_expr_equal(left, value) and proof_expr_equal(right, name)
+                    _:
+                        pass
+            return false
+
+        def proof_disjunct_atoms_equivalent(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return true if proof_disjunct_terms_equivalent(left, right, facts)
+            first: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_comparison_disjunct_shape(left)
+            second: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_comparison_disjunct_shape(right)
+            return first.known and second.known and first.operator == second.operator and proof_disjunct_terms_equivalent(first.left, second.left, facts) and proof_disjunct_terms_equivalent(first.right, second.right, facts)
+
+        def proof_goal_contains_disjunct(goal: Ast::Expr, candidate: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            requires depth <= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            decreases PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT - depth
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_goal_contains_disjunct(left, candidate, facts, depth + 1) or proof_goal_contains_disjunct(right, candidate, facts, depth + 1)
+                _:
+                    return proof_disjunct_atoms_equivalent(goal, candidate, facts)
+
+        def proof_goal_disjunction_relevance(goal: Ast::Expr, left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> usize:
+            left_matches: bool = proof_goal_contains_disjunct(goal, left, facts, 0)
+            right_matches: bool = proof_goal_contains_disjunct(goal, right, facts, 0)
+            return 2 if left_matches and right_matches
+            return 1 if left_matches or right_matches
+            return 0
+
+        def proof_find_goal_relevant_disjunction(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr):
+            first_index: mutable usize = facts.count
+            first_left: mutable Ast::Expr = Ast::Expr.Absent
+            first_right: mutable Ast::Expr = Ast::Expr.Absent
+            best_index: mutable usize = facts.count
+            best_left: mutable Ast::Expr = Ast::Expr.Absent
+            best_right: mutable Ast::Expr = Ast::Expr.Absent
+            best_score: mutable usize = 0
+            for index in 0..<facts.count |index, facts, goal, first_index, first_left, first_right, best_index, best_left, best_right, best_score|:
+                candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(facts[index])
+                continue if not candidate.known
+                if first_index == facts.count:
+                    first_index <- index
+                    first_left <- candidate.left
+                    first_right <- candidate.right
+                score: usize = proof_goal_disjunction_relevance(goal, candidate.left, candidate.right, facts)
+                if score > best_score:
+                    best_index <- index
+                    best_left <- candidate.left
+                    best_right <- candidate.right
+                    best_score <- score
+                break if best_score == 2
+            return (true, best_index, best_left, best_right) if best_score > 0
+            return (true, first_index, first_left, first_right) if first_index < facts.count
+            return (false, facts.count, Ast::Expr.Absent, Ast::Expr.Absent)
