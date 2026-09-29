@@ -1,0 +1,58 @@
+extend ElisaProof:
+    public:
+        # An unsigned local bound to a conditional or a remainder, `digit: u64 = byte - 48 if
+        # ... else 0` or `digit: u64 = byte % 10`, is recorded as an equality with that value.
+        # The goal tier can read a bound off it, but the wrap guard reads only plain bounds, so
+        # `value * 10 + digit` stayed unguarded. Each arm's upper end is taken under its own side
+        # of the condition, the larger one is proved over the binding as an ordinary goal, and
+        # the result enters the facts as a proof step, which replay re-proves from its premises.
+        def proof_add_binding_range(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, symbol: sview, value: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
+            return if not proof_binding_range_candidate(value)
+            upper: (known: bool, value: i64) = proof_binding_upper_bound(value, facts, position)
+            return if not upper.known or upper.value < 0
+            goal: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.LtEq, Ast::Expr.IntLit(upper.value, position), position)
+            return if any existing in facts where proof_expr_equal(existing, goal)
+            annotations: darray[Ast::EnumAnnotation] = []
+            return if not proof_goal(facts, goal, annotations)
+            proof_add_derived_fact(facts, report, goal, "proof-step", position.line, owner)
+
+        def proof_binding_range_candidate(value: Ast::Expr) -> bool:
+            match value:
+                Ast::Expr.If(_, _, _, _):
+                    return true
+                Ast::Expr.Binary(_, operator, _, _):
+                    return operator == TokenKind.Percent
+                _:
+                    return false
+
+        def proof_binding_upper_bound(value: Ast::Expr, facts: darray[Ast::Expr]&, position: Ast::Pos) -> (known: bool, value: i64):
+            match value:
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    guarded: mutable darray[Ast::Expr] = []
+                    guarded.extend(facts)
+                    guarded.push(condition)
+                    then_upper: (known: bool, value: i64) = proof_binding_arm_upper(then_expression, guarded, Ast::Expr.Absent)
+                    else_upper: (known: bool, value: i64) = proof_binding_arm_upper(else_expression, facts, Ast::Expr.Unary(TokenKind.Not, condition, position))
+                    return (false, 0) if not then_upper.known or not else_upper.known
+                    return (true, then_upper.value) if then_upper.value >= else_upper.value
+                    return (true, else_upper.value)
+                _:
+                    return proof_binding_arm_upper(value, facts, Ast::Expr.Absent)
+
+        # `assumed` is the negated condition for an else arm and Absent otherwise; the then arm's
+        # condition already stands among its facts.
+        def proof_binding_arm_upper(arm: Ast::Expr, facts: darray[Ast::Expr]&, assumed: Ast::Expr) -> (known: bool, value: i64):
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, facts, &bounds)
+            match assumed:
+                Ast::Expr.Absent:
+                    pass
+                _:
+                    proof_collect_bounds(assumed, facts, &bounds)
+            proof_close_equalities(facts, &bounds)
+            first: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(arm, bounds)
+            return (true, first.upper) if first.has_upper
+            proof_close_plain_bounds(facts, &bounds)
+            closed: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(arm, bounds)
+            return (closed.has_upper, closed.upper)

@@ -712,6 +712,8 @@ run_probe global_constant_loop_exit examples/global_constant_loop_exit.elisa 0
 run_probe rejected_global_constant_loop_exit examples/rejected_global_constant_loop_exit.elisa 1
 run_probe branch_join examples/branch_join.elisa 0
 run_probe rejected_branch_join examples/rejected_branch_join.elisa 1
+run_probe loop_state_joins examples/loop_state_joins.elisa 0
+run_probe rejected_loop_state_joins examples/rejected_loop_state_joins.elisa 1
 run_probe bound_propagation examples/bound_propagation.elisa 0
 run_probe rejected_bound_propagation examples/rejected_bound_propagation.elisa 1
 run_probe strict_shift examples/strict_shift.elisa 0
@@ -1560,6 +1562,7 @@ cases = (
     ("captured_block_exit", {('unchecked', 'ensure-unproven'), ('broken', 'invariant-not-preserved'), ('broken', 'ensure-unproven')}),
     ("global_constant_loop_exit", {('last_slot', 'ensure-unproven')}),
     ("branch_join", {('not_always_kept', 'ensure-unproven'), ('replace_too_far', 'ensure-unproven'), ('stale_rebind', 'ensure-unproven')}),
+    ("loop_state_joins", {('untrue_aggregate_bound', 'ensure-unproven'), ('escaping_arm', 'invariant-not-preserved'), ('arm_local_value', 'ensure-unproven'), ('growing_arm_local', 'invariant-not-preserved'), ('untrue_negated_order', 'ensure-unproven')}),
 )
 for name, owners in cases:
     with open(os.path.join(report_dir, name + ".json"), encoding="utf-8") as handle:

@@ -9134,3 +9134,50 @@ compiler does not yet check lifetimes on a tuple field. A compiler session repor
 point into the package buffer, which lives for the whole replay call, so the code is correct by
 construction rather than by the compiler. Once the compiler lands per-field `@r` on tuple fields,
 these returns become `sview @r`.
+
+## Loop states across rebinds, arm locals and aggregate calls (2026-09-28)
+
+The engine's sound-event asset parser (`read_fields`, `number`) met eight holes, each now closed
+with a sound rule. `examples/loop_state_joins.elisa` proves one case of each; the rejected twin
+keeps five false controls open.
+
+- **Conditional and remainder bindings.** `digit: u64 = byte - 48 if ... else 0` was an equality
+  only, and the wrap guard reads plain bounds, so `value * 10 + digit` stayed unguarded. Each
+  arm's upper end is taken under its side of the condition. The larger one is proved as an
+  ordinary goal and enters as a proof step (`check/binding_ranges.elisa`).
+- **Value blocks.** A `value: T = for ... -> value:` block is flattened into the enclosing body,
+  and a single-arm join (`raise ... if`) restores the surviving arm's values.
+- **Fact budget.** Facts from imported module constants are added to the per-function budget,
+  up to the entry cap, so a module with many constants does not exhaust it before the body
+  starts. A first version added headroom for every entry fact. That made the standalone replay
+  audit take 122 s and 1.4 GB, against 34 s and 0.88 GB before, and the memory watchdog stopped
+  it. Limited to constant facts, the audit takes 49 s and 0.94 GB.
+- **A control made true.** `rebound_after_guard` in `rejected_call_stable_facts.elisa` returned
+  `depth + 1` after the guard `local < 127` on `local == depth`, which really is at most 127.
+  Alias transfer now proves it, so the control returns `depth + 2`, which can reach 128.
+- **Fixed-array locals.** `fields: mutable u64[M::N] = zeroed` keeps its own symbol and gets
+  `fields.count == N` as a type bound. Before, `values[slot]` checked against `zeroed.count`.
+- **Constants in captured-loop invariants.** A loop with a capture list arrives as a block
+  expression statement. The constant scanner now looks inside it, so `invariant count <= FIELDS`
+  imports `FIELDS`.
+- **Alias transfer.** `cursor <- begin`, where `begin == cursor` held, dropped every fact about
+  the old `cursor`. Each such fact is rewritten over the alias. The rewrite is proved from the
+  full pre-rebind facts and enters as a proof step (`check/alias_transfer.elisa`).
+- **Negated orders in the kernel.** Replay could not prove `not (b < c)`, which a branch join
+  records. The kernel now proves `not (a < b)` from `b <= a`, and does the same for the other
+  three orders. Only that direction is taken, so it stays sound over an unordered float: a proved
+  converse means both operands compare.
+- **Joins after rebinding arms.** When both arms rebind a counter, its invariant was dropped in
+  each arm and was never a join candidate. Facts that held before the branch are now candidates
+  too. Each candidate is still proved in each arm under that arm's value.
+- **Arms that declare locals.** A `value: u64 = try f(...)` inside an arm disabled the whole
+  join restore. Arm locals are now allowed when none shadows an outer name. A local may appear in
+  an arm's step, but a joined fact never names one.
+- **Aggregate call results.** `record: Fields = try read_fields(...)` keeps its own symbol, so
+  the summary `read_fields(...).count <= 9` never reached `record.count`. The call's summaries
+  are instantiated again with `result` bound to the local, as scalar locals already were. The
+  rewrite now also descends into field objects. Replay validates the new trace by the callee's
+  ensure, as for the original.
+
+**Limitations.** A plain two-arm join of different values, with `x <- 5` in one arm and
+`x <- 7` in the other, still does not yield `x <= 7`. No candidate states that bound.
