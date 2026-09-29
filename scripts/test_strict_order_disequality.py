@@ -23,7 +23,7 @@ assert positive["replay"]["certificates"] == positive["replay"]["replayed"] == p
 assert positive["replay"]["gaps"] == 0 and positive["trust"]["trusted_assumptions"] == [], positive
 assert {goal["name"] for goal in positive["goals"]} == {
     "strict_less_excludes_equality", "strict_greater_excludes_reversed_equality",
-    "equality_with_zero_excludes_u64_max",
+    "equality_with_zero_excludes_u64_max", "equality_with_zero_excludes_parenthesized_u64_max",
 }, positive["goals"]
 
 negative = report("rejected_nonstrict_order_disequality", 1)
@@ -40,4 +40,12 @@ same_high_bit_finding = next(finding for finding in same_high_bit["findings"]
                              if finding["kind"] == "ensure-unproven")
 assert same_high_bit_finding["counterexample_found"] == (same_high_bit["verification_state"] == "disproved"), same_high_bit
 
-print("strict order/disequality: < and > replay; <= is refuted and identical u64-max is not certified")
+unary_negative = report("rejected_u64_unary_negative_same_value", 1)
+assert unary_negative["status"] == "failed" and unary_negative["verification_state"] in {"disproved", "unknown"}, unary_negative
+assert unary_negative["summary"]["failed"] == 1 and unary_negative["summary"]["semantic_errors"] == 0, unary_negative
+assert unary_negative["replay"]["gaps"] == 0 and unary_negative["trust"]["trusted_assumptions"] == [], unary_negative
+unary_finding = next(finding for finding in unary_negative["findings"]
+                     if finding["kind"] == "ensure-unproven")
+assert unary_finding["counterexample_found"] == (unary_negative["verification_state"] == "disproved"), unary_negative
+
+print("strict order/disequality: < and > replay; <= is refuted; literal, parenthesized, same-value and unary-negative boundaries checked")
