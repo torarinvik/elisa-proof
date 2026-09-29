@@ -10093,3 +10093,13 @@ negated primitive order over plain sides as its difference constraint, which
 
 **Still open.** A sum of two call results, such as `cap(p) + cap(q) <= 20` from two
 `result <= 10` summaries, does not prove.
+
+## Port: call-summary dispatcher snapshot budget (from `codex/wasmbrowser-proof` 55e6b4d, 2026-09-29)
+
+A medium body (12 to 24 statements) that calls a small set of one to four verified targets can
+accumulate many facts from repeated call summaries while having few parameters. It now gets the
+same fixed fact-state headroom as a parameter-heavy selector; the independent step cap remains.
+`proof_return_analysis_fact_state_budget` takes the call-target count from `call_counts`.
+
+**Evidence.** The cherry-pick applied cleanly and the prover rebuilt. Every `proof/*.elisa` in
+`elisa-engine` gives the same result before and after. The full test and dogfood suites pass.
