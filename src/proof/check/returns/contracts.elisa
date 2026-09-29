@@ -31,6 +31,27 @@ extend ElisaProof:
         # arrives -- runs the block's statements in the function's own frame and then returns the
         # block's value. That is exactly the body `statements ++ [return value]`. A block with no
         # value is not this shape and stays with the ordinary admission gate.
+        # `result.f` over a returned tuple literal is the literal's element labelled `f` in the
+        # declared return type. The literal stands in as a construction under a reserved type name,
+        # which `proof_substitute` projects field by field. If that name survives, some use of
+        # `result` was not a labelled field, and the caller keeps the plain substitution.
+        def proof_project_tuple_result(goal: Ast::Expr, return_value: Ast::Expr, functions: ProofFunctionTable&, name: sview) -> (known: bool, value: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            function_index: usize = proof_function_index(functions, name)
+            return (false, goal) if function_index >= functions.return_label_counts.count
+            match return_value:
+                Ast::Expr.Tuple(elements, position):
+                    return (false, goal) if elements.count == 0 or functions.return_label_counts[function_index] != elements.count
+                    start: usize = functions.return_label_starts[function_index]
+                    fields: mutable darray[Ast::FieldInit] = []
+                    for index in 0..<elements.count |fields, elements, functions, start|:
+                        fields.push(Ast::FieldInit{name: functions.all_return_labels[start + index], value: elements[index]})
+                    result_name: darray[sview] = ["result"]
+                    result_value: darray[Ast::Expr] = [Ast::Expr.Construct(Ast::Expr.Ident("__elisa_tuple_result", position), fields, position)]
+                    projected: Ast::Expr = proof_substitute(goal, result_name, result_value)
+                    return (not proof_expr_mentions_name(projected, "__elisa_tuple_result"), projected)
+                _:
+                    return (false, goal)
+
         def proof_return_value_block(statement: Ast::Stmt) -> (known: bool, body: darray[Ast::Stmt], position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
             empty: mutable darray[Ast::Stmt] = []
             match statement:
@@ -274,13 +295,16 @@ extend ElisaProof:
                         # Only a call written at the return runs here. A local's call ran at its
                         # binding, which already applied its summary and havoc; clearing again
                         # would discard the summary that describes the returned value.
-                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if proof_expr_has_call(returned) and not return_call_applied
+                        # Numeric conversions and verified pure calls write nothing.
+                        proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if proof_expr_has_call(returned) and not return_call_applied and not proof_contract_calls_are_pure(returned, functions)
                         proof_invalidate_moved_roots(moved_roots, names, values, facts, report, name, position)
                         result_name: mutable darray[sview] = ["result"]
                         result_value: mutable darray[Ast::Expr] = [return_value]
                         for ensure in ensures |report, name, facts, result_name, result_value, position|:
                             current_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
                             goal: mutable Ast::Expr = proof_substitute(current_goal, result_name, result_value)
+                            projected_goal: (known: bool, value: Ast::Expr) = proof_project_tuple_result(current_goal, return_value, functions, name)
+                            goal <- projected_goal.value if projected_goal.known
                             goal <- proof_rewrite_pure_call_summaries(goal, facts, functions, 0) if proof_expr_has_call(goal)
                             proof_add_pure_call_witnesses(goal, facts, functions, report, position.line, name, 0) if proof_expr_has_call(goal)
                             proven: bool = proof_certify_return_goal(facts, return_value, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))

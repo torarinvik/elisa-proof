@@ -9807,11 +9807,11 @@ a gap. Replay accepts a summary only from a function whose goals are all proven,
 hypothesis never supports a proof that the kernel accepts. `scripts/test_adt_library.py` pins
 both files, and checks that every gap lies in a failing function.
 
-Two things are still missing:
-- Named-tuple results such as `(numbers: i64, operators: i64)` are not projected from a
-  positional tuple literal, so `ensure result.numbers >= 0` does not prove.
-- A match's `_` arm records no negated-variant facts, so `not (result is Token.Plus)` does not
-  prove for `skip_plus`.
+Two things were missing:
+- Named-tuple results were not projected. This is now done; see "Named-tuple results: an ADT
+  parser library" below.
+- A match's `_` arm recorded no negated-variant facts. This is now done; see "Refuted earlier
+  match arms" below.
 
 ## Port: negated conjunction fall-through (from `codex/wasmbrowser-proof` 0fde6a8, 2026-09-29)
 
@@ -9929,3 +9929,132 @@ and a zero multiple. `scripts/test_monotone_orders.py` and the dogfood probes ch
 Two limits remain. A signed sum is not ordered, since it could wrap below. `(p + p) / w` has no
 interval when `p` is bounded only through its own sum, so the wrap guard refuses the goal before
 the quotient rule sees it.
+
+## Named-tuple results: an ADT parser library (P2-03 slice, 2026-09-29)
+
+A parser returns `(value: i64, consumed: i64)` and states its contract over `result.value` and
+`result.consumed`. Six changes make that prove:
+
+1. **Label table.** The function index records each function's return-tuple labels
+   (`proof_return_tuple_labels`). Each label is found from the parser's `__tuple_label`
+   annotations inside that element's source span. An element that has no label, or has more than
+   one, makes the list empty, and so does a repeated label. An empty list means nothing is
+   projected.
+2. **Projection.** At `return (a, b)`, the ensure's `result` is replaced by a construction under
+   the reserved name `__elisa_tuple_result`, which `proof_substitute` projects field by field. If
+   the name survives, some use of `result` was not a labeled field, and the plain substitution
+   stands.
+3. **Call labels are typed values.** For a verified pure call whose declared return is a named
+   tuple, `f(x).label` is one value with its declared width, like a scalar call.
+   - A tuple local bound to such a call keeps the call term, so the summary stated over
+     `f(x).label` describes it.
+   - Every scalar label is witnessed at once, so a condition over a sibling label is read under
+     the same width guard.
+   - The signed-width guard reads a call label's place marker.
+   - The field-place rule generalizes `f(x).label` in both the checker and the kernel. The kernel
+     accepts it only under a named call root.
+4. **Numeric casts are not calls for frame purposes.** `digit.i64()` runs no callee. Before this
+   change, the frame check treated it as an opaque call: it cleared the path's facts and forgot
+   every call-bound value. A return whose calls are all casts or verified pure calls no longer
+   clears facts either.
+5. **Scalar witnesses are charged once.** The 32-witness function budget used to count
+   duplicates. Every ensure goal of a return re-derives the same witnesses, so a parser body used
+   up the budget before its last return.
+
+**Soundness.**
+- Projection is by position against the declared type. A wrong mapping is caught by
+  `swapped_labels`.
+- Repeated labels are refused (`repeated_label`). The compiler accepts them, but the checker does
+  not project them.
+- A cast has compiler-reserved selectors and writes nothing (`proof_contract_calls_are_pure`
+  already relies on this).
+- A verified pure call writes nothing.
+- The kernel re-checks every generalized place under its own witness.
+
+**Evidence.**
+- `examples/adt_parser.elisa`: `parse_number`, `parse_sum` (structural induction through a tuple
+  local, a guarded step and the bare tuple fall-through) and `parsed_length` (a label read off a
+  call) all prove, and all 35 certificates replay.
+- `examples/rejected_adt_parser.elisa` refuses six functions:
+  - `consumes_nothing`;
+  - `swapped_labels`;
+  - `sum_reads_nothing`, a false inductive bound;
+  - `length_below_ten`;
+  - `value_is_a_byte`, which uses a sibling label's bound;
+  - `repeated_label`.
+
+  Replay gaps occur only in `sum_reads_nothing`.
+- `scripts/test_adt_parser.py` pins both files.
+- Mutation checks:
+  - Reversing the projection order proves `swapped_labels`.
+  - Disabling the kernel's call-rooted field place leaves 8 gaps.
+  - Disabling the checker's field place, the call-label width, or the cast frame skip each leaves
+    `parse_sum` unproven.
+- The full test and dogfood suites pass.
+
+**Still open.**
+- A second pure call forgets an earlier call-bound local's value, so two parses of one stream are
+  not known to agree.
+- `base(x) + d.i64()` over a scalar call-bound local still lacks the call's scalar witness.
+
+## Refuted earlier match arms (P2-03 slice, 2026-09-29)
+
+Arms are tried in order. An arm is reached only when every earlier unguarded arm's pattern
+failed, so a later arm now also gets `not (condition)` for each such arm. This applies to
+statement matches on the return path and to value matches (`return match x: ...`). It is what
+`skip_plus` needed to state `ensure not (result is Token.Plus)`: its `_` arm returns the token
+the `Token.Plus` arm rejected.
+
+**Which conditions can be negated.** A positive pattern fact only needs to be necessary for the
+match. A negated one needs the condition to decide the match exactly, and
+`proof_pattern_condition_exact` admits only these:
+- a variant whose payload subpatterns are all binders or wildcards;
+- a `true`, `false`, or plain decimal integer literal;
+- an integer range with plain decimal bounds;
+- an `as` or or-pattern built from these.
+
+These are refused:
+- a payload literal (`Number(0, _)` also fails on other numbers);
+- a pin (a user `==`);
+- hex, char, and float literals.
+
+**Guards.**
+- A guarded arm is never negated, because its guard can fail.
+- After any guard that calls a function, nothing further is negated in that match: the call may
+  change what the scrutinee term denotes.
+- Value-match guards cannot call anything.
+
+**Trust.** Like the positive pattern facts, these are `branch-condition` boundary facts: replay
+accepts their source-level justification without re-deriving it. That places
+`proof_pattern_condition_exact` and the arm-order bookkeeping in the trusted checker, which is why
+both are small and tested adversarially.
+
+**Evidence.**
+- `examples/match_refuted_arms.elisa` proves, with every certificate replayed:
+  - `skip_plus`;
+  - `classify`, where the second and third arms negate the first;
+  - a literal arm and a range arm;
+  - an or-pattern;
+  - two value matches.
+- `adt_library`'s `skip_plus` now carries `not (result is Token.Plus)`; 72/72 replay.
+- `examples/rejected_match_refuted_arms.elisa` refuses:
+  - a guarded arm;
+  - a payload literal;
+  - an inclusive range whose `_` arm genuinely breaks the claim;
+  - an arm after a guard call;
+  - a later arm (only earlier arms are refuted);
+  - a pin;
+  - a guarded value match.
+- `scripts/test_match_refuted_arms.py` pins both files.
+- Mutation checks:
+  - Admitting every pattern as exact proves `pinned`.
+  - Negating guarded arms proves `guarded_arm`.
+  - Dropping the stop after a guard call proves `after_guard_call`.
+  - Negating guarded value-match arms proves `guarded_value`.
+  - Disabling the negations entirely leaves six goals open in the positive file and reopens
+    `skip_plus` in `adt_library`.
+  - Disabling the value-match negations reopens both value matches.
+- The full test and dogfood suites pass.
+
+**Still open.** Distinct variants are not known to be disjoint: in an `End` arm,
+`not (tokens is Token.Number)` does not prove. That needs the enum's variant list in the checker.

@@ -1,0 +1,51 @@
+extend ElisaProof:
+    private:
+        # A counting range is a semantic source of bounds: every value bound by a loop over
+        # `low..<high` satisfies `low <= item` and `item < high` (or `item <= high` for `..=`).
+        # Keep these as traced facts rather than treating the syntax as an axiom. They are valid
+        # for every iteration, and the normal call/write/move boundaries still discard them when
+        # the surrounding state can change. Refinement filters are unwrapped only to recover the
+        # range; their predicates are handled separately by the ordinary loop checker.
+        def proof_loop_range_base(iterable: Ast::Expr) -> Ast::Expr:
+            match iterable:
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_loop_range_base(base)
+                Ast::Expr.Paren(inner, _):
+                    return proof_loop_range_base(inner)
+                _:
+                    return iterable
+
+        # The proof state is name-based, while Elisa permits a loop binder to shadow an outer
+        # binding with the same spelling. Represent the current binder with a structural, opaque
+        # proof atom so `for x in ...: return x` cannot become definitionally equal to the outer
+        # `x`. The source offset makes nested binders with the same name distinct; this atom is
+        # internal to certificates and is never emitted as executable Elisa.
+        def proof_loop_binder_value(variable: sview, position: Ast::Pos) -> Ast::Expr:
+            marker: mutable darray[Ast::Expr] = []
+            marker.push(Ast::Expr.Ident(variable, position))
+            marker.push(Ast::Expr.IntLit(position.offset.i64(), position))
+            return Ast::Expr.Tuple(marker, position)
+
+        def proof_add_loop_range_facts(iterable: Ast::Expr, variables: darray[sview]&, binder_position: Ast::Pos, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, line: u32) -> void:
+            return if variables.count == 0 or variables[0] == ""
+            range: Ast::Expr = proof_loop_range_base(iterable)
+            # The binder is represented by its own proof atom, so the type witness has to be
+            # keyed by that atom: a witness on the bare spelling would never meet a goal.
+            binder: Ast::Expr = proof_loop_binder_value(variables[0], binder_position)
+            match range:
+                Ast::Expr.Binary(low, operator, high, position):
+                    return if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe
+                    lower: Ast::Expr = Ast::Expr.Binary(low, TokenKind.LtEq, binder, position)
+                    upper_operator: TokenKind = TokenKind.LtEq if operator == TokenKind.RangeLe else TokenKind.Lt
+                    upper: Ast::Expr = Ast::Expr.Binary(binder, upper_operator, high, position)
+                    proof_add_traced_fact(facts, report, lower, "loop-range", line, name)
+                    proof_add_traced_fact(facts, report, upper, "loop-range", line, name)
+                    # The endpoints of a counting range are integers, so the binder is one too.
+                    # That is the same semantic source as the two bounds just recorded.
+                    proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(binder, binder_position), line, name)
+                _:
+                    # Iterating a container whose elements were resolved to primitive scalars
+                    # binds each element, so the binder inherits that witness. A container of
+                    # aggregates, or one with no element witness, leaves the binder unwitnessed.
+                    return if variables.count != 1
+                    proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(binder, binder_position), line, name) if proof_scalar_element_remaining(range, facts, 0) == 1

@@ -113,56 +113,6 @@ extend ElisaProof:
                 _:
                     pass
 
-        # A counting range is a semantic source of bounds: every value bound by a loop over
-        # `low..<high` satisfies `low <= item` and `item < high` (or `item <= high` for `..=`).
-        # Keep these as traced facts rather than treating the syntax as an axiom. They are valid
-        # for every iteration, and the normal call/write/move boundaries still discard them when
-        # the surrounding state can change. Refinement filters are unwrapped only to recover the
-        # range; their predicates are handled separately by the ordinary loop checker.
-        def proof_loop_range_base(iterable: Ast::Expr) -> Ast::Expr:
-            match iterable:
-                Ast::Expr.Refinement(base, _, _):
-                    return proof_loop_range_base(base)
-                Ast::Expr.Paren(inner, _):
-                    return proof_loop_range_base(inner)
-                _:
-                    return iterable
-
-        # The proof state is name-based, while Elisa permits a loop binder to shadow an outer
-        # binding with the same spelling. Represent the current binder with a structural, opaque
-        # proof atom so `for x in ...: return x` cannot become definitionally equal to the outer
-        # `x`. The source offset makes nested binders with the same name distinct; this atom is
-        # internal to certificates and is never emitted as executable Elisa.
-        def proof_loop_binder_value(variable: sview, position: Ast::Pos) -> Ast::Expr:
-            marker: mutable darray[Ast::Expr] = []
-            marker.push(Ast::Expr.Ident(variable, position))
-            marker.push(Ast::Expr.IntLit(position.offset.i64(), position))
-            return Ast::Expr.Tuple(marker, position)
-
-        def proof_add_loop_range_facts(iterable: Ast::Expr, variables: darray[sview]&, binder_position: Ast::Pos, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, line: u32) -> void:
-            return if variables.count == 0 or variables[0] == ""
-            range: Ast::Expr = proof_loop_range_base(iterable)
-            # The binder is represented by its own proof atom, so the type witness has to be
-            # keyed by that atom: a witness on the bare spelling would never meet a goal.
-            binder: Ast::Expr = proof_loop_binder_value(variables[0], binder_position)
-            match range:
-                Ast::Expr.Binary(low, operator, high, position):
-                    return if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe
-                    lower: Ast::Expr = Ast::Expr.Binary(low, TokenKind.LtEq, binder, position)
-                    upper_operator: TokenKind = TokenKind.LtEq if operator == TokenKind.RangeLe else TokenKind.Lt
-                    upper: Ast::Expr = Ast::Expr.Binary(binder, upper_operator, high, position)
-                    proof_add_traced_fact(facts, report, lower, "loop-range", line, name)
-                    proof_add_traced_fact(facts, report, upper, "loop-range", line, name)
-                    # The endpoints of a counting range are integers, so the binder is one too.
-                    # That is the same semantic source as the two bounds just recorded.
-                    proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(binder, binder_position), line, name)
-                _:
-                    # Iterating a container whose elements were resolved to primitive scalars
-                    # binds each element, so the binder inherits that witness. A container of
-                    # aggregates, or one with no element witness, leaves the binder unwitnessed.
-                    return if variables.count != 1
-                    proof_add_type_bound_fact(facts, report, proof_scalar_term_marker(binder, binder_position), line, name) if proof_scalar_element_remaining(range, facts, 0) == 1
-
         # Check a restricted expression-position catch at a return boundary. A fallible call has
         # two semantically different post-states: the success arm may consume the callee's
         # verified result summary, while error arms may consume only the call's checked frame
@@ -258,7 +208,9 @@ extend ElisaProof:
         # facts justify another arm.
         def proof_check_value_match_return(scrutinee: Ast::Expr, arms: darray[Ast::MatchArm], names: darray[sview]&, values: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, position: Ast::Pos) -> void:
             scrutinee_value: Ast::Expr = proof_substitute(scrutinee, names, values)
-            for arm in arms |arms, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, scrutinee_value, position|:
+            # Every earlier unguarded arm with an exact condition failed; guards here never call.
+            refuted: mutable darray[Ast::Expr] = []
+            for arm in arms |arms, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, scrutinee_value, position, refuted|:
                 if not proof_return_analysis_budget_available(facts, names, values, report, name, position.line):
                     report.proof_obligation(false)
                     return
@@ -271,8 +223,12 @@ extend ElisaProof:
                     report.proof_obligation(false)
                     proof_add_finding(report, "pattern-unsupported", position.line, name, "value-match pattern cannot enter a verified proof state")
                 pattern_condition: Ast::Expr? = proof_pattern_condition(arm.pattern, scrutinee_value, position) if pattern_supported else null
+                if pattern_supported:
+                    for earlier in refuted |earlier, arm_facts, report, name, position|:
+                        proof_add_traced_fact(arm_facts, report, Ast::Expr.Unary(TokenKind.Not, earlier, position), "branch-condition", position.line, name)
                 if pattern_condition is condition:
                     proof_add_traced_fact(arm_facts, report, condition, "branch-condition", position.line, name)
+                    refuted.push(condition) if proof_pattern_condition_exact(arm.pattern) and arm.guard is Ast::Expr.Absent
                 else:
                     match arm.pattern:
                         Ast::Pattern.Wildcard:

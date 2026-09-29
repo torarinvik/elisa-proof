@@ -156,7 +156,7 @@ summary trace cannot be relabelled as one.
 | `branch-condition` | `check/statement_checks.elisa`, `check/bounds_and_facts.elisa`, `check/returns/matches.elisa` | the condition of the taken branch |
 | `loop-condition` | `check/statement_checks.elisa`, `check/returns/loops.elisa` | a `while` condition inside the body |
 | `loop-invariant` | `check/statement_checks.elisa`, `check/returns/loops.elisa` | an invariant assumed at body entry (and proved separately) |
-| `loop-range` | `check/statement_checks.elisa` | a `for` index's range bounds |
+| `loop-range` | `check/loop_range_facts.elisa` | a `for` index's range bounds |
 | `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
 <!-- /inventory:boundary-trace-kinds -->
 

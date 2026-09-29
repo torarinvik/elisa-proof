@@ -81,3 +81,83 @@ extend ElisaProof:
             entry: usize = proof_source_kernel_tuple_label_line(index, line)
             return "" if entry >= index.lines.count or requested >= index.label_counts[entry]
             return index.labels[index.label_starts[entry] + requested]
+
+        # The field labels of a named-tuple type in element order, or none. An element's label is
+        # the one `__tuple_label` annotation between the previous element's start (the tuple's own
+        # start for the first) and its own. An unnamed element, a second candidate or a repeated
+        # label gives no labels at all, and `result.f` then stays an opaque field.
+        def proof_return_tuple_labels(type_expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
+            labels: mutable darray[sview] = []
+            match type_expression:
+                Ast::Expr.Tuple(elements, tuple_position):
+                    lower: mutable Ast::Pos = tuple_position
+                    for element in elements |labels, lower, annotations|:
+                        upper: Ast::Pos = Ast::expr_pos(element)
+                        found: mutable sview = ""
+                        candidates: mutable usize = 0
+                        for annotation in annotations |lower, upper, found, candidates|:
+                            continue if annotation.owner != "__tuple_label" or annotation.line < lower.line or annotation.line > upper.line
+                            if annotation.offset >= lower.offset and annotation.offset < upper.offset:
+                                candidates <- candidates + 1
+                                found <- annotation.name
+                        for earlier in labels |found, candidates|:
+                            candidates <- 0 if earlier == found
+                        if candidates != 1 or found == "":
+                            labels.clear()
+                            return labels
+                        labels.push(found)
+                        lower <- upper
+                _:
+                    pass
+            return labels
+
+        # A tuple type whose every element is a primitive scalar.
+        def proof_scalar_tuple_type(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, functions: ProofFunctionTable&) -> bool:
+            match type_expression:
+                Ast::Expr.Tuple(elements, _):
+                    return false if elements.count == 0
+                    for element in elements |declarations, functions|:
+                        return false if proof_scalar_type_kind_index(element, declarations, functions.type_audit_index, 0) != 1
+                    return true
+                _:
+                    return false
+
+        # `f(args).label`, for a verified total-pure `f` whose declared return is a named tuple, is
+        # one value just as a scalar call is (see `proof_add_pure_call_witnesses`), under the same
+        # argument conditions. Each primitive scalar element's witness carries its declared width.
+        def proof_add_tuple_field_call_witnesses(object: Ast::Expr, field: sview, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void can[Memory.Allocate, Abort.Panic]:
+            match object:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return if not proof_contract_calls_are_pure(object, functions)
+                    callee_name: sview = proof_ident_name(callee)
+                    return if callee_name == ""
+                    called: usize = proof_function_index(functions, callee_name)
+                    return if called >= functions.return_label_counts.count
+                    for argument in arguments |facts, report|:
+                        continue if proof_value_binding_argument(argument, report, 0)
+                        return if not proof_scalar_term_witnessed(argument, facts, 0)
+                    declared: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(report.source_declarations, callee_name, 0)
+                    return if declared.count != 1
+                    match declared.type_expression:
+                        Ast::Expr.Tuple(elements, _):
+                            return if elements.count != functions.return_label_counts[called]
+                            start: usize = functions.return_label_starts[called]
+                            labeled_field: mutable bool = false
+                            for index in 0..<elements.count |functions, start, field, labeled_field|:
+                                labeled_field <- true if functions.all_return_labels[start + index] == field
+                            return if not labeled_field
+                            # Every scalar label is typed at once: a summary or branch condition
+                            # over a sibling label is read under the same width guards.
+                            for index in 0..<elements.count |elements, functions, start, object, facts, report, line, owner, position|:
+                                element: Ast::Expr = elements[index]
+                                continue if proof_scalar_type_kind_index(element, report.source_declarations, functions.type_audit_index, 0) != 1
+                                labeled: Ast::Expr = Ast::Expr.Field(object, functions.all_return_labels[start + index], position)
+                                proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(labeled, position), line, owner)
+                                signed_width: i64 = proof_signed_type_width(element, report.source_declarations, 0)
+                                proof_add_scalar_type_witness(facts, report, proof_signed_place_marker(labeled, signed_width, position), line, owner) if signed_width > 0
+                                unsigned_width: i64 = proof_unsigned_type_width(element, report.source_declarations, 0)
+                                proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(labeled, unsigned_width, position), line, owner) if unsigned_width > 0
+                        _:
+                            pass
+                _:
+                    pass
