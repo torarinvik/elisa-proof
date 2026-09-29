@@ -414,7 +414,7 @@ The critical path is M0 → M1 → M2/M3/M4 → M5/M6/M7. M8–M10 grow alongsid
 
 For each backlog item, use this execution loop: inspect current code and failures; state the invariant; create positive and adversarial tests; implement the smallest coherent change; run focused then full relevant gates; inspect trust and coverage deltas; document remaining limitations; commit the validated gain. A compiler defect discovered in the loop becomes a linked prerequisite, not an excuse to suppress the failing proof test.
 
-The detailed task backlog, ranked by return on investment, lives in [BACKLOG.md](BACKLOG.md): more than 80 tasks with IDs, rationale and completion evidence. It starts with a refusal census (A-01), so each later task is chosen by measured impact.
+The detailed task backlog, ranked by return on investment, lives in [BACKLOG.md](BACKLOG.md): 74 tasks with IDs, rationale and completion evidence. It starts with a refusal census (A-01), so each later task is chosen by measured impact.
 
 ## 21. Decisions that need evidence before commitment
 
