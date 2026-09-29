@@ -69,4 +69,5 @@ def main():
     print(f"census: {proven}/{total} proven across {len(files)} examples, {len(gates)} gates, {len(unreadable)} unreadable")
 
 
-main()
+if __name__ == "__main__":
+    main()
