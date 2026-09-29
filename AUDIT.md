@@ -10104,3 +10104,9 @@ both `IntLit(-n)` and `Unary(-, n)` spellings, and widening `proof_type_bound_na
 changed nothing. The cause is not yet found, so the change was reverted rather than traded against
 a regression. A next attempt should bisect the goal path with a negative lower fact of type-bound
 origin (a user `requires v >= -5` does not trigger it).
+
+Further bisecting (same day): placing the range facts after the scalar witness, spelling the lower
+bound `v >= MIN` instead of `MIN <= v`, and widening `proof_type_bound_name` all leave the
+regression unchanged, and even the exact goal `ensure result >= -128` stays unproven beside the
+fact `v >= -128`. A user `requires` with the same shape proves, so the type-bound origin or the
+signed width marker's interaction with a negative lower bound is the remaining suspect.
