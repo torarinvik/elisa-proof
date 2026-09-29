@@ -10226,3 +10226,12 @@ The deferred P2-03 list named "the c4 scalar witness" after scratch probe `c4`: 
 had no scalar witness because `base` was not pure, so its summary was lost. B-02's deterministic
 call witnesses close it; `examples/widened_call_result.elisa` is the probe and
 `examples/rejected_widened_call_result.elisa` shows its bound is tight.
+
+## Enum tag tests as bools (BACKLOG B-05)
+
+`name is Enum.Variant` in a goal gets a primitive scalar witness: `is` is the builtin tag test and
+is never overloaded, and a name denotes one value in a goal, so the test is one bool. A subject
+that is not a bare name gets no witness; a call subject is still refused as
+`contract-proposition-type`. Not yet closed: `ensure result == (c is E.V)` over `if c is E.V:
+return true` needs `true == P` from the fact `P`, a bool-literal equality rule that the producer
+and the kernel both lack.
