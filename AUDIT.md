@@ -10065,7 +10065,7 @@ the test catches it. Full suite chunks 00-18 and dogfood chunks 00-08 pass.
 Not done, each refused conservatively today (never unsound; variant disjointness has since landed,
 see "Variant exclusion after a match arm"): `parse_twice_agrees`, the c4 scalar witness, bool equality in contracts
 (`ensure result == (a is b)` reports `contract-proposition-type`), returned_chain, qualified
-`Module::CONST` in bodies (since landed for returns, local initializers and `if` branches; see below), tuple-field `@r` for package_reader, and signed parameter range facts. Each needs a
+`Module::CONST` in bodies (since landed for returns, local initializers and `if` branches; see below), tuple-field `@r` for package_reader, and signed parameter range facts (both bounds since landed; see "Signed lower bound"). Each needs a
 new kernel rule with its own soundness argument; none is started. Negative-literal typing was
 re-probed (`return -x` with `x >= 0` proves `result <= 0`) and works.
 
