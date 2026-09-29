@@ -1,16 +1,16 @@
 # Refusal census
 
-654 examples, 5741/7438 obligations proven.
+654 examples, 5745/7444 obligations proven.
 
 | Count | Gate |
 | ---: | --- |
 | 435 | no-rule |
 | 390 | function-summary-unverified: callee body has not established a verified executable summary |
-| 132 | wrap-guard-goal |
+| 133 | wrap-guard-goal |
 | 127 | contract-proposition-type: kernel proposition formation rejected the term or operator |
 | 122 | control-flow-analysis-budget: control-flow analysis exceeded its fact snapshot budget |
 | 68 | contract-proposition-type: kernel proposition typing work budget exceeded |
-| 48 | ambiguous-constant-goal |
+| 47 | ambiguous-constant-goal |
 | 39 | wrap-guard-fact |
 | 28 | expression-unsupported: operator or index may dispatch to an unmodeled user protocol |
 | 27 | borrow-call-opaque: a method-shaped call may write its receiver, and no summary maps a receiver |
@@ -24,9 +24,9 @@
 | 20 | region-alias-unsupported: an sview value has no directly tracked live backing region |
 | 17 | control-flow-analysis-budget: control-flow analysis exceeded its step budget |
 | 17 | region-call-opaque: a region-polymorphic call has no converged lifetime summary |
+| 14 | literal-width |
 | 14 | region-call-opaque: a region-polymorphic call is not mapped to a verified caller region |
 | 13 | resource-write-readonly: a whole-binding write requires a mutable resource binding |
-| 12 | literal-width |
 | 12 | resource-use-after-move: a moved resource is used again |
 | 9 | quantifier |
 | 9 | region-alias-unsupported: region value aliases require a live, unmoved whole-binding source with the same tracked region |
@@ -97,13 +97,13 @@ Wall time under the census's parallel load, so treat it as a ranking.
 
 | Seconds | Example |
 | ---: | --- |
-| 136.60 | rejected_kernel_arena_cycle.elisa |
-| 47.09 | kernel_intern_runtime.elisa |
-| 27.44 | loop_state_joins.elisa |
-| 16.81 | rejected_loop_state_joins.elisa |
-| 12.98 | unsigned_resource_source_policy.elisa |
-| 3.60 | dogfood_kernel_core.elisa |
-| 3.47 | field_places.elisa |
-| 2.99 | rejected_shared_fixed_borrows.elisa |
-| 2.81 | rejected_dogfood_kernel_core.elisa |
-| 2.57 | rejected_budget.elisa |
+| 118.70 | rejected_kernel_arena_cycle.elisa |
+| 26.45 | kernel_intern_runtime.elisa |
+| 25.88 | loop_state_joins.elisa |
+| 16.17 | rejected_loop_state_joins.elisa |
+| 13.74 | unsigned_resource_source_policy.elisa |
+| 3.90 | rejected_shared_fixed_borrows.elisa |
+| 3.83 | rejected_dogfood_kernel_core.elisa |
+| 3.68 | rejected_dispatcher_budget.elisa |
+| 2.89 | rejected_budget.elisa |
+| 2.09 | dogfood_kernel_core.elisa |

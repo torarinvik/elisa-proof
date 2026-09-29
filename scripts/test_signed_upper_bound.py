@@ -25,11 +25,15 @@ assert data["summary"]["failed"] == 1 and data["replay"]["gaps"] == 0
 assert [(f["name"], f["line"]) for f in data["findings"]] == [("narrow", 3)], data["findings"]
 
 data = run("signed_lower_bound.elisa")
-assert data["summary"]["proven"] == 4 and data["summary"]["failed"] == 0 and data["findings"] == []
-assert data["replay"]["gaps"] == 0 and data["replay"]["replayed"] == 4
+assert data["summary"]["proven"] == 6 and data["summary"]["failed"] == 0 and data["findings"] == []
+assert data["replay"]["gaps"] == 0 and data["replay"]["replayed"] == 6
 
 data = run("rejected_signed_lower_bound.elisa")
-assert data["summary"]["failed"] == 1 and data["replay"]["gaps"] == 0
-assert [(f["name"], f["line"]) for f in data["findings"]] == [("narrow_floor", 3)], data["findings"]
+assert data["summary"]["failed"] == 3 and data["replay"]["gaps"] == 0
+assert [(f["name"], f["line"]) for f in data["findings"]] == [("narrow_floor", 3), ("beyond_floor", 7), ("unsigned_floor", 11)], data["findings"]
+# `-(MAX+1)` is the only negated literal past the maximum with one typed value; one further, or any
+# negative literal at an unsigned width, stays out of width.
+gates = {g["name"]: g.get("refusal_gate") for g in data["goals"] if not g["proven"]}
+assert gates == {"narrow_floor": "no-rule", "beyond_floor": "literal-width", "unsigned_floor": "literal-width"}, gates
 
-print("signed upper bound: i8 parameter proves <= 127 and refuses <= 126")
+print("signed upper bound: i8 parameter proves <= 127 and refuses <= 126; >= -128 proves and >= -129 is out of width")

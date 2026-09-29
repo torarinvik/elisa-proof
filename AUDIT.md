@@ -10181,3 +10181,7 @@ signed widths below 64. The same limitation remains for a *goal* written `>= -12
 ## Refusal census and refusal gate (BACKLOG A-01, A-02)
 
 `proof_refusal_gate` is a diagnostic only. It names the first `proof_goal_depth` guard that refuses an unproven goal, and nothing proves anything because of it. The JSON report emits `refusal_gate` on unproven goals and on findings that carry them. `scripts/refusal_census.py` buckets every example by gate into `docs/census/`. First census: 5741/7438 obligations proven across 654 examples. The largest buckets are `no-rule` (435), unverified callee summaries (390) and `wrap-guard-goal` (132).
+
+## Negated signed-minimum literal (BACKLOG B-01)
+
+`proof_signed_constant_at_width` and its replay mirror read `-(MAX+1)` directly over an integer literal as the signed minimum. This is the only negated literal past the width maximum they accept. The reason is two's complement: the literal's wrapped reading is `-(MIN)`, which is `MIN`, and the mathematical reading is also `MIN`, so the ambiguous-constant guard has nothing left to disagree about. `>= -128` on `i8` now proves and replays. `>= -129` on `i8` and `>= -256` on `u8` are still refused at `literal-width`. Tests: `examples/signed_lower_bound.elisa`, `examples/rejected_signed_lower_bound.elisa`, `scripts/test_signed_upper_bound.py`.

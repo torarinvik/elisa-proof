@@ -22,7 +22,7 @@ def gates(name):
     return [f.get("refusal_gate") for f in run(name)["findings"]]
 
 
-assert gates("rejected_signed_lower_bound.elisa") == ["no-rule"]
+assert gates("rejected_signed_lower_bound.elisa") == ["no-rule", "literal-width", "literal-width"]
 assert gates("rejected_variant_exclusion.elisa") == ["non-comparison-goal"]
 assert gates("rejected_qualified_body_shadow.elisa") == ["wrap-guard-goal"]
 
