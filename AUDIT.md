@@ -10058,3 +10058,38 @@ both are small and tested adversarially.
 
 **Still open.** Distinct variants are not known to be disjoint: in an `End` arm,
 `not (tokens is Token.Number)` does not prove. That needs the enum's variant list in the checker.
+
+## Construct arguments in replay and negated guard orders (2026-09-29)
+
+Both holes came from the engine's music-transition proof (`elisa-engine` `proof/audio_music.elisa`).
+
+**Construct arguments.** A call summary over `f(T{a: x})` records its fact over the construct
+itself. `proof_replay_expr_equal_depth` had no `Construct` arm, so it could not match the fact
+to its trace, and the certificate replayed with a gap. The new arm compares the type expression
+and each field's name and value, in order.
+
+**Negated guard orders.** A failed early return such as `return 0 if a >= b` leaves
+`not (a >= b)` on the fall-through path. The plain-difference closure skipped negated facts, so
+the quotient rule could not use `a < b` to bound `a * k / b` by `k`. The closure now reads a
+negated primitive order over plain sides as its difference constraint, which
+`proof_collect_difference_constraints` already negates. The kernel mirrors this in
+`proof_kernel_replay_collect_plain_differences`.
+
+**Evidence.**
+- `examples/replay_construct_arguments.elisa` proves 11/11 replayed. The previous build proved
+  it with 3 replay gaps.
+- `examples/negated_guard_orders.elisa` proves `progress`, `proper_fraction`,
+  `descending_guard` and `below_after_guard`. The previous build left the first three open.
+- The rejected files keep open:
+  - a tighter cap;
+  - swapped construct fields;
+  - a different construct;
+  - a too-tight progress bound;
+  - a guard that runs the wrong way;
+  - a guard that leaves equality in.
+- `scripts/test_replay_construct_arguments.py` and `scripts/test_negated_guard_orders.py` pin all
+  four files, and dogfood probes them.
+- The full test and dogfood suites pass.
+
+**Still open.** A sum of two call results, such as `cap(p) + cap(q) <= 20` from two
+`result <= 10` summaries, does not prove.

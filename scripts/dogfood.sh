@@ -722,6 +722,10 @@ run_probe loop_state_joins examples/loop_state_joins.elisa 0
 run_probe rejected_loop_state_joins examples/rejected_loop_state_joins.elisa 1
 run_probe monotone_orders examples/monotone_orders.elisa 0
 run_probe rejected_monotone_orders examples/rejected_monotone_orders.elisa 1
+run_probe replay_construct_arguments examples/replay_construct_arguments.elisa 0
+run_probe rejected_replay_construct_arguments examples/rejected_replay_construct_arguments.elisa 1
+run_probe negated_guard_orders examples/negated_guard_orders.elisa 0
+run_probe rejected_negated_guard_orders examples/rejected_negated_guard_orders.elisa 1
 run_probe bound_propagation examples/bound_propagation.elisa 0
 run_probe rejected_bound_propagation examples/rejected_bound_propagation.elisa 1
 run_probe strict_shift examples/strict_shift.elisa 0
@@ -1575,6 +1579,8 @@ cases = (
     ("branch_join", {('not_always_kept', 'ensure-unproven'), ('replace_too_far', 'ensure-unproven'), ('stale_rebind', 'ensure-unproven')}),
     ("loop_state_joins", {('untrue_aggregate_bound', 'ensure-unproven'), ('escaping_arm', 'invariant-not-preserved'), ('arm_local_value', 'ensure-unproven'), ('growing_arm_local', 'invariant-not-preserved'), ('untrue_negated_order', 'ensure-unproven')}),
     ("monotone_orders", {('untrue_strict_sum', 'ensure-unproven'), ('untrue_clamped_sum', 'ensure-unproven'), ('untrue_loose_operand', 'ensure-unproven'), ('untrue_full_share', 'ensure-unproven'), ('untrue_small_limit', 'ensure-unproven'), ('untrue_relational_clamp', 'ensure-unproven'), ('untrue_below_sum', 'ensure-unproven'), ('untrue_zero_multiple', 'ensure-unproven')}),
+    ("replay_construct_arguments", {('untrue_tighter_cap', 'ensure-unproven'), ('untrue_swapped_fields', 'ensure-unproven'), ('untrue_other_construct', 'ensure-unproven')}),
+    ("negated_guard_orders", {('untrue_tight_progress', 'ensure-unproven'), ('untrue_reversed_guard', 'ensure-unproven'), ('untrue_inclusive_guard', 'ensure-unproven')}),
 )
 for name, owners in cases:
     with open(os.path.join(report_dir, name + ".json"), encoding="utf-8") as handle:
