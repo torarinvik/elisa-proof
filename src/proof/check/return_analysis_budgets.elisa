@@ -1,0 +1,75 @@
+# Bounds on return-path analysis: statement steps and the size of each branch snapshot.
+extend ElisaProof:
+    private:
+        const PROOF_CONTROL_FLOW_DEPTH_LIMIT: usize = 64
+        const PROOF_RETURN_ANALYSIS_BUDGET: usize = 64
+        const PROOF_KERNEL_REPLAY_EXPR_EQUAL_STEP_BUDGET: usize = 128
+        # Branch snapshots duplicate AST-backed symbolic state. Keep this bounded so malformed
+        # or adversarial control flow terminates predictably; exhaustion is reported unsupported.
+        const PROOF_RETURN_FACT_STATE_BUDGET: usize = 64
+        # Some typed arena parameters contribute more than the base fact count before body
+        # analysis begins. Give those states bounded headroom without changing the separate
+        # small-function policy; the ordinary 64-step control-flow budget remains unchanged.
+        const PROOF_RETURN_FACT_STATE_ENTRY_CAP: usize = 128
+        const PROOF_SMALL_FUNCTION_FACT_STATE_BUDGET: usize = 256
+        const PROOF_SMALL_FUNCTION_BODY_LIMIT: usize = 4
+        const PROOF_PARAMETER_HEAVY_PARAMETER_LIMIT: usize = 12
+        const PROOF_PARAMETER_HEAVY_BODY_LIMIT: usize = 24
+        const PROOF_CALL_SUMMARY_BODY_MIN: usize = 12
+        const PROOF_CALL_SUMMARY_BODY_MAX: usize = 24
+        const PROOF_CALL_SUMMARY_TARGET_MAX: usize = 4
+
+        def proof_return_analysis_fact_state_budget(body_count: usize, parameter_count: usize, call_target_count: usize) -> usize:
+            return PROOF_SMALL_FUNCTION_FACT_STATE_BUDGET if body_count <= PROOF_SMALL_FUNCTION_BODY_LIMIT
+            return PROOF_RETURN_FACT_STATE_ENTRY_CAP if parameter_count >= PROOF_PARAMETER_HEAVY_PARAMETER_LIMIT and body_count <= PROOF_PARAMETER_HEAVY_BODY_LIMIT
+            # A bounded dispatcher can have few parameters yet accumulate many facts from
+            # repeated verified call summaries. Grant the same fixed headroom only to medium
+            # bodies with a small, explicit call-target set; the independent step cap remains.
+            return PROOF_RETURN_FACT_STATE_ENTRY_CAP if body_count >= PROOF_CALL_SUMMARY_BODY_MIN and body_count <= PROOF_CALL_SUMMARY_BODY_MAX and call_target_count > 0 and call_target_count <= PROOF_CALL_SUMMARY_TARGET_MAX
+            return PROOF_RETURN_FACT_STATE_BUDGET
+
+        def proof_return_analysis_step_budget(name: sview) -> usize:
+            return PROOF_KERNEL_REPLAY_EXPR_EQUAL_STEP_BUDGET if name == "proof_kernel_replay_expr_equal"
+            return PROOF_RETURN_ANALYSIS_BUDGET
+
+        def proof_return_analysis_budget_available(facts: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            step_budget: usize = PROOF_RETURN_ANALYSIS_BUDGET if report.return_analysis_step_budget == 0 else report.return_analysis_step_budget
+            within_steps: bool = report.return_analysis_steps < step_budget
+            fact_state_budget: usize = PROOF_RETURN_FACT_STATE_BUDGET if report.return_analysis_fact_state_budget == 0 else report.return_analysis_fact_state_budget
+            within_facts: bool = facts.count <= fact_state_budget
+            within_names: bool = names.count <= fact_state_budget
+            within_values: bool = values.count <= fact_state_budget
+            report.measured_live_facts_peak <- facts.count if facts.count > report.measured_live_facts_peak
+            if within_steps and within_facts and within_names and within_values:
+                report.measured_control_flow_steps <- report.measured_control_flow_steps + 1
+                return true
+            if not report.return_analysis_budget_reported:
+                report.return_analysis_budget_reported <- true
+                reason: mutable sview = "control-flow analysis exceeded its bounded symbolic-state budget"
+                dimension: mutable sview = "state"
+                observed: mutable usize = 0
+                limit: mutable usize = 0
+                if not within_steps:
+                    reason <- "control-flow analysis exceeded its step budget"
+                    dimension <- "steps"
+                    # Include the statement whose analysis was denied; the completed-work
+                    # counter itself correctly remains capped at the configured limit.
+                    observed <- report.return_analysis_steps + 1
+                    limit <- step_budget
+                if within_steps and not within_facts:
+                    reason <- "control-flow analysis exceeded its fact snapshot budget"
+                    dimension <- "facts"
+                    observed <- facts.count
+                    limit <- fact_state_budget
+                if within_steps and within_facts and not within_names:
+                    reason <- "control-flow analysis exceeded its binding-name snapshot budget"
+                    dimension <- "names"
+                    observed <- names.count
+                    limit <- fact_state_budget
+                if within_steps and within_facts and within_names and not within_values:
+                    reason <- "control-flow analysis exceeded its binding-value snapshot budget"
+                    dimension <- "values"
+                    observed <- values.count
+                    limit <- fact_state_budget
+                proof_add_budget_finding(report, "control-flow-analysis-budget", line, name, reason, dimension, observed, limit)
+            return false

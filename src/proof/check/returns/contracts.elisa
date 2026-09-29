@@ -75,6 +75,74 @@ extend ElisaProof:
                     pass
             return (false, empty, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
 
+        # `x: T = <block>` -- how a loop with a header accumulator arrives as a local's value --
+        # runs the block's statements in the function's own frame and then binds its value. When
+        # no name the block declares is visible there, flattening it to `statements ++ [x: T =
+        # value]` keeps every later read meaning the same: the compiler rejects reads of the
+        # block's names after it, and a later declaration of one rebinds it as usual. A block
+        # that would shadow a visible name is left alone.
+        def proof_flatten_value_block_declaration(body: darray[Ast::Stmt]&, names: darray[sview]&) -> (known: bool, body: darray[Ast::Stmt]) can[Memory.Allocate, Abort.Panic]:
+            flattened: mutable darray[Ast::Stmt] = []
+            visible: mutable darray[sview] = []
+            visible.extend(names)
+            found: mutable bool = false
+            for statement in body |flattened, visible, found|:
+                if found:
+                    flattened.push(statement)
+                    continue
+                block: (known: bool, statements: darray[Ast::Stmt], local_name: sview, type_expression: Ast::Expr, value: Ast::Expr, position: Ast::Pos) = proof_declared_value_block(statement)
+                if block.known and not proof_block_shadows(block.statements, visible):
+                    flattened.extend(block.statements)
+                    # `x: T = x` over the block's own `x: T` binds the value it already holds, so
+                    # it is dropped rather than read as a shadowing that forgets every fact.
+                    flattened.push(Ast::Stmt.VarDecl(block.local_name, block.type_expression, block.value, block.position)) if not proof_block_identity_rebind(block.statements, block.local_name, block.type_expression, block.value)
+                    found <- true
+                    continue
+                flattened.push(statement)
+                declared: sview = proof_statement_declared_name(statement)
+                visible.push(declared) if declared != ""
+            return (found, flattened)
+
+        def proof_declared_value_block(statement: Ast::Stmt) -> (known: bool, statements: darray[Ast::Stmt], local_name: sview, type_expression: Ast::Expr, value: Ast::Expr, position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+            empty: mutable darray[Ast::Stmt] = []
+            match statement:
+                Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                    match initializer:
+                        Ast::Expr.Block(statements, block_value, _, _):
+                            match block_value:
+                                Ast::Expr.Absent:
+                                    pass
+                                Ast::Expr.Invalid:
+                                    pass
+                                _:
+                                    return (true, statements, local_name, type_expression, block_value, position)
+                        _:
+                            pass
+                _:
+                    pass
+            return (false, empty, "", Ast::Expr.Absent, Ast::Expr.Absent, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+
+        def proof_block_identity_rebind(statements: darray[Ast::Stmt]&, local_name: sview, type_expression: Ast::Expr, value: Ast::Expr) -> bool:
+            match value:
+                Ast::Expr.Ident(value_name, _):
+                    return false if value_name != local_name
+                _:
+                    return false
+            same: mutable bool = false
+            for statement in statements |local_name, type_expression, same|:
+                match statement:
+                    Ast::Stmt.VarDecl(declared, declared_type, _, _):
+                        same <- proof_expr_equal(declared_type, type_expression) if declared == local_name
+                    _:
+                        pass
+            same
+
+        def proof_block_shadows(statements: darray[Ast::Stmt]&, visible: darray[sview]&) -> bool:
+            for statement in statements |visible|:
+                declared: sview = proof_statement_declared_name(statement)
+                return true if declared != "" and (any candidate in visible where candidate == declared)
+            false
+
         # Check a return value block in a private copy of the state. The block's declarations
         # are scoped to it and every path through it ends at the appended return, so only its
         # validity and any loop edge that escapes it reach the enclosing flow.
@@ -329,6 +397,9 @@ extend ElisaProof:
                             # true at the end of the branch means true at this point.
                             else_reads: darray[Ast::Expr] = proof_join_reads(else_facts, values, names, else_values, branch_value_count)
                             proof_restore_call_stable_facts(else_reads, facts, names, frame_parameters, report, name, report.aliased_names) if else_names.count == names.count
+                            # The same holds for the values it leaves: the call-stable ones, a
+                            # module constant among them, keep their recorded value.
+                            proof_restore_branch_values(values, names, then_values, else_values, false, else_names.count == names.count, branch_value_count, facts, frame_parameters, report, name)
                     elif then_falls_through and not else_falls_through:
                         if condition_facts_stable and then_names.count == names.count and then_values.count >= branch_value_count:
                             for index in 0..<branch_value_count |index, values, then_values|:
@@ -340,6 +411,7 @@ extend ElisaProof:
                             proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                             then_reads: darray[Ast::Expr] = proof_join_reads(then_facts, values, names, then_values, branch_value_count)
                             proof_restore_call_stable_facts(then_reads, facts, names, frame_parameters, report, name, report.aliased_names) if then_names.count == names.count
+                            proof_restore_branch_values(values, names, then_values, else_values, then_names.count == names.count, false, branch_value_count, facts, frame_parameters, report, name)
                     elif not then_falls_through and not else_falls_through:
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                         flow.normal <- false
@@ -351,6 +423,7 @@ extend ElisaProof:
                     then_weakens_join: bool = then_falls_through and proof_body_may_modify(then_body)
                     else_weakens_join: bool = else_falls_through and proof_body_may_modify(else_body)
                     if not lemma_steps and (then_weakens_join or else_weakens_join):
+                        prior_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
                         proof_forget_values(names, values, position)
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                         # The arms were executed symbolically, so a fact still standing at a
@@ -364,7 +437,7 @@ extend ElisaProof:
                         else_joined: darray[Ast::Expr] = proof_join_reads(else_facts, values, names, else_values, branch_value_count)
                         if then_falls_through and else_falls_through:
                             proof_restore_branch_stable_facts(then_joined, else_joined, facts, names, frame_parameters, report, name)
-                            proof_restore_branch_implied_facts(&then_facts, &else_facts, then_values, else_values, values, names, branch_value_count, facts, frame_parameters, report, name, annotations, position) if then_names.count == names.count and else_names.count == names.count
+                            proof_restore_branch_implied_facts(&then_facts, &else_facts, prior_facts, then_names, else_names, then_values, else_values, values, names, branch_value_count, facts, frame_parameters, report, name, annotations, position) if proof_arm_names_extend(then_names, names) and proof_arm_names_extend(else_names, names)
                         elif then_falls_through:
                             proof_restore_call_stable_facts(then_joined, facts, names, frame_parameters, report, name, report.aliased_names)
                         elif else_falls_through:

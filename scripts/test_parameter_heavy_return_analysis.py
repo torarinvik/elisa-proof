@@ -32,5 +32,11 @@ assert over_limit["replay"]["gaps"] == 0, over_limit["replay"]
 assert over_limit["replay"]["certificates"] == over_limit["replay"]["replayed"], over_limit["replay"]
 budget = next(f for f in over_limit["findings"]
               if f["kind"] == "control-flow-analysis-budget")
-assert budget["budget"] == {"dimension": "facts", "observed": 65, "limit": 64}, budget
+# Its module constants carry their own fact headroom, so the body may run out of steps first.
+# Either way it stays at the ordinary 64 limit and unverified.
+assert budget["budget"]["dimension"] in ("facts", "steps"), budget
+assert budget["budget"]["limit"] == 64 and budget["budget"]["observed"] > 64, budget
+over_limit_functions = {item["name"]: item for item in over_limit["declaration_details"]
+                        if item.get("kind") == "function"}
+assert not over_limit_functions["parameter_heavy_manifest_route_over_limit"]["verified"], over_limit_functions
 print("parameter-heavy return analysis: all obligations and certificates replay")
