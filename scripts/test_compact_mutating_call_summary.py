@@ -26,8 +26,8 @@ assert positive["status"] == positive["verification_state"] == "proved", positiv
 assert positive["summary"]["proven"] == positive["summary"]["obligations"]
 functions = {entry["name"]: entry for entry in positive["declaration_details"]
              if entry.get("kind") == "function"}
-assert functions["decode_status"]["verified"] and functions["decode_status"]["ensures"] == 3
-assert functions["wrapper_status"]["verified"] and functions["wrapper_status"]["ensures"] == 3
+assert functions["decode_status"]["verified"] and functions["decode_status"]["ensures"] == 4
+assert functions["wrapper_status"]["verified"] and functions["wrapper_status"]["ensures"] == 4
 assert any(trace["kind"] == "function-summary" and
            trace["dependency"] == "decode_status" and
            trace["name"] == "wrapper_status"
@@ -39,4 +39,4 @@ assert any(finding["kind"] == "ensure-unproven" and
            finding["name"] == "rejected_wrapper_status"
            for finding in negative["findings"]), negative["findings"]
 
-print("compact mutating call summary: bounded contracts and summary replay pass; false mapping rejected")
+print("compact mutating call summary: bounded status/output contracts and summary replay pass; false mapping rejected")
