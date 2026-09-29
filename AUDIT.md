@@ -9321,7 +9321,7 @@ Rejected: `examples/rejected_value_call_arguments.elisa` covers:
 - an `sview` payload;
 - a hierarchy parent;
 - `common:` fields;
-- a binding lent by `&mut` between the calls.
+- a binding lent by `&mut` before and between the calls, compared as `a == c`.
 
 Each is `ensure-unproven`, with 0 replay gaps.
 
@@ -9664,6 +9664,62 @@ requires.
     both were dropped.
 - The full test and dogfood suites pass.
 
-Two limits remain. A signed parameter has no range facts from its type, so `value >= -128` for an
-`i8` is still unproven. A guard like `later > 1000000 - 255` over a call-bound local is also
-unproven, while the folded literal `999745` proves.
+Two limits remained. A signed parameter has no range facts from its type, so `value >= -128` for an
+`i8` is still unproven. A guard like `later > 1000000 - 255` over a call-bound local was also
+unproven, while the folded literal `999745` proved. The next section closes the second limit.
+
+## Returned call-bound locals, and constants beside call results (2026-09-29)
+
+Fifth P2-03 slice. A call to a callee with a `requires` is not pure, so the call havocs the
+caller's facts at the call. It then keeps only call-stable facts and type bounds, and adds the
+summary. `return y` for `y: i64 = bounded(x)` still lost that summary. The return path saw the call
+text substituted for `y` and cleared the facts a second time, as if the call ran again.
+
+**Rule 1: return clear.** `proof_check_return_contracts` clears facts after a call only when the returned
+expression itself, as written, contains a call. A local's call ran at its binding, where its summary
+and havoc were already applied.
+
+**Rule 2: call-result width.** `proof_strict_signed_width` gives a named call the width of a
+`__elisa_signed_place_type_bound` marker whose term is exactly that call. The pure-call witness adds
+that marker from the callee's single declared signed return type. The general place reader is left
+alone, because it keys retention and invalidation on a place's root binding, and a call has none.
+
+The return fix exposed `later > 1000000 - 255` in `token_sum`. The checker proved the ensure from
+the literal fact, but the kernel refused the untyped constant, which gave 2 replay gaps. The kernel
+needs no change for this. Its field-place generalization already renames a witnessed call to a
+fresh name that carries the same marker. A kernel-side mirror was written and then dropped: with
+its arm disabled, every probe still replays with 0 gaps.
+
+**Evidence.**
+- `examples/returned_call_local.elisa`: every goal proves and replays. It covers a returned local
+  over a parameter and over a literal argument.
+- `examples/rejected_returned_call_local.elisa`: stays refused. It covers:
+  - a claim stronger than the summary;
+  - a `&mut`-lent local whose recorded value must not come back through the return;
+  - an unproven callee precondition.
+- `examples/call_result_width.elisa`: 19 of 19 goals prove and replay. It covers guarded successors
+  and early returns over a call-bound local, a direct call guard, and the recursive `token_sum`.
+- `examples/rejected_call_result_width.elisa`: every ensure is refused with no replay gaps. It
+  covers:
+  - `100 + 100` beside an `i8` result;
+  - `200 + 100` beside a `u8` result;
+  - an off-by-one over a local and over a direct call;
+  - an impure call with no upper bound.
+- `scripts/test_call_result_width.py` is wired into `scripts/test.sh`.
+- Hostile scratch probes, not committed, are all refused:
+  - a limit argument reassigned between two calls, then returning the first result bare, as a
+    sum, or as a conditional;
+  - the same through a `changes` callee;
+  - pure-callee variants of each;
+  - two calls over a lent payload-enum binding compared for equality.
+- `rejected_value_call_arguments` had pinned `lent`, whose claim `result >= 0` is true. It only
+  failed because of the extra clear. `lent` now claims `a == c` over two calls after the binding is
+  lent, which is unjustified. Dropping both aliasing checks proves it, so the control is still
+  sharp.
+- Mutation checks:
+  - Restoring the old return condition leaves both `returned_call_local` ensures unproven.
+  - Making the call arm return 0 leaves 4 `call_result_width` ensures unproven, with 2 replay
+    gaps.
+- The full test and dogfood suites pass.
+
+A sum of two call-bound locals, as in `first + second` over chained calls, is still unproven.
