@@ -86,6 +86,7 @@ python3 "$ROOT_DIR/scripts/test_numeric_cast_contract.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_distinct_constants.py"
 python3 "$ROOT_DIR/scripts/test_strict_order_disequality.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_resource_source_policy.py"
+python3 "$ROOT_DIR/scripts/test_compact_mutating_call_summary.py"
 python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
 python3 "$ROOT_DIR/scripts/test_vector_index_arithmetic.py"
 
