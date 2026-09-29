@@ -1,20 +1,20 @@
 # Refusal census
 
-665 examples, 5884/7577 obligations proven.
+667 examples, 5903/7600 obligations proven.
 
 | Count | Gate |
 | ---: | --- |
-| 417 | no-rule |
+| 419 | no-rule |
 | 390 | function-summary-unverified: callee body has not established a verified executable summary |
 | 142 | wrap-guard-goal |
 | 128 | contract-proposition-type: kernel proposition formation rejected the term or operator |
 | 124 | control-flow-analysis-budget: control-flow analysis exceeded its fact snapshot budget |
 | 68 | contract-proposition-type: kernel proposition typing work budget exceeded |
-| 48 | ambiguous-constant-goal |
+| 49 | ambiguous-constant-goal |
 | 39 | wrap-guard-fact |
+| 28 | budget |
 | 28 | expression-unsupported: operator or index may dispatch to an unmodeled user protocol |
 | 27 | borrow-call-opaque: a method-shaped call may write its receiver, and no summary maps a receiver |
-| 27 | budget |
 | 25 | loop-invariant-missing: loop has no invariant for symbolic verification |
 | 24 | region-alias-unsupported: the binding's backing-region lifetime was not established; destruction has not been demonstrated |
 | 22 | borrow-call-summary-unsupported: the checked callee resource summary could not be encoded for this call |
@@ -97,13 +97,13 @@ Wall time under the census's parallel load, so treat it as a ranking.
 
 | Seconds | Example |
 | ---: | --- |
-| 104.28 | rejected_kernel_arena_cycle.elisa |
-| 23.62 | kernel_intern_runtime.elisa |
-| 18.23 | loop_state_joins.elisa |
-| 10.34 | rejected_loop_state_joins.elisa |
-| 9.18 | unsigned_resource_source_policy.elisa |
-| 3.50 | rejected_shared_fixed_borrows.elisa |
-| 2.83 | rejected_dogfood_kernel_core.elisa |
-| 2.69 | rejected_dispatcher_budget.elisa |
-| 2.51 | dogfood_kernel_core.elisa |
-| 2.35 | field_places.elisa |
+| 108.77 | rejected_kernel_arena_cycle.elisa |
+| 31.09 | kernel_intern_runtime.elisa |
+| 11.87 | loop_state_joins.elisa |
+| 5.74 | rejected_loop_state_joins.elisa |
+| 5.08 | unsigned_resource_source_policy.elisa |
+| 2.69 | field_places.elisa |
+| 2.29 | dogfood_kernel_core.elisa |
+| 1.64 | dispatcher_budget.elisa |
+| 1.44 | rejected_dogfood_kernel_core.elisa |
+| 1.32 | rejected_dispatcher_budget.elisa |

@@ -10243,3 +10243,16 @@ arguments), `while` conditions and loop contracts (`invariant`, `decreases`), `f
 the arguments of calls inside any rewritten expression. The same shadow guard applies, and a `for`
 variable named like the module counts as a shadow. A remaining, separate gap: over u8, a
 `decreases TOP - y` under `y < TOP` is refused as possibly wrapping, with a literal too.
+
+## Signed type ranges for locals and fields (BACKLOG B-07)
+
+`proof_add_signed_range_facts` states `t <= MAX` and `-MAX - 1 <= t` as type-bound facts for any
+term of a signed type narrower than 64 bits. The parameter path now wraps it. Two new callers:
+
+- A declared local gets the range after the call purges. Before this change, the opaque-call purge
+  kept the upper literal bound but dropped the unary floor, so the lower end was lost.
+- A struct field place gets the range beside its signed place marker.
+
+A reassigned local's new value carries no range and stays unproven. Tuple labels are not covered
+yet. Evidence: examples/signed_local_field_bounds.elisa proves 15/15 and replays 15/15, and
+examples/rejected_signed_local_field_bounds.elisa refuses four bounds that are one step tighter.
