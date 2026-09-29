@@ -10256,3 +10256,10 @@ term of a signed type narrower than 64 bits. The parameter path now wraps it. Tw
 A reassigned local's new value carries no range and stays unproven. Tuple labels are not covered
 yet. Evidence: examples/signed_local_field_bounds.elisa proves 15/15 and replays 15/15, and
 examples/rejected_signed_local_field_bounds.elisa refuses four bounds that are one step tighter.
+
+## Unsigned increment under a strict peer (BACKLOG B-08)
+
+This needed no engine change. The relational rule from bound_propagation already covers it:
+`usize` and `u64` `i + 1 > i` proves under `i < n` and under `i < values.count`, in both the
+producer and replay. examples/usize_increment_under_count.elisa (10/10) and its rejected
+variant (non-strict peer, no peer, result held under the count) now lock that in.
