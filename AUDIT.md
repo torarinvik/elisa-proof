@@ -10110,3 +10110,6 @@ bound `v >= MIN` instead of `MIN <= v`, and widening `proof_type_bound_name` all
 regression unchanged, and even the exact goal `ensure result >= -128` stays unproven beside the
 fact `v >= -128`. A user `requires` with the same shape proves, so the type-bound origin or the
 signed width marker's interaction with a negative lower bound is the remaining suspect.
+
+The lower bound alone (without the upper fact) reproduces the regression, so the pair is not the
+trigger. The remaining hypothesis is the kernel arena rather than the producer's interval pass.
