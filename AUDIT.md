@@ -10143,3 +10143,26 @@ A signed parameter of 8, 16 or 32 bits now gets the traced `type-bound` fact `v 
 above, so `v >= MIN` is still unavailable. Sound by the parameter's type. The front end reports
 its own "could not be proven statically" diagnostic for such postconditions, so the test
 (`scripts/test_signed_upper_bound.py`) reads the engine's obligations rather than the overall status.
+
+## returned_chain: diagnosed, not fixed (2026-09-29)
+
+```
+def returned_chain(x: i64) -> i64:
+    requires x >= 0
+    ensure result <= 2000000
+    first: i64 = bounded(x)
+    second: i64 = bounded(first)
+    return first + second
+```
+
+where `bounded` has `requires x >= 0` and bounds its result. The single-call forms (`return y`
+after `y = bounded(x)`) prove; this two-call chain does not. At the return the goal reads
+`first + bounded(bounded(x)) <= 2000000`: `second` was substituted by its call text, but `first`
+survived as a bare identifier, and the facts hold only `second`'s summary (`bounded(bounded(x))`
+bounds). The summary facts about `first` (`bounded(x) >= 0`, `<= 1000000`) were dropped by
+`proof_clear_facts_after_call` when the second call ran, because a call term mentioning a
+non-pure callee is not call-stable. Keeping them is sound only if a call term is a deterministic
+function of its arguments, which needs a soundness argument about callee reads of mutable global
+state that the alias analysis does not currently make. A cheaper repair is to also substitute
+`first` by its call text at the return so goal and facts agree, but that leaves the first summary
+just as dropped. No change made; probe files are in the scratch directory only.
