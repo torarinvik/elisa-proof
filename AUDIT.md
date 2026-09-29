@@ -10033,11 +10033,29 @@ the kernel. `proof_return_analysis_fact_state_budget` now takes `call_target_cou
 The merge put `statement_checks.elisa` at 604 lines. The budget constants and the three budget
 functions therefore move into `src/proof/check/return_analysis_budgets.elisa` without changes.
 
-**Open.** A chain of calls to one pure function that has contracts takes about 10× longer per
-added call: 5 chained calls take 24 s, and 13 did not finish in 30 min. Build b8e6a68 behaves the
-same, so the port did not cause it. Until that is bounded, there is no dispatcher-sized regression
-test for this port.
+**Fixed below.** The chained-call blowup noted here is bounded by the next section.
 
 **Evidence.** The merged build (elisa-engine-proof dfa218a plus this port) passes the full test
 suite and the dogfood suite. `test_parameter_heavy_return_analysis`, `test_loop_state_joins` and
 `test_match_refuted_arms` pass.
+
+## Bounded replay for chained pure calls (2026-09-29)
+
+A chain of calls to one pure function with contracts took about 10x longer per call: 5 calls took
+24 s and 13 did not finish. Two causes, both in replay, neither in the kernel's rules.
+
+1. **Replay node growth.** Each replayed case split rebuilt `not`/operator nodes with
+   `add_node`, which never deduplicates, so nested splits multiplied the arena.
+   `add_node_reused` (in `kernel_core.elisa`) scans the last `PROOF_KERNEL_REUSE_WINDOW` (256)
+   nodes for an identical children-free node with value 0 and empty names and returns its index,
+   else appends. Reusing an identical immutable node cannot change what a term means, so this adds
+   no trusted rule. It is inside the dogfood self-proof (kernel_core 16 -> 37 obligations, fixture
+   29 -> 50), and the scan guards its index so every access is proven.
+2. **Per-path dependency revalidation.** `proof_replay_certificate_with_stack` re-walked each
+   dependency certificate on every call path. A dependency that has already replayed in this run
+   is now accepted (`replayed` is reset at the start of `proof_replay_certificates`, so it only
+   means "replayed by this run").
+
+**Evidence.** `examples/chained_pure_calls.elisa` (12 chained calls) proves and replays at once;
+`scripts/test_chained_pure_calls.py` runs it. A binary without the dependency reuse times out and
+the test catches it. Full suite chunks 00-18 and dogfood chunks 00-08 pass.

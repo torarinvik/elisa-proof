@@ -86,6 +86,7 @@ python3 "$ROOT_DIR/scripts/test_call_result_width.py"
 python3 "$ROOT_DIR/scripts/test_adt_library.py"
 python3 "$ROOT_DIR/scripts/test_adt_parser.py"
 python3 "$ROOT_DIR/scripts/test_match_refuted_arms.py"
+python3 "$ROOT_DIR/scripts/test_chained_pure_calls.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
 python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
@@ -1351,13 +1352,13 @@ if [[ "$rejected_counting_loop_measure_status" -ne 1 ]] || ! python3 -c 'import 
     printf 'proof test matrix failed: rejected_counting_loop_measure=%s\n' "$rejected_counting_loop_measure_status" >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==29 and r["summary"]["obligations"]==29; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'
+run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==50 and r["summary"]["obligations"]==50; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'
 dogfood_core_contract_probe_status=${PIPESTATUS[1]}
 if [[ "$dogfood_core_contract_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: direct calls to dogfood kernel contracts\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==16 and r["summary"]["obligations"]==16; assert r["findings"]==[] and r["summary"]["semantic_errors"]==0; assert r["replay"]["gaps"]==0 and r["kernel"]["independent_replay"] is True'
+run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==37 and r["summary"]["obligations"]==37; assert r["findings"]==[] and r["summary"]["semantic_errors"]==0; assert r["replay"]["gaps"]==0 and r["kernel"]["independent_replay"] is True'
 kernel_core_self_probe_status=${PIPESTATUS[1]}
 if [[ "$kernel_core_self_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: kernel core does not verify itself\n' >&2
