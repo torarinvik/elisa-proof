@@ -10093,3 +10093,14 @@ or duplicate constants, functions declared inside a module, non-integer initiali
 Not covered: a qualified constant used in a function *body* (e.g. `return Limits::TOP`) is not
 rewritten and stays unproven.
 Tests: `scripts/test_qualified_constants.py`.
+
+### Signed parameter range facts: probed, not landed (2026-09-29)
+
+Adding traced `type-bound` facts `MIN <= v` and `v <= MAX` for `i8`/`i16`/`i32` parameters proves
+`ensure result <= 127` for an `i8`, but any lower-bound fact below zero made goals that baseline
+proves, such as `requires v >= 5` then `ensure result >= 4` on an `i16`, unproven with no
+counterexample. The upper fact alone is harmless; the failure needs the negative lower fact, in
+both `IntLit(-n)` and `Unary(-, n)` spellings, and widening `proof_type_bound_name` to admit it
+changed nothing. The cause is not yet found, so the change was reverted rather than traded against
+a regression. A next attempt should bisect the goal path with a negative lower fact of type-bound
+origin (a user `requires v >= -5` does not trigger it).
