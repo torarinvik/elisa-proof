@@ -9836,3 +9836,70 @@ ported, because every ported example proves and replays without it.
   - Disabling the checker split leaves lines 7 and 12 unproven.
   - Disabling the kernel split leaves 2 replay gaps.
 - The full test and dogfood suites pass.
+
+## Named-tuple results: an ADT parser library (P2-03 slice, 2026-09-29)
+
+A parser returns `(value: i64, consumed: i64)` and states its contract over `result.value` and
+`result.consumed`. Six changes make that prove:
+
+1. **Label table.** The function index records each function's return-tuple labels
+   (`proof_return_tuple_labels`). Each label is found from the parser's `__tuple_label`
+   annotations inside that element's source span. An element that has no label, or has more than
+   one, makes the list empty, and so does a repeated label. An empty list means nothing is
+   projected.
+2. **Projection.** At `return (a, b)`, the ensure's `result` is replaced by a construction under
+   the reserved name `__elisa_tuple_result`, which `proof_substitute` projects field by field. If
+   the name survives, some use of `result` was not a labeled field, and the plain substitution
+   stands.
+3. **Call labels are typed values.** For a verified pure call whose declared return is a named
+   tuple, `f(x).label` is one value with its declared width, like a scalar call.
+   - A tuple local bound to such a call keeps the call term, so the summary stated over
+     `f(x).label` describes it.
+   - Every scalar label is witnessed at once, so a condition over a sibling label is read under
+     the same width guard.
+   - The signed-width guard reads a call label's place marker.
+   - The field-place rule generalizes `f(x).label` in both the checker and the kernel. The kernel
+     accepts it only under a named call root.
+4. **Numeric casts are not calls for frame purposes.** `digit.i64()` runs no callee. Before this
+   change, the frame check treated it as an opaque call: it cleared the path's facts and forgot
+   every call-bound value. A return whose calls are all casts or verified pure calls no longer
+   clears facts either.
+5. **Scalar witnesses are charged once.** The 32-witness function budget used to count
+   duplicates. Every ensure goal of a return re-derives the same witnesses, so a parser body used
+   up the budget before its last return.
+
+**Soundness.**
+- Projection is by position against the declared type. A wrong mapping is caught by
+  `swapped_labels`.
+- Repeated labels are refused (`repeated_label`). The compiler accepts them, but the checker does
+  not project them.
+- A cast has compiler-reserved selectors and writes nothing (`proof_contract_calls_are_pure`
+  already relies on this).
+- A verified pure call writes nothing.
+- The kernel re-checks every generalized place under its own witness.
+
+**Evidence.**
+- `examples/adt_parser.elisa`: `parse_number`, `parse_sum` (structural induction through a tuple
+  local, a guarded step and the bare tuple fall-through) and `parsed_length` (a label read off a
+  call) all prove, and all 35 certificates replay.
+- `examples/rejected_adt_parser.elisa` refuses six functions:
+  - `consumes_nothing`;
+  - `swapped_labels`;
+  - `sum_reads_nothing`, a false inductive bound;
+  - `length_below_ten`;
+  - `value_is_a_byte`, which uses a sibling label's bound;
+  - `repeated_label`.
+
+  Replay gaps occur only in `sum_reads_nothing`.
+- `scripts/test_adt_parser.py` pins both files.
+- Mutation checks:
+  - Reversing the projection order proves `swapped_labels`.
+  - Disabling the kernel's call-rooted field place leaves 8 gaps.
+  - Disabling the checker's field place, the call-label width, or the cast frame skip each leaves
+    `parse_sum` unproven.
+- The full test and dogfood suites pass.
+
+**Still open.**
+- A second pure call forgets an earlier call-bound local's value, so two parses of one stream are
+  not known to agree.
+- `base(x) + d.i64()` over a scalar call-bound local still lacks the call's scalar witness.
