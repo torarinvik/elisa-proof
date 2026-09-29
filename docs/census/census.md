@@ -90,3 +90,20 @@
 | 1 | region-scope-unsupported: region block must introduce a fresh named lexical region |
 | 1 | resource-use-after-move: a borrow cannot be created from a moved resource binding |
 | 1 | structural-decreases-unproven: recursive call must preserve or strictly descend every inferred enum subject |
+
+## Slowest examples
+
+Wall time under the census's parallel load, so treat it as a ranking.
+
+| Seconds | Example |
+| ---: | --- |
+| 136.60 | rejected_kernel_arena_cycle.elisa |
+| 47.09 | kernel_intern_runtime.elisa |
+| 27.44 | loop_state_joins.elisa |
+| 16.81 | rejected_loop_state_joins.elisa |
+| 12.98 | unsigned_resource_source_policy.elisa |
+| 3.60 | dogfood_kernel_core.elisa |
+| 3.47 | field_places.elisa |
+| 2.99 | rejected_shared_fixed_borrows.elisa |
+| 2.81 | rejected_dogfood_kernel_core.elisa |
+| 2.57 | rejected_budget.elisa |

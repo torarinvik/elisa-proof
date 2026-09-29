@@ -32,6 +32,10 @@ def main():
             regressions.append(f"{name}: proven {old['proven']} -> {new['proven']}")
         elif new["proven"] > old["proven"]:
             gains.append(f"{name}: proven {old['proven']} -> {new['proven']}")
+        # Timing is noisy under parallel load: only a doubling on an example that already takes
+        # seconds, beyond a fixed slack, counts as a replay blowup.
+        if old.get("seconds", 0) >= 2 and new.get("seconds", 0) > 2 * old["seconds"] + 5:
+            regressions.append(f"{name}: wall time {old['seconds']}s -> {new['seconds']}s")
         added = sorted(set(new.get("gates", [])) - set(old.get("gates", new.get("gates", []))))
         if added:
             regressions.append(f"{name}: new refusal gates {added}")

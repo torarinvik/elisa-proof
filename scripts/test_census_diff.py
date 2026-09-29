@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = {"examples": 2, "proven": 5, "obligations": 6, "unreadable": [], "gates": {"no-rule": 1},
-        "files": {"a.elisa": {"proven": 3, "obligations": 3, "gates": []},
+        "files": {"a.elisa": {"proven": 3, "obligations": 3, "gates": [], "seconds": 4.0},
                   "b.elisa": {"proven": 2, "obligations": 3, "gates": ["no-rule"]}}}
 
 
@@ -35,6 +35,10 @@ assert drop.returncode == 1 and "a.elisa: proven 3 -> 2" in drop.stderr, drop.st
 gate = diff(variant(lambda c: c["files"]["b.elisa"].update(gates=["no-rule", "budget"])))
 assert gate.returncode == 1 and "new refusal gates ['budget']" in gate.stderr, gate.stderr
 
+slow = diff(variant(lambda c: c["files"]["a.elisa"].update(seconds=13.5)))
+assert slow.returncode == 1 and "a.elisa: wall time 4.0s -> 13.5s" in slow.stderr, slow.stderr
+assert diff(variant(lambda c: c["files"]["a.elisa"].update(seconds=12.5))).returncode == 0
+
 
 def lose(c):
     del c["files"]["a.elisa"]
@@ -43,4 +47,4 @@ def lose(c):
 
 lost = diff(variant(lose))
 assert lost.returncode == 1 and "no longer produces a readable report" in lost.stderr, lost.stderr
-print("census diff: drops, new gates and lost reports fail; gains pass")
+print("census diff: drops, new gates, 2x slowdowns and lost reports fail; gains pass")
