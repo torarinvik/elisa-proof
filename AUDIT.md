@@ -9601,3 +9601,15 @@ conditional, which only withholds information.
 
 A literal beside a compound operand, such as `2 * (a if a <= b else b)`, is still refused by the
 ambiguous-literal gate before any split runs.
+
+## Port: primitive casts in contracts, and distinct-constant disequality coverage (2026-09-29)
+
+**Casts.** wasmbrowser-proof `ae39d29` is cherry-picked as-is. A zero-argument numeric conversion
+such as `status.usize()` is pure in a contract when its receiver is pure. In the kernel, an integer
+conversion is a witnessed scalar when its receiver is witnessed. Main's rule that the literal
+`count` of an array is a scalar is kept beside it.
+
+**Distinct constants.** wasmbrowser-proof `c09b933` adds a dedicated `x != a or x != b` rule. Main
+does not need it: main's disjunction case split, `not A => B`, already proves and replays that
+peer's example. Only the example, its refused same-constant control and the test are ported, as
+regression coverage; no rule is added. The full test and dogfood suites pass with both.
