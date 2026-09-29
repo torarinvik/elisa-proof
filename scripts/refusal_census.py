@@ -13,9 +13,9 @@ BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "docs/census"
 
 
-def run(path):
+def run(path, timeout=120):
     try:
-        result = subprocess.run([str(BINARY), "--json", str(path)], capture_output=True, text=True, timeout=120)
+        result = subprocess.run([str(BINARY), "--json", str(path)], capture_output=True, text=True, timeout=timeout)
         data = json.loads(result.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError):
         return path.name, None
@@ -26,6 +26,12 @@ def main():
     files = sorted((ROOT / "examples").glob("*.elisa"))
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
         results = list(pool.map(run, files))
+    # A timeout under parallel load is not a refusal: retry serially, with a longer limit, the files
+    # the committed census could read (the runtime harness examples never produce a report).
+    baseline_path = ROOT / "docs/census/census.json"
+    known = set(json.loads(baseline_path.read_text())["files"]) if baseline_path.exists() else set()
+    results = [(name, data) if data is not None or name not in known else run(ROOT / "examples" / name, 600)
+               for name, data in results]
     gates = Counter()
     per_file = {}
     proven = total = 0
@@ -37,10 +43,13 @@ def main():
         summary = data.get("summary", {})
         proven += summary.get("proven", 0)
         total += summary.get("obligations", 0)
-        per_file[name] = {"proven": summary.get("proven", 0), "obligations": summary.get("obligations", 0)}
+        file_gates = set()
         for finding in data.get("findings", []):
             gate = finding.get("refusal_gate") or f"{finding.get('kind')}: {finding.get('message')}"
             gates[gate] += 1
+            file_gates.add(gate)
+        per_file[name] = {"proven": summary.get("proven", 0), "obligations": summary.get("obligations", 0),
+                          "gates": sorted(file_gates)}
     report = {"examples": len(files), "proven": proven, "obligations": total,
               "unreadable": sorted(unreadable), "gates": dict(sorted(gates.items(), key=lambda kv: (-kv[1], kv[0]))),
               "files": per_file}

@@ -92,6 +92,7 @@ python3 "$ROOT_DIR/scripts/test_qualified_constants.py"
 python3 "$ROOT_DIR/scripts/test_variant_exclusion.py"
 python3 "$ROOT_DIR/scripts/test_signed_upper_bound.py"
 python3 "$ROOT_DIR/scripts/test_refusal_gate.py"
+python3 "$ROOT_DIR/scripts/test_census_diff.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
 python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
@@ -4675,4 +4676,5 @@ if [[ "${proposition_nesting_status[0]}" -ne 1 || "${proposition_nesting_status[
 fi
 
 "$ROOT_DIR/scripts/test_optimized_replay.sh"
+python3 "$ROOT_DIR/scripts/census_diff.py"
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'
