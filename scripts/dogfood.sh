@@ -158,7 +158,7 @@ python3 - "$REPORT_DIR/kernel_core.json" "$REPORT_DIR/kernel_core_fixture.json" 
 import json
 import sys
 
-for path, proven in zip(sys.argv[1:], (16, 29)):
+for path, proven in zip(sys.argv[1:], (37, 50)):
     with open(path, encoding="utf-8") as handle:
         report = json.load(handle)
     assert report["status"] == "proved"

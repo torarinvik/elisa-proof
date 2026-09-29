@@ -10103,3 +10103,64 @@ same fixed fact-state headroom as a parameter-heavy selector; the independent st
 
 **Evidence.** The cherry-pick applied cleanly and the prover rebuilt. Every `proof/*.elisa` in
 `elisa-engine` gives the same result before and after. The full test and dogfood suites pass.
+## Port: bounded snapshots for call-summary dispatchers (from `codex/wasmbrowser-proof` 55e6b4d, 2026-09-29)
+
+A function body of 12–24 statements that calls at most 4 distinct targets now gets the same
+fact-state cap (`ENTRY_CAP`) as the parameter-heavy bodies. Before, such a dispatcher ran out of
+fact states partway through its summaries. The budget is only a search limit, so it can refuse more
+or less work but cannot admit a claim. Every fact the extra headroom reaches still replays through
+the kernel. `proof_return_analysis_fact_state_budget` now takes `call_target_count`, read from
+`functions.call_counts`.
+
+The merge put `statement_checks.elisa` at 604 lines. The budget constants and the three budget
+functions therefore move into `src/proof/check/return_analysis_budgets.elisa` without changes.
+
+**Fixed below.** The chained-call blowup noted here is bounded by the next section.
+
+**Evidence.** The merged build (elisa-engine-proof dfa218a plus this port) passes the full test
+suite and the dogfood suite. `test_parameter_heavy_return_analysis`, `test_loop_state_joins` and
+`test_match_refuted_arms` pass.
+
+## Bounded replay for chained pure calls (2026-09-29)
+
+A chain of calls to one pure function with contracts took about 10x longer per call: 5 calls took
+24 s and 13 did not finish. Two causes, both in replay, neither in the kernel's rules.
+
+1. **Replay node growth.** Each replayed case split rebuilt `not`/operator nodes with
+   `add_node`, which never deduplicates, so nested splits multiplied the arena.
+   `add_node_reused` (in `kernel_core.elisa`) scans the last `PROOF_KERNEL_REUSE_WINDOW` (256)
+   nodes for an identical children-free node with value 0 and empty names and returns its index,
+   else appends. Reusing an identical immutable node cannot change what a term means, so this adds
+   no trusted rule. It is inside the dogfood self-proof (kernel_core 16 -> 37 obligations, fixture
+   29 -> 50), and the scan guards its index so every access is proven.
+2. **Per-path dependency revalidation.** `proof_replay_certificate_with_stack` re-walked each
+   dependency certificate on every call path. A dependency that has already replayed in this run
+   is now accepted (`replayed` is reset at the start of `proof_replay_certificates`, so it only
+   means "replayed by this run").
+
+**Evidence.** `examples/chained_pure_calls.elisa` (12 chained calls) proves and replays at once;
+`scripts/test_chained_pure_calls.py` runs it. A binary without the dependency reuse times out and
+the test catches it. Full suite chunks 00-18 and dogfood chunks 00-08 pass.
+
+## Deferred P2-03 follow-ups (2026-09-29)
+
+Not done, each refused conservatively today (never unsound): variant disjointness,
+`parse_twice_agrees`, the c4 scalar witness, bool equality in contracts
+(`ensure result == (a is b)` reports `contract-proposition-type`), returned_chain, qualified
+`Module::CONST`, tuple-field `@r` for package_reader, and signed parameter range facts. Each needs a
+new kernel rule with its own soundness argument; none is started. Negative-literal typing was
+re-probed (`return -x` with `x >= 0` proves `result <= 0`) and works.
+
+### Probe results for two deferred items (2026-09-29)
+
+- **Bool equality:** `ensure result == (a and b)` and `ensure result == a` over `bool` prove today
+  (the replay typer admits `==`/`!=` between two boolean sorts). What is refused is `is` between two
+  bools (`ensure result == (a is b)`), because `is` is the type/enum-tag test, not an equality.
+  The gap is in the item's wording, not the kernel; no change is needed.
+- **Qualified module constants:** `Limits::TOP` used outside module `Limits` stays opaque
+  (`return Limits::TOP` does not establish `result == 100`). Cause: `proof_import_global_constant_facts`
+  in `check/global_constants.elisa` imports only constants of the function's own namespace and the
+  root, as bare `Ident` facts, and the replay validator (`replay/global_constant_validation.elisa`)
+  resolves a fact's owner by that same bare-name scope rule. Importing a qualified constant needs
+  a `Scope`-keyed fact, substitution over `Ast::Expr.Scope`, and a matching replay lookup by
+  path; that is a change to both producer and independent checker and is not started.
