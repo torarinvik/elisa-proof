@@ -47,5 +47,5 @@ print("deterministic call chain: precondition-only callees keep summaries; effec
 data = run(ROOT / "examples/widened_call_result.elisa")
 assert data["summary"]["failed"] == 0 and data["replay"]["gaps"] == 0 and data["summary"]["proven"] == 9, data["summary"]
 data = run(ROOT / "examples/rejected_widened_call_result.elisa")
-assert [(f["name"], f["line"]) for f in data["findings"]] == [("too_tight", 13)] and data["replay"]["gaps"] == 0, data["findings"]
+assert [(f["name"], f["line"]) for f in data["findings"]] == [("too_tight", 14)] and data["replay"]["gaps"] == 0, data["findings"]
 print("widened call result: the c4 probe proves, and its bound is tight")
