@@ -1,0 +1,79 @@
+extend ElisaProofKernelReplay:
+    private:
+        # The arena reads an integer literal as its exact value, but compiled code evaluates it
+        # at the width of the expression it sits in. The source type checker refuses a literal
+        # that does not fit only when its peer is a bare name: `a + 0 == 256` with `a: u8`
+        # compiles, and the literal wraps to 0. Reading it as 256 lets a false fact close any
+        # goal. Every closed constant under a witnessed fixed width must therefore fit that width,
+        # leaf and intermediate alike, or the whole proof state is refused.
+        def proof_kernel_replay_literal_width_operator(operator: sview) -> bool:
+            return true if operator == "==" or operator == "!=" or operator == "<" or operator == ">" or operator == "<=" or operator == ">="
+            return proof_kernel_replay_integer_arithmetic_operator(operator)
+
+        # A closed constant fits a signed width when every leaf and intermediate lies inside it.
+        # A negated literal is checked directly, so the minimum `-128` of i8 is admitted although
+        # `128` alone is not an i8 value. A bare negative payload is either a folded negative
+        # value or a wrapped 64-bit literal; truncation keeps it only when it fits the width.
+        def proof_kernel_replay_constant_fits_signed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, width: i64) -> bool:
+            return true if width == 0
+            if root < nodes.count and nodes[root].kind == "int" and not proof_kernel_replay_int_tagged(nodes[root]) and nodes[root].value < 0:
+                return nodes[root].value >= ElisaProofKernelCore::proof_kernel_signed_width_min(width)
+            if root < nodes.count and nodes[root].kind == "unary" and nodes[root].operator == "-" and nodes[root].left < nodes.count:
+                literal: ElisaProofKernelCore::ProofKernelNode = nodes[nodes[root].left]
+                if literal.kind == "int" and not proof_kernel_replay_int_tagged(literal):
+                    return literal.value >= 0 and 0 - literal.value >= ElisaProofKernelCore::proof_kernel_signed_width_min(width)
+            return proof_kernel_replay_constant_fits_width(nodes, root, width)
+
+        # Every leaf and intermediate in [0, 127] reads the same at every width, which admits the
+        # small shifts and bitwise forms the width evaluator does not model.
+        def proof_kernel_replay_constant_fits_width(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, width: i64) -> bool:
+            return true if proof_kernel_replay_small_nonnegative_constant(nodes, root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT).known
+            return proof_kernel_replay_signed_constant_at_width(nodes, root, width, 0).known
+
+        def proof_kernel_replay_constant_fits_unsigned(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, width: i64) -> bool:
+            return true if width == 0
+            return proof_kernel_replay_constant_fits_width(nodes, root, 0 - width)
+
+        # Check `root` against the widths inherited from its enclosing arithmetic. A node's own
+        # witnessed width replaces the inherited one; a logical connective starts a fresh context.
+        def proof_kernel_replay_literals_fit(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, unsigned_width: i64, signed_width: i64, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth) or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "unary":
+                return proof_kernel_replay_literals_fit(nodes, children, facts, node.left, 0, 0, depth + 1) if node.operator == "not"
+                return proof_kernel_replay_literals_fit(nodes, children, facts, node.left, unsigned_width, signed_width, depth + 1)
+            if node.kind == "paren":
+                return proof_kernel_replay_literals_fit(nodes, children, facts, node.left, unsigned_width, signed_width, depth + 1)
+            if node.kind == "if":
+                return proof_kernel_replay_literals_fit(nodes, children, facts, node.left, 0, 0, depth + 1) and proof_kernel_replay_literals_fit(nodes, children, facts, node.right, unsigned_width, signed_width, depth + 1) and proof_kernel_replay_literals_fit(nodes, children, facts, node.auxiliary, unsigned_width, signed_width, depth + 1)
+            if node.kind == "quantifier":
+                return proof_kernel_replay_literals_fit(nodes, children, facts, node.right, 0, 0, depth + 1)
+            return true if node.kind != "binary"
+            if not proof_kernel_replay_literal_width_operator(node.operator):
+                return proof_kernel_replay_literals_fit(nodes, children, facts, node.left, 0, 0, depth + 1) and proof_kernel_replay_literals_fit(nodes, children, facts, node.right, 0, 0, depth + 1)
+            left_closed: bool = proof_kernel_replay_constant_int(nodes, node.left, depth + 1).known
+            right_closed: bool = proof_kernel_replay_constant_int(nodes, node.right, depth + 1).known
+            # A closed node has no width of its own; its enclosing context, if any, checks it.
+            return true if left_closed and right_closed
+            own_unsigned: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, depth + 1)
+            own_signed: i64 = proof_kernel_replay_signed_width_in_expression(nodes, children, facts, root, depth + 1)
+            # A comparison's result is boolean: its operands carry their own width, never the
+            # width of an enclosing arithmetic context.
+            comparison: bool = not proof_kernel_replay_integer_arithmetic_operator(node.operator)
+            context_unsigned: i64 = own_unsigned if own_unsigned != 0 or comparison else unsigned_width
+            context_signed: i64 = own_signed if own_signed != 0 or comparison else signed_width
+            if left_closed:
+                return false if not proof_kernel_replay_constant_fits_unsigned(nodes, node.left, context_unsigned) or not proof_kernel_replay_constant_fits_signed(nodes, node.left, context_signed)
+            if right_closed:
+                return false if not proof_kernel_replay_constant_fits_unsigned(nodes, node.right, context_unsigned) or not proof_kernel_replay_constant_fits_signed(nodes, node.right, context_signed)
+            return false if not left_closed and not proof_kernel_replay_literals_fit(nodes, children, facts, node.left, context_unsigned, context_signed, depth + 1)
+            return false if not right_closed and not proof_kernel_replay_literals_fit(nodes, children, facts, node.right, context_unsigned, context_signed, depth + 1)
+            return true
+
+        def proof_kernel_replay_state_literals_fit(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+            return false if not proof_kernel_replay_literals_fit(nodes, children, facts, goal_root, 0, 0, 0)
+            for fact in facts |fact, nodes, children, facts|:
+                return false if not proof_kernel_replay_literals_fit(nodes, children, facts, fact, 0, 0, 0)
+            return true

@@ -1,0 +1,217 @@
+# Payload enums as frame-owned values. Both compilers refuse a write to an enum payload field
+# ("field is immutable"), and a payload field cannot be declared `mutable`, so an enum value --
+# inline or a handle into a region-backed packed store -- denotes one immutable tree for its
+# whole lifetime. A by-value binding of such a type that nothing references is therefore storage
+# no callee can change, the same argument `proof_type_is_reference_free` makes for a struct.
+#
+# The admitted payloads are deliberately narrow: primitive scalars, floats, const enums, structs
+# of such fields and further admitted enums. A container or view payload is refused even when
+# the reference-free predicate would accept it, because a binder over it is a second path to the
+# payload's heap storage. An enum in a refinement hierarchy (`is Parent`) or carrying `common:`
+# fields is refused: a value of the parent type may hold any refinement's payload.
+const PROOF_ENUM_HIERARCHY_PARENT_TAG: u32 = 3900000008
+
+extend ElisaProof:
+    private:
+        def proof_enum_in_hierarchy(annotations: darray[Ast::EnumAnnotation]&, name: sview) -> bool:
+            for annotation in annotations |name|:
+                return true if annotation.line == PROOF_ENUM_HIERARCHY_PARENT_TAG and (annotation.owner == name or annotation.name == name)
+                return true if annotation.name == "__has_common" and annotation.owner == name
+            return false
+
+        # Every enum and struct declaration answering to a bare name, anywhere in the program. A
+        # bare-name search cannot tell modules apart, so anything but one match is refused.
+        def proof_count_named_aggregates(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> (enums: usize, const_enums: usize, structs: usize):
+            return (2, 2, 2) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            enums: mutable usize = 0
+            const_enums: mutable usize = 0
+            structs: mutable usize = 0
+            for declaration in declarations |name, depth, enums, const_enums, structs|:
+                match declaration:
+                    Ast::Decl.Enum(enum_name, _, is_const, _, _):
+                        enums <- enums + 1 if enum_name == name and not is_const
+                        const_enums <- const_enums + 1 if enum_name == name and is_const
+                    Ast::Decl.Struct(struct_name, _, _, _, _, _, _):
+                        structs <- structs + 1 if struct_name == name
+                    Ast::Decl.Module(_, body, _):
+                        nested: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(body, name, depth + 1)
+                        enums <- enums + nested.enums
+                        const_enums <- const_enums + nested.const_enums
+                        structs <- structs + nested.structs
+                    Ast::Decl.Scoped(body, _):
+                        nested: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(body, name, depth + 1)
+                        enums <- enums + nested.enums
+                        const_enums <- const_enums + nested.const_enums
+                        structs <- structs + nested.structs
+                    _:
+                        pass
+            return (enums, const_enums, structs)
+
+        # Whether every payload field of the one payload enum named `name` is a plain value.
+        # `visiting` already holds `name`, so a recursive mention is admitted coinductively.
+        def proof_enum_payloads_plain(declarations: darray[Ast::Decl]&, all: darray[Ast::Decl]&, name: sview, annotations: darray[Ast::EnumAnnotation]&, visiting: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |all, name, annotations, visiting, depth|:
+                match declaration:
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        if enum_name == name and not is_const:
+                            for variant in variants |all, annotations, visiting, depth|:
+                                for field in variant.fields |all, annotations, visiting, depth|:
+                                    return false if not proof_plain_value_type(field, all, annotations, visiting, depth + 1)
+                    Ast::Decl.Module(_, body, _):
+                        return false if not proof_enum_payloads_plain(body, all, name, annotations, visiting, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_enum_payloads_plain(body, all, name, annotations, visiting, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_plain_named_type(name: sview, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, visiting: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or name == ""
+            return true if proof_scalar_primitive_type_name(name) or name == "f32" or name == "f64"
+            return true if any open in visiting where open == name
+            alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+            return false if alias.count != 0
+            counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, name, 0)
+            return counts.enums == 0 and counts.structs == 0 if counts.const_enums == 1
+            return false if counts.const_enums != 0
+            if counts.structs == 1 and counts.enums == 0:
+                field_names: mutable darray[sview] = []
+                return false if proof_struct_field_names(declarations, name, 0, &field_names) != 1
+                for field_name in field_names |name, declarations, annotations, visiting, depth|:
+                    field: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(declarations, name, field_name, 0)
+                    return false if field.count != 1 or not proof_plain_value_type(field.type_expression, declarations, annotations, visiting, depth + 1)
+                return true
+            return false if counts.enums != 1 or counts.structs != 0 or proof_enum_in_hierarchy(annotations, name)
+            inner: mutable darray[sview] = proof_copy_names(visiting)
+            inner.push(name)
+            return proof_enum_payloads_plain(declarations, declarations, name, annotations, inner, depth + 1)
+
+        def proof_plain_value_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, visiting: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_plain_value_type(inner, declarations, annotations, visiting, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    return proof_plain_named_type(name, declarations, annotations, visiting, depth + 1)
+                Ast::Expr.Scope(_, name, _):
+                    return proof_plain_named_type(name, declarations, annotations, visiting, depth + 1)
+                _:
+                    return false
+
+        # A binding's declared type admits it to the frame's own storage as a plain value.
+        # `mutable` is a mode on the by-value binding, not part of what the value can reach.
+        def proof_value_binding_type(expression: Ast::Expr, report: ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Unary(operator, inner, _):
+                    return operator == TokenKind.Mutable and proof_value_binding_type(inner, report, depth + 1)
+                _:
+                    pass
+            visiting: darray[sview] = []
+            return proof_plain_value_type(expression, report.source_declarations, report.source_annotations, visiting, 0)
+
+        # A call argument that names a plain value binding of this frame, or a field chain under
+        # one. The same text denotes the same immutable value wherever the binding is unchanged,
+        # which the ordinary assignment and call-boundary rules already track by the root name.
+        def proof_value_binding_argument(expression: Ast::Expr, report: ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == "" or not (any owned in report.value_binding_names where owned == name)
+                    return not (any existing in report.aliased_names where existing == name or existing == "*")
+                Ast::Expr.Field(object, field_name, _):
+                    return field_name != "" and proof_value_binding_argument(object, report, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_value_binding_argument(inner, report, depth + 1)
+                _:
+                    return false
+
+        # The declared payload types of `Enum.Variant`, for the one plain enum of that bare name.
+        # A qualified or dotless path, a hierarchy member and anything but one match is unknown.
+        def proof_payload_variant_field_types(declarations: darray[Ast::Decl]&, all: darray[Ast::Decl]&, enum_name: sview, variant_name: sview, fields: mutable darray[Ast::Expr]&, depth: usize) -> usize:
+            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            found: mutable usize = 0
+            for declaration in declarations |all, enum_name, variant_name, fields, depth, found|:
+                match declaration:
+                    Ast::Decl.Enum(name, variants, is_const, _, _):
+                        if name == enum_name and not is_const:
+                            for variant in variants |variant_name, fields, found|:
+                                if variant.name == variant_name:
+                                    found <- found + 1
+                                    fields.clear()
+                                    fields.extend(variant.fields)
+                    Ast::Decl.Module(_, body, _):
+                        found <- found + proof_payload_variant_field_types(body, all, enum_name, variant_name, fields, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        found <- found + proof_payload_variant_field_types(body, all, enum_name, variant_name, fields, depth + 1)
+                    _:
+                        pass
+            return found
+
+        # The declared type of each binder a payload pattern pushes, in push order. The compiler
+        # binds a positional payload binder to the field at the same position, the wildcards
+        # included, so only a pattern of bare binders and wildcards is read.
+        def proof_payload_binder_types(pattern: Ast::Pattern, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, types: mutable darray[Ast::Expr]&) -> bool:
+            types.clear()
+            match pattern:
+                Ast::Pattern.Variant(path, pattern_fields):
+                    dots: mutable usize = 0
+                    split: mutable usize = 0
+                    for offset in 0..<sview_len(path) |offset, path, dots, split|:
+                        if sview_at(path, offset) == PROOF_ASCII_DECIMAL_POINT:
+                            dots <- dots + 1
+                            split <- offset
+                    return false if dots != 1 or split == 0 or split + PROOF_PATTERN_DELIMITER_WIDTH >= sview_len(path)
+                    enum_name: sview = string_view_slice(path, 0, split.i64())
+                    variant_name: sview = string_view_slice(path, (split + PROOF_PATTERN_DELIMITER_WIDTH).i64(), sview_len(path).i64())
+                    counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, enum_name, 0)
+                    return false if counts.enums != 1 or counts.const_enums != 0 or counts.structs != 0 or proof_enum_in_hierarchy(annotations, enum_name)
+                    field_types: mutable darray[Ast::Expr] = []
+                    return false if proof_payload_variant_field_types(declarations, declarations, enum_name, variant_name, &field_types, 0) != 1
+                    return false if field_types.count != pattern_fields.count
+                    for position_index in 0..<pattern_fields.count |position_index, pattern_fields, field_types, types|:
+                        match pattern_fields[position_index]:
+                            Ast::Pattern.Binding(_):
+                                types.push(field_types[position_index])
+                            Ast::Pattern.Wildcard:
+                                pass
+                            _:
+                                types.clear()
+                                return false
+                    return true
+                _:
+                    return false
+
+        # A payload binder that took a fresh symbol has the declared type of its payload field.
+        # The field type must be a primitive scalar spelled directly: an alias or a name could
+        # be a type parameter in disguise. The facts are the ones a declared local receives.
+        def proof_add_payload_binder_type_facts(pattern: Ast::Pattern, values: darray[Ast::Expr]&, first: usize, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, index: ProofTypeAuditIndex, owner: sview, position: Ast::Pos) -> void:
+            types: mutable darray[Ast::Expr] = []
+            return if not proof_payload_binder_types(pattern, report.source_declarations, report.source_annotations, &types)
+            return if first > values.count or values.count - first != types.count
+            for offset in 0..<types.count |offset, types, values, first, facts, report, index, owner, position|:
+                proof_add_payload_symbol_type_facts(values[first + offset], types[offset], facts, report, index, owner, position)
+
+        def proof_add_payload_symbol_type_facts(value: Ast::Expr, type_expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, index: ProofTypeAuditIndex, owner: sview, position: Ast::Pos) -> void:
+            symbol: mutable sview = ""
+            match value:
+                Ast::Expr.Ident(name, _):
+                    symbol <- name
+                _:
+                    return
+            fresh: mutable bool = false
+            for pool_index in 0..<PROOF_INTERNAL_REBIND_SYMBOL_COUNT |pool_index, symbol, fresh|:
+                fresh <- true if symbol == proof_internal_rebind_name(pool_index)
+            return if not fresh
+            match type_expression:
+                Ast::Expr.Ident(type_name, _):
+                    return if not proof_scalar_primitive_type_name(type_name)
+                _:
+                    return
+            unsigned_width: i64 = proof_unsigned_type_width_index(type_expression, index, 0)
+            proof_add_unsigned_binding_facts(facts, report, symbol, unsigned_width, position.line, owner, position) if unsigned_width > 0
+            signed_width: i64 = proof_signed_type_width_index(type_expression, index, 0)
+            proof_add_type_bound_fact(facts, report, proof_signed_type_marker(Ast::Expr.Ident(symbol, position), signed_width, position), position.line, owner) if signed_width > 0
+            proof_add_primitive_operator_witnesses(facts, report, Ast::Expr.Ident(symbol, position), type_expression, position)
+            proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(symbol, position), position.line, owner) if unsigned_width <= 0

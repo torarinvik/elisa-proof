@@ -137,6 +137,12 @@ def replay_external_calls() -> set[str]:
     return called_functions(replay) - own - kernel_public
 
 
+def correspondence_external_calls() -> set[str]:
+    checker = elisa_files(SRC / "correspondence")
+    kernel_public = defined_functions(elisa_files(PROOF / "kernel_replay", PROOF / "kernel_core.elisa"))
+    return called_functions(checker) - defined_functions(checker) - kernel_public
+
+
 def kernel_external_calls() -> set[str]:
     kernel = elisa_files(PROOF / "kernel_replay", PROOF / "kernel_core.elisa", PROOF / "kernel_replay.elisa")
     return called_functions(kernel) - defined_functions(kernel)
@@ -153,6 +159,7 @@ def main() -> int:
         "summary-trace-kinds": summary_trace_kinds(),
         "resource-fact-free-leaves": resource_fact_free_leaves(),
         "replay-external-calls": replay_external_calls(),
+        "correspondence-external-calls": correspondence_external_calls(),
     }
     failures: list[str] = []
     for table, source in checks.items():

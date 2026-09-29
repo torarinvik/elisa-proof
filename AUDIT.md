@@ -9135,6 +9135,708 @@ point into the package buffer, which lives for the whole replay call, so the cod
 construction rather than by the compiler. Once the compiler lands per-field `@r` on tuple fields,
 these returns become `sview @r`.
 
+## P2-02: checked correspondence (2026-09-28)
+
+`elisa-proof-replay --correspond <package> <source>` checks that a package proves what the source
+obliges. P2-01 replayed theorems but trusted the adapter for their hypotheses and for which goals
+the source raises. The correspondence checker (`src/correspondence/`, about 1.2k lines) removes
+that trust for a small sequential subset. It parses the source with the Elisa front end and walks
+each function with its own reference semantics, re-deriving every obligation: return ensures, call
+requires, loop preservation and branch joins. It then looks for a replayed theorem whose
+conclusion is the obligation and whose hypotheses are all facts of the walk at that point.
+DESIGN.md, "Checked correspondence", gives the semantics, the subset and the budgets.
+
+**Statuses.**
+- `checked`: every obligation of the function is concluded by a replayed theorem under facts the
+  walk established.
+- `unmatched`: some obligation has no such theorem. The result names the obligation kind and line.
+- `unsupported`: the function is outside the subset. The result names the first reason.
+
+A function that calls an unchecked callee is `unsupported` (`callee-unchecked`), so a checked
+caller never leans on a callee's unchecked ensures. The command exits 0 only when every function is
+checked.
+
+**What it trusts.** The kernel, the Elisa parser and type checker, and the checker's reference
+semantics. Terms carry no types, so the width of `x + 1` comes from the type facts the checker
+states for the operands' declared types; the type checker is what makes those facts true.
+`scripts/test_kernel_inventory.py` pins every function the checker calls outside itself and the
+kernel: the twelve package-reader entry points and three output helpers.
+
+**Adversarial matrix** (`scripts/test_correspondence.py`, run by `scripts/test.sh`):
+- Positive: four examples covering assignment, branch, call and a counting loop are fully checked.
+- Mutations are `unmatched`. Each case packages one source and checks the package against a
+  mutated one:
+  - a swapped, negated or weakened branch;
+  - an off-by-one bound (`x > 0` against `x >= 0`);
+  - an added guard hypothesis;
+  - a fact borrowed from another function's contract;
+  - a stale loop fact;
+  - a callee's weakened ensure;
+  - a call whose argument was swapped, which fails both its requires and the caller's ensure;
+  - an i64 sum's package against a u8 sum;
+  - a package with one theorem removed.
+- Unsupported, with the named reason: a while loop, division, a mutable parameter, recursion,
+  shadowing, a return inside a loop, a loop invariant, a nested call, a duplicated module name,
+  a type alias, and a lemma.
+- Refused: an inadmissible source (every status empty), malformed JSON, a forged statement, an
+  empty package. Usage errors and an absent package exit 2.
+- Budgets: 70 nested ifs (`nesting`) and a chain of 140 locals (`expression`).
+
+**Bug found by the sweep: a lemma was checked.** Running the checker on all 567 examples and
+matching its checked functions against the prover's findings flagged `rejected_lemma_result`'s
+`returning_fact`. That lemma returns a value, which the report rejects, yet the checker called it
+checked. The parser marks lemmas with an `__lemma` annotation, not in the declaration itself, so
+the checker walked it as an ordinary function. Lemmas are ghost declarations whose semantics the
+checker does not model; they are now `unsupported` (`lemma`). With that fix, no prover finding
+falls inside any checked function.
+
+**Width probes.** Unsigned arithmetic wraps, so a theorem about `x + 1` over i64 must not check a
+u8 function. Hand-forged packages confirmed that the kernel refuses:
+- arithmetic whose operand has no width witness;
+- arithmetic whose operand has only the `__elisa_primitive_scalar_type` witness;
+- a u8 increment with its `x <= 254` no-wrap hypothesis dropped.
+
+A genuine i64 package against the u8 source stays `unmatched`, because the u8 walk states u8 type
+facts and the theorem's hypotheses cite i64 ones.
+
+**Sweep.** All 567 examples were packaged and checked:
+- Packages: 457 replayed, 77 source-inadmissible, 23 with no theorems; the 10 runtime harnesses
+  timed out as in P2-01.
+- Functions: 90 checked, 96 unmatched, 889 unsupported. The main unsupported reasons are parameter
+  types (306), return types (205), names (76), contracts (68), effects (63), statements (51), local
+  types (41), expressions (37) and unchecked callees (27).
+- 48 of the 557 runs exit 0.
+
+**Limitations.**
+- Completeness, not soundness: `loop_counter_invariant`'s `increment_keeps_its_value` and
+  `two_counters` are proved by the prover but `unmatched`. The producer names an assigned value
+  with a fresh `__elisa_rebind_N` symbol and a binding equation. The checker substitutes the value
+  instead, so the conclusions differ syntactically.
+- The producer drops the return-ensure theorem for a chain of about 40 locals, which leaves that
+  function `unmatched`.
+- Loops whose preservation goal the prover does not prove (e.g. `total <- index`) are `unmatched`.
+  A loop's binder carries no type of its own, so arithmetic on it cannot replay without a width
+  witness.
+- Termination and arithmetic overflow are not established. The trust record says so.
+
+## Literals wrapped by their width (2026-09-28)
+
+This fixes a soundness hole on main. The source type checker refuses a literal that does not
+fit its width only when the literal's peer is a bare name. So `a + 0 == 256` with `a: u8`
+compiles, and the literal wraps to 0. The kernel read the literal as exactly 256. Beside the
+type range `a <= 255` the fact was unsatisfiable and closed any goal. At 919bb94,
+`requires a + 0 == 256` proved `ensure a == 7`, and so did `a * 1 == 300` and the guarded
+difference `b - a == 256`.
+
+Now every proposition state admitted by kernel replay must pass
+`proof_kernel_replay_state_literals_fit` (`kernel_replay/literal_widths.elisa`), whose rules are:
+- A closed constant under a comparison or integer arithmetic operator must fit the width
+  witnessed for that node: unsigned and signed, every leaf and every intermediate.
+- A comparison uses only its own width. An arithmetic node without a witness of its own inherits
+  the width of the arithmetic around it.
+- `not`, `if` conditions and quantifier bodies start a fresh context.
+- A negated literal is checked as one value, so `-128` fits i8 although `128` does not.
+- A negative literal with no width tag fits a signed width only when it lies inside it. It
+  never fits an unsigned width.
+- A width-tagged high-bit literal is a typed value, which the typed comparison rule already
+  handles.
+
+The check covers every goal, tactic step, tactic branch and quantifier state. The producer
+mirror (`linear/literal_widths.elisa`) refuses the same states in `proof_goal_with_operator_mask`,
+so the solver gives up instead of emitting a certificate that the kernel would refuse. Every
+probe below ends with 0 replay gaps.
+
+Nothing on main was found to wrap through a call, an if-expression, an index or a field peer.
+Each of those forms is unproven both at 919bb94 and now. The check does not depend on that.
+
+Accepted: `examples/literal_widths.elisa`. It covers:
+- the u8 maximum;
+- the i8 minimum as a negated literal;
+- a signed step down;
+- a guarded exact difference;
+- a small shift.
+
+Rejected: `examples/rejected_literal_widths.elisa`:
+- `a + 0 == 256`, `a * 1 == 300` and a guarded difference of 256 at u8 (all proved at 919bb94);
+- a wide sum;
+- `-1` at u8;
+- 200 and -129 at i8;
+- 128 in a goal at i8.
+
+Kernel adversaries: suite 12 of `examples/kernel_arena_runtime` (codes 230-239) builds each
+state directly, with the type ranges the producer supplies. Mutation checks:
+- disabling the whole check fails with 230;
+- admitting any bare negative payload fails with 236;
+- admitting any negated literal fails with 235.
+The signed cases need the primitive scalar witness that source states carry. Without it the
+kernel refuses them for another reason, and the cases would test nothing.
+
+## Payload-enum values as call arguments (2026-09-28)
+
+A pure call over a by-value payload-enum binding, such as `depth(n)` with `n: Nat`, now gets
+the pure-call witness a call over scalars gets. Its summary also survives the next call in the
+body. Before this change, `a: i64 = depth(n); b: i64 = depth(n)` lost `a >= 0` at the second
+call because the witness required every argument to be a witnessed scalar.
+
+This is producer-side only. The witness is the same `__elisa_primitive_scalar_type(call)`
+marker, and replay checks every fact trace exactly as before. What it admits is decided by
+`enum_value_types.elisa`, `proof_value_argument_stable` and `proof_value_binding_argument`.
+
+Why a plain enum value is fixed:
+- Both compilers refuse a write to a payload field ("field is immutable"), and a payload field
+  cannot be declared `mutable`. So an enum value, inline or a handle into a packed store,
+  denotes one immutable tree for its lifetime.
+- A binding of such a type is one of the frame's value bindings (`value_binding_names`). If no
+  reference, receiver or opaque argument names it (`aliased_names`), only reassignment changes
+  it, and reassignment drops facts by root name as it does for a scalar.
+- A match payload symbol that is bound from such a binding is registered the same way.
+
+What is admitted as a plain value type:
+- primitive scalars and floats;
+- a const enum with a unique name;
+- a struct of plain fields;
+- a payload enum whose name is unique, that is in no `is` hierarchy, that has no `common:`
+  block, and whose variant fields are all plain.
+
+Recursive mentions are admitted coinductively. Any alias, container, view or reference type is
+refused.
+
+Assumptions, recorded as such:
+- Payload and common fields are immutable in both compilers.
+- Store lifetime and dangling handles are the compiler's responsibility.
+- The name lookup is by bare name, so any second enum, struct or const enum with the same name
+  anywhere in the program refuses the type.
+
+Accepted: `examples/value_call_arguments.elisa` covers:
+- a declared result;
+- two calls over one parameter;
+- a match payload beside its scrutinee;
+- a local copy;
+- a recursive enum with a struct payload.
+
+All 15 goals prove. On main, 5 of the 15 are unproven.
+
+Rejected: `examples/rejected_value_call_arguments.elisa` covers:
+- a `darray` payload;
+- an `sview` payload;
+- a hierarchy parent;
+- `common:` fields;
+- a binding lent by `&mut` before and between the calls, compared as `a == c`.
+
+Each is `ensure-unproven`, with 0 replay gaps.
+
+Mutation checks:
+- making `proof_enum_in_hierarchy` always false and admitting every unknown type form proves
+  the container, hierarchy and common cases;
+- dropping the aliasing check in both `proof_value_argument_stable` and
+  `proof_value_binding_argument` proves `lent`. Either check alone keeps it refused.
+
+The `sview` case is refused by the name lookup, which is a separate path.
+
+Found and not changed (pre-existing, scalars too):
+- A summary whose ensure mentions a call (`ensure result <= size(n)`) is lost at the next call.
+- A statement call to a void, impure callee drops a guard fact over a local scalar.
+
+## Pure call results are generalized like field places (2026-09-28)
+
+A comparison over a pure call's result, such as `small(n) + 1 >= 1` given `small(n) >= 0` and
+`small(n) < 1000`, did not prove. The interval, difference and affine tiers read only bare
+names, and no call term had a signed width, so `small(n) + 1` could not be shown not to wrap.
+
+What changed:
+- The field-place rule (`proof_field_place_goal` and its kernel mirror
+  `proof_kernel_replay_field_place_goal`) now also generalizes a call of a named function to a
+  fresh `__elisa_field_place_N` name. The call must carry a pure-call witness
+  (`__elisa_primitive_scalar_type(call)`). Type markers and other internal names never count as
+  calls here. In the kernel, a call node may carry no argument names or exactly one per argument.
+- The producer adds `__elisa_signed_place_type_bound(call, w)` beside the pure-call witness.
+  `w` is the signed width of the callee's declared return type. The bare callee name must
+  select exactly one source declaration; otherwise no width is recorded.
+- The kernel's signed place marker now also accepts a named identifier as its term. That is the
+  form a field place or call result takes after generalization, and it states what
+  `__elisa_signed_type_bound` states for a bare name.
+
+Why generalization is sound: a witnessed pure call is a function of its arguments. Within one
+proof state every occurrence of the same call text denotes one value. Replacing every
+occurrence with one fresh name therefore turns a proof of the generalized goal into a proof of
+the original, by instantiating the name back. Quantifier bodies are not rewritten, which only
+withholds information. A call nested inside another generalized term stays as it is, which
+also only withholds information.
+
+Accepted: `examples/call_result_places.elisa` covers:
+- a call plus a constant;
+- a call against a looser constant;
+- the sum of two calls over different arguments;
+- two bound results summed;
+- a result kept across another call;
+- one call cancelling itself.
+
+All 22 goals prove and replay. On main, 6 of them are unproven.
+
+Rejected: `examples/rejected_call_result_places.elisa` covers:
+- a call with no upper bound, whose successor can wrap;
+- two calls over different arguments treated as one;
+- the same call text over a name rebound between the calls.
+
+All three stay unproven with no replay gaps.
+
+Mutation checks, run on development probes with the same shapes as the accepted cases:
+- Without the kernel's call collection, 4 of 16 probe goals become replay gaps.
+- Without the kernel's identifier width, 4 of 16 probe goals become replay gaps.
+- Without the producer's width marker, 5 probe goals become unproven.
+- With the producer's signed-overflow gate forced open, the wrapping case proves in the
+  producer, and the kernel still refuses it as a replay gap.
+
+Two reads of the call-term width marker turned out to be unnecessary and were removed: the
+signed width of an unreduced call term, and a stability rule keeping the marker across calls.
+Once the call is generalized, the width is read under its fresh name. The marker is also
+re-derived for any call the goal still mentions.
+
+## Pure call-entry reference snapshots (2026-09-29)
+
+Ported from `codex/wasmbrowser-proof`: d23142c "Replay pure call-entry scalar reference
+snapshots" and 02120fa "Make replay recursion budgets strict-checkable".
+
+A pure function may now state `old(p[0])` in an ensure when `p` is a scalar reference parameter.
+At a call site, that ensure's `old(p[0])` becomes the caller's `a[0]` when all of these hold:
+- both caller and callee are pure;
+- the actual argument is a bare name;
+- that name is one of the caller's own reference parameters.
+
+The fact trace records the snapshot as an extra `__old_reference_state` binding after `result`.
+
+Trusted surface: certificate validation grows by about 40 lines, plus
+`replay/old_reference_call_validation.elisa` (85 lines). Replay re-derives each condition from
+its own tables and does not trust the producer's flag:
+- the formal the `old` names, which must be the one supported `old(p[0])` place;
+- that the callee's formal is a reference;
+- that the caller is pure;
+- that the actual is one of the caller's reference parameters;
+- that the snapshot is exactly `a[0]`.
+
+Any other `old` shape makes the substitution invalid, and the certificate is refused.
+
+Merge adjustments:
+- `old(...)` stays refused in every non-ensure contract kind of a pure function, `decreases`
+  included. The branch refused it only in `requires`.
+- Bound call summaries re-emit the snapshot binding, so a rebound call result still replays.
+- The branch's congruence and proposition-typing budget edits were already on main in an
+  equivalent form, so main's versions were kept.
+
+Mutation check: with the producer's caller-purity gate removed,
+`reference_observe_after_impure_call` proves in the producer, and replay refuses it (1 gap of
+32 certificates). All 18 test chunks and all 9 dogfood chunks pass.
+
+## Loop-scaled array indices (2026-09-29)
+
+Ported from `codex/wasmbrowser-proof`: 29efb2d "Prove bounded loop-scaled array indices" and
+061ee94 "Reject shadowed loop bounds in index proofs". Only part of 29efb2d was taken.
+
+**What was kept.** A loop binder is a witnessed primitive integer with no width marker. An
+arithmetic term over such a binder is now range-safe when its interval lies in [0, 127]. That
+range fits every primitive integer type, signed or unsigned, so no width has to be known. The
+rule is added to both the producer and the kernel. It is what proves
+`sources[index * 4 + 3]` for `index in 0..<2`.
+
+**What was left out.** The branch also keyed interval bounds on the binder's `(name, offset)`
+tuple atom, in both the linear tier and the kernel. On main that machinery is redundant: the
+field-place generalization (19848f6) already renames the tuple atom to a fresh name that the
+name-keyed bounds read.
+- With the kernel atom rule disabled, all 16 probe goals still replayed.
+- With the linear atom rule disabled, all 16 probe goals still proved.
+
+It was therefore not ported, which keeps the trusted surface smaller.
+
+**Evidence.**
+- `examples/vector_index_arithmetic_probe.elisa`: 16 of 16 goals prove and replay.
+- Rejected cases:
+  - `rejected_vector_index_arithmetic`: the last iteration reaches index 11 of 8;
+  - `rejected_vector_index_underflow`: `index - 1`;
+  - `rejected_vector_index_shadowing`: an inner `index` shadows the outer one.
+
+  All three are refused with no replay gaps.
+- Mutation checks:
+  - Without the kernel rule, 4 of 16 goals become replay gaps.
+  - Without the producer rule, only 8 of 16 obligations prove.
+- All 18 test chunks and all 9 dogfood chunks pass.
+
+## Recursive payload enums: sibling summaries and binder types (2026-09-29)
+
+First slice of P2-03 (ADT proof library).
+
+**Sibling summaries.** In `Tree.Node(left, _, right)`, a call `tree_size(right)` used to drop
+the summary of the earlier `tree_size(left)`: the call-stability rule accepted only witnessed
+scalars and parameters as arguments that survive a call. A payload symbol
+(`__elisa_rebind_N`) is now also stable when it is a registered local extent. Such a symbol is
+created only over a by-value, reference-free scrutinee. No source text can spell or assign it,
+and the payload tree it names is immutable, so it denotes one value across any call.
+
+**Binder types.** A positional or named binder in `Enum.Variant(...)` now takes the declared
+type of the payload field at its pattern position, wildcards included. This matches the
+compiler's lowering (`codegen_stmt_match_arm.elisa`). The typing is used in two places:
+- Proposition formation types the binder, so `head < 0` is no longer refused as
+  `contract-proposition-type`.
+- The checker adds the type-bound facts. This is done only for primitive scalar field types,
+  with no aliases, and only when the path is exactly `Enum.Variant` of one non-hierarchy
+  enum with one matching variant and one field per pattern slot. Anything else adds no facts.
+
+These are trusted boundary facts, like every other type bound, so the mapping must be exact.
+
+**Evidence.**
+- `examples/adt_recursive_payload_probe.elisa`: 16 of 16 goals prove and replay. It covers
+  list length, tree size over two recursive calls, a head-sign scan, and a u8 binder.
+- Rejected controls:
+  - `rejected_adt_recursive_payload_difference`: `l - r + 1 >= 1` is unbounded.
+  - `rejected_adt_payload_binder_position`: an i64 binder after a u8 wildcard gets no u8 bound.
+  - `rejected_adt_payload_binder_width`: u8 does not give `<= 254`.
+
+  All three are refused with `ensure-unproven`. The difference control's only replay gap is a
+  goal that depends on its own refused summary, which is never counted as replayed.
+- Mutation checks:
+  - Without the stability rule, `tree_size` is unproven.
+  - Without the checker facts, `tagged_tag` is unproven.
+  - Without the formation typing, `list_all_nonnegative` is refused as
+    `contract-proposition-type`.
+
+## Call results in unsafe premises, and negated successor guards (2026-09-29)
+
+Second P2-03 slice: a recursive size function caps `l + r + 1` with `return CAP if l + r >= CAP`.
+
+**Unsafe premises generalize their call results.** A premise such as `l + r >= 1000000` over two
+call results used to disqualify the whole goal. The fixed-width guard could not show the sum is in
+range, because the only bounds on `l` and `r` are the callee's summaries, and those are facts about
+the call terms. The guard cannot read facts about call terms as ranges.
+
+Now, when a premise fails that guard and the goal is a comparison, the producer hands the goal to
+the existing field-place rule, `proof_field_place_goal`. The kernel does the same through
+`proof_kernel_replay_field_place_goal`. That rule renames each witnessed pure call result to a fresh
+name. It then re-enters every guard, including this premise check, over the renamed facts. The
+rename adds no facts, so a premise that is still out of range under its generalized names is
+refused as before. The kernel pays one unit of its budget for the step and requires a negatable
+binary goal. The rule's own four-place, once-per-goal limit is unchanged.
+
+**Negated guards feed the successor bound.** The kernel's `strict_shift` rule proves
+`x + 1 <= n` from a premise `x < n`. It read only positive premises. The producer's rule reads its
+premise through `readable_order`, which also sees the `not (x >= n)` that an early return leaves
+behind. The kernel now uses its mirror, `proof_kernel_replay_readable_order`. That reading requires
+a primitive scalar witness on both operands, so an overloaded `__cmp__` is never assumed total.
+This was a replay gap that already existed with plain parameters.
+
+**Evidence.**
+- `examples/call_sum_premise_probe.elisa`: 14 of 14 goals prove and replay. It covers
+  `capped_pair`, `left_heavy` (`l + r - 2 >= 0` after `l + r < 3` is excluded), and the
+  plain-parameter `plain_capped`.
+- Rejected controls, all refused with `ensure-unproven` and no replay gaps:
+  - `rejected_call_sum_premise_unbounded`: the callee has no upper bound, so the premise may be a
+    wrapped sum.
+  - `rejected_call_sum_premise_wrong_bound`: the ensure is `<= 999999`.
+  - `rejected_negated_strict_shift_off_by_one`: `not (x + y > C)` leaves `x + y + 1 = C + 1`.
+- `scripts/test_call_sum_premise.py` is wired into `scripts/test.sh`.
+- Mutation checks:
+  - Without the producer change, lines 15 and 22 are unproven.
+  - Without the kernel field-place step, the three call-sum goals are replay gaps.
+  - Without the kernel `readable_order` reading, `capped_pair:15` and `plain_capped:30` are gaps.
+- The full test and dogfood suites pass.
+
+## Port: parameter-heavy return analysis budget (2026-09-29)
+
+This ports wasmbrowser-proof `047daad`. A function with at least 12 parameters and at most 16 body
+statements now gets the fact-state entry cap (128) as its return-analysis snapshot budget. Every
+other function keeps its ordinary budget. The cap is a resource bound, not a proof rule, so it
+adds no facts.
+
+`examples/parameter_heavy_return_analysis_over_limit.elisa` still pins the refusal at 65 facts over
+a limit of 64. In the peer probe, main drops the unannotated contract wrapper. Main counts the
+wrapper's 14 `ensures` as obligations, and they cannot hold without a callee summary; the peer
+binary never counted them.
+
+Evidence: before the port the route function was refused with `control-flow-analysis-budget`; now
+it verifies and replays. The full test and dogfood suites pass.
+
+## Nested conditional split (2026-09-29)
+
+Third P2-03 slice: a recursive height function returns `deeper + 1 if deeper < CAP`, where
+`deeper = l if l >= r else r`. After substitution, the goal is `(l if l >= r else r) + 1 <= CAP`
+and the guard is a fact about the same conditional. The operand split only fires when a
+conditional is a whole side of the comparison, so this goal was unproven.
+
+**Rule.** `proof_nested_conditional_goal` finds the first conditional in pre-order below a
+comparison's operands. It reaches that conditional only through parentheses, negation and binary
+operators; a conditional that is a whole operand is still left to the operand split. The rule
+then checks two branches:
+- Under `c`, every occurrence of the conditional, in the goal and in every fact, is replaced by
+  its then-value.
+- Under `not c`, every occurrence is replaced by its else-value.
+
+The condition is only a path assumption, and both branches must close. Under `c` the conditional
+denotes its then-value, so the rewrite changes no truth value. Quantifier bodies keep the
+conditional, which only withholds information.
+
+**Limits and guards.**
+- The rule shares the case-split depth limit (4). It sets `exhausted` when that limit refuses a
+  split.
+- The kernel mirror is `proof_kernel_replay_nested_conditional_goal`. It rewrites through
+  `replace_exact`, which is the same capture-avoiding rewrite that field-place generalization uses,
+  and costs one unit of budget for each step.
+- Both the producer and the kernel try the rule where an unsafe fact or goal already hands the goal
+  to field-place generalization. The branches re-enter every range guard.
+- The producer does not count parentheses as a level, because the arena has none. The two sides
+  therefore pick the same conditional.
+
+**Evidence.**
+- `examples/nested_conditional_split_probe.elisa`: 14 of 14 goals prove and replay. It covers
+  three functions:
+  - `tree_height`, a recursive ADT height over both recursive summaries.
+  - `successor_of_max`.
+  - `min_plus_max_is_sum`, where two conditionals under one sum need two nested splits.
+- Rejected controls, all refused with `ensure-unproven` and no replay gaps:
+  - `rejected_nested_conditional_unguarded`: `deeper + 1` without its guard.
+  - `rejected_nested_conditional_wrong_branch`: the guard bounds `a`, not the maximum.
+  - `rejected_nested_conditional_max_twice`: `max + max == a + b`.
+- `scripts/test_nested_conditional_split.py` is wired into `scripts/test.sh`.
+- Mutation checks:
+  - Without the kernel rule, 5 goals are replay gaps.
+  - Without the producer rule, lines 21, 29 and 37 are unproven.
+- The full test and dogfood suites pass.
+
+A literal beside a compound operand, such as `2 * (a if a <= b else b)`, is still refused by the
+ambiguous-literal gate before any split runs.
+
+## Port: primitive casts in contracts, and distinct-constant disequality coverage (2026-09-29)
+
+**Casts.** wasmbrowser-proof `ae39d29` is cherry-picked as-is. A zero-argument numeric conversion
+such as `status.usize()` is pure in a contract when its receiver is pure. In the kernel, an integer
+conversion is a witnessed scalar when its receiver is witnessed. Main's rule that the literal
+`count` of an array is a scalar is kept beside it.
+
+**Distinct constants.** wasmbrowser-proof `c09b933` adds a dedicated `x != a or x != b` rule. Main
+does not need it: main's disjunction case split, `not A => B`, already proves and replays that
+peer's example. Only the example, its refused same-constant control and the test are ported, as
+regression coverage; no rule is added. The full test and dogfood suites pass with both.
+
+## Widening integer conversions keep their receiver's value (2026-09-29)
+
+Fourth P2-03 slice: a token walker sums `later + value.i64()` over `Number(value: u8, rest)`. A
+conversion had been witnessed as a primitive scalar, but its value stayed opaque, so no bound on
+`value` reached the sum.
+
+**Rule.** `proof_add_widening_cast_witnesses` fires for `name.T()` only when all of these hold:
+- `T` is an integer type that no source function or method shadows (`proof_runtime_numeric_conversion`
+  counts both).
+- The receiver is a bare name with a type marker.
+- `T` holds every value of the receiver's type: unsigned into a wider-or-equal unsigned or a
+  strictly wider signed type, or signed into a wider-or-equal signed type.
+
+It then adds the target's type markers and `name.T() == name`. Narrowing and sign-changing
+conversions add nothing, so their value stays opaque, as `rejected_numeric_cast_operator` already
+requires.
+
+**Plumbing, each checked by mutation.**
+- The kernel's field-place collector accepts a witnessed call whose callee is a field (the
+  conversion), as well as a named pure call.
+- The pure-summary rewrite refuses field-callee calls. Rewriting `name.T() == name` would move the
+  receiver into the wider arithmetic and change the width every guard reads.
+- A local declaration or a return whose only calls are conversions skips summary application,
+  forgetting and fact clearing. It runs no source function.
+- A conversion's receiver is not counted as lent to a call, so the binder stays stable across a
+  later call statement.
+- A conversion is not an untrusted operator operand, because a primitive integer cannot be a struct
+  protocol receiver.
+
+**Evidence.**
+- `examples/widening_cast.elisa`: 36 of 36 goals prove and replay. It covers u8 into i64 and u16,
+  i8 into i64, conversions in match arms, and conversions before and after a kept call result.
+- `examples/rejected_widening_cast.elisa`: every ensure is refused with no replay gaps. The
+  controls are u32 into u8, i64 into u64, u64 into i64, an i8 widening claimed non-negative, a u8
+  widening claimed below 255, and a protocol method named `i64` that returns -1.
+- `scripts/test_widening_cast.py` is wired into `scripts/test.sh`.
+- `rejected_conditional_conversions` had pinned `b.u64() if b >= 48 else 0` with
+  `ensure result <= 255` as unproven. That claim is true for `b: u8` and now proves, so it moved
+  to `conditional_conversions`. The control now claims `<= 254`, which is false at `b = 255`.
+- Mutation checks:
+  - Without the kernel collector change, 10 goals are replay gaps.
+  - Without the producer, 11 ensures are unproven.
+  - Without the alias exemption, the two after-call functions are unproven.
+  - Without the declaration and return skips, 7 ensures are unproven.
+  - Without the summary refusal, `widen_sum` and `bound_first` are unproven.
+  - Without the operator-operand exemption, the match-arm functions are unproven or unsupported.
+  - A frame-walker skip and a post-return clear skip were also tried. Neither changed any probe, so
+    both were dropped.
+- The full test and dogfood suites pass.
+
+Two limits remained. A signed parameter has no range facts from its type, so `value >= -128` for an
+`i8` is still unproven. A guard like `later > 1000000 - 255` over a call-bound local was also
+unproven, while the folded literal `999745` proved. The next section closes the second limit.
+
+## Returned call-bound locals, and constants beside call results (2026-09-29)
+
+Fifth P2-03 slice. A call to a callee with a `requires` is not pure, so the call havocs the
+caller's facts at the call. It then keeps only call-stable facts and type bounds, and adds the
+summary. `return y` for `y: i64 = bounded(x)` still lost that summary. The return path saw the call
+text substituted for `y` and cleared the facts a second time, as if the call ran again.
+
+**Rule 1: return clear.** `proof_check_return_contracts` clears facts after a call only when the returned
+expression itself, as written, contains a call. A local's call ran at its binding, where its summary
+and havoc were already applied.
+
+**Rule 2: call-result width.** `proof_strict_signed_width` gives a named call the width of a
+`__elisa_signed_place_type_bound` marker whose term is exactly that call. The pure-call witness adds
+that marker from the callee's single declared signed return type. The general place reader is left
+alone, because it keys retention and invalidation on a place's root binding, and a call has none.
+
+The return fix exposed `later > 1000000 - 255` in `token_sum`. The checker proved the ensure from
+the literal fact, but the kernel refused the untyped constant, which gave 2 replay gaps. The kernel
+needs no change for this. Its field-place generalization already renames a witnessed call to a
+fresh name that carries the same marker. A kernel-side mirror was written and then dropped: with
+its arm disabled, every probe still replays with 0 gaps.
+
+**Evidence.**
+- `examples/returned_call_local.elisa`: every goal proves and replays. It covers a returned local
+  over a parameter and over a literal argument.
+- `examples/rejected_returned_call_local.elisa`: stays refused. It covers:
+  - a claim stronger than the summary;
+  - a `&mut`-lent local whose recorded value must not come back through the return;
+  - an unproven callee precondition.
+- `examples/call_result_width.elisa`: 19 of 19 goals prove and replay. It covers guarded successors
+  and early returns over a call-bound local, a direct call guard, and the recursive `token_sum`.
+- `examples/rejected_call_result_width.elisa`: every ensure is refused with no replay gaps. It
+  covers:
+  - `100 + 100` beside an `i8` result;
+  - `200 + 100` beside a `u8` result;
+  - an off-by-one over a local and over a direct call;
+  - an impure call with no upper bound.
+- `scripts/test_call_result_width.py` is wired into `scripts/test.sh`.
+- Hostile scratch probes, not committed, are all refused:
+  - a limit argument reassigned between two calls, then returning the first result bare, as a
+    sum, or as a conditional;
+  - the same through a `changes` callee;
+  - pure-callee variants of each;
+  - two calls over a lent payload-enum binding compared for equality.
+- `rejected_value_call_arguments` had pinned `lent`, whose claim `result >= 0` is true. It only
+  failed because of the extra clear. `lent` now claims `a == c` over two calls after the binding is
+  lent, which is unjustified. Dropping both aliasing checks proves it, so the control is still
+  sharp.
+- Mutation checks:
+  - Restoring the old return condition leaves both `returned_call_local` ensures unproven.
+  - Making the call arm return 0 leaves 4 `call_result_width` ensures unproven, with 2 replay
+    gaps.
+- The full test and dogfood suites pass.
+
+A sum of two call-bound locals, as in `first + second` over chained calls, is still unproven.
+
+## Port: typed usize sentinels (from `codex/wasmbrowser-proof` ed8b7c9, 2026-09-29)
+
+The parser pins a `usize` literal above i64.max, such as `usize::MAX`, as its negative bit pattern.
+`u64` constants already took the unsubstituted path in that case. A `usize` constant did not, so
+`unsigned_resource_source_policy` could not use its `18446744073709551615` fallback. The two
+types now take the same path: when the pin is negative, the name stays unsubstituted, with only its
+primitive-scalar witness.
+
+The branch also adds a disequality-from-equality rule to both the checker and the kernel. That rule
+is not ported. With only the constant change, every ported example proves and replays. Main's case
+split already covers the exclusions, as it did for c09b933.
+
+**Evidence.**
+- Ported from the branch:
+  - `unsigned_resource_source_policy`: 32 goals prove and replay;
+  - `usize_max_reflexivity`;
+  - `negative_integer_literal_reflexivity`;
+  - the equality exclusions in `unsigned_equal_constant_exclusion`;
+  - the `rejected_unsigned_equality_same_value` control.
+- New: `examples/rejected_usize_max_constant.elisa` checks that the pin is never read as -1. It
+  covers `HUGE < 5`, `HUGE + 1 == 0`, and returning `HUGE` under `result < 10`, and all three are
+  unproven.
+- Mutation check: dropping the `usize` clause leaves 5 of the policy ensures unproven. The hostile
+  control stays refused, because a negative pin was never proved small.
+- The full test and dogfood suites pass.
+
+## Nested call results generalize from the inside out (2026-09-29)
+
+Generalization replaces each witnessed pure call result with a fresh reserved name, one place at
+a time in collection order. A call bounded by an earlier call's result, `lift(y, lift(x, floor))`,
+appears in the facts after its inner call. So the inner call was generalized first, and the outer
+place then no longer matched anything: every occurrence now read `lift(y, __elisa_field_place_0)`.
+The outer call stayed opaque, and a chain through it, `v > r >= l >= floor`, never closed. The
+checker and the kernel now both rewrite the remaining places with each replacement, so a place
+that contains an earlier one is generalized in the form it has at that point.
+
+This stays sound because `lift(y, fresh)` still denotes one value for a fixed `fresh`. The witness
+on the outer call is rewritten along with it, and calls with different arguments stay distinct
+places.
+
+**Evidence.**
+- `examples/nested_call_results.elisa` proves and replays 12 goals:
+  - a two- and three-deep chain;
+  - a branch above the chain;
+  - a goal that names the outer call first.
+- Each claim in `examples/rejected_nested_call_results.elisa` is false for some input, and all
+  four stay unproven:
+  - a bound through a call with different inner arguments;
+  - a strict bound where equality is reachable;
+  - a reversed chain;
+  - swapped arguments.
+- Mutation checks:
+  - Dropping the checker's rewrite leaves 2 of the positive ensures unproven.
+  - Dropping the kernel's rewrite leaves 3 replay gaps.
+- The full test and dogfood suites pass.
+
+## ADT proof library (P2-03 slice, 2026-09-29)
+
+`examples/adt_library.elisa` is the first library of inductive proofs over `IntList`, `Tree` and a
+token stream:
+- list length and nonnegative-element count;
+- tree size, height and maximum above a floor;
+- token-stream sum and length;
+- a totality-only parser step, `skip_plus`.
+
+Every recursive function carries `decreases` over the enum it matches, and each recursive call
+passes a binder from that match. That is the totality evidence: structural descent on a finite
+value, checked by both the proof checker and the compiler. Counters saturate at `ADT_CAP`, so the
+induction step never overflows. `tree_max_or` needed the nested-call generalization above. All
+70 certificates replay.
+
+`examples/rejected_adt_library.elisa` covers the M6 negatives:
+- a hypothesis that does not survive the step (`count_is_zero`, `shallow`, `length_below_cap`);
+- recursion on the matched value itself (`spin`, `tree_spin`), refused by the structural check
+  and by the compiler;
+- a claim true for one constructor only (`wrong_constructor`);
+- a bound the recursion breaks (`max_below_floor`).
+
+Where the checker closed a goal in those functions with the function's own summary, replay leaves
+a gap. Replay accepts a summary only from a function whose goals are all proven, so a false
+hypothesis never supports a proof that the kernel accepts. `scripts/test_adt_library.py` pins
+both files, and checks that every gap lies in a failing function.
+
+Two things are still missing:
+- Named-tuple results such as `(numbers: i64, operators: i64)` are not projected from a
+  positional tuple literal, so `ensure result.numbers >= 0` does not prove.
+- A match's `_` arm records no negated-variant facts, so `not (result is Token.Plus)` does not
+  prove for `skip_plus`.
+
+## Port: negated conjunction fall-through (from `codex/wasmbrowser-proof` 0fde6a8, 2026-09-29)
+
+An early return guarded by `a and b` used to leave `not a or not b` on the fall-through path, because
+`bounds_and_facts` expanded it eagerly. The fact now stays `not (a and b)`, and both case splitters
+split it into `not a` / `not b`: `proof_find_disjunction` in the checker and
+`proof_replay_find_disjunction_depth` / the congruence splitter in the kernel. Each branch is checked
+on its own, so a later guard can close one side. The split is sound for `bool`: `and` is not
+overloadable, and `not (a and b)` is exactly `not a or not b`. The parameter-heavy body limit goes
+from 16 to 24, and the over-limit example grows to match.
+
+The proofbase backend declines a nested enum pattern of the form `Unary(Not, Binary(...))`, so the
+checker arms match the operand in a second `match`. The branch also has a relevant-disjunction
+premise split (`relevant_disjunctions.elisa` in the checker and the kernel). That split is not
+ported, because every ported example proves and replays without it.
+
+**Evidence.**
+- `examples/negated_conjunction_fallthrough.elisa`: `guarded_selector` and `de_morgan_case` prove,
+  and all 8 certificates replay. `false_negated_conjunction_control` (`ensure not left` after
+  `return 0 if not (left and right)`) stays unproven.
+- Mutation checks:
+  - Disabling the checker split leaves lines 7 and 12 unproven.
+  - Disabling the kernel split leaves 2 replay gaps.
+- The full test and dogfood suites pass.
+
 ## Loop states across rebinds, arm locals and aggregate calls (2026-09-28)
 
 The engine's sound-event asset parser (`read_fields`, `number`) met eight holes, each now closed
@@ -9181,3 +9883,11 @@ keeps five false controls open.
 
 **Limitations.** A plain two-arm join of different values, with `x <- 5` in one arm and
 `x <- 7` in the other, still does not yield `x <= 7`. No candidate states that bound.
+
+## Constant headroom beside parameter-heavy budgets (2026-09-29)
+
+Merging main brought in the parameter-heavy fact budget next to this branch's module-constant
+headroom. The over-limit control, `parameter_heavy_manifest_route_over_limit`, declares nine
+module constants, so it now gets more fact room and runs out of its 64-step budget first. It stays
+unsupported and unverified. `test_parameter_heavy_return_analysis.py` now accepts either budget
+dimension at limit 64 and checks that the function is not verified.

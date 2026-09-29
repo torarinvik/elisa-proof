@@ -236,6 +236,8 @@ claims marked "(checked)".
 | Trusted certificate admission | `proof/certificate_admission.elisa` | ~80 | Admits trace-certificate roots by kind and version tag. |
 | Trusted replay adapter | `proof/replay.elisa`, `proof/replay/*` | ~2.4k | Binds certificates to goals and facts to traces; re-proves derived steps. Calls into the kernel through public entry points, and calls only the external helpers listed under limitation 1 (checked). |
 | Trusted source adapter | `proof/kernel.elisa`, `proof/check/*`, `proof/resources/*`, `proof/expr/*` | ~18k | Lowers source to arena terms and emits boundary facts. Soundness depends on each boundary fact meaning what its row above says. |
+| Trusted package reader | `portable/*`, `app/portable_io.elisa` | ~0.5k | Reads `elisa-proof-package-v1` files under exact schemas and hands every sequent to kernel replay. Trusted by `elisa-proof-replay` and by the correspondence checker (DESIGN.md, "Portable replay packages"). |
+| Trusted correspondence checker | `correspondence/*` | ~1.2k | Re-derives a function's obligations from the parsed source by its own reference semantics and matches them against replayed theorems term by term (DESIGN.md, "Checked correspondence"). Calls only the kernel's public entry points, the package reader and the output helpers listed under limitation 5 (checked). It does not call the source adapter. |
 | Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | ~5k | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
 | Presentation | `app/*` except repair | ~2.8k | Output and CLI. Fingerprints are binding guards only (limitation 2). |
 
@@ -272,4 +274,29 @@ claims marked "(checked)".
    modelled.
 4. **Boundary facts are trusted, not replayed.** A producer bug that emits a boundary fact for the
    wrong construct is outside the kernel's reach. The source-admission gate matrix (P1-05) and
-   the WP correspondence work (P2-02) narrow this.
+   the checked correspondence (P2-02) narrow this. For a function that `--correspondence` reports
+   `checked`, the boundary facts are no longer trusted: every hypothesis is a fact of the
+   checker's own reference semantics, and the source adapter is not consulted.
+5. **Correspondence checker dependencies.** The checker is a second reading of the source, so it
+   must not share code with the adapter it audits. Outside its own modules and the kernel, it
+   calls only the functions below.
+
+<!-- inventory:correspondence-external-calls -->
+| Function | Defined in | Tier |
+|---|---|---|
+| `proof_package_array_field` | `portable/package_reader.elisa` | package reader |
+| `proof_package_build_nodes` | `portable/package_reader.elisa` | package reader |
+| `proof_package_check_theorem` | `portable/package_checker.elisa` | package reader |
+| `proof_package_index` | `portable/package_reader.elisa` | package reader |
+| `proof_package_index_field` | `portable/package_reader.elisa` | package reader |
+| `proof_package_malformed` | `portable/package_reader.elisa` | package reader |
+| `proof_package_ok` | `portable/package_reader.elisa` | package reader |
+| `proof_package_over_budget` | `portable/package_reader.elisa` | package reader |
+| `proof_package_read_header` | `portable/package_reader.elisa` | package reader |
+| `proof_package_read_kernel` | `portable/package_reader.elisa` | package reader |
+| `proof_package_rejected` | `portable/package_reader.elisa` | package reader |
+| `proof_package_string_field` | `portable/package_reader.elisa` | package reader |
+| `proof_push` | `app/portable_io.elisa` | output |
+| `proof_push_json_i64` | `app/portable_io.elisa` | output |
+| `proof_push_json_string` | `app/portable_io.elisa` | output |
+<!-- /inventory:correspondence-external-calls -->

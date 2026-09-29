@@ -1,0 +1,276 @@
+# Checked correspondence: does a proof package prove what the source obliges?
+#
+# The package is replayed exactly as `--check-package` replays it. Every theorem the kernel
+# re-derives under the `goal` rule is a sequent `hypotheses |- conclusion` that holds for every
+# value of its symbols. The walker independently lists each function's obligations as
+# `facts |- goal`, with facts the reference semantics establishes on every path to that point.
+# An obligation is matched when some replayed theorem concludes exactly its goal from hypotheses
+# that are each exactly one of its facts, or when it is a conjunction whose conjuncts are matched.
+# The package's names, lines, origins and statements are never consulted: a theorem counts only
+# for what its terms say, so a theorem produced for another function or another path can match an
+# obligation only when its hypotheses really hold there.
+#
+# A function is `checked` when the walk supports it and every obligation is matched. Its
+# `ensure`s may then be assumed at calls in later functions; nothing else is trusted.
+
+const CORR_RESULT_FORMAT: sview = "elisa-proof-correspondence-v1"
+
+struct CorrTheorem:
+    conclusion: usize
+    hypotheses_start: usize
+    hypotheses_count: usize
+
+def corr_collect_taken(declarations: darray[Ast::Decl]&, top_level: bool, taken: mutable darray[sview]&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    for declaration in declarations |top_level, taken, depth|:
+        match declaration:
+            Ast::Decl.Func(name, _, _, _, _, _, _):
+                taken.push(name) if not top_level
+            Ast::Decl.Module(name, body, _):
+                taken.push(name)
+                return false if not corr_collect_taken(body, false, taken, depth + 1)
+            Ast::Decl.Scoped(body, _):
+                return false if not corr_collect_taken(body, false, taken, depth + 1)
+            Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                taken.push(name)
+            Ast::Decl.Const(name, _, _, _, _):
+                taken.push(name)
+            Ast::Decl.Struct(name, _, _, _, _, _, _):
+                taken.push(name)
+            Ast::Decl.Enum(name, _, _, _, _):
+                taken.push(name)
+            Ast::Decl.Alias(name, _, _):
+                taken.push(name)
+            Ast::Decl.Law(name, _, _):
+                taken.push(name)
+            _:
+                pass
+    return true
+
+# Every top-level function, in file order. A name declared anywhere else too, or twice, is
+# walked as unsupported; a name some other declaration takes is kept as a `blocked` entry, so a
+# call to it resolves to nothing and no variable may reuse it.
+def corr_collect_functions(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, work: mutable CorrWork&) -> bool:
+    for annotation in annotations |work|:
+        work.lemmas.push(annotation.name) if annotation.owner == "__lemma"
+    taken: mutable darray[sview] = []
+    return false if not corr_collect_taken(declarations, true, &taken, 0)
+    for index in 0..<declarations.count |index, declarations, work, taken|:
+        match declarations[index]:
+            Ast::Decl.Func(name, _, _, _, _, _, position):
+                return false if work.functions.count >= CorrLimit::FUNCTIONS
+                work.functions.push(CorrFunction{name: name, line: position.line, declaration: index, status: "", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
+            _:
+                pass
+    work.taken.extend(taken)
+    for name in taken |work|:
+        return false if work.functions.count >= CorrLimit::FUNCTIONS
+        work.functions.push(CorrFunction{name: name, line: 0, declaration: 0, status: "blocked", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
+    return true
+
+def corr_hypothesis_held(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, pool: CorrPool&, work: CorrWork&, obligation: CorrObligation) -> bool:
+    for index in 0..<obligation.facts_count |index, nodes, children, root, pool, work, obligation|:
+        return true if corr_node_equal(nodes, children, root, pool, work.obligation_facts[obligation.facts_start + index], 0)
+    return false
+
+def corr_goal_matched(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, theorems: darray[CorrTheorem]&, hypotheses: darray[usize]&, pool: CorrPool&, work: CorrWork&, obligation: CorrObligation, goal: usize, depth: usize) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or goal == 0 or goal >= pool.terms.count
+    for theorem in theorems |nodes, children, hypotheses, pool, work, obligation, goal|:
+        if corr_node_equal(nodes, children, theorem.conclusion, pool, goal, 0):
+            held: mutable bool = true
+            for index in 0..<theorem.hypotheses_count |index, nodes, children, hypotheses, pool, work, obligation, theorem, held|:
+                held <- false if held and not corr_hypothesis_held(nodes, children, hypotheses[theorem.hypotheses_start + index], pool, work, obligation)
+            return true if held
+    node: CorrTerm = pool.terms[goal]
+    return false if node.kind != "binary" or node.operator != "and"
+    return corr_goal_matched(nodes, children, theorems, hypotheses, pool, work, obligation, node.left, depth + 1) and corr_goal_matched(nodes, children, theorems, hypotheses, pool, work, obligation, node.right, depth + 1)
+
+def corr_push_function(out: mutable darray[u8]&, work: CorrWork&, function: CorrFunction, first: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(out, ",") if not first
+    proof_push(out, "{\"name\":")
+    proof_push_json_string(out, function.name)
+    proof_push(out, ",\"line\":")
+    proof_push_json_i64(out, function.line.i64())
+    proof_push(out, ",\"status\":")
+    proof_push_json_string(out, function.status)
+    proof_push(out, ",\"reason\":")
+    if sview_len(function.reason) > 0:
+        proof_push_json_string(out, function.reason)
+    else:
+        proof_push(out, "null")
+    proof_push(out, ",\"obligations\":")
+    proof_push_json_i64(out, function.obligations_count.i64())
+    proof_push(out, ",\"matched\":")
+    proof_push_json_i64(out, function.matched.i64())
+    proof_push(out, ",\"unmatched\":[")
+    written: mutable usize = 0
+    for index in 0..<function.obligations_count |index, out, work, function, written|:
+        obligation: CorrObligation = work.obligations[function.obligations_start + index]
+        continue if sview_len(obligation.kind) == 0
+        proof_push(out, ",") if written > 0
+        proof_push(out, "{\"line\":")
+        proof_push_json_i64(out, obligation.line.i64())
+        proof_push(out, ",\"kind\":")
+        proof_push_json_string(out, obligation.kind)
+        proof_push(out, "}")
+        written <- written + 1
+    proof_push(out, "]}")
+
+def corr_push_result(out: mutable darray[u8]&, package: ProofPackageVerdict, source_admissible: bool, theorems: usize, replayed: usize, work: CorrWork&, checked: usize, unmatched: usize, unsupported: usize, exit_code: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(out, "{\"format\":")
+    proof_push_json_string(out, CORR_RESULT_FORMAT)
+    proof_push(out, ",\"package\":{\"status\":")
+    proof_push_json_string(out, package.status)
+    proof_push(out, ",\"reason\":")
+    if sview_len(package.reason) > 0:
+        proof_push_json_string(out, package.reason)
+    else:
+        proof_push(out, "null")
+    proof_push(out, ",\"theorems\":")
+    proof_push_json_i64(out, theorems.i64())
+    proof_push(out, ",\"replayed\":")
+    proof_push_json_i64(out, replayed.i64())
+    proof_push(out, "},\"source_admissible\":")
+    proof_push(out, "true" if source_admissible else "false")
+    proof_push(out, ",\"functions\":[")
+    first: mutable bool = true
+    for function in work.functions |out, work, first|:
+        continue if function.status == "blocked"
+        corr_push_function(out, work, function, first)
+        first <- false
+    proof_push(out, "],\"summary\":{\"checked\":")
+    proof_push_json_i64(out, checked.i64())
+    proof_push(out, ",\"unmatched\":")
+    proof_push_json_i64(out, unmatched.i64())
+    proof_push(out, ",\"unsupported\":")
+    proof_push_json_i64(out, unsupported.i64())
+    proof_push(out, ",\"exit_code\":")
+    proof_push_json_i64(out, exit_code)
+    proof_push(out, "},\"trust\":{\"kernel_replay\":\"every theorem is re-derived by the proof kernel from the package arena\",\"correspondence\":\"a checked function's obligations are re-derived from the source by this checker's reference semantics for its sequential subset and each is concluded by a replayed theorem whose hypotheses are facts of that semantics\",\"trusted\":[\"the proof kernel\",\"the Elisa parser and type checker\",\"the correspondence checker's reference semantics\"],\"not_established\":[\"termination\",\"arithmetic overflow\",\"functions outside the subset\"]}}\n")
+
+# Walks every function, matching each walked function's obligations as soon as it is walked so
+# that its status is known to the functions after it.
+def corr_check_functions(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, theorems: darray[CorrTheorem]&, hypotheses: darray[usize]&) -> void:
+    for index in 0..<work.functions.count |index, pool, work, declarations, nodes, children, theorems, hypotheses|:
+        continue if work.functions[index].status == "blocked"
+        work.functions[index].obligations_start <- work.obligations.count
+        if corr_function_index(work, work.functions[index].name) != index:
+            work.functions[index].status <- "unsupported"
+            work.functions[index].reason <- "name"
+            continue
+        if corr_name_listed(work.lemmas, work.functions[index].name):
+            work.functions[index].status <- "unsupported"
+            work.functions[index].reason <- "lemma"
+            continue
+        reason: sview = corr_walk_function(pool, work, declarations, index)
+        if sview_len(reason) > 0:
+            # A partial walk's obligations are discarded with it.
+            work.obligations <- work.obligations.truncate(work.functions[index].obligations_start)
+            work.functions[index].status <- "unsupported"
+            work.functions[index].reason <- reason
+            continue
+        start: usize = work.functions[index].obligations_start
+        count: usize = work.obligations.count - start
+        work.functions[index].obligations_count <- count
+        matched: mutable usize = 0
+        for offset in 0..<count |offset, pool, work, nodes, children, theorems, hypotheses, start, matched|:
+            obligation: CorrObligation = work.obligations[start + offset]
+            if corr_goal_matched(nodes, children, theorems, hypotheses, pool, work, obligation, obligation.goal, 0):
+                matched <- matched + 1
+                # A matched obligation is left out of the report's unmatched list.
+                work.obligations[start + offset].kind <- ""
+        work.functions[index].matched <- matched
+        if count > 0 and matched == count:
+            work.functions[index].status <- "checked"
+        else:
+            work.functions[index].status <- "unmatched"
+            work.functions[index].reason <- "no-obligations" if count == 0 else "unproved-obligation"
+
+def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, source_admissible: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    pool: mutable CorrPool = corr_pool_new()
+    work: mutable CorrWork = corr_work_empty()
+    arena: mutable Arena = zeroed
+    parsed: JsonParseResult[arena] = json_parse_checked(&arena, ElisaProofJson::bytes_range_ref(input, 0, input.count))
+    if parsed.code != JsonErrorCode.OK:
+        corr_push_result(out, proof_package_malformed("json"), source_admissible, 0, 0, &work, 0, 0, 0, 1)
+        return 1
+    root: JsonValueHandle[arena] = ElisaProofJson::from_result(parsed)
+    header: ProofPackageVerdict = proof_package_read_header(root)
+    if sview_len(header.status) > 0:
+        corr_push_result(out, header, source_admissible, 0, 0, &work, 0, 0, 0, 1)
+        return 1
+    theorem_list: (known: bool, value: JsonValueHandle[arena], count: usize) = proof_package_array_field(root, "theorems")
+    if not theorem_list.known:
+        corr_push_result(out, proof_package_malformed("package-schema"), source_admissible, 0, 0, &work, 0, 0, 0, 1)
+        return 1
+    if theorem_list.count > ProofPackageLimit::THEOREMS:
+        corr_push_result(out, proof_package_over_budget("theorem-budget"), source_admissible, 0, 0, &work, 0, 0, 0, 1)
+        return 1
+    kernel: (known: bool, value: JsonValueHandle[arena]) = ElisaProofJson::field(root, "kernel")
+    raw: mutable darray[ProofPackageRawNode] = []
+    bytes: mutable darray[u8] = []
+    children: mutable darray[usize] = []
+    loaded: ProofPackageVerdict = proof_package_read_kernel(kernel.value, &raw, &bytes, &children)
+    if sview_len(loaded.status) > 0:
+        corr_push_result(out, loaded, source_admissible, 0, 0, &work, 0, 0, 0, 1)
+        return 1
+    nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+    proof_package_build_nodes(&raw, &bytes, &nodes)
+    node_count: usize = nodes.count
+    child_count: usize = children.count
+    if not ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&nodes, &children):
+        corr_push_result(out, proof_package_malformed("arena-inadmissible"), source_admissible, theorem_list.count, 0, &work, 0, 0, 0, 1)
+        return 1
+    theorem_keys: darray[sview] = ["goal_id", "name", "line", "rule", "hypotheses", "hypothesis_origins", "conclusion", "statement", "goal_fingerprint"]
+    workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
+    theorems: mutable darray[CorrTheorem] = []
+    hypotheses: mutable darray[usize] = []
+    replayed: mutable usize = 0
+    identity_remaining: mutable usize = ProofPackageLimit::IDENTITY_BYTES
+    verdict: mutable ProofPackageVerdict = proof_package_ok()
+    missing: JsonValueHandle[arena] = ElisaProofJson::null_value(root)
+    for index in 0..<theorem_list.count |index, theorem_list, missing, theorem_keys, nodes, children, node_count, child_count, workspace, theorems, hypotheses, replayed, identity_remaining, verdict|:
+        theorem: JsonValueHandle[arena] = try ElisaProofJson::at(theorem_list.value, index.i64()) else missing
+        checked: (verdict: ProofPackageVerdict, identity_bytes: usize) = proof_package_check_theorem(theorem, &theorem_keys, &nodes, &children, identity_remaining, &workspace)
+        nodes <- nodes.truncate(node_count)
+        children <- children.truncate(child_count)
+        identity_remaining <- 0 if checked.identity_bytes >= identity_remaining
+        identity_remaining <- identity_remaining - checked.identity_bytes if checked.identity_bytes < identity_remaining
+        if sview_len(checked.verdict.status) > 0:
+            verdict <- checked.verdict
+            break
+        replayed <- replayed + 1
+        # The theorem was checked above, so its fields are present and its roots in range.
+        rule: (known: bool, value: sview) = proof_package_string_field(theorem, "rule")
+        conclusion: (known: bool, value: usize) = proof_package_index_field(theorem, "conclusion")
+        roots: (known: bool, value: JsonValueHandle[arena], count: usize) = proof_package_array_field(theorem, "hypotheses")
+        # Only the plain goal rule concludes an arbitrary proposition; the other rules' conclusions
+        # are safety claims about a term, and a quantifier conclusion is replayed by its own rule.
+        continue if not rule.known or rule.value != "goal" or not conclusion.known or not roots.known
+        continue if nodes[conclusion.value].kind == "quantifier"
+        start: usize = hypotheses.count
+        for position in 0..<roots.count |position, roots, missing, hypotheses|:
+            entry: JsonValueHandle[arena] = try ElisaProofJson::at(roots.value, position.i64()) else missing
+            hypothesis: (known: bool, value: usize) = proof_package_index(entry)
+            hypotheses.push(hypothesis.value) if hypothesis.known
+        theorems.push(CorrTheorem{conclusion: conclusion.value, hypotheses_start: start, hypotheses_count: hypotheses.count - start}) if hypotheses.count - start == roots.count
+    verdict <- proof_package_rejected("no-theorems") if theorem_list.count == 0 and sview_len(verdict.status) == 0
+    # An unreplayed package supports no obligation: every theorem must replay before any counts.
+    if sview_len(verdict.status) > 0:
+        corr_push_result(out, verdict, source_admissible, theorem_list.count, replayed, &work, 0, 0, 0, 1)
+        return 1
+    if not corr_collect_functions(file.top_decls, file.enum_annotations, &work):
+        corr_push_result(out, ProofPackageVerdict{status: "replayed", reason: ""}, source_admissible, theorem_list.count, replayed, &work, 0, 0, 0, 1)
+        return 1
+    if source_admissible:
+        corr_check_functions(&pool, &work, file.top_decls, &nodes, &children, &theorems, &hypotheses)
+    checked_count: mutable usize = 0
+    unmatched_count: mutable usize = 0
+    unsupported_count: mutable usize = 0
+    for function in work.functions |checked_count, unmatched_count, unsupported_count|:
+        checked_count <- checked_count + 1 if function.status == "checked"
+        unmatched_count <- unmatched_count + 1 if function.status == "unmatched"
+        unsupported_count <- unsupported_count + 1 if function.status == "unsupported"
+    exit_code: i64 = 0 if source_admissible and checked_count > 0 and unmatched_count == 0 else 1
+    corr_push_result(out, ProofPackageVerdict{status: "replayed", reason: ""}, source_admissible, theorem_list.count, replayed, &work, checked_count, unmatched_count, unsupported_count, exit_code)
+    return exit_code

@@ -6,6 +6,21 @@ extend ElisaProof:
         const PROOF_FRAME_PLACE_MAX_DEPTH: usize = 3
         const PROOF_PURE_CALL_REWRITE_DEPTH_LIMIT: usize = 8
 
+        # Elisa represents numeric conversions as zero-argument method-shaped calls such as
+        # `status.usize()`. The compiler reserves these primitive selectors, so unlike an
+        # ordinary method call they are total value conversions, not user-dispatched effects.
+        # Keep this list aligned with the frontend's numeric-cast selector set.
+        def proof_contract_numeric_cast_target(target: sview) -> bool:
+            return target == "i8" or target == "i16" or target == "i32" or target == "i64" or target == "int" or target == "isize" or target == "u8" or target == "u16" or target == "u32" or target == "u64" or target == "usize" or target == "uintptr" or target == "f32" or target == "f64"
+
+        def proof_contract_numeric_cast_receiver(callee: Ast::Expr, arguments: darray[Ast::Expr]&) -> (known: bool, receiver: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if arguments.count != 0
+            match callee:
+                Ast::Expr.Field(receiver, target, _):
+                    return (proof_contract_numeric_cast_target(target), receiver)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
         def proof_contract_calls_are_pure(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
             return proof_contract_calls_are_pure_depth(expression, functions, 0)
 
@@ -38,6 +53,8 @@ extend ElisaProof:
                 Ast::Expr.Call(callee, arguments, _, _):
                     if proof_ident_name(callee) == "old" and arguments.count == 1:
                         return proof_contract_calls_are_pure_depth(arguments[0], functions, depth + 1)
+                    numeric_cast: (known: bool, receiver: Ast::Expr) = proof_contract_numeric_cast_receiver(callee, arguments)
+                    return proof_contract_calls_are_pure_depth(numeric_cast.receiver, functions, depth + 1) if numeric_cast.known
                     called: sview = proof_callable_name(callee)
                     called_index: usize = proof_function_index(functions, called)
                     return false if called == "" or called_index >= functions.pure.count or not functions.pure[called_index]
@@ -148,10 +165,12 @@ extend ElisaProof:
         # overflow boundary. The enclosing admission gates ensure nested runtime calls are pure;
         # the equality lookup also handles a successful result binding from a fallible call. The
         # eight-step fuel limit keeps nested expressions finite and fail-closed.
+        # A widening conversion's `name.T() == name` crosses a type boundary: rewriting it would
+        # move the receiver into the wider arithmetic and change the width every guard reads.
         def proof_pure_call_summary_replacement(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> (known: bool, value: Ast::Expr):
             match expression:
                 Ast::Expr.Call(_, _, _, _):
-                    pass
+                    return (false, Ast::Expr.Invalid) if proof_field_callee_call(expression)
                 _:
                     return (false, Ast::Expr.Invalid)
             return (false, Ast::Expr.Invalid) if proof_expr_has_old(expression)

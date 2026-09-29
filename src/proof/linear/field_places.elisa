@@ -8,10 +8,12 @@ extend ElisaProof:
         # replacing every occurrence of one fixed value with a fresh name turns a proof of the
         # generalized goal into a proof of the original by instantiating the name back. Only
         # witnessed primitive scalar places over a plain name, and renamed loop binders, are
-        # generalized, each to its own
+        # generalized, as are witnessed pure call results, each to its own
         # reserved `__elisa_field_place_N` name, which source code cannot spell. Quantifier
         # bodies are left as they are, which only withholds information. The rule runs once per
-        # goal: a fact that already names a generalized place stops it. The kernel mirror is
+        # goal: a fact that already names a generalized place stops it. A place containing an
+        # earlier one is rewritten with it, so nested call results generalize from the inside
+        # out whichever order they were collected in. The kernel mirror is
         # `proof_kernel_replay_field_place_goal`.
         def proof_field_place_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
             return false if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
@@ -34,6 +36,12 @@ extend ElisaProof:
                 for fact in rewritten_facts |places, index, fresh, next_facts|:
                     next_facts.push(proof_generalize_place(fact, places[index], fresh, 0).value)
                 rewritten_facts <- next_facts
+                # A later place may contain this one, `f(y, f(x, k))` after `f(x, k)`: it now
+                # reads `f(y, fresh)` in the goal and facts, so rewrite it the same way.
+                next_places: mutable darray[Ast::Expr] = []
+                for later in places |places, index, fresh, next_places|:
+                    next_places.push(proof_generalize_place(later, places[index], fresh, 0).value)
+                places <- next_places
             proof_goal_depth(rewritten_facts, rewritten_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
 
         def proof_field_place_name(index: usize) -> sview:
@@ -79,18 +87,37 @@ extend ElisaProof:
                     proof_collect_field_places(then_expression, facts, places, depth + 1)
                     proof_collect_field_places(else_expression, facts, places, depth + 1)
                 Ast::Expr.Call(_, arguments, _, _):
+                    # A witnessed pure call, or an integer conversion of a witnessed receiver,
+                    # denotes one value for fixed arguments, so it is generalized like a place;
+                    # its own place arguments follow it.
+                    if (proof_named_call_term(expression) or proof_field_callee_call(expression)) and proof_scalar_term_witnessed(expression, facts, 0):
+                        proof_push_field_place(places, expression)
                     for argument in arguments |facts, places, depth|:
                         proof_collect_field_places(argument, facts, places, depth + 1)
                 Ast::Expr.Index(object, index, _):
                     proof_collect_field_places(object, facts, places, depth + 1)
                     proof_collect_field_places(index, facts, places, depth + 1)
                 Ast::Expr.Field(_, _, _) | Ast::Expr.Tuple(_, _):
-                    if proof_field_place_shape(expression, 0) and proof_scalar_term_witnessed(expression, facts, 0):
-                        for place in places |expression|:
-                            return if proof_expr_equal(place, expression)
-                        places.push(expression)
+                    proof_push_field_place(places, expression) if proof_field_place_shape(expression, 0) and proof_scalar_term_witnessed(expression, facts, 0)
                 _:
                     pass
+
+        def proof_field_callee_call(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, _, _, _):
+                    match callee:
+                        Ast::Expr.Field(_, _, _):
+                            return true
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_push_field_place(places: mutable darray[Ast::Expr]&, expression: Ast::Expr) -> void:
+            return if places.count >= PROOF_FIELD_PLACE_LIMIT
+            for place in places |expression|:
+                return if proof_expr_equal(place, expression)
+            places.push(expression)
 
         # Replaces every occurrence of `place` outside quantifier bodies, including inside the
         # type markers, so the fresh name inherits the place's scalar and width witnesses.
@@ -134,3 +161,52 @@ extend ElisaProof:
                     return proof_is_comparison(operator)
                 _:
                     return false
+
+        # A conditional nested inside a comparison, `(a if c else b) + 1 <= k`, is split like one
+        # standing alone as an operand, except that each branch also rewrites every fact: under
+        # `c` the conditional denotes `a`, so replacing each occurrence of it (goal and facts)
+        # with `a` changes no truth value, and likewise `b` under `not c`. Both branches are
+        # required and the condition is only a path assumption. Quantifier bodies keep the
+        # conditional, which only withholds information. Kernel mirror:
+        # `proof_kernel_replay_nested_conditional_goal`.
+        def proof_nested_conditional_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if not proof_comparison_goal_shape(goal)
+            conditional: (found: bool, value: Ast::Expr) = proof_first_nested_conditional(goal, 0, 0)
+            return false if not conditional.found
+            if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                exhausted <- true
+                return false
+            match conditional.value:
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    then_facts: mutable darray[Ast::Expr] = []
+                    else_facts: mutable darray[Ast::Expr] = []
+                    for fact in facts |conditional, then_expression, else_expression, then_facts, else_facts|:
+                        then_facts.push(proof_generalize_place(fact, conditional.value, then_expression, 0).value)
+                        else_facts.push(proof_generalize_place(fact, conditional.value, else_expression, 0).value)
+                    then_facts.push(condition)
+                    else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
+                    then_goal: Ast::Expr = proof_generalize_place(goal, conditional.value, then_expression, 0).value
+                    else_goal: Ast::Expr = proof_generalize_place(goal, conditional.value, else_expression, 0).value
+                    return proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+                _:
+                    return false
+
+        # The first conditional in pre-order under the comparison's operands, reached only
+        # through parentheses, negation and binary operators. A conditional standing alone as
+        # an operand is left to the operand split. `level` counts operators only, since the
+        # kernel arena has no parentheses; `depth` bounds the walk.
+        def proof_first_nested_conditional(expression: Ast::Expr, level: usize, depth: usize) -> (found: bool, value: Ast::Expr):
+            return (false, expression) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.If(_, _, _, _):
+                    return (level > 1, expression)
+                Ast::Expr.Paren(inner, _):
+                    return proof_first_nested_conditional(inner, level, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_first_nested_conditional(operand, level + 1, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    found_left: (found: bool, value: Ast::Expr) = proof_first_nested_conditional(left, level + 1, depth + 1)
+                    return found_left if found_left.found
+                    return proof_first_nested_conditional(right, level + 1, depth + 1)
+                _:
+                    return (false, expression)

@@ -77,12 +77,20 @@ python3 "$ROOT_DIR/scripts/test_overlap_diagnostics.py"
 python3 "$ROOT_DIR/scripts/test_certificate_reuse.py"
 python3 "$ROOT_DIR/scripts/test_measurements.py"
 python3 "$ROOT_DIR/scripts/test_source_admission_matrix.py"
+python3 "$ROOT_DIR/scripts/test_negated_conjunction_fallthrough.py"
+python3 "$ROOT_DIR/scripts/test_parameter_heavy_return_analysis.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
 python3 "$ROOT_DIR/scripts/test_rejected_numeric_cast_operator.py"
+python3 "$ROOT_DIR/scripts/test_widening_cast.py"
+python3 "$ROOT_DIR/scripts/test_call_result_width.py"
+python3 "$ROOT_DIR/scripts/test_adt_library.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
 python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_disjunction.py"
+python3 "$ROOT_DIR/scripts/test_numeric_cast_contract.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_distinct_constants.py"
+python3 "$ROOT_DIR/scripts/test_unsigned_resource_source_policy.py"
 python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
 python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
 python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
@@ -92,9 +100,14 @@ python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_remainder_range.py"
 python3 "$ROOT_DIR/scripts/test_loop_state_joins.py"
 python3 "$ROOT_DIR/scripts/test_portable_replay.py"
+python3 "$ROOT_DIR/scripts/test_correspondence.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
+python3 "$ROOT_DIR/scripts/test_vector_index_arithmetic.py"
+python3 "$ROOT_DIR/scripts/test_adt_recursive_payload.py"
+python3 "$ROOT_DIR/scripts/test_call_sum_premise.py"
+python3 "$ROOT_DIR/scripts/test_nested_conditional_split.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -3192,6 +3205,23 @@ if [[ "$rejected_guarded_differences_status" -ne 0 ]]; then
 fi
 printf 'guarded differences: exact differences and plain orders bound goal sums; modular and unguarded forms refused\n'
 set +e
+run_json_report "$ROOT_DIR/examples/literal_widths.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; proven = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] == "goal"}; assert proven == {"unsigned_maximum", "signed_minimum", "signed_step_down", "exact_difference", "small_shift"}'
+literal_widths_status=${PIPESTATUS[1]}
+set -e
+if [[ "$literal_widths_status" -ne 0 ]]; then
+  printf 'proof test matrix failed: a literal that fits its width was refused\n' >&2
+  exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_literal_widths.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("plus_zero", "ensure-unproven"), ("times_one", "ensure-unproven"), ("wide_difference", "ensure-unproven"), ("wide_sum", "ensure-unproven"), ("negative_unsigned", "ensure-unproven"), ("wide_signed", "ensure-unproven"), ("below_signed_minimum", "ensure-unproven"), ("wide_goal", "ensure-unproven")}'
+rejected_literal_widths_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_literal_widths_status" -ne 0 ]]; then
+  printf 'proof test matrix failed: a literal wrapped by its width was read exactly\n' >&2
+  exit 1
+fi
+printf 'literal widths: literals that fit their width prove; wrapped literals prove nothing\n'
+set +e
 run_json_report "$ROOT_DIR/examples/field_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
 field_places_status=${PIPESTATUS[1]}
 set -e
@@ -3254,6 +3284,44 @@ rejected_bound_call_summaries_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_bound_call_summaries_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a bound call result proved more than its summary\n' >&2
+    exit 1
+fi
+
+# A pure call over a by-value payload-enum binding keeps its summary across the next call.
+set +e
+run_json_report "$ROOT_DIR/examples/value_call_arguments.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+value_call_arguments_status=${PIPESTATUS[1]}
+set -e
+if [[ "$value_call_arguments_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call over a payload-enum value lost its summary at the next call\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_value_call_arguments.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("container", "ensure-unproven"), ("view", "ensure-unproven"), ("hierarchy", "ensure-unproven"), ("common_fields", "ensure-unproven"), ("lent", "ensure-unproven")}'
+rejected_value_call_arguments_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_value_call_arguments_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call over an enum a second path reaches kept its summary\n' >&2
+    exit 1
+fi
+
+# A witnessed pure call result is generalized like a field place and keeps its declared width.
+set +e
+run_json_report "$ROOT_DIR/examples/call_result_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+call_result_places_status=${PIPESTATUS[1]}
+set -e
+if [[ "$call_result_places_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a bounded pure call result was not generalized\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_call_result_places.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wraps", "ensure-unproven"), ("other_argument", "ensure-unproven"), ("stale_argument", "ensure-unproven")}'
+rejected_call_result_places_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_call_result_places_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call result was bounded or identified too loosely\n' >&2
     exit 1
 fi
 

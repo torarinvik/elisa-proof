@@ -156,7 +156,7 @@ extend ElisaProof:
             return false if trace.summary_bindings_start > report.fact_trace_summary_values.count or trace.summary_bindings_count > report.fact_trace_summary_values.count - trace.summary_bindings_start
             return false if trace.summary_requires_start > report.fact_trace_summary_require_goal_ids.count or trace.summary_requires_count > report.fact_trace_summary_require_goal_ids.count - trace.summary_requires_start
             summary_found: mutable bool = false
-            summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, verified: false, verification_reason: ""}
+            summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
             for candidate in report.executable_summaries |candidate, trace, summary_found, summary|:
                 if candidate.name == trace.dependency:
                     return false if summary_found
@@ -166,16 +166,53 @@ extend ElisaProof:
             return false if summary.parameters_start > report.executable_parameters.count or summary.parameters_count > report.executable_parameters.count - summary.parameters_start
             return false if summary.requires_start > report.executable_requires.count or summary.requires_count > report.executable_requires.count - summary.requires_start
             return false if summary.ensures_start > report.executable_ensures.count or summary.ensures_count > report.executable_ensures.count - summary.ensures_start
-            return false if trace.summary_bindings_count != summary.parameters_count + 1 or trace.summary_requires_count != summary.requires_count or trace.summary_ensure_index >= summary.ensures_count
+            return false if summary.parameters_start + summary.parameters_count > report.executable_parameter_references.count
+            return false if trace.summary_requires_count != summary.requires_count or trace.summary_ensure_index >= summary.ensures_count
             for index in 0..<summary.parameters_count |index, summary, report, trace|:
                 return false if report.fact_trace_summary_names[trace.summary_bindings_start + index] != report.executable_parameters[summary.parameters_start + index]
             return false if report.fact_trace_summary_names[trace.summary_bindings_start + summary.parameters_count] != "result"
             instance: mutable Ast::Expr = report.executable_ensures[summary.ensures_start + trace.summary_ensure_index]
+            old_reference: (known: bool, found: bool, parameter: sview) = proof_replay_old_reference_parameter(instance, 0)
+            has_call_old: bool = old_reference.known and old_reference.found
+            expected_binding_count: mutable usize = summary.parameters_count + 1
+            expected_binding_count <- expected_binding_count + 1 if has_call_old
+            return false if not old_reference.known or trace.summary_bindings_count != expected_binding_count
+            return false if has_call_old and not summary.pure
             parameter_names: mutable darray[sview] = []
             parameter_values: mutable darray[Ast::Expr] = []
             for index in 0..<summary.parameters_count |index, summary, report, trace, parameter_names, parameter_values|:
                 parameter_names.push(report.fact_trace_summary_names[trace.summary_bindings_start + index])
                 parameter_values.push(report.fact_trace_summary_values[trace.summary_bindings_start + index])
+            if has_call_old:
+                old_parameter_slot: mutable usize = summary.parameters_count
+                for index in 0..<summary.parameters_count |index, parameter_names, old_reference|:
+                    old_parameter_slot <- index if parameter_names[index] == old_reference.parameter
+                return false if old_parameter_slot >= summary.parameters_count or not report.executable_parameter_references[summary.parameters_start + old_parameter_slot]
+                return false if report.fact_trace_summary_names[trace.summary_bindings_start + summary.parameters_count + 1] != "__old_reference_state"
+                actual_parameter: Ast::Expr = parameter_values[old_parameter_slot]
+                match actual_parameter:
+                    Ast::Expr.Ident(actual_name, position):
+                        caller_found: mutable bool = false
+                        caller: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
+                        for candidate in report.executable_summaries |candidate, trace, caller_found, caller|:
+                            if candidate.name == trace.name:
+                                return false if caller_found
+                                caller_found <- true
+                                caller <- candidate
+                        return false if not caller_found or caller.parameters_start > report.executable_parameters.count or caller.parameters_count > report.executable_parameters.count - caller.parameters_start or caller.parameters_start + caller.parameters_count > report.executable_parameter_references.count
+                        return false if not caller.pure
+                        caller_reference: mutable bool = false
+                        for index in 0..<caller.parameters_count |index, caller, report, actual_name, caller_reference|:
+                            caller_reference <- true if report.executable_parameters[caller.parameters_start + index] == actual_name and report.executable_parameter_references[caller.parameters_start + index]
+                        return false if not caller_reference
+                        zero: Ast::Expr = Ast::Expr.IntLit(0, position)
+                        expected_snapshot: Ast::Expr = Ast::Expr.Index(actual_parameter, zero, position)
+                        actual_snapshot: Ast::Expr = report.fact_trace_summary_values[trace.summary_bindings_start + summary.parameters_count + 1]
+                        return false if not proof_replay_expr_equal(expected_snapshot, actual_snapshot)
+                        instance <- proof_replay_substitute_old_reference_call(instance, old_reference.parameter, actual_snapshot, 0)
+                        return false if proof_replay_expr_is_invalid(instance)
+                    _:
+                        return false
             instance <- proof_replay_substitute_many(instance, parameter_names, parameter_values)
             instance <- proof_replay_substitute(instance, "result", report.fact_trace_summary_values[trace.summary_bindings_start + summary.parameters_count])
             return false if not proof_replay_expr_equal(instance, trace.expression)

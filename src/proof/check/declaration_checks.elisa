@@ -280,12 +280,12 @@ extend ElisaProof:
             report.return_analysis_steps <- 0
             report.return_analysis_step_budget <- proof_return_analysis_step_budget(function_name)
             report.return_analysis_budget_reported <- false
-            report.return_analysis_fact_state_budget <- PROOF_RETURN_FACT_STATE_BUDGET
-            # Small, straight-line functions need to retain their entry witnesses as one state.
-            # Larger bodies keep the tighter snapshot bound because their branch copies are the
-            # dominant memory cost; this avoids trading one local completeness fix for a corpus
-            # wide allocation spike.
-            report.return_analysis_fact_state_budget <- PROOF_SMALL_FUNCTION_FACT_STATE_BUDGET if body.count <= PROOF_SMALL_FUNCTION_BODY_LIMIT
+            # Give only short, high-arity selectors bounded extra snapshot room. Their parameter
+            # witnesses otherwise push a single branch just over the ordinary limit; larger
+            # bodies retain the lower cap because branching-state copies dominate memory use.
+            report.return_analysis_fact_state_budget <- proof_return_analysis_fact_state_budget(
+                body.count, parameters.count
+            )
             # A mutable global is a place any callee can reach without being handed anything, so a
             # lend could be stored there and outlive its call. The confinement rule is withdrawn
             # from the whole program as soon as one is declared, the same way the shared-extent
@@ -303,13 +303,16 @@ extend ElisaProof:
             proof_collect_aliased_names(body, functions, &report.escaping_names, not frame_has_mutable_global)
             proof_record_shared_borrows(parameters, frame_has_mutable_global, report)
             report.local_extent_names.clear()
+            report.value_binding_names.clear()
             # A parameter passed by value is this frame's own storage only when its type contains
             # neither a reference nor a borrowed view. An aggregate containing either still
             # reaches external storage, which an unrelated callee may mutate through another
             # path. Such a root must not justify call-stable field/count facts.
             for parameter in parameters |report|:
                 local_value: bool = not proof_resource_is_reference_type(parameter.type_expression) and proof_type_is_reference_free(parameter.type_expression, report.source_declarations, 0) and not proof_type_contains_borrowed_view(parameter.type_expression, report.source_declarations, 0)
-                report.local_extent_names.push(parameter.name) if local_value
+                plain_value: bool = not proof_resource_is_reference_type(parameter.type_expression) and proof_value_binding_type(parameter.type_expression, report, 0)
+                report.local_extent_names.push(parameter.name) if local_value or plain_value
+                report.value_binding_names.push(parameter.name) if plain_value
             for parameter in parameters |facts, report, function_name, position|:
                 unsigned_width: i64 = proof_unsigned_type_width_index(parameter.type_expression, functions.type_audit_index, 0)
                 proof_add_unsigned_binding_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position) if unsigned_width > 0
@@ -367,9 +370,8 @@ extend ElisaProof:
             return ProofDeclarationSummary{kind: kind, name: name, line: line, parameters_start: 0, parameters_count: 0, requires_count: 0, ensures_count: 0, changes_count: 0, preserves_count: 0, decreases_count: 0, lemma: false, recursive: false, pure: false, verified: false, verification_reason: "not-checked", structural: false, effects_start: 0, effects_count: 0, effects_declared: false}
 
         # A declared `can[...]` row is source-declared metadata, exactly like a parameter list.
-        # An abstract row — one naming an effect variable rather than a concrete effect — is
-        # recorded as declared but is refused by the containment obligation, which cannot compare
-        # a row it does not know the members of.
+        # An abstract row names an effect variable, so containment is refused because its members
+        # are unknown.
         def proof_effect_row_is_abstract(effects: darray[sview]&) -> bool:
             for effect in effects:
                 return true if effect == ""
@@ -528,10 +530,11 @@ extend ElisaProof:
                             summary.verified <- function_index < functions.verified.count and functions.verified[function_index]
                             summary.verification_reason <- functions.verification_reasons[function_index] if function_index < functions.verification_reasons.count else "not-checked"
                             summary.structural <- functions.structural[function_index]
-                            executable: ProofExecutableSummary = ProofExecutableSummary{name: name, line: position.line, parameters_start: report.executable_parameters.count, parameters_count: functions.param_counts[function_index], requires_start: report.executable_requires.count, requires_count: functions.requires_counts[function_index], ensures_start: report.executable_ensures.count, ensures_count: functions.ensure_counts[function_index], verified: summary.verified, verification_reason: summary.verification_reason}
+                            executable: ProofExecutableSummary = ProofExecutableSummary{name: name, line: position.line, parameters_start: report.executable_parameters.count, parameters_count: functions.param_counts[function_index], requires_start: report.executable_requires.count, requires_count: functions.requires_counts[function_index], ensures_start: report.executable_ensures.count, ensures_count: functions.ensure_counts[function_index], pure: summary.pure, verified: summary.verified, verification_reason: summary.verification_reason}
                             parameter_start: usize = functions.param_starts[function_index]
                             for index in 0..<executable.parameters_count |index, parameter_start, functions, report|:
                                 report.executable_parameters.push(functions.all_params[parameter_start + index])
+                                report.executable_parameter_references.push(functions.all_parameter_references[parameter_start + index])
                             requires_start: usize = functions.requires_starts[function_index]
                             for index in 0..<executable.requires_count |index, requires_start, functions, report|:
                                 report.executable_requires.push(functions.all_requires[requires_start + index])

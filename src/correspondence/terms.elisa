@@ -1,0 +1,287 @@
+# Terms of the correspondence checker's reference semantics.
+#
+# The correspondence checker (walker.elisa, matcher.elisa) re-derives, from the source alone, what
+# each proof obligation of a small sequential subset must say, and then asks whether a theorem the
+# kernel replayed says exactly that. The terms here are its own: a small pool built without the
+# prover's fact engine, compared node by node with the replayed package's arena. Index 0 of every
+# pool is the invalid term; each constructor returns it when a child is invalid or a budget is hit,
+# so an unsupported expression can never become a matched obligation.
+
+const module CorrLimit:
+    TERMS: usize = 262144
+    TERM_SIZE: usize = 4096
+    TERM_DEPTH: usize = 128
+    FACTS: usize = 2048
+    VARIABLES: usize = 512
+    OBLIGATIONS: usize = 4096
+    NESTING: usize = 64
+    FUNCTIONS: usize = 4096
+
+struct CorrTerm:
+    # "ident", "int", "bool", "unary", "binary", "call" (callee in `name`), or "tuple".
+    kind: sview
+    operator: sview
+    value: i64
+    name: sview
+    left: usize
+    right: usize
+    args_start: usize
+    args_count: usize
+    size: usize
+    depth: usize
+
+struct CorrPool:
+    terms: mutable darray[CorrTerm]
+    args: mutable darray[usize]
+
+def corr_pool_new() -> CorrPool:
+    pool: mutable CorrPool = CorrPool{terms: [], args: []}
+    pool.terms.push(CorrTerm{kind: "invalid", operator: "", value: 0, name: "", left: 0, right: 0, args_start: 0, args_count: 0, size: 0, depth: 0})
+    return pool
+
+def corr_add(pool: mutable CorrPool&, kind: sview, operator: sview, value: i64, name: sview, left: usize, right: usize, args_start: usize, args_count: usize, size: usize, depth: usize) -> usize:
+    return 0 if pool.terms.count >= CorrLimit::TERMS or size > CorrLimit::TERM_SIZE or depth > CorrLimit::TERM_DEPTH
+    pool.terms.push(CorrTerm{kind: kind, operator: operator, value: value, name: name, left: left, right: right, args_start: args_start, args_count: args_count, size: size, depth: depth})
+    return pool.terms.count - 1
+
+def corr_ident(pool: mutable CorrPool&, name: sview) -> usize:
+    return 0 if sview_len(name) == 0
+    return corr_add(pool, "ident", "", 0, name, 0, 0, 0, 0, 1, 1)
+
+def corr_int(pool: mutable CorrPool&, value: i64) -> usize:
+    # A negative payload is a high-bit unsigned literal whose type tag the encoder recovers from
+    # the lexer; this checker never reconstructs that tag, so it never builds one.
+    return 0 if value < 0
+    return corr_add(pool, "int", "", value, "", 0, 0, 0, 0, 1, 1)
+
+def corr_bool(pool: mutable CorrPool&, value: bool) -> usize:
+    return corr_add(pool, "bool", "", 1 if value else 0, "", 0, 0, 0, 0, 1, 1)
+
+def corr_unary(pool: mutable CorrPool&, operator: sview, operand: usize) -> usize:
+    return 0 if operand == 0 or operand >= pool.terms.count
+    size: usize = pool.terms[operand].size + 1
+    depth: usize = pool.terms[operand].depth + 1
+    return corr_add(pool, "unary", operator, 0, "", operand, 0, 0, 0, size, depth)
+
+def corr_binary(pool: mutable CorrPool&, operator: sview, left: usize, right: usize) -> usize:
+    return 0 if left == 0 or right == 0 or left >= pool.terms.count or right >= pool.terms.count
+    size: usize = pool.terms[left].size + pool.terms[right].size + 1
+    left_depth: usize = pool.terms[left].depth
+    right_depth: usize = pool.terms[right].depth
+    depth: mutable usize = left_depth + 1
+    depth <- right_depth + 1 if right_depth > left_depth
+    return corr_add(pool, "binary", operator, 0, "", left, right, 0, 0, size, depth)
+
+# Shared by calls and tuples: children are copied into the pool's argument list.
+def corr_node_with_children(pool: mutable CorrPool&, kind: sview, name: sview, children: darray[usize]&) -> usize:
+    size: mutable usize = 2
+    depth: mutable usize = 1
+    for child in children |pool, size, depth|:
+        return 0 if child == 0 or child >= pool.terms.count
+        size <- size + pool.terms[child].size + 1
+        child_depth: usize = pool.terms[child].depth + 2
+        depth <- child_depth if child_depth > depth
+    start: usize = pool.args.count
+    pool.args.extend(children)
+    return corr_add(pool, kind, "", 0, name, 0, 0, start, children.count, size, depth)
+
+def corr_call(pool: mutable CorrPool&, callee: sview, arguments: darray[usize]&) -> usize:
+    return 0 if sview_len(callee) == 0
+    return corr_node_with_children(pool, "call", callee, arguments)
+
+def corr_call1(pool: mutable CorrPool&, callee: sview, argument: usize) -> usize:
+    arguments: mutable darray[usize] = []
+    arguments.push(argument)
+    return corr_call(pool, callee, &arguments)
+
+def corr_call2(pool: mutable CorrPool&, callee: sview, first: usize, second: usize) -> usize:
+    arguments: mutable darray[usize] = []
+    arguments.push(first)
+    arguments.push(second)
+    return corr_call(pool, callee, &arguments)
+
+def corr_tuple2(pool: mutable CorrPool&, first: usize, second: usize) -> usize:
+    elements: mutable darray[usize] = []
+    elements.push(first)
+    elements.push(second)
+    return corr_node_with_children(pool, "tuple", "", &elements)
+
+def corr_equal(pool: CorrPool&, left: usize, right: usize, depth: usize) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or left == 0 or right == 0 or left >= pool.terms.count or right >= pool.terms.count
+    return true if left == right
+    a: CorrTerm = pool.terms[left]
+    b: CorrTerm = pool.terms[right]
+    return false if a.kind != b.kind or a.operator != b.operator or a.value != b.value or a.name != b.name or a.args_count != b.args_count
+    if a.left != 0 or b.left != 0:
+        return false if not corr_equal(pool, a.left, b.left, depth + 1)
+    if a.right != 0 or b.right != 0:
+        return false if not corr_equal(pool, a.right, b.right, depth + 1)
+    for index in 0..<a.args_count |index, pool, a, b, depth|:
+        return false if not corr_equal(pool, pool.args[a.args_start + index], pool.args[b.args_start + index], depth + 1)
+    return true
+
+# Whether `term` contains the symbol `name`. A callee name is not a symbol.
+def corr_mentions(pool: CorrPool&, term: usize, name: sview, depth: usize) -> bool:
+    return true if depth > CorrLimit::TERM_DEPTH or term == 0 or term >= pool.terms.count
+    node: CorrTerm = pool.terms[term]
+    return node.name == name if node.kind == "ident"
+    return true if node.left != 0 and corr_mentions(pool, node.left, name, depth + 1)
+    return true if node.right != 0 and corr_mentions(pool, node.right, name, depth + 1)
+    for index in 0..<node.args_count |index, pool, node, name, depth|:
+        return true if corr_mentions(pool, pool.args[node.args_start + index], name, depth + 1)
+    return false
+
+def corr_mentions_any(pool: CorrPool&, term: usize, names: darray[sview]&) -> bool:
+    for name in names |pool, term|:
+        return true if corr_mentions(pool, term, name, 0)
+    return false
+
+# The subset's source operators and their kernel spellings; everything else is unsupported.
+def corr_binary_operator(operator: TokenKind) -> sview:
+    return "+" if operator == TokenKind.Plus
+    return "-" if operator == TokenKind.Minus
+    return "*" if operator == TokenKind.Star
+    return "==" if operator == TokenKind.EqEq
+    return "!=" if operator == TokenKind.BangEq
+    return "<" if operator == TokenKind.Lt
+    return ">" if operator == TokenKind.Gt
+    return "<=" if operator == TokenKind.LtEq
+    return ">=" if operator == TokenKind.GtEq
+    return "and" if operator == TokenKind.And
+    return "or" if operator == TokenKind.Or
+    return ""
+
+def corr_lookup(names: darray[sview]&, values: darray[usize]&, name: sview) -> usize:
+    found: mutable usize = 0
+    for index in 0..<names.count |index, names, values, name, found|:
+        found <- values[index] if names[index] == name and index < values.count
+    return found
+
+# The value of a call-free subset expression in an environment of symbolic values. Division and
+# remainder are left out: their obligations belong to other rules this checker does not model.
+def corr_eval(pool: mutable CorrPool&, expression: Ast::Expr, names: darray[sview]&, values: darray[usize]&, depth: usize) -> usize:
+    return 0 if depth > CorrLimit::TERM_DEPTH
+    match expression:
+        Ast::Expr.IntLit(value, _):
+            return corr_int(pool, value)
+        Ast::Expr.BoolLit(value, _):
+            return corr_bool(pool, value)
+        Ast::Expr.Ident(name, _):
+            return corr_lookup(names, values, name)
+        Ast::Expr.Paren(inner, _):
+            return corr_eval(pool, inner, names, values, depth + 1)
+        Ast::Expr.Unary(operator, operand, _):
+            spelled: mutable sview = ""
+            spelled <- "-" if operator == TokenKind.Minus
+            spelled <- "not" if operator == TokenKind.Not
+            return 0 if sview_len(spelled) == 0
+            inner: usize = corr_eval(pool, operand, names, values, depth + 1)
+            return corr_unary(pool, spelled, inner)
+        Ast::Expr.Binary(left, operator, right, _):
+            spelled: sview = corr_binary_operator(operator)
+            return 0 if sview_len(spelled) == 0
+            left_term: usize = corr_eval(pool, left, names, values, depth + 1)
+            right_term: usize = corr_eval(pool, right, names, values, depth + 1)
+            return corr_binary(pool, spelled, left_term, right_term)
+        _:
+            return 0
+
+const module CorrTypeWidth:
+    SMALL_UNSIGNED_8: i64 = 255
+    SMALL_UNSIGNED_16: i64 = 65535
+    SMALL_UNSIGNED_32: i64 = 4294967295
+
+def corr_signed_width(type_name: sview) -> i64:
+    return 8 if type_name == "i8"
+    return 16 if type_name == "i16"
+    return 32 if type_name == "i32"
+    return 64 if type_name == "i64"
+    return 0
+
+def corr_unsigned_width(type_name: sview) -> i64:
+    return 8 if type_name == "u8"
+    return 16 if type_name == "u16"
+    return 32 if type_name == "u32"
+    return 64 if type_name == "u64" or type_name == "usize"
+    return 0
+
+def corr_scalar_type(type_name: sview) -> bool:
+    return type_name == "bool" or corr_signed_width(type_name) > 0 or corr_unsigned_width(type_name) > 0
+
+# The facts the prover states for a value held at a scalar type, spelled as it spells them.
+# Returns false when a term could not be built.
+def corr_push_type_facts(pool: mutable CorrPool&, term: usize, type_name: sview, facts: mutable darray[usize]&) -> bool:
+    return false if term == 0
+    signed: i64 = corr_signed_width(type_name)
+    unsigned: i64 = corr_unsigned_width(type_name)
+    if signed > 0:
+        width: usize = corr_int(pool, signed)
+        bound: usize = corr_call2(pool, "__elisa_signed_type_bound", term, width)
+        scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", term)
+        return false if bound == 0 or scalar == 0
+        facts.push(bound)
+        facts.push(scalar)
+        return true
+    if unsigned > 0:
+        zero: usize = corr_int(pool, 0)
+        lower: usize = corr_binary(pool, "<=", zero, term)
+        width: usize = corr_int(pool, unsigned)
+        bound: usize = corr_call2(pool, "__elisa_unsigned_type_bound", term, width)
+        return false if lower == 0 or bound == 0
+        facts.push(lower)
+        facts.push(bound)
+        return true if unsigned == 64
+        maximum: mutable i64 = CorrTypeWidth::SMALL_UNSIGNED_32
+        maximum <- CorrTypeWidth::SMALL_UNSIGNED_8 if unsigned == 8
+        maximum <- CorrTypeWidth::SMALL_UNSIGNED_16 if unsigned == 16
+        maximum_term: usize = corr_int(pool, maximum)
+        upper: usize = corr_binary(pool, "<=", term, maximum_term)
+        return false if upper == 0
+        facts.push(upper)
+        return true
+    if type_name == "bool":
+        scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", term)
+        return false if scalar == 0
+        facts.push(scalar)
+        return true
+    return false
+
+# Structural identity of a pool term and a replayed kernel node: every field the encoder would
+# write must agree, and every field it leaves empty must be empty. Paren is transparent in both.
+def corr_node_leaf(node: ElisaProofKernelCore::ProofKernelNode) -> bool:
+    return node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0
+
+def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, pool: CorrPool&, term: usize, depth: usize) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or root >= nodes.count or term == 0 or term >= pool.terms.count
+    node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+    expected: CorrTerm = pool.terms[term]
+    return false if node.kind != expected.kind or node.operator != expected.operator or node.secondary_name != ""
+    if expected.kind == "ident" or expected.kind == "int" or expected.kind == "bool":
+        return node.value == expected.value and node.name == expected.name and corr_node_leaf(node)
+    return false if node.value != 0 or node.name != ""
+    if expected.kind == "unary":
+        return node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
+    if expected.kind == "binary":
+        return false if node.auxiliary != 0 or node.children_start != 0 or node.children_count != 0
+        return corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1) and corr_node_equal(nodes, children, node.right, pool, expected.right, depth + 1)
+    return false if node.right != 0 or node.children_count != expected.args_count
+    # A call records how many argument labels it was written with; every label is checked empty
+    # below, so an all-positional call and one with all-empty labels denote the same term.
+    return false if node.auxiliary != 0 and (expected.kind != "call" or node.auxiliary != expected.args_count)
+    return false if node.children_start > children.count or node.children_count > children.count - node.children_start
+    if expected.kind == "tuple":
+        return false if node.left != 0
+        for index in 0..<expected.args_count |index, nodes, children, node, pool, expected, depth|:
+            return false if not corr_node_equal(nodes, children, children[node.children_start + index], pool, pool.args[expected.args_start + index], depth + 1)
+        return true
+    return false if expected.kind != "call" or node.left >= nodes.count
+    callee: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
+    return false if callee.kind != "ident" or callee.operator != "" or callee.value != 0 or callee.name != expected.name or callee.secondary_name != "" or not corr_node_leaf(callee)
+    for index in 0..<expected.args_count |index, nodes, children, node, pool, expected, depth|:
+        slot: usize = children[node.children_start + index]
+        return false if slot >= nodes.count
+        argument: ElisaProofKernelCore::ProofKernelNode = nodes[slot]
+        return false if argument.kind != "call_arg" or argument.operator != "" or argument.value != 0 or argument.name != "" or argument.secondary_name != ""
+        return false if argument.right != 0 or argument.auxiliary != 0 or argument.children_start != 0 or argument.children_count != 0
+        return false if not corr_node_equal(nodes, children, argument.left, pool, pool.args[expected.args_start + index], depth + 1)
+    return true
