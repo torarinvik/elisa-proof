@@ -9723,3 +9723,29 @@ its arm disabled, every probe still replays with 0 gaps.
 - The full test and dogfood suites pass.
 
 A sum of two call-bound locals, as in `first + second` over chained calls, is still unproven.
+
+## Port: typed usize sentinels (from `codex/wasmbrowser-proof` ed8b7c9, 2026-09-29)
+
+The parser pins a `usize` literal above i64.max, such as `usize::MAX`, as its negative bit pattern.
+`u64` constants already took the unsubstituted path in that case. A `usize` constant did not, so
+`unsigned_resource_source_policy` could not use its `18446744073709551615` fallback. The two
+types now take the same path: when the pin is negative, the name stays unsubstituted, with only its
+primitive-scalar witness.
+
+The branch also adds a disequality-from-equality rule to both the checker and the kernel. That rule
+is not ported. With only the constant change, every ported example proves and replays. Main's case
+split already covers the exclusions, as it did for c09b933.
+
+**Evidence.**
+- Ported from the branch:
+  - `unsigned_resource_source_policy`: 32 goals prove and replay;
+  - `usize_max_reflexivity`;
+  - `negative_integer_literal_reflexivity`;
+  - the equality exclusions in `unsigned_equal_constant_exclusion`;
+  - the `rejected_unsigned_equality_same_value` control.
+- New: `examples/rejected_usize_max_constant.elisa` checks that the pin is never read as -1. It
+  covers `HUGE < 5`, `HUGE + 1 == 0`, and returning `HUGE` under `result < 10`, and all three are
+  unproven.
+- Mutation check: dropping the `usize` clause leaves 5 of the policy ensures unproven. The hostile
+  control stays refused, because a negative pin was never proved small.
+- The full test and dogfood suites pass.

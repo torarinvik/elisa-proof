@@ -23,6 +23,19 @@ assert positive["replay"]["gaps"] == 0 and positive["trust"]["trusted_assumption
 function = next(item for item in positive["declaration_details"]
                 if item.get("name") == "distinct_constants_from_u8")
 assert function["verified"] and function["ensures"] == 2, function
+equality = next(item for item in positive["declaration_details"]
+                if item.get("name") == "equality_excludes_distinct_u8_value")
+assert equality["verified"] and equality["ensures"] == 1, equality
+for name in ("fallthrough_u8_branch_excludes_zero", "fallthrough_u8_four_branch_excludes_zero"):
+    function = next(item for item in positive["declaration_details"] if item.get("name") == name)
+    assert function["verified"] and function["ensures"] == 1, function
+
+same_value = report("rejected_unsigned_equality_same_value", 1)
+assert same_value["status"] == "failed" and same_value["verification_state"] == "disproved", same_value
+assert same_value["summary"]["semantic_errors"] == 0, same_value
+assert same_value["replay"]["gaps"] == 0, same_value
+assert any(finding["kind"] == "ensure-unproven" and finding["status"] == "disproved"
+           and finding["counterexample_found"] for finding in same_value["findings"]), same_value
 
 negative = report("rejected_same_constant_disequality", 1)
 assert negative["status"] == "failed" and negative["verification_state"] == "disproved", negative
@@ -34,4 +47,4 @@ assert negative["replay"]["gaps"] == 0, negative
 assert any(finding["kind"] == "ensure-unproven" and finding["status"] == "disproved"
            and finding["counterexample_found"] for finding in negative["findings"]), negative
 
-print("unsigned disequality disjunctions: distinct in-range constants replay; repeated constant refuted")
+print("unsigned disequality: distinct constants and equality-derived exclusions replay; false controls refuted")
