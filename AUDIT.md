@@ -10166,3 +10166,14 @@ function of its arguments, which needs a soundness argument about callee reads o
 state that the alias analysis does not currently make. A cheaper repair is to also substitute
 `first` by its call text at the return so goal and facts agree, but that leaves the first summary
 just as dropped. No change made; probe files are in the scratch directory only.
+
+## Signed lower bound: root cause found and landed (2026-09-29)
+
+The regression recorded above was the typed constant guard, not the kernel arena. A fact containing
+the literal `-32768` (or `Unary(-, 32768)`) is judged by `proof_signed_constant_at_width`, which
+reads `-MIN` as the magnitude `MIN` negated and finds `32768` outside `i16`; the fact therefore
+counts as an ambiguous integer constant and `proof_source_arithmetic_operator_guard` refuses every
+goal beside it. The fix is the spelling: the floor is `-MAX - 1 <= v`, which the guard evaluates
+exactly at the parameter's width. `proof_add_signed_upper_bound_fact` now adds both bounds for
+signed widths below 64. The same limitation remains for a *goal* written `>= -128`; write
+`>= -127 - 1`. Tests: `examples/signed_lower_bound.elisa`, `examples/rejected_signed_lower_bound.elisa`.
