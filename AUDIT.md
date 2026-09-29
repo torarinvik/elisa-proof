@@ -9812,3 +9812,27 @@ Two things are still missing:
   positional tuple literal, so `ensure result.numbers >= 0` does not prove.
 - A match's `_` arm records no negated-variant facts, so `not (result is Token.Plus)` does not
   prove for `skip_plus`.
+
+## Port: negated conjunction fall-through (from `codex/wasmbrowser-proof` 0fde6a8, 2026-09-29)
+
+An early return guarded by `a and b` used to leave `not a or not b` on the fall-through path, because
+`bounds_and_facts` expanded it eagerly. The fact now stays `not (a and b)`, and both case splitters
+split it into `not a` / `not b`: `proof_find_disjunction` in the checker and
+`proof_replay_find_disjunction_depth` / the congruence splitter in the kernel. Each branch is checked
+on its own, so a later guard can close one side. The split is sound for `bool`: `and` is not
+overloadable, and `not (a and b)` is exactly `not a or not b`. The parameter-heavy body limit goes
+from 16 to 24, and the over-limit example grows to match.
+
+The proofbase backend declines a nested enum pattern of the form `Unary(Not, Binary(...))`, so the
+checker arms match the operand in a second `match`. The branch also has a relevant-disjunction
+premise split (`relevant_disjunctions.elisa` in the checker and the kernel). That split is not
+ported, because every ported example proves and replays without it.
+
+**Evidence.**
+- `examples/negated_conjunction_fallthrough.elisa`: `guarded_selector` and `de_morgan_case` prove,
+  and all 8 certificates replay. `false_negated_conjunction_control` (`ensure not left` after
+  `return 0 if not (left and right)`) stays unproven.
+- Mutation checks:
+  - Disabling the checker split leaves lines 7 and 12 unproven.
+  - Disabling the kernel split leaves 2 replay gaps.
+- The full test and dogfood suites pass.
