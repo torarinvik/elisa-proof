@@ -9807,11 +9807,11 @@ a gap. Replay accepts a summary only from a function whose goals are all proven,
 hypothesis never supports a proof that the kernel accepts. `scripts/test_adt_library.py` pins
 both files, and checks that every gap lies in a failing function.
 
-Two things are still missing:
-- Named-tuple results such as `(numbers: i64, operators: i64)` are not projected from a
-  positional tuple literal, so `ensure result.numbers >= 0` does not prove.
-- A match's `_` arm records no negated-variant facts, so `not (result is Token.Plus)` does not
-  prove for `skip_plus`.
+Two things were missing:
+- Named-tuple results were not projected. This is now done; see "Named-tuple results: an ADT
+  parser library" below.
+- A match's `_` arm recorded no negated-variant facts. This is now done; see "Refuted earlier
+  match arms" below.
 
 ## Port: negated conjunction fall-through (from `codex/wasmbrowser-proof` 0fde6a8, 2026-09-29)
 
@@ -9903,3 +9903,65 @@ A parser returns `(value: i64, consumed: i64)` and states its contract over `res
 - A second pure call forgets an earlier call-bound local's value, so two parses of one stream are
   not known to agree.
 - `base(x) + d.i64()` over a scalar call-bound local still lacks the call's scalar witness.
+
+## Refuted earlier match arms (P2-03 slice, 2026-09-29)
+
+Arms are tried in order. An arm is reached only when every earlier unguarded arm's pattern
+failed, so a later arm now also gets `not (condition)` for each such arm. This applies to
+statement matches on the return path and to value matches (`return match x: ...`). It is what
+`skip_plus` needed to state `ensure not (result is Token.Plus)`: its `_` arm returns the token
+the `Token.Plus` arm rejected.
+
+**Which conditions can be negated.** A positive pattern fact only needs to be necessary for the
+match. A negated one needs the condition to decide the match exactly, and
+`proof_pattern_condition_exact` admits only these:
+- a variant whose payload subpatterns are all binders or wildcards;
+- a `true`, `false`, or plain decimal integer literal;
+- an integer range with plain decimal bounds;
+- an `as` or or-pattern built from these.
+
+These are refused:
+- a payload literal (`Number(0, _)` also fails on other numbers);
+- a pin (a user `==`);
+- hex, char, and float literals.
+
+**Guards.**
+- A guarded arm is never negated, because its guard can fail.
+- After any guard that calls a function, nothing further is negated in that match: the call may
+  change what the scrutinee term denotes.
+- Value-match guards cannot call anything.
+
+**Trust.** Like the positive pattern facts, these are `branch-condition` boundary facts: replay
+accepts their source-level justification without re-deriving it. That places
+`proof_pattern_condition_exact` and the arm-order bookkeeping in the trusted checker, which is why
+both are small and tested adversarially.
+
+**Evidence.**
+- `examples/match_refuted_arms.elisa` proves, with every certificate replayed:
+  - `skip_plus`;
+  - `classify`, where the second and third arms negate the first;
+  - a literal arm and a range arm;
+  - an or-pattern;
+  - two value matches.
+- `adt_library`'s `skip_plus` now carries `not (result is Token.Plus)`; 72/72 replay.
+- `examples/rejected_match_refuted_arms.elisa` refuses:
+  - a guarded arm;
+  - a payload literal;
+  - an inclusive range whose `_` arm genuinely breaks the claim;
+  - an arm after a guard call;
+  - a later arm (only earlier arms are refuted);
+  - a pin;
+  - a guarded value match.
+- `scripts/test_match_refuted_arms.py` pins both files.
+- Mutation checks:
+  - Admitting every pattern as exact proves `pinned`.
+  - Negating guarded arms proves `guarded_arm`.
+  - Dropping the stop after a guard call proves `after_guard_call`.
+  - Negating guarded value-match arms proves `guarded_value`.
+  - Disabling the negations entirely leaves six goals open in the positive file and reopens
+    `skip_plus` in `adt_library`.
+  - Disabling the value-match negations reopens both value matches.
+- The full test and dogfood suites pass.
+
+**Still open.** Distinct variants are not known to be disjoint: in an `End` arm,
+`not (tokens is Token.Number)` does not prove. That needs the enum's variant list in the checker.
