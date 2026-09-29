@@ -34,4 +34,11 @@ wrong_signed = report("rejected_negative_i64_module_constant_contract.elisa", 1)
 assert wrong_signed["status"] == "failed" and wrong_signed["verification_state"] == "unknown", wrong_signed
 assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong_status"
            and not f["counterexample_found"] for f in wrong_signed["findings"]), wrong_signed
-print("module-local u8 and signed i64 constants preserve range and scope; false contracts stay open")
+qualified = report("module_qualified_global_constant_contract.elisa", 0)
+assert qualified["status"] == qualified["verification_state"] == "proved", qualified
+assert not qualified["findings"], qualified
+qualified_negative = report("rejected_qualified_global_constant_boundary.elisa", 1)
+assert qualified_negative["status"] == "failed" and qualified_negative["verification_state"] == "unknown", qualified_negative
+assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong_boundary"
+           for f in qualified_negative["findings"]), qualified_negative
+print("module-local u8, signed i64 and qualified constants preserve range/scope; false contracts stay open")
