@@ -10062,8 +10062,8 @@ the test catches it. Full suite chunks 00-18 and dogfood chunks 00-08 pass.
 
 ## Deferred P2-03 follow-ups (2026-09-29)
 
-Not done, each refused conservatively today (never unsound): variant disjointness,
-`parse_twice_agrees`, the c4 scalar witness, bool equality in contracts
+Not done, each refused conservatively today (never unsound; variant disjointness has since landed,
+see "Variant exclusion after a match arm"): `parse_twice_agrees`, the c4 scalar witness, bool equality in contracts
 (`ensure result == (a is b)` reports `contract-proposition-type`), returned_chain, qualified
 `Module::CONST`, tuple-field `@r` for package_reader, and signed parameter range facts. Each needs a
 new kernel rule with its own soundness argument; none is started. Negative-literal typing was
