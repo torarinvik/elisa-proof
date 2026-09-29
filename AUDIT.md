@@ -10235,3 +10235,11 @@ that is not a bare name gets no witness; a call subject is still refused as
 `contract-proposition-type`. Not yet closed: `ensure result == (c is E.V)` over `if c is E.V:
 return true` needs `true == P` from the fact `P`, a bool-literal equality rule that the producer
 and the kernel both lack.
+
+## Qualified constants in more statements (BACKLOG B-06)
+
+The body rewrite of 4db58a8 now also covers assigned values, expression statements (call
+arguments), `while` conditions and loop contracts (`invariant`, `decreases`), `for` ranges, and
+the arguments of calls inside any rewritten expression. The same shadow guard applies, and a `for`
+variable named like the module counts as a shadow. A remaining, separate gap: over u8, a
+`decreases TOP - y` under `y < TOP` is refused as possibly wrapping, with a literal too.
