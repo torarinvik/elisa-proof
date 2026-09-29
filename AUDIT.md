@@ -10207,3 +10207,14 @@ This lets summaries survive a later call, as in `first = f(x); second = f(first)
 **Replay gap:** replay trusts the type-bound trace as a boundary fact, exactly as it does for pure-call witnesses. Replay does not re-derive the callee's classification. Closing that gap for both witness kinds is a follow-up.
 
 Tests: `examples/deterministic_call_chain.elisa`, `examples/rejected_deterministic_call_chain.elisa` (effects, global read, mutable borrow, indirect effect), and `scripts/test_deterministic_call_chain.py`, including a 40-call budget case.
+
+## Bound tuple label witnesses (BACKLOG B-03)
+
+A local bound to a named-tuple call result (`found: (count: i64, value: H[r]) = pick(value)`) is
+one stored value whatever the callee reads, so each primitive scalar label `found.<label>` gets the
+callee's declared element type witness, and a narrow unsigned label also gets its `0 <= x <= MAX`
+range, exactly as a parameter does. These are type-bound facts: replay trusts their traces, the
+same gap recorded for parameter type bounds. No bound beyond the type is added; every other fact
+about a label comes from the callee's instantiated summaries. `package_reader` itself stays
+unproven: its `Json::` compiler builtins and `ElisaProofJson` calls have no summaries. The front
+end reports no diagnostic for a label the callee does not declare; such a label gets no witness.

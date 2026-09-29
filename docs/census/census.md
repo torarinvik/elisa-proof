@@ -1,14 +1,14 @@
 # Refusal census
 
-656 examples, 5782/7485 obligations proven.
+658 examples, 5833/7513 obligations proven.
 
 | Count | Gate |
 | ---: | --- |
-| 436 | no-rule |
+| 411 | no-rule |
 | 390 | function-summary-unverified: callee body has not established a verified executable summary |
-| 135 | wrap-guard-goal |
+| 137 | wrap-guard-goal |
 | 127 | contract-proposition-type: kernel proposition formation rejected the term or operator |
-| 122 | control-flow-analysis-budget: control-flow analysis exceeded its fact snapshot budget |
+| 124 | control-flow-analysis-budget: control-flow analysis exceeded its fact snapshot budget |
 | 68 | contract-proposition-type: kernel proposition typing work budget exceeded |
 | 47 | ambiguous-constant-goal |
 | 39 | wrap-guard-fact |
@@ -97,13 +97,13 @@ Wall time under the census's parallel load, so treat it as a ranking.
 
 | Seconds | Example |
 | ---: | --- |
-| 117.85 | rejected_kernel_arena_cycle.elisa |
-| 35.93 | kernel_intern_runtime.elisa |
-| 23.71 | loop_state_joins.elisa |
-| 13.53 | rejected_loop_state_joins.elisa |
-| 11.58 | unsigned_resource_source_policy.elisa |
-| 3.51 | rejected_dogfood_kernel_core.elisa |
-| 3.35 | dogfood_kernel_core.elisa |
-| 3.06 | rejected_shared_fixed_borrows.elisa |
-| 3.00 | rejected_budget.elisa |
-| 2.96 | field_places.elisa |
+| 87.22 | rejected_kernel_arena_cycle.elisa |
+| 39.38 | kernel_intern_runtime.elisa |
+| 17.80 | loop_state_joins.elisa |
+| 9.84 | rejected_loop_state_joins.elisa |
+| 8.51 | unsigned_resource_source_policy.elisa |
+| 3.02 | field_places.elisa |
+| 2.95 | dogfood_kernel_core.elisa |
+| 2.05 | rejected_shared_fixed_borrows.elisa |
+| 2.01 | rejected_budget.elisa |
+| 1.82 | rejected_dogfood_kernel_core.elisa |
