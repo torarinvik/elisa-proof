@@ -1,0 +1,120 @@
+extend ElisaProofKernelReplay:
+    private:
+        # Mirror of the producer's monotone order rules over wrap-free unsigned terms: a sum is
+        # below a sum when its operands are pairwise below, one of them strictly for `<`, and a
+        # quotient by a variable divisor is below a constant `k` when its dividend is below
+        # `k` times that divisor. Every reduced goal is replayed through the ordinary goal
+        # dispatch, with the same split budget the producer spends.
+        def proof_kernel_replay_monotone_order_goal(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            return false if split_depth >= PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT
+            root: usize = proof_kernel_replay_monotone_strip(nodes, goal_root)
+            return false if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            goal: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if goal.kind != "binary"
+            ascending: bool = goal.operator == "<" or goal.operator == "<="
+            return false if not ascending and goal.operator != ">" and goal.operator != ">="
+            strict: bool = goal.operator == "<" or goal.operator == ">"
+            smaller: usize = goal.left if ascending else goal.right
+            larger: usize = goal.right if ascending else goal.left
+            return false if proof_kernel_replay_unsigned_width_in_expression(nodes, children, smaller, facts, 0) == 0
+            return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, root)
+            return true if proof_kernel_replay_monotone_sum(nodes, children, facts, smaller, larger, strict, split_depth, depth, remaining: remaining - 1)
+            return true if proof_kernel_replay_monotone_weaken(nodes, children, facts, smaller, larger, strict, split_depth, depth, remaining: remaining - 1)
+            return proof_kernel_replay_monotone_quotient(nodes, children, facts, smaller, larger, strict, split_depth, depth, remaining: remaining - 1)
+
+        def proof_kernel_replay_monotone_strip(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> usize:
+            current: mutable usize = root
+            for _ in 0..<8 |current, nodes|:
+                return current if current >= nodes.count or nodes[current].kind != "paren"
+                current <- nodes[current].left
+            current
+
+        def proof_kernel_replay_monotone_sum(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], smaller: usize, larger: usize, strict: bool, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            left_sum: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, proof_kernel_replay_monotone_strip(nodes, smaller), "+")
+            right_sum: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, proof_kernel_replay_monotone_strip(nodes, larger), "+")
+            return false if not left_sum.known or not right_sum.known
+            return true if proof_kernel_replay_monotone_pair(nodes, children, facts, left_sum.left, right_sum.left, left_sum.right, right_sum.right, strict, split_depth, depth, remaining: remaining - 1)
+            return proof_kernel_replay_monotone_pair(nodes, children, facts, left_sum.left, right_sum.right, left_sum.right, right_sum.left, strict, split_depth, depth, remaining: remaining - 1)
+
+        def proof_kernel_replay_monotone_subgoal(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            goal: usize = ElisaProofKernelCore::add_node(nodes, "binary", operator, left, right, 0, 0, 0, 0, "", "")
+            return proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal, split_depth + 1, depth + 1, remaining: remaining - 1)
+
+        # Mirror: a term is below a sum through either operand, and below a
+        # constant multiple `k >= 1` of a term through that term.
+        def proof_kernel_replay_monotone_weaken(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], smaller: usize, larger: usize, strict: bool, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            order: sview = "<" if strict else "<="
+            root: usize = proof_kernel_replay_monotone_strip(nodes, larger)
+            sum: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, root, "+")
+            if sum.known:
+                return true if proof_kernel_replay_monotone_subgoal(nodes, children, facts, smaller, order, sum.left, split_depth, depth, remaining: remaining - 1)
+                return proof_kernel_replay_monotone_subgoal(nodes, children, facts, smaller, order, sum.right, split_depth, depth, remaining: remaining - 1)
+            product: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, root, "*")
+            return false if not product.known
+            left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, product.left, 0)
+            right_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, product.right, 0)
+            return false if left_constant.known == right_constant.known
+            factor: i64 = left_constant.value if left_constant.known else right_constant.value
+            return false if factor < 1
+            multiplied: usize = product.right if left_constant.known else product.left
+            proof_kernel_replay_monotone_subgoal(nodes, children, facts, smaller, order, multiplied, split_depth, depth, remaining: remaining - 1)
+
+        def proof_kernel_replay_monotone_pair(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], first: usize, first_bound: usize, second: usize, second_bound: usize, strict: bool, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            if not strict:
+                return proof_kernel_replay_monotone_subgoal(nodes, children, facts, first, "<=", first_bound, split_depth, depth, remaining: remaining - 1) and proof_kernel_replay_monotone_subgoal(nodes, children, facts, second, "<=", second_bound, split_depth, depth, remaining: remaining - 1)
+            if proof_kernel_replay_monotone_subgoal(nodes, children, facts, second, "<=", second_bound, split_depth, depth, remaining: remaining - 1):
+                return true if proof_kernel_replay_monotone_subgoal(nodes, children, facts, first, "<", first_bound, split_depth, depth, remaining: remaining - 1)
+            return proof_kernel_replay_monotone_subgoal(nodes, children, facts, first, "<=", first_bound, split_depth, depth, remaining: remaining - 1) and proof_kernel_replay_monotone_subgoal(nodes, children, facts, second, "<", second_bound, split_depth, depth, remaining: remaining - 1)
+
+        def proof_kernel_replay_monotone_quotient(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], smaller: usize, larger: usize, strict: bool, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            limit: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, larger, 0)
+            return false if not limit.known or limit.value <= 0
+            division: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, proof_kernel_replay_monotone_strip(nodes, smaller), "/")
+            return false if not division.known
+            return false if proof_kernel_replay_constant_int(nodes, division.right, 0).known
+            order: sview = "<" if strict else "<="
+            scaled: (known: bool, operand: usize) = proof_kernel_replay_monotone_scaled_operand(nodes, division.left, limit.value)
+            reduced: mutable bool = false
+            if scaled.known:
+                reduced <- proof_kernel_replay_monotone_subgoal(nodes, children, facts, scaled.operand, order, division.right, split_depth, depth, remaining: remaining - 1)
+            else:
+                product: usize = ElisaProofKernelCore::add_node(nodes, "binary", "*", larger, division.right, 0, 0, 0, 0, "", "")
+                reduced <- proof_kernel_replay_monotone_subgoal(nodes, children, facts, division.left, order, product, split_depth, depth, remaining: remaining - 1)
+            return false if not reduced
+            return true if strict
+            zero: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, 0, "", "")
+            return proof_kernel_replay_monotone_subgoal(nodes, children, facts, zero, "<", division.right, split_depth, depth, remaining: remaining - 1)
+
+        def proof_kernel_replay_monotone_scaled_operand(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, dividend: usize, factor: i64) -> (known: bool, operand: usize):
+            return (true, dividend) if factor == 1
+            product: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, proof_kernel_replay_monotone_strip(nodes, dividend), "*")
+            return (false, 0) if not product.known
+            right_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, product.right, 0)
+            return (true, product.left) if right_constant.known and right_constant.value == factor
+            left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, product.left, 0)
+            return (true, product.right) if left_constant.known and left_constant.value == factor
+            (false, 0)

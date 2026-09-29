@@ -9891,3 +9891,41 @@ headroom. The over-limit control, `parameter_heavy_manifest_route_over_limit`, d
 module constants, so it now gets more fact room and runs out of its 64-step budget first. It stays
 unsupported and unverified. `test_parameter_heavy_return_analysis.py` now accepts either budget
 dimension at limit 64 and checks that the function is not verified.
+
+## Monotone orders, variable divisors and relational clamps (2026-09-29)
+
+The engine's movement triggers (`travel_after`, `gain` in `src/audio/triggers.elisa`) met four
+holes. The linear tier is difference logic over intervals, so it could not state a goal with
+three names, a coefficient or a variable divisor. Each rule below is read only over unsigned terms
+that the wrap guard (`proof_unsigned_expression_safe`, and `proof_kernel_replay_unsigned_goal_safe`
+in the kernel) has already certified, so machine arithmetic there is integer arithmetic. Every rule
+reduces its goal to smaller order goals that go back through every tier and guard, and each costs
+one case-split level. `src/proof/kernel_replay/monotone_orders.elisa` mirrors the rules. Each
+function in that cycle carries `decreases remaining` and lowers it on every edge.
+
+- **Sums.** `a + b < c + d` follows from `a < c` and `b <= d`, or from `a <= c` and `b < d`, in
+  either pairing. `<=` needs both pairs inclusive.
+- **Weakening.** A term is below `c + d` when it is below either operand. It is below `k * w`
+  for a constant `k >= 1` when it is below `w`, since the extra amount is a wrap-free unsigned
+  term. A zero factor is refused.
+- **Quotients.** `n / d < k` for a constant `k > 0` and a non-constant `d` follows from
+  `n < k * d`. `n / d <= k` follows from `n <= k * d` together with `0 < d`. When `n` is `x * k`
+  (or `k` is 1), the comparison is `x` against `d` itself. The divisor-zero case is left to the
+  existing resource-safety obligation.
+- **Variable-divisor intervals.** The interval tier bounded a quotient only by a constant
+  divisor. A dividend in `[l, u]` with `l >= 0`, over a divisor whose lower bound is at least 1,
+  now lies in `[l / d.upper (or 0), u / d.lower]`. Truncation is flooring there, and the quotient
+  falls as the divisor grows. `unsigned_bounds.elisa` mirrors this.
+- **Relational clamps.** An `if` binding such as `p = t if t < s else s - 1` used to leave only
+  an equality. `proof_add_relational_binding_range` now takes the larger side of the condition's
+  order. It tries `p < s` and then `p <= s` as ordinary goals over the binding. Only a proved one
+  is added, as a derived `proof-step` fact.
+
+`examples/monotone_orders.elisa` proves ten cases. `examples/rejected_monotone_orders.elisa` keeps
+eight false neighbours open, each with a stated counterexample. Examples: an inclusive clamp
+reaching the bound, a full share equal to `k`, a small limit, a sum bound claimed for one operand,
+and a zero multiple. `scripts/test_monotone_orders.py` and the dogfood probes check both files.
+
+Two limits remain. A signed sum is not ordered, since it could wrap below. `(p + p) / w` has no
+interval when `p` is bounded only through its own sum, so the wrap guard refuses the goal before
+the quotient rule sees it.

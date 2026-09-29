@@ -1,0 +1,114 @@
+extend ElisaProof:
+    public:
+        # Order rules the difference tier cannot state, since each needs three names, a
+        # coefficient or a variable divisor. Both are read only over unsigned terms the wrap guard has cleared,
+        # where machine arithmetic is integer arithmetic, and each reduces its goal to smaller
+        # order goals that re-enter every tier and guard. The kernel mirrors both.
+        #
+        # Sums: `a + b < c + d` holds when `a < c` and `b <= d`, or `a <= c` and `b < d`, in
+        # either pairing of the right-hand operands; `<=` needs both sides inclusive. A term
+        # that the pairing misses weakens to one operand of a sum or the base of a constant multiple.
+        #
+        # Quotients: `n / d < k` for a constant `k` holds when `n < k * d`, and `n / d <= k`
+        # when `0 < d` and `n <= k * d`. When `n` is `x * k` the scaled comparison is `x`
+        # against `d` itself, which keeps it inside the difference tier.
+        def proof_monotone_order_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, position):
+                    return false if not proof_is_order_operator(operator)
+                    ascending: bool = operator == TokenKind.Lt or operator == TokenKind.LtEq
+                    strict: bool = operator == TokenKind.Lt or operator == TokenKind.Gt
+                    smaller: Ast::Expr = left if ascending else right
+                    larger: Ast::Expr = right if ascending else left
+                    return false if proof_unsigned_width_in_expression(smaller, facts) == 0
+                    return false if not proof_unsigned_expression_safe(goal, facts)
+                    return true if proof_monotone_sum_goal(facts, smaller, larger, strict, annotations, operator_mask, depth, budget, split_depth, exhausted, position)
+                    return true if proof_monotone_weaken_goal(facts, smaller, larger, strict, annotations, operator_mask, depth, budget, split_depth, exhausted, position)
+                    return proof_monotone_quotient_goal(facts, smaller, larger, strict, annotations, operator_mask, depth, budget, split_depth, exhausted, position)
+                _:
+                    return false
+
+        def proof_monotone_sum_goal(facts: darray[Ast::Expr]&, smaller: Ast::Expr, larger: Ast::Expr, strict: bool, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&, position: Ast::Pos) -> bool:
+            match proof_strip_parens(smaller):
+                Ast::Expr.Binary(first, TokenKind.Plus, second, _):
+                    match proof_strip_parens(larger):
+                        Ast::Expr.Binary(third, TokenKind.Plus, fourth, _):
+                            return true if proof_monotone_pair(facts, first, third, second, fourth, strict, annotations, operator_mask, depth, budget, split_depth, exhausted, position)
+                            return proof_monotone_pair(facts, first, fourth, second, third, strict, annotations, operator_mask, depth, budget, split_depth, exhausted, position)
+                        _:
+                            return false
+                _:
+                    return false
+
+        # A term is below `c + d` when it is below either operand, and below
+        # `k * w` for a constant `k >= 1` when it is below `w`: the other operand, and every
+        # multiple past the first, only adds a wrap-free unsigned amount.
+        def proof_monotone_weaken_goal(facts: darray[Ast::Expr]&, smaller: Ast::Expr, larger: Ast::Expr, strict: bool, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&, position: Ast::Pos) -> bool:
+            order: TokenKind = TokenKind.Lt if strict else TokenKind.LtEq
+            match proof_strip_parens(larger):
+                Ast::Expr.Binary(left, TokenKind.Plus, right, _):
+                    return true if proof_goal_depth(facts, Ast::Expr.Binary(smaller, order, left, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted)
+                    return proof_goal_depth(facts, Ast::Expr.Binary(smaller, order, right, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted)
+                Ast::Expr.Binary(left, TokenKind.Star, right, _):
+                    left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                    right_constant: (known: bool, value: i64) = proof_constant_int(right)
+                    return false if left_constant.known == right_constant.known
+                    factor: i64 = left_constant.value if left_constant.known else right_constant.value
+                    return false if factor < 1
+                    multiplied: Ast::Expr = right if left_constant.known else left
+                    return proof_goal_depth(facts, Ast::Expr.Binary(smaller, order, multiplied, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted)
+                _:
+                    return false
+
+        def proof_monotone_pair(facts: darray[Ast::Expr]&, first: Ast::Expr, first_bound: Ast::Expr, second: Ast::Expr, second_bound: Ast::Expr, strict: bool, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&, position: Ast::Pos) -> bool:
+            second_inclusive: Ast::Expr = Ast::Expr.Binary(second, TokenKind.LtEq, second_bound, position)
+            first_inclusive: Ast::Expr = Ast::Expr.Binary(first, TokenKind.LtEq, first_bound, position)
+            if not strict:
+                return proof_goal_depth(facts, first_inclusive, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) and proof_goal_depth(facts, second_inclusive, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted)
+            if proof_goal_depth(facts, second_inclusive, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted):
+                return true if proof_goal_depth(facts, Ast::Expr.Binary(first, TokenKind.Lt, first_bound, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted)
+            return proof_goal_depth(facts, first_inclusive, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) and proof_goal_depth(facts, Ast::Expr.Binary(second, TokenKind.Lt, second_bound, position), annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted)
+
+        def proof_monotone_quotient_goal(facts: darray[Ast::Expr]&, smaller: Ast::Expr, larger: Ast::Expr, strict: bool, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&, position: Ast::Pos) -> bool:
+            limit: (known: bool, value: i64) = proof_constant_int(larger)
+            return false if not limit.known or limit.value <= 0
+            match proof_strip_parens(smaller):
+                Ast::Expr.Binary(dividend, TokenKind.Slash, divisor, _):
+                    return false if proof_constant_int(divisor).known
+                    order: TokenKind = TokenKind.Lt if strict else TokenKind.LtEq
+                    scaled: Ast::Expr = proof_monotone_scaled_operand(dividend, limit.value)
+                    reduced: mutable Ast::Expr = Ast::Expr.Binary(scaled, order, divisor, position)
+                    match scaled:
+                        Ast::Expr.Invalid:
+                            reduced <- Ast::Expr.Binary(dividend, order, Ast::Expr.Binary(larger, TokenKind.Star, divisor, position), position)
+                        _:
+                            pass
+                    return false if not proof_goal_depth(facts, reduced, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted)
+                    return true if strict
+                    positive: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.Lt, divisor, position)
+                    return proof_goal_depth(facts, positive, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted)
+                _:
+                    return false
+
+        # `x` when `dividend` is `x * factor` or `factor * x`, the dividend itself for a factor
+        # of 1, and Invalid otherwise.
+        def proof_monotone_scaled_operand(dividend: Ast::Expr, factor: i64) -> Ast::Expr:
+            return dividend if factor == 1
+            match proof_strip_parens(dividend):
+                Ast::Expr.Binary(left, TokenKind.Star, right, _):
+                    right_constant: (known: bool, value: i64) = proof_constant_int(right)
+                    return left if right_constant.known and right_constant.value == factor
+                    left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                    return right if left_constant.known and left_constant.value == factor
+                    return Ast::Expr.Invalid
+                _:
+                    return Ast::Expr.Invalid
+
+        # A non-negative dividend over a divisor at least 1 truncates toward zero, which is
+        # flooring here, and the quotient falls as the divisor grows. The kernel mirrors this in
+        # `proof_kernel_replay_interval`.
+        def proof_variable_divisor_interval(a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool), b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool)) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
+            return (false, 0, 0, false, false) if not a.has_lower or not a.has_upper or a.lower < 0 or not b.has_lower or b.lower < 1
+            least: i64 = a.lower / b.upper if b.has_upper else 0
+            (true, least, a.upper / b.lower, true, true)

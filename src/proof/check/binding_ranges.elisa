@@ -8,6 +8,7 @@ extend ElisaProof:
         # the result enters the facts as a proof step, which replay re-proves from its premises.
         def proof_add_binding_range(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, symbol: sview, value: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
             return if not proof_binding_range_candidate(value)
+            proof_add_relational_binding_range(facts, report, symbol, value, owner, position)
             upper: (known: bool, value: i64) = proof_binding_upper_bound(value, facts, position)
             return if not upper.known or upper.value < 0
             goal: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.LtEq, Ast::Expr.IntLit(upper.value, position), position)
@@ -56,3 +57,39 @@ extend ElisaProof:
             proof_close_plain_bounds(facts, &bounds)
             closed: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(arm, bounds)
             return (closed.has_upper, closed.upper)
+
+        # A clamp such as `p: u64 = t if t < s else s - 1` is bounded by a variable, not a
+        # constant: `p < s`. The goal tier proves that by splitting the conditional, but only
+        # when the goal names `p` alone; beside a second clamp, `p + a < s + s` needs both
+        # relational bounds as plain facts. The condition's upper operand is the candidate: the
+        # strict bound is tried first, then the inclusive one, each as an ordinary goal whose
+        # proof enters the facts as a replayed proof step.
+        def proof_add_relational_binding_range(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, symbol: sview, value: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
+            match value:
+                Ast::Expr.If(condition, _, _, _):
+                    upper: Ast::Expr = proof_binding_condition_upper(condition)
+                    match upper:
+                        Ast::Expr.Invalid:
+                            return
+                        _:
+                            pass
+                    return if proof_constant_int(upper).known or proof_expr_mentions_name(upper, symbol)
+                    annotations: darray[Ast::EnumAnnotation] = []
+                    for operator in [TokenKind.Lt, TokenKind.LtEq] |facts, report, symbol, upper, owner, position, annotations|:
+                        goal: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), operator, upper, position)
+                        return if any existing in facts where proof_expr_equal(existing, goal)
+                        if proof_goal(facts, goal, annotations):
+                            proof_add_derived_fact(facts, report, goal, "proof-step", position.line, owner)
+                            return
+                _:
+                    return
+
+        # The larger side of an order condition, or Invalid when the condition is not one.
+        def proof_binding_condition_upper(condition: Ast::Expr) -> Ast::Expr:
+            match proof_strip_parens(condition):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return right if operator == TokenKind.Lt or operator == TokenKind.LtEq
+                    return left if operator == TokenKind.Gt or operator == TokenKind.GtEq
+                    return Ast::Expr.Invalid
+                _:
+                    return Ast::Expr.Invalid
