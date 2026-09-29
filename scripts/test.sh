@@ -3918,6 +3918,7 @@ if [[ "$global_constant_module_status" -ne 0 || "$rejected_global_constant_colli
     exit 1
 fi
 python3 "$ROOT_DIR/scripts/test_module_u8_constant_contract.py"
+python3 "$ROOT_DIR/scripts/test_string_literal_comparison.py"
 
 # A rebind written over the binding's own symbol takes a fresh symbol, so the new value is recorded
 # and the old one keeps its facts. The equality that records it is admitted into the difference
