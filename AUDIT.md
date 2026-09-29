@@ -10177,3 +10177,7 @@ goal beside it. The fix is the spelling: the floor is `-MAX - 1 <= v`, which the
 exactly at the parameter's width. `proof_add_signed_upper_bound_fact` now adds both bounds for
 signed widths below 64. The same limitation remains for a *goal* written `>= -128`; write
 `>= -127 - 1`. Tests: `examples/signed_lower_bound.elisa`, `examples/rejected_signed_lower_bound.elisa`.
+
+## Refusal census and refusal gate (BACKLOG A-01, A-02)
+
+`proof_refusal_gate` is a diagnostic only. It names the first `proof_goal_depth` guard that refuses an unproven goal, and nothing proves anything because of it. The JSON report emits `refusal_gate` on unproven goals and on findings that carry them. `scripts/refusal_census.py` buckets every example by gate into `docs/census/`. First census: 5741/7438 obligations proven across 654 examples. The largest buckets are `no-rule` (435), unverified callee summaries (390) and `wrap-guard-goal` (132).
