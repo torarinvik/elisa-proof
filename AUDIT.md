@@ -9552,3 +9552,52 @@ binary never counted them.
 
 Evidence: before the port the route function was refused with `control-flow-analysis-budget`; now
 it verifies and replays. The full test and dogfood suites pass.
+
+## Nested conditional split (2026-09-29)
+
+Third P2-03 slice: a recursive height function returns `deeper + 1 if deeper < CAP`, where
+`deeper = l if l >= r else r`. After substitution, the goal is `(l if l >= r else r) + 1 <= CAP`
+and the guard is a fact about the same conditional. The operand split only fires when a
+conditional is a whole side of the comparison, so this goal was unproven.
+
+**Rule.** `proof_nested_conditional_goal` finds the first conditional in pre-order below a
+comparison's operands. It reaches that conditional only through parentheses, negation and binary
+operators; a conditional that is a whole operand is still left to the operand split. The rule
+then checks two branches:
+- Under `c`, every occurrence of the conditional, in the goal and in every fact, is replaced by
+  its then-value.
+- Under `not c`, every occurrence is replaced by its else-value.
+
+The condition is only a path assumption, and both branches must close. Under `c` the conditional
+denotes its then-value, so the rewrite changes no truth value. Quantifier bodies keep the
+conditional, which only withholds information.
+
+**Limits and guards.**
+- The rule shares the case-split depth limit (4). It sets `exhausted` when that limit refuses a
+  split.
+- The kernel mirror is `proof_kernel_replay_nested_conditional_goal`. It rewrites through
+  `replace_exact`, which is the same capture-avoiding rewrite that field-place generalization uses,
+  and costs one unit of budget for each step.
+- Both the producer and the kernel try the rule where an unsafe fact or goal already hands the goal
+  to field-place generalization. The branches re-enter every range guard.
+- The producer does not count parentheses as a level, because the arena has none. The two sides
+  therefore pick the same conditional.
+
+**Evidence.**
+- `examples/nested_conditional_split_probe.elisa`: 14 of 14 goals prove and replay. It covers
+  three functions:
+  - `tree_height`, a recursive ADT height over both recursive summaries.
+  - `successor_of_max`.
+  - `min_plus_max_is_sum`, where two conditionals under one sum need two nested splits.
+- Rejected controls, all refused with `ensure-unproven` and no replay gaps:
+  - `rejected_nested_conditional_unguarded`: `deeper + 1` without its guard.
+  - `rejected_nested_conditional_wrong_branch`: the guard bounds `a`, not the maximum.
+  - `rejected_nested_conditional_max_twice`: `max + max == a + b`.
+- `scripts/test_nested_conditional_split.py` is wired into `scripts/test.sh`.
+- Mutation checks:
+  - Without the kernel rule, 5 goals are replay gaps.
+  - Without the producer rule, lines 21, 29 and 37 are unproven.
+- The full test and dogfood suites pass.
+
+A literal beside a compound operand, such as `2 * (a if a <= b else b)`, is still refused by the
+ambiguous-literal gate before any split runs.

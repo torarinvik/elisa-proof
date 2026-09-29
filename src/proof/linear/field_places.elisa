@@ -141,3 +141,52 @@ extend ElisaProof:
                     return proof_is_comparison(operator)
                 _:
                     return false
+
+        # A conditional nested inside a comparison, `(a if c else b) + 1 <= k`, is split like one
+        # standing alone as an operand, except that each branch also rewrites every fact: under
+        # `c` the conditional denotes `a`, so replacing each occurrence of it (goal and facts)
+        # with `a` changes no truth value, and likewise `b` under `not c`. Both branches are
+        # required and the condition is only a path assumption. Quantifier bodies keep the
+        # conditional, which only withholds information. Kernel mirror:
+        # `proof_kernel_replay_nested_conditional_goal`.
+        def proof_nested_conditional_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if not proof_comparison_goal_shape(goal)
+            conditional: (found: bool, value: Ast::Expr) = proof_first_nested_conditional(goal, 0, 0)
+            return false if not conditional.found
+            if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                exhausted <- true
+                return false
+            match conditional.value:
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    then_facts: mutable darray[Ast::Expr] = []
+                    else_facts: mutable darray[Ast::Expr] = []
+                    for fact in facts |conditional, then_expression, else_expression, then_facts, else_facts|:
+                        then_facts.push(proof_generalize_place(fact, conditional.value, then_expression, 0).value)
+                        else_facts.push(proof_generalize_place(fact, conditional.value, else_expression, 0).value)
+                    then_facts.push(condition)
+                    else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
+                    then_goal: Ast::Expr = proof_generalize_place(goal, conditional.value, then_expression, 0).value
+                    else_goal: Ast::Expr = proof_generalize_place(goal, conditional.value, else_expression, 0).value
+                    return proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+                _:
+                    return false
+
+        # The first conditional in pre-order under the comparison's operands, reached only
+        # through parentheses, negation and binary operators. A conditional standing alone as
+        # an operand is left to the operand split. `level` counts operators only, since the
+        # kernel arena has no parentheses; `depth` bounds the walk.
+        def proof_first_nested_conditional(expression: Ast::Expr, level: usize, depth: usize) -> (found: bool, value: Ast::Expr):
+            return (false, expression) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.If(_, _, _, _):
+                    return (level > 1, expression)
+                Ast::Expr.Paren(inner, _):
+                    return proof_first_nested_conditional(inner, level, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_first_nested_conditional(operand, level + 1, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    found_left: (found: bool, value: Ast::Expr) = proof_first_nested_conditional(left, level + 1, depth + 1)
+                    return found_left if found_left.found
+                    return proof_first_nested_conditional(right, level + 1, depth + 1)
+                _:
+                    return (false, expression)
