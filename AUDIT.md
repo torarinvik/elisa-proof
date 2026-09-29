@@ -10113,3 +10113,16 @@ signed width marker's interaction with a negative lower bound is the remaining s
 
 The lower bound alone (without the upper fact) reproduces the regression, so the pair is not the
 trigger. The remaining hypothesis is the kernel arena rather than the producer's interval pass.
+
+## Variant exclusion after a match arm
+
+A match arm `x is E.V` now also records `not (x is E.V) or not (x is E.W)` for every other variant
+`W` of `E` (boundary trace kind `variant-exclusion`, at most eight variants, only for an enum name
+declared exactly once). Unit resolution turns the arm's own fact into `not (x is E.W)`, so an arm
+can prove that its scrutinee is not a sibling variant. The disjunction is sound for any value of
+`x`; replay re-derives it independently in `replay/variant_exclusion_validation.elisa`, requiring
+one enum declaration with both distinct variants and one shared subject. Kernel typing still gates
+the `is` terms. Tests: `scripts/test_variant_exclusion.py` (positive; the matched variant itself;
+an enum name declared twice, which produces no fact). Only return-position `match` statements emit
+the fact; value matches in `statement_checks.elisa` do not yet, and the shorthand `.V` pattern
+(no enum name) is skipped.
