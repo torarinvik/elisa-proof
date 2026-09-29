@@ -10164,3 +10164,14 @@ re-probed (`return -x` with `x >= 0` proves `result <= 0`) and works.
   resolves a fact's owner by that same bare-name scope rule. Importing a qualified constant needs
   a `Scope`-keyed fact, substitution over `Ast::Expr.Scope`, and a matching replay lookup by
   path; that is a change to both producer and independent checker and is not started.
+
+## Qualified module constants in contracts
+
+`Module::CONST` inside a `requires`/`ensure` now imports a traced "global-constant" fact
+(`Scope == literal`) plus a scalar witness, and the contract occurrence is rewritten to the
+literal so the arithmetic engines can bound it. The independent replay validator re-derives the
+constant from `report.source_declarations`. Refused: a parameter named like the module, mutable
+or duplicate constants, functions declared inside a module, non-integer initializers.
+Not covered: a qualified constant used in a function *body* (e.g. `return Limits::TOP`) is not
+rewritten and stays unproven.
+Tests: `scripts/test_qualified_constants.py`.
