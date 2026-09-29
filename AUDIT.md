@@ -9749,3 +9749,34 @@ split already covers the exclusions, as it did for c09b933.
 - Mutation check: dropping the `usize` clause leaves 5 of the policy ensures unproven. The hostile
   control stays refused, because a negative pin was never proved small.
 - The full test and dogfood suites pass.
+
+## Nested call results generalize from the inside out (2026-09-29)
+
+Generalization replaces each witnessed pure call result with a fresh reserved name, one place at
+a time in collection order. A call bounded by an earlier call's result, `lift(y, lift(x, floor))`,
+appears in the facts after its inner call. So the inner call was generalized first, and the outer
+place then no longer matched anything: every occurrence now read `lift(y, __elisa_field_place_0)`.
+The outer call stayed opaque, and a chain through it, `v > r >= l >= floor`, never closed. The
+checker and the kernel now both rewrite the remaining places with each replacement, so a place
+that contains an earlier one is generalized in the form it has at that point.
+
+This stays sound because `lift(y, fresh)` still denotes one value for a fixed `fresh`. The witness
+on the outer call is rewritten along with it, and calls with different arguments stay distinct
+places.
+
+**Evidence.**
+- `examples/nested_call_results.elisa` proves and replays 12 goals:
+  - a two- and three-deep chain;
+  - a branch above the chain;
+  - a goal that names the outer call first.
+- Each claim in `examples/rejected_nested_call_results.elisa` is false for some input, and all
+  four stay unproven:
+  - a bound through a call with different inner arguments;
+  - a strict bound where equality is reachable;
+  - a reversed chain;
+  - swapped arguments.
+- Mutation checks:
+  - Dropping the checker's rewrite leaves 2 of the positive ensures unproven.
+  - Dropping the kernel's rewrite leaves 3 replay gaps.
+- The full test and dogfood suites pass.
+

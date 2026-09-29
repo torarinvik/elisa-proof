@@ -1,5 +1,6 @@
-"""A returned call-bound local keeps its call's summary, and a closed constant beside a call
-result is read at the callee's declared signed width; nothing else is."""
+"""A returned call-bound local keeps its call's summary, a closed constant beside a call result
+is read at the callee's declared signed width, and a call result nested in another call's
+arguments generalizes with it; nothing else is."""
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,8 @@ def unproven(data):
     return sorted({(f["kind"], f["line"], f["name"]) for f in data["findings"]})
 
 
-for name, minimum in (("call_result_width.elisa", 19), ("returned_call_local.elisa", 9)):
+for name, minimum in (("call_result_width.elisa", 19), ("returned_call_local.elisa", 9),
+                      ("nested_call_results.elisa", 12)):
     code, data = check(name)
     assert code == 0 and data["status"] == "proved", (name, code, data["findings"])
     assert data["findings"] == [], (name, data["findings"])
@@ -49,4 +51,13 @@ assert unproven(data) == [
     ("ensure-unproven", 37, "unproven_precondition"),
 ], unproven(data)
 
-print("call results: returned locals keep their summary, constants typed at the call's width, replayed")
+code, data = check("rejected_nested_call_results.elisa")
+assert code == 1 and data["status"] == "failed", code
+assert unproven(data) == [
+    ("ensure-unproven", 13, "distinct_inner"),
+    ("ensure-unproven", 20, "strict_claim"),
+    ("ensure-unproven", 26, "reversed_chain"),
+    ("ensure-unproven", 32, "swapped_arguments"),
+], unproven(data)
+
+print("call results: returned locals keep their summary, constants typed at the call's width, nested calls generalized, replayed")
