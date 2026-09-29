@@ -9497,3 +9497,43 @@ These are trusted boundary facts, like every other type bound, so the mapping mu
   - Without the checker facts, `tagged_tag` is unproven.
   - Without the formation typing, `list_all_nonnegative` is refused as
     `contract-proposition-type`.
+
+## Call results in unsafe premises, and negated successor guards (2026-09-29)
+
+Second P2-03 slice: a recursive size function caps `l + r + 1` with `return CAP if l + r >= CAP`.
+
+**Unsafe premises generalize their call results.** A premise such as `l + r >= 1000000` over two
+call results used to disqualify the whole goal. The fixed-width guard could not show the sum is in
+range, because the only bounds on `l` and `r` are the callee's summaries, and those are facts about
+the call terms. The guard cannot read facts about call terms as ranges.
+
+Now, when a premise fails that guard and the goal is a comparison, the producer hands the goal to
+the existing field-place rule, `proof_field_place_goal`. The kernel does the same through
+`proof_kernel_replay_field_place_goal`. That rule renames each witnessed pure call result to a fresh
+name. It then re-enters every guard, including this premise check, over the renamed facts. The
+rename adds no facts, so a premise that is still out of range under its generalized names is
+refused as before. The kernel pays one unit of its budget for the step and requires a negatable
+binary goal. The rule's own four-place, once-per-goal limit is unchanged.
+
+**Negated guards feed the successor bound.** The kernel's `strict_shift` rule proves
+`x + 1 <= n` from a premise `x < n`. It read only positive premises. The producer's rule reads its
+premise through `readable_order`, which also sees the `not (x >= n)` that an early return leaves
+behind. The kernel now uses its mirror, `proof_kernel_replay_readable_order`. That reading requires
+a primitive scalar witness on both operands, so an overloaded `__cmp__` is never assumed total.
+This was a replay gap that already existed with plain parameters.
+
+**Evidence.**
+- `examples/call_sum_premise_probe.elisa`: 14 of 14 goals prove and replay. It covers
+  `capped_pair`, `left_heavy` (`l + r - 2 >= 0` after `l + r < 3` is excluded), and the
+  plain-parameter `plain_capped`.
+- Rejected controls, all refused with `ensure-unproven` and no replay gaps:
+  - `rejected_call_sum_premise_unbounded`: the callee has no upper bound, so the premise may be a
+    wrapped sum.
+  - `rejected_call_sum_premise_wrong_bound`: the ensure is `<= 999999`.
+  - `rejected_negated_strict_shift_off_by_one`: `not (x + y > C)` leaves `x + y + 1 = C + 1`.
+- `scripts/test_call_sum_premise.py` is wired into `scripts/test.sh`.
+- Mutation checks:
+  - Without the producer change, lines 15 and 22 are unproven.
+  - Without the kernel field-place step, the three call-sum goals are replay gaps.
+  - Without the kernel `readable_order` reading, `capped_pair:15` and `plain_capped:30` are gaps.
+- The full test and dogfood suites pass.
