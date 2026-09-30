@@ -822,6 +822,8 @@ run_probe scaled_single_difference examples/scaled_single_difference.elisa 0
 run_probe rejected_scaled_single_difference examples/rejected_scaled_single_difference.elisa 1
 run_probe literal_call_arguments examples/literal_call_arguments.elisa 0
 run_probe rejected_literal_call_arguments examples/rejected_literal_call_arguments.elisa 1
+run_probe signed_negated_literals examples/signed_negated_literals.elisa 0
+run_probe rejected_signed_negated_literals examples/rejected_signed_negated_literals.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.
