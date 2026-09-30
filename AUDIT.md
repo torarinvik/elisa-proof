@@ -10470,3 +10470,31 @@ replay all passed. The final census exited nonzero on timing-only comparisons:
 CPU-active. The census reported no proof-count drop or new refusal gate; this is not a fully green
 suite because its performance gate failed. Rerun that census under lower host contention before
 claiming the complete suite passes.
+
+## Counterexample model domains preserve Elisa scalar types (2026-09-30)
+
+The diagnostic counterexample search stored all symbols as `i64`, while its admission check treated
+any primitive-scalar witness as enough to interpret an identifier numerically. Since the primitive
+set includes `bool` and `char`, a Boolean or character equality could be reported as disproved with
+an integer assignment. Boolean identifiers used directly as propositions were also unevaluable.
+The return-contract filter then independently discarded non-integer assignments, so a valid
+Boolean model could not survive report classification.
+
+Counterexample domain inference and exact evaluation now live in separate modules. A Boolean domain
+is recorded only from proposition position or a Boolean-literal equality; an integer name requires
+an integer-literal anchor. Ambiguous identifier-only equalities (including `bool`/`char`) therefore
+remain `unknown`, rather than manufacturing an ill-typed assignment. Boolean values are serialized
+as `BoolLit`, and return-contract filtering accepts either integer or Boolean parameter assignments
+while still rejecting locals and non-parameter witnesses. The exhaustive bounded-model proof tier
+continues to use its legacy evaluator adapter; diagnostic-only type inference does not change its
+admission rule.
+
+Regressions in `examples/counterexample_boolean_domains.elisa` check Boolean `not`, equality anchored
+by a Boolean literal, unanchored Boolean equality, and character equality. Focused Stage1 checks also
+covered the existing exact integer/wrapped-width counterexample pair and `examples/bounded_model.elisa`.
+The portable replay suite, source-length gate, internal-marker collision tests, and `git diff --check`
+passed. The build used the clean compiler worktree at pinned revision
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f`; the globally installed Stage1 snapshot was older and
+did not match this proof checkout's compiler pin. The full test matrix and performance census were
+not rerun: unrelated compiler/proof jobs were actively consuming CPU. Do not call the complete suite
+green on the basis of these focused results.

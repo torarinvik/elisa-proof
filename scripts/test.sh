@@ -1610,6 +1610,14 @@ if [[ "$counterexample_domain_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
+run_json_report "$ROOT_DIR/examples/counterexample_boolean_domains.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["replay"]["gaps"] == 0; findings = {finding["name"]: finding for finding in report["findings"] if finding["kind"] == "ensure-unproven"}; boolean = findings["boolean_parameter_counterexample"]; anchored_boolean = findings["boolean_equality_counterexample"]; ambiguous_boolean = findings["ambiguous_boolean_equality"]; ambiguous_character = findings["ambiguous_character_equality"]; assert boolean["status"] == "disproved" and boolean["counterexample_found"]; assert boolean["counterexample"] and boolean["counterexample"][0]["right"]["kind"] == "bool" and boolean["counterexample"][0]["right"]["value"] is True; assert anchored_boolean["status"] == "disproved" and anchored_boolean["counterexample_found"] and anchored_boolean["counterexample"][0]["right"]["kind"] == "bool"; assert ambiguous_boolean["status"] == "unknown" and not ambiguous_boolean["counterexample_found"] and ambiguous_boolean["counterexample"] == []; assert ambiguous_character["status"] == "unknown" and not ambiguous_character["counterexample_found"] and ambiguous_character["counterexample"] == []'
+counterexample_boolean_domains_status=${PIPESTATUS[1]}
+set -e
+if [[ "$counterexample_boolean_domains_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: counterexample models must preserve or refuse scalar domains\n' >&2
+    exit 1
+fi
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_inexact_overloaded_counterexample.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert any(f["name"] == "always_equal_contract" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"])'
 overloaded_counterexample_status=${PIPESTATUS[1]}
 set -e
