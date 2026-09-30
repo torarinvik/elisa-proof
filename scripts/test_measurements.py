@@ -35,7 +35,8 @@ def check_measurements(text, report):
     measured = report["measurements"]
     assert list(report)[-1] == "measurements", "measurements must be the last section"
     assert measured["format"] == "elisa-proof-measurements-v1"
-    assert set(measured) == {"format", *KEYS}, sorted(measured)
+    assert set(measured) == {"format", "heaviest_functions", *KEYS}, sorted(measured)
+    check_heaviest(report)
     assert all(isinstance(measured[key], int) and measured[key] >= 0 for key in KEYS)
     kernel = report["kernel"]
     assert measured["declarations"] == report["summary"]["declarations"]
@@ -49,6 +50,19 @@ def check_measurements(text, report):
     assert measured["largest_certificate_facts"] == largest
     # The byte count covers everything before the section itself.
     assert measured["report_bytes"] == text.index(',"measurements":'), (measured["report_bytes"], text.index(',"measurements":'))
+
+
+def check_heaviest(report):
+    # Recompute the ranking from the goal list: per-name totals, ten largest, first-seen on ties.
+    totals = {}
+    for goal in report["goals"]:
+        entry = totals.setdefault(goal["name"], [0, 0])
+        entry[0] += 1
+        entry[1] += goal["kernel_facts_count"]
+    ranked = sorted(totals.items(), key=lambda item: -item[1][1])[:10]
+    expected = [{"name": name, "goal_attempts": count, "certificate_kernel_facts": facts}
+                for name, (count, facts) in ranked]
+    assert report["measurements"]["heaviest_functions"] == expected, report["measurements"]["heaviest_functions"]
 
 
 def check_arena(report):
@@ -71,6 +85,10 @@ def main():
     # Every certificate re-encodes its facts, so a proved source with several goals shares terms.
     assert verified["measurements"]["kernel_nodes_shared"] > 0
     assert verified["measurements"]["control_flow_steps"] > 0 and verified["measurements"]["live_facts_peak"] > 0
+
+    text, library = run(ROOT / "examples/adt_library.elisa", 0)
+    check_measurements(text, library)
+    assert len(library["measurements"]["heaviest_functions"]) > 1
 
     text, repeated = run(ROOT / "examples/repeated_index_certificates.elisa", 0)
     check_measurements(text, repeated)
@@ -105,6 +123,7 @@ def main():
         assert process.returncode != 0
         report = json.loads(process.stdout)
         check_measurements(process.stdout, report)
+        assert report["measurements"]["heaviest_functions"] == []
         assert report["measurements"]["kernel_nodes"] == 0 and report["measurements"]["certificates"] == 0
     print("measurements: schema, report consistency, arena order, and quantifier separation passed")
 

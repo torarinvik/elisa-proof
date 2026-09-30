@@ -1,0 +1,60 @@
+# Independent replay check for a "variant-exclusion" fact: `not (x is E.A) or not (x is E.B)` holds
+# only when `E` is a single enum declaration in the source with two distinct variants `A` and `B`.
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_VARIANT_DEPTH_LIMIT: usize = 32
+
+        # Count declarations of `enum_name`, and how many of them declare each of two variants.
+        def proof_replay_variant_scan(declarations: darray[Ast::Decl]&, enum_name: sview, first: sview, second: sview, enums: mutable usize&, firsts: mutable usize&, seconds: mutable usize&, depth: usize):
+            return if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            for declaration in declarations |enum_name, first, second, enums, firsts, seconds, depth|:
+                match declaration:
+                    Ast::Decl.Enum(name, variants, _, _, _):
+                        if name == enum_name:
+                            enums <- enums + 1
+                            for variant in variants |first, second, firsts, seconds|:
+                                firsts <- firsts + 1 if variant.name == first
+                                seconds <- seconds + 1 if variant.name == second
+                    Ast::Decl.Module(_, body, _):
+                        proof_replay_variant_scan(body, enum_name, first, second, enums, firsts, seconds, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_variant_scan(body, enum_name, first, second, enums, firsts, seconds, depth + 1)
+                    _:
+                        pass
+
+        # One `not (subject is Enum.Variant)` disjunct: its subject, enum and variant.
+        def proof_replay_variant_negated_test(expression: Ast::Expr) -> (known: bool, subject: Ast::Expr, enum_name: sview, variant: sview):
+            no_subject: Ast::Expr = Ast::Expr.Invalid
+            match expression:
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    match inner:
+                        Ast::Expr.Binary(subject, TokenKind.Is, target, _):
+                            match target:
+                                Ast::Expr.Field(base, variant_name, _):
+                                    match base:
+                                        Ast::Expr.Ident(enum_name, _):
+                                            return (true, subject, enum_name, variant_name)
+                                        _:
+                                            return (false, no_subject, "", "")
+                                _:
+                                    return (false, no_subject, "", "")
+                        _:
+                            return (false, no_subject, "", "")
+                _:
+                    return (false, no_subject, "", "")
+
+        def proof_replay_variant_exclusion_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            match trace.expression:
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    first: (known: bool, subject: Ast::Expr, enum_name: sview, variant: sview) = proof_replay_variant_negated_test(left)
+                    second: (known: bool, subject: Ast::Expr, enum_name: sview, variant: sview) = proof_replay_variant_negated_test(right)
+                    return false if not first.known or not second.known
+                    return false if first.enum_name != second.enum_name or first.variant == second.variant
+                    return false if not proof_expr_equal(first.subject, second.subject)
+                    enums: mutable usize = 0
+                    firsts: mutable usize = 0
+                    seconds: mutable usize = 0
+                    proof_replay_variant_scan(report.source_declarations, first.enum_name, first.variant, second.variant, &enums, &firsts, &seconds, 0)
+                    return enums == 1 and firsts == 1 and seconds == 1
+                _:
+                    return false

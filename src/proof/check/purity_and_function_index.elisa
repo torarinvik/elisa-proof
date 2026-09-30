@@ -145,10 +145,13 @@ extend ElisaProof:
                         return false
             return true
 
-        def proof_function_is_directly_pure(functions: ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, mutable_globals: darray[sview]&, report: ProofReport&) -> bool:
+        # `allow_requires` asks only whether the body is deterministic: a precondition makes the
+        # function partial, so it may not be a total contract term, but every call that runs
+        # has proved its precondition and still reads nothing but its by-value arguments.
+        def proof_function_is_directly_pure(functions: ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, mutable_globals: darray[sview]&, report: ProofReport&, allow_requires: bool) -> bool:
             return false if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
             return false if function_index >= functions.requires_counts.count or function_index >= functions.changes_counts.count or function_index >= functions.preserves_counts.count
-            return false if functions.requires_counts[function_index] > 0 or functions.changes_counts[function_index] > 0 or functions.preserves_counts[function_index] > 0
+            return false if (functions.requires_counts[function_index] > 0 and not allow_requires) or functions.changes_counts[function_index] > 0 or functions.preserves_counts[function_index] > 0
             return false if effects.count > 0
             param_start: usize = functions.param_starts[function_index]
             return false if function_index >= functions.param_counts.count or functions.param_counts[function_index] != parameters.count
@@ -230,7 +233,9 @@ extend ElisaProof:
                         function_index: usize = cursor
                         cursor <- cursor + 1
                         if function_index < functions.direct_pure.count:
-                            functions.direct_pure[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, mutable_globals, report)
+                            functions.direct_pure[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, mutable_globals, report, false)
+                        if function_index < functions.deterministic.count:
+                            functions.deterministic[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, mutable_globals, report, true)
                     Ast::Decl.Module(_, module_body, _):
                         proof_mark_direct_pure_functions_pass(file, module_body, functions, cursor, mutable_globals, report)
                     Ast::Decl.Scoped(scoped_body, _):
@@ -266,8 +271,10 @@ extend ElisaProof:
 
         def proof_mark_pure_functions(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, report: ProofReport&) -> void:
             functions.direct_pure.clear()
+            functions.deterministic.clear()
             for _ in 0..<functions.names.count |functions|:
                 functions.direct_pure.push(false)
+                functions.deterministic.push(false)
             mutable_global_names: mutable darray[sview] = []
             for annotation in file.enum_annotations |mutable_global_names|:
                 if annotation.name == "__global_mutable" and not (any existing in mutable_global_names where existing == annotation.owner):
@@ -284,6 +291,39 @@ extend ElisaProof:
                 cursor: mutable usize = 0
                 proof_mark_pure_functions_pass(file, declarations, functions, cursor, changed)
                 pass_index <- pass_index + 1
+            proof_mark_deterministic_functions(functions)
+
+        # Deterministic functions: pure ones, plus non-recursive functions that are directly pure
+        # except for a precondition and call only deterministic functions. Start from the direct
+        # classification and remove any function with another kind of call until nothing
+        # changes; with recursion excluded this is the least fixed point as well.
+        def proof_mark_deterministic_functions(functions: mutable ProofFunctionTable&) -> void:
+            for index in 0..<functions.deterministic.count |functions|:
+                recursive: bool = index < functions.recursive.count and functions.recursive[index]
+                functions.deterministic[index] <- false if recursive
+                functions.deterministic[index] <- true if index < functions.pure.count and functions.pure[index]
+            changed: mutable bool = true
+            rounds: mutable usize = 0
+            while changed and rounds <= functions.names.count |functions, changed, rounds|:
+                changed <- false
+                for index in 0..<functions.deterministic.count |functions, changed|:
+                    continue if not functions.deterministic[index] or (index < functions.pure.count and functions.pure[index])
+                    if not proof_function_calls_are_deterministic(functions, index):
+                        functions.deterministic[index] <- false
+                        changed <- true
+                rounds <- rounds + 1
+
+        def proof_function_calls_are_deterministic(functions: ProofFunctionTable&, function_index: usize) -> bool:
+            return false if function_index >= functions.call_starts.count or function_index >= functions.call_counts.count
+            start: usize = functions.call_starts[function_index]
+            count: usize = functions.call_counts[function_index]
+            return false if start > functions.all_calls.count or count > functions.all_calls.count - start
+            for offset in 0..<count |offset, start, functions|:
+                called: sview = functions.all_calls[start + offset]
+                return false if called == "__opaque_call__"
+                called_index: usize = proof_function_index(functions, called)
+                return false if called_index >= functions.deterministic.count or not functions.deterministic[called_index]
+            return true
 
         # Runtime calls may materialize a default that invokes a verified pure function. This is
         # separate from the lemma mapper because erased lemma defaults remain intentionally

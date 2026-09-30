@@ -1,0 +1,58 @@
+# An enum value has exactly one variant tag. After a match arm establishes `x is E.V`, each other
+# variant `W` of the same enum is excluded; the exclusion is recorded as the disjunction
+# `not (x is E.V) or not (x is E.W)` so unit resolution derives `not (x is E.W)` only from the arm's
+# own fact. Only a uniquely named enum is used, and replay re-derives the variants independently.
+extend ElisaProof:
+    private:
+        const PROOF_VARIANT_EXCLUSION_DEPTH_LIMIT: usize = 32
+        const PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT: usize = 8
+
+        def proof_variant_exclusion_enum_count(declarations: darray[Ast::Decl]&, enum_name: sview, depth: usize) -> usize:
+            return 2 if depth >= PROOF_VARIANT_EXCLUSION_DEPTH_LIMIT
+            found: mutable usize = 0
+            for declaration in declarations |enum_name, depth, found|:
+                match declaration:
+                    Ast::Decl.Enum(name, _, _, _, _):
+                        found <- found + 1 if name == enum_name
+                    Ast::Decl.Module(_, body, _):
+                        found <- found + proof_variant_exclusion_enum_count(body, enum_name, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        found <- found + proof_variant_exclusion_enum_count(body, enum_name, depth + 1)
+                    _:
+                        pass
+            return found
+
+        def proof_variant_exclusion_collect(declarations: darray[Ast::Decl]&, enum_name: sview, variants_out: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_VARIANT_EXCLUSION_DEPTH_LIMIT
+            for declaration in declarations |enum_name, variants_out, depth|:
+                match declaration:
+                    Ast::Decl.Enum(name, variants, _, _, _):
+                        if name == enum_name:
+                            for variant in variants |variants_out|:
+                                variants_out.push(variant.name)
+                    Ast::Decl.Module(_, body, _):
+                        proof_variant_exclusion_collect(body, enum_name, variants_out, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_variant_exclusion_collect(body, enum_name, variants_out, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_add_variant_exclusions(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, condition: Ast::Expr, line: u32, function_name: sview, position: Ast::Pos):
+            match condition:
+                Ast::Expr.Binary(subject, TokenKind.Is, Ast::Expr.Field(Ast::Expr.Ident(enum_name, _), variant_name, _), _):
+                    return if proof_variant_exclusion_enum_count(report.source_declarations, enum_name, 0) != 1
+                    variants: mutable darray[sview] = []
+                    return if not proof_variant_exclusion_collect(report.source_declarations, enum_name, &variants, 0)
+                    return if variants.count > PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT
+                    known: mutable bool = false
+                    for variant in variants |variant_name, known|:
+                        known <- true if variant == variant_name
+                    return if not known
+                    for other in variants |subject, enum_name, variant_name, facts, report, line, function_name, position|:
+                        if other != variant_name:
+                            has_variant: Ast::Expr = Ast::Expr.Unary(TokenKind.Not, Ast::Expr.Binary(subject, TokenKind.Is, Ast::Expr.Field(Ast::Expr.Ident(enum_name, position), variant_name, position), position), position)
+                            has_other: Ast::Expr = Ast::Expr.Unary(TokenKind.Not, Ast::Expr.Binary(subject, TokenKind.Is, Ast::Expr.Field(Ast::Expr.Ident(enum_name, position), other, position), position), position)
+                            proof_add_traced_fact(facts, report, Ast::Expr.Binary(has_variant, TokenKind.Or, has_other, position), "variant-exclusion", line, function_name)
+                _:
+                    pass

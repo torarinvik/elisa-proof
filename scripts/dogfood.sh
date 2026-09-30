@@ -766,7 +766,7 @@ run_probe value_root_field examples/value_root_field.elisa 0
 run_probe rejected_value_root_field examples/rejected_value_root_field.elisa 1
 run_probe shared_extent_loop examples/shared_extent_loop.elisa 0
 run_probe rejected_shared_extent_loop examples/rejected_shared_extent_loop.elisa 1
-run_probe replay_literal_facts examples/replay_literal_facts.elisa 1
+run_probe replay_literal_facts examples/replay_literal_facts.elisa 0
 run_probe rejected_replay_literal_facts examples/rejected_replay_literal_facts.elisa 1
 run_probe unsigned_nonnegative_sum examples/unsigned_nonnegative_sum.elisa 0
 run_probe rejected_unsigned_nonnegative_sum examples/rejected_unsigned_nonnegative_sum.elisa 1
@@ -1844,7 +1844,7 @@ with open(absent, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: literal extent boundary fixture did not fail cleanly")
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_named_count_is_not_a_length", "a_literal_length_is_not_an_element_bound", "a_non_empty_literal_length_is_not_read"):
+for owner in ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_named_count_is_not_a_length", "a_literal_length_is_not_an_element_bound", "a_non_empty_literal_length_is_not_read", "a_short_literal_has_its_own_length_only"):
     if reasons.get(owner) != "body-unverified":
         raise SystemExit("dogfood failed: %s read a length where no literal states one" % owner)
 print("dogfood literal_extent: an empty literal is empty, and says nothing past that")

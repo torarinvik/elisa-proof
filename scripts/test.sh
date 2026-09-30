@@ -89,6 +89,23 @@ python3 "$ROOT_DIR/scripts/test_match_refuted_arms.py"
 python3 "$ROOT_DIR/scripts/test_chained_pure_calls.py"
 python3 "$ROOT_DIR/scripts/test_dispatcher_budget.py"
 python3 "$ROOT_DIR/scripts/test_qualified_constants.py"
+python3 "$ROOT_DIR/scripts/test_variant_exclusion.py"
+python3 "$ROOT_DIR/scripts/test_signed_upper_bound.py"
+python3 "$ROOT_DIR/scripts/test_refusal_gate.py"
+python3 "$ROOT_DIR/scripts/test_deterministic_call_chain.py"
+python3 "$ROOT_DIR/scripts/test_tuple_field_region.py"
+python3 "$ROOT_DIR/scripts/test_enum_tag_equality.py"
+python3 "$ROOT_DIR/scripts/test_signed_local_field_bounds.py"
+python3 "$ROOT_DIR/scripts/test_usize_increment_under_count.py"
+python3 "$ROOT_DIR/scripts/test_disequality_strictness.py"
+python3 "$ROOT_DIR/scripts/test_guard_and_flag_facts.py"
+python3 "$ROOT_DIR/scripts/test_min_max_abs_summaries.py"
+python3 "$ROOT_DIR/scripts/test_literal_count.py"
+python3 "$ROOT_DIR/scripts/test_engine_state.py"
+python3 "$ROOT_DIR/scripts/test_explain.py"
+python3 "$ROOT_DIR/scripts/test_long_difference_chain.py"
+python3 "$ROOT_DIR/scripts/test_can_block_frame.py"
+python3 "$ROOT_DIR/scripts/test_census_diff.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
 python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
@@ -3646,7 +3663,7 @@ if [[ "$literal_extent_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_literal_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; refused = ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_named_count_is_not_a_length", "a_literal_length_is_not_an_element_bound", "a_non_empty_literal_length_is_not_read"); assert all(reasons[owner] == "body-unverified" for owner in refused)'
+run_json_report "$ROOT_DIR/examples/rejected_literal_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; refused = ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_named_count_is_not_a_length", "a_literal_length_is_not_an_element_bound", "a_non_empty_literal_length_is_not_read", "a_short_literal_has_its_own_length_only"); assert all(reasons[owner] == "body-unverified" for owner in refused)'
 rejected_literal_extent_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_literal_extent_status" -ne 0 ]]; then
@@ -3921,7 +3938,7 @@ fi
 # expression equality had no arm for one, so such a fact never matched its own trace and every
 # certificate carrying it gapped. Exact, elementwise: a different literal is a different fact.
 set +e
-run_json_report "$ROOT_DIR/examples/replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; lower = [g for g in report["goals"] if g["rule"] == "index-lower"]; assert len(lower) == 5; assert all(g["proven"] and g["replay_status"] == "replayed" for g in lower); assert {f["kind"] for f in report["findings"]} == {"index-upper-unproven"}'
+run_json_report "$ROOT_DIR/examples/replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; lower = [g for g in report["goals"] if g["rule"] == "index-lower"]; assert len(lower) == 5; assert all(g["proven"] and g["replay_status"] == "replayed" for g in lower); assert report["status"] == "proved"; assert report["findings"] == []'
 replay_literal_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$replay_literal_facts_status" -ne 0 ]]; then
@@ -4695,4 +4712,5 @@ if [[ "${proposition_nesting_status[0]}" -ne 1 || "${proposition_nesting_status[
 fi
 
 "$ROOT_DIR/scripts/test_optimized_replay.sh"
+python3 "$ROOT_DIR/scripts/census_diff.py"
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

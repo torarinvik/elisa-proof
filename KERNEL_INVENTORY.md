@@ -149,6 +149,7 @@ summary trace cannot be relabelled as one.
 | Kind | Producer | Source construct |
 |---|---|---|
 | `global-constant` | `check/global_constants.elisa` | a module constant's value (re-validated by `replay/global_constant_validation.elisa`) |
+| `variant-exclusion` | `check/variant_exclusion.elisa` | `not (x is E.V) or not (x is E.W)` for distinct variants of a uniquely declared enum (re-validated by `replay/variant_exclusion_validation.elisa`) |
 | `precondition` | `check/declaration_checks.elisa` | a function `requires` clause |
 | `type-bound` | `check/bounds_and_facts.elisa` | the range of a parameter's machine-integer type |
 | `runtime-assert` | `check/returns/contracts.elisa` | a statement after an aborting `assert` |
@@ -257,6 +258,7 @@ claims marked "(checked)".
 | `proof_has_ambiguous_integer_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
 | `proof_has_ambiguous_integer_constant_in` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
+| `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_integer_literal_tag` | `proof/expr/literal_types.elisa` | source adapter |

@@ -2432,8 +2432,8 @@ the difference reasoning.
 `proof_close_bounds_through_differences` propagates intervals along the constraints before the
 guard runs: `x - y <= c` with `y <= U` gives `x <= U + c`, and with `x >= L` gives `y >= L - c`.
 Each step is an ordinary interval inference that can only narrow an interval already implied, so
-nothing is admitted that the facts did not already carry. The pass is capped at four rounds, which
-keeps it linear; a bound needing more rounds is simply not derived, which only loses a proof. The
+nothing is admitted that the facts did not already carry. The pass runs to a fixed point (see
+"Bound propagation to a fixed point" below; it was first capped at four rounds). The
 constraint collection moves above the guard for the same reason.
 `proof_kernel_replay_close_bounds_through_differences` is the identical rule in the kernel, which
 is what lets the certificates replay.
@@ -10144,10 +10144,10 @@ the test catches it. Full suite chunks 00-18 and dogfood chunks 00-08 pass.
 
 ## Deferred P2-03 follow-ups (2026-09-29)
 
-Not done, each refused conservatively today (never unsound): variant disjointness,
-`parse_twice_agrees`, the c4 scalar witness, bool equality in contracts
+Not done, each refused conservatively today (never unsound; variant disjointness has since landed,
+see "Variant exclusion after a match arm"): `parse_twice_agrees`, the c4 scalar witness, bool equality in contracts
 (`ensure result == (a is b)` reports `contract-proposition-type`), returned_chain, qualified
-`Module::CONST`, tuple-field `@r` for package_reader, and signed parameter range facts. Each needs a
+`Module::CONST` in bodies (since landed for returns, local initializers and `if` branches; see below), tuple-field `@r` for package_reader, and signed parameter range facts (both bounds since landed; see "Signed lower bound"). Each needs a
 new kernel rule with its own soundness argument; none is started. Negative-literal typing was
 re-probed (`return -x` with `x >= 0` proves `result <= 0`) and works.
 
@@ -10172,8 +10172,7 @@ re-probed (`return -x` with `x >= 0` proves `result <= 0`) and works.
 literal so the arithmetic engines can bound it. The independent replay validator re-derives the
 constant from `report.source_declarations`. Refused: a parameter named like the module, mutable
 or duplicate constants, functions declared inside a module, non-integer initializers.
-Not covered: a qualified constant used in a function *body* (e.g. `return Limits::TOP`) is not
-rewritten and stays unproven.
+Function bodies are covered separately (see "Qualified module constants in function bodies").
 Tests: `scripts/test_qualified_constants.py`.
 
 ### Unreadable premises are set aside, not fatal (2026-09-30)
@@ -10200,3 +10199,277 @@ Tests:
 
 Still open: a real signed-remainder rule. `index % n` with `n > 0` has
 `|r| < n` and takes the sign of `index`, but nothing reads that yet.
+
+### Signed parameter range facts: probed, not landed (2026-09-29)
+
+Adding traced `type-bound` facts `MIN <= v` and `v <= MAX` for `i8`/`i16`/`i32` parameters proves
+`ensure result <= 127` for an `i8`, but any lower-bound fact below zero made goals that baseline
+proves, such as `requires v >= 5` then `ensure result >= 4` on an `i16`, unproven with no
+counterexample. The upper fact alone is harmless; the failure needs the negative lower fact, in
+both `IntLit(-n)` and `Unary(-, n)` spellings, and widening `proof_type_bound_name` to admit it
+changed nothing. The cause is not yet found, so the change was reverted rather than traded against
+a regression. A next attempt should bisect the goal path with a negative lower fact of type-bound
+origin (a user `requires v >= -5` does not trigger it).
+
+Further bisecting (same day): placing the range facts after the scalar witness, spelling the lower
+bound `v >= MIN` instead of `MIN <= v`, and widening `proof_type_bound_name` all leave the
+regression unchanged, and even the exact goal `ensure result >= -128` stays unproven beside the
+fact `v >= -128`. A user `requires` with the same shape proves, so the type-bound origin or the
+signed width marker's interaction with a negative lower bound is the remaining suspect.
+
+The lower bound alone (without the upper fact) reproduces the regression, so the pair is not the
+trigger. The remaining hypothesis is the kernel arena rather than the producer's interval pass.
+
+## Variant exclusion after a match arm
+
+A match arm `x is E.V` now also records `not (x is E.V) or not (x is E.W)` for every other variant
+`W` of `E` (boundary trace kind `variant-exclusion`, at most eight variants, only for an enum name
+declared exactly once). Unit resolution turns the arm's own fact into `not (x is E.W)`, so an arm
+can prove that its scrutinee is not a sibling variant. The disjunction is sound for any value of
+`x`; replay re-derives it independently in `replay/variant_exclusion_validation.elisa`, requiring
+one enum declaration with both distinct variants and one shared subject. Kernel typing still gates
+the `is` terms. Tests: `scripts/test_variant_exclusion.py` (positive; the matched variant itself;
+an enum name declared twice, which produces no fact). Only return-position `match` statements emit
+the fact; value matches in `statement_checks.elisa` do not yet, and the shorthand `.V` pattern
+(no enum name) is skipped.
+
+## Qualified module constants in function bodies
+
+`Limits::TOP` in a `return`, a local initializer, an `if` condition or its branches now imports the
+same traced, replay-validated `global-constant` fact and is rewritten to the literal in a copy of
+the body that only return analysis reads (`checked_body` in `declaration_checks.elisa`). Other
+statement kinds (loops, matches, assignments) are not rewritten and their mentions do not trigger
+an import, so they stay refused. A local declared with the module's first segment as its name
+disables the import (`rejected_qualified_body_shadow.elisa`). Tests are in
+`scripts/test_qualified_constants.py`.
+
+## Signed parameter upper bound (partial landing)
+
+A signed parameter of 8, 16 or 32 bits now gets the traced `type-bound` fact `v <= MAX`
+(`proof_add_signed_upper_bound_fact`). The lower bound stays out because of the regression recorded
+above, so `v >= MIN` is still unavailable. Sound by the parameter's type. The front end reports
+its own "could not be proven statically" diagnostic for such postconditions, so the test
+(`scripts/test_signed_upper_bound.py`) reads the engine's obligations rather than the overall status.
+
+## returned_chain: diagnosed, not fixed (2026-09-29)
+
+```
+def returned_chain(x: i64) -> i64:
+    requires x >= 0
+    ensure result <= 2000000
+    first: i64 = bounded(x)
+    second: i64 = bounded(first)
+    return first + second
+```
+
+where `bounded` has `requires x >= 0` and bounds its result. The single-call forms (`return y`
+after `y = bounded(x)`) prove; this two-call chain does not. At the return the goal reads
+`first + bounded(bounded(x)) <= 2000000`: `second` was substituted by its call text, but `first`
+survived as a bare identifier, and the facts hold only `second`'s summary (`bounded(bounded(x))`
+bounds). The summary facts about `first` (`bounded(x) >= 0`, `<= 1000000`) were dropped by
+`proof_clear_facts_after_call` when the second call ran, because a call term mentioning a
+non-pure callee is not call-stable. Keeping them is sound only if a call term is a deterministic
+function of its arguments, which needs a soundness argument about callee reads of mutable global
+state that the alias analysis does not currently make. A cheaper repair is to also substitute
+`first` by its call text at the return so goal and facts agree, but that leaves the first summary
+just as dropped. No change made; probe files are in the scratch directory only.
+
+## Signed lower bound: root cause found and landed (2026-09-29)
+
+The regression recorded above was the typed constant guard, not the kernel arena. A fact containing
+the literal `-32768` (or `Unary(-, 32768)`) is judged by `proof_signed_constant_at_width`, which
+reads `-MIN` as the magnitude `MIN` negated and finds `32768` outside `i16`; the fact therefore
+counts as an ambiguous integer constant and `proof_source_arithmetic_operator_guard` refuses every
+goal beside it. The fix is the spelling: the floor is `-MAX - 1 <= v`, which the guard evaluates
+exactly at the parameter's width. `proof_add_signed_upper_bound_fact` now adds both bounds for
+signed widths below 64. The same limitation remains for a *goal* written `>= -128`; write
+`>= -127 - 1`. Tests: `examples/signed_lower_bound.elisa`, `examples/rejected_signed_lower_bound.elisa`.
+
+## Refusal census and refusal gate (BACKLOG A-01, A-02)
+
+`proof_refusal_gate` is a diagnostic only. It names the first `proof_goal_depth` guard that refuses an unproven goal, and nothing proves anything because of it. The JSON report emits `refusal_gate` on unproven goals and on findings that carry them. `scripts/refusal_census.py` buckets every example by gate into `docs/census/`. First census: 5741/7438 obligations proven across 654 examples. The largest buckets are `no-rule` (435), unverified callee summaries (390) and `wrap-guard-goal` (132).
+
+## Negated signed-minimum literal (BACKLOG B-01)
+
+`proof_signed_constant_at_width` and its replay mirror read `-(MAX+1)` directly over an integer literal as the signed minimum. This is the only negated literal past the width maximum they accept. The reason is two's complement: the literal's wrapped reading is `-(MIN)`, which is `MIN`, and the mathematical reading is also `MIN`, so the ambiguous-constant guard has nothing left to disagree about. `>= -128` on `i8` now proves and replays. `>= -129` on `i8` and `>= -256` on `u8` are still refused at `literal-width`. Tests: `examples/signed_lower_bound.elisa`, `examples/rejected_signed_lower_bound.elisa`, `scripts/test_signed_upper_bound.py`.
+
+## Deterministic call witnesses (BACKLOG B-02)
+
+`proof_mark_deterministic_functions` classifies a function as deterministic when it is pure, or when it meets both of the following:
+- It is non-recursive and passes `proof_function_is_directly_pure` with its `requires` allowed. That means no effects, no `changes` or `preserves`, no mutable or mutable-typed parameter, and no read of a mutable global.
+- Every call it makes is to another deterministic function.
+
+At an executable call site of a verified deterministic callee with a scalar result, `proof_add_deterministic_call_witness` records `__elisa_primitive_scalar_type(call)` and the declared signed width. It does this only when every argument is witnessed or is a value binding.
+
+The soundness argument:
+- The call ran, so its precondition was proved there.
+- The callee's result depends only on its by-value arguments, so the call text denotes one value for as long as those arguments do.
+- `proof_expr_call_stable` already requires stable arguments before it retains the term.
+- The witness is never added in contract position. There a partial callee could be named outside its precondition.
+
+This lets summaries survive a later call, as in `first = f(x); second = f(first)`.
+
+**Budget:** at most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be live at once. Past that cap, summaries are dropped at the next call as before. This keeps `dispatch_wide` at a live-fact peak of 61 against its 66-fact snapshot budget; the peak was 53 before this change.
+
+**Replay gap:** replay trusts the type-bound trace as a boundary fact, exactly as it does for pure-call witnesses. Replay does not re-derive the callee's classification. Closing that gap for both witness kinds is a follow-up.
+
+Tests: `examples/deterministic_call_chain.elisa`, `examples/rejected_deterministic_call_chain.elisa` (effects, global read, mutable borrow, indirect effect), and `scripts/test_deterministic_call_chain.py`, including a 40-call budget case.
+
+## Bound tuple label witnesses (BACKLOG B-03)
+
+A local bound to a named-tuple call result (`found: (count: i64, value: H[r]) = pick(value)`) is
+one stored value whatever the callee reads, so each primitive scalar label `found.<label>` gets the
+callee's declared element type witness, and a narrow unsigned label also gets its `0 <= x <= MAX`
+range, exactly as a parameter does. These are type-bound facts: replay trusts their traces, the
+same gap recorded for parameter type bounds. No bound beyond the type is added; every other fact
+about a label comes from the callee's instantiated summaries. `package_reader` itself stays
+unproven: its `Json::` compiler builtins and `ElisaProofJson` calls have no summaries. The front
+end reports no diagnostic for a label the callee does not declare; such a label gets no witness.
+
+## The "c4 scalar witness" item (BACKLOG B-04)
+
+The deferred P2-03 list named "the c4 scalar witness" after scratch probe `c4`: a caller binds
+`later: i64 = base(x)` for a callee with a `requires`, then returns `later + d.i64()`. The result
+had no scalar witness because `base` was not pure, so its summary was lost. B-02's deterministic
+call witnesses close it; `examples/widened_call_result.elisa` is the probe and
+`examples/rejected_widened_call_result.elisa` shows its bound is tight.
+
+## Enum tag tests as bools (BACKLOG B-05)
+
+`name is Enum.Variant` in a goal gets a primitive scalar witness: `is` is the builtin tag test and
+is never overloaded, and a name denotes one value in a goal, so the test is one bool. A subject
+that is not a bare name gets no witness; a call subject is still refused as
+`contract-proposition-type`. Not yet closed: `ensure result == (c is E.V)` over `if c is E.V:
+return true` needs `true == P` from the fact `P`, a bool-literal equality rule that the producer
+and the kernel both lack.
+
+## Qualified constants in more statements (BACKLOG B-06)
+
+The body rewrite of 4db58a8 now also covers assigned values, expression statements (call
+arguments), `while` conditions and loop contracts (`invariant`, `decreases`), `for` ranges, and
+the arguments of calls inside any rewritten expression. The same shadow guard applies, and a `for`
+variable named like the module counts as a shadow. A remaining, separate gap: over u8, a
+`decreases TOP - y` under `y < TOP` is refused as possibly wrapping, with a literal too.
+
+## Signed type ranges for locals and fields (BACKLOG B-07)
+
+`proof_add_signed_range_facts` states `t <= MAX` and `-MAX - 1 <= t` as type-bound facts for any
+term of a signed type narrower than 64 bits. The parameter path now wraps it. Two new callers:
+
+- A declared local gets the range after the call purges. Before this change, the opaque-call purge
+  kept the upper literal bound but dropped the unary floor, so the lower end was lost.
+- A struct field place gets the range beside its signed place marker.
+
+A reassigned local's new value carries no range and stays unproven. Tuple labels are not covered
+yet. Evidence: examples/signed_local_field_bounds.elisa proves 15/15 and replays 15/15, and
+examples/rejected_signed_local_field_bounds.elisa refuses four bounds that are one step tighter.
+
+## Unsigned increment under a strict peer (BACKLOG B-08)
+
+This needed no engine change. The relational rule from bound_propagation already covers it:
+`usize` and `u64` `i + 1 > i` proves under `i < n` and under `i < values.count`, in both the
+producer and replay. examples/usize_increment_under_count.elisa (10/10) and its rejected
+variant (non-strict peer, no peer, result held under the count) now lock that in.
+
+## Disequality makes an order fact strict (BACKLOG K-02)
+
+When the producer's difference collector (`proof_facts_state_disequality`) or the kernel's
+(`proof_kernel_replay_facts_state_disequality`) reads `a <= b` or `a >= b`, it checks for a top-level
+fact `a != b` (either order, or `not (a == b)`) over structurally equal terms. If one exists, it
+pushes a strict edge. This is sound over the integers because `a <= b` and `a != b` together mean
+`a < b`. Only top-level facts are consulted. A disequality inside a conjunction is not.
+
+The kernel half does real work: with it disabled, examples/disequality_strictness.elisa replayed 6
+of 10 certificates. With it enabled, the example proves 11/11 and replays 11/11. The rejected
+variant (another pair, no order fact, a two-step bound) stays unproven.
+
+## Nested guards and bool flags (BACKLOG K-03, K-04)
+
+Both already worked, with no engine change. `continue if i >= values.count` inside a `for` loop
+and `return 0 if n >= values.count` inside an `if` both make the following index proof go
+through. `ok: bool = i < n; if ok:` gives `i < n` inside the branch.
+
+Three variants stay unproven, as they should: a reassigned flag, an operand moved after the flag
+was bound, and the `not ok` branch. examples/guard_and_flag_facts.elisa proves 9/9 and its
+rejected variant fails exactly those three.
+
+## min / max / abs summaries (BACKLOG K-01)
+
+Elisa has no `min`, `max` or `abs` builtin. The front end reports `undefined identifier "min"`.
+The item therefore became: user-written versions must carry exact summaries.
+
+The `<=` ensures already proved. The exactness ensure `result == a or result == b` was refused at
+the connective gate. Each disjunct failed alone, and the `not A => B` fallback kept the
+conditional unsplit inside the negated premise.
+
+The fix: `proof_nested_conditional_goal` and its kernel mirror now accept an `and`/`or` goal, and
+the `or` rule tries that split on the whole disjunction before the fallback. Each branch rewrites
+the conditional to one value in the goal and in every fact, and both branches are required, so
+nothing about the condition is assumed beyond the path.
+
+Evidence: with the kernel line disabled, examples/min_max_abs_summaries.elisa replayed 14 of 19
+certificates. With it enabled, 19/19 replay, including `clamp` built on both summaries. The
+rejected variant (strict bound, one-sided equality, a shifted arm, abs >= 1, a wrong equality)
+fails all five.
+
+## Short literal lengths by comparison (BACKLOG K-06)
+
+The earlier boundary ("An empty literal is empty") held back non-empty literal lengths. Reading
+one took a `usize` to `i64` conversion that the checker does not verify itself in, and that once
+cost 16 functions and 65 proofs.
+
+`proof_small_literal_count` and its kernel mirror `proof_kernel_replay_small_count` now read
+lengths 0 to 8 by comparing the `usize` count against each value. There is no conversion. The
+kernel helper is non-recursive, sits beside `proof_kernel_replay_constant_leaf`, and adds no
+recursive component.
+
+Evidence: examples/literal_count.elisa proves and replays 11/11: `[1, 2, 3].count == 3`, an
+eight-element literal, a local, and a walk over a three-element table. The
+`rejected_literal_extent` boundary moves to a nine-element literal, and gains a wrong length for
+a short literal. Dogfood and census are measured below in the commit message.
+
+## Engine state beside front-end diagnostics (BACKLOG K-07)
+
+A front-end diagnostic (for example the stage-1 checker declining a negative-literal `i8` ensure)
+keeps `verification_state` open even when the engine proved and replayed every obligation, which
+read as an unexplained failure. The JSON report now carries `engine_state` (`proved` only when no
+obligation failed and every certificate replayed, otherwise `open`) and the text report prints
+`front end diagnostic, engine: proved` in exactly that situation. The verdict itself is unchanged:
+`status` stays `failed` and the exit code stays 1, so no trust boundary moves. Covered by
+`scripts/test_engine_state.py` (proved, open-goal, clean, and malformed sources).
+
+## Explaining one goal (BACKLOG K-08)
+
+`--explain <goal_id> <file>` prints a single goal as plain text: the goal, `proven, certificate N`
+or `open, refused at gate G` (the same gate the JSON report names), and every fact with the origin
+the replay driver recorded (`<- kind line L via dependency`, or `unknown origin`). It only reads
+the report; nothing it prints is admitted. Out-of-range, malformed and missing ids exit 2 with no
+rendering. `scripts/test_explain.py` pins a snapshot of an open goal and cross-checks every goal of
+`rejected_budget.elisa` against the JSON report's gate and fact count.
+
+## Bound propagation to a fixed point (BACKLOG C-01)
+
+The goal tier already closed the difference graph with Floyd–Warshall over at most
+`PROOF_DIFFERENCE_NODE_LIMIT` names. The interval pass that feeds the overflow guard and the
+interval tier did not: it stopped after four rounds, so a bound stated five or more links from the
+term that needed it was never derived, and `v0 * 4` under `v0 < v1 < ... < v5 <= 1000` was refused.
+The pass (`proof_close_bounds_through_differences`, mirrored by
+`proof_kernel_replay_close_bounds_through_differences`) now repeats until a round tightens nothing,
+up to 33 rounds: a chain over N names settles in N rounds, so the limit only stops a
+contradictory cycle that would tighten forever. Each step is still an ordinary interval inference
+over true facts, so nothing new is trusted. Setting the kernel's limit back to four leaves 4 replay
+gaps in `examples/long_difference_chain.elisa` (10/10 replayed at the new limit), so the mirror is
+load-bearing. `examples/rejected_long_difference_chain.elisa` pins a too-high top, a non-strict
+chain, a broken link and a contradictory cycle; `scripts/test_long_difference_chain.py` runs both,
+with the thirty-two-name chain as the budget case.
+
+## Effect blocks keep untouched facts (BACKLOG D-01, inferred frame)
+
+A `can Effect:` block used to clear every non-type-bound fact once its body could modify
+anything, so `requires n < 100` was lost across an unrelated `a.push(3)`. The block now hands
+back the facts its own body left standing: statements inside it already havoc what their writes
+and mutable-argument calls reach, and facts that mention a block local or binding are dropped
+as they leave scope. Only a block whose body falls through is adopted; other block kinds keep
+the old clear. Fixtures: `examples/can_block_frame.elisa` (proved, replayed) and
+`examples/rejected_can_block_frame.elisa` (own count, assigned local, block-local relation stay
+unproven). An explicit `modifies` clause still needs front-end syntax the compiler lacks.
