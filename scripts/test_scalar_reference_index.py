@@ -13,13 +13,22 @@ data = json.loads(run.stdout)
 assert data["summary"]["semantic_errors"] == 0, data
 assert data["replay"]["gaps"] == 0, data
 assert data["replay"]["certificates"] == data["replay"]["replayed"], data
-for name in ("reference_read", "reference_update", "reference_byte_cast", "reference_disjunctive_update",
+assert data["trust"]["trusted_assumptions"] == [], data["trust"]
+for name in ("reference_read", "reference_update", "reference_byte_cast", "reference_pure_value",
+             "reference_write_from_pure_call", "reference_disjunctive_update",
              "reference_observe_entry", "reference_observe_through_call"):
     assert not any(f["name"] == name and f["kind"] in
                    ("expression-unsupported", "contract-proposition-type", "index-bounds-opaque")
                    for f in data["findings"]), data
     assert any(d.get("name") == name and d.get("verified") for d in data["declaration_details"]), name
 through_call = {d["name"]: d for d in data["declaration_details"] if d.get("kind") == "function"}
+assert through_call["reference_write_from_pure_call"]["verified"], through_call
+assert not through_call["reference_write_from_pure_call_false"]["verified"], through_call
+assert any(f["name"] == "reference_write_from_pure_call_false" and f["kind"] == "ensure-unproven"
+           for f in data["findings"]), data
+assert any(t["kind"] == "function-summary" and t["dependency"] == "reference_pure_value"
+           and t["name"] == "reference_write_from_pure_call"
+           for t in data["kernel"]["fact_traces"]), data["kernel"]["fact_traces"]
 assert not through_call["reference_update_through_call"]["verified"], through_call
 assert any(f["name"] == "reference_update_through_call" and f["kind"] == "call-old-opaque"
            for f in data["findings"]), data
@@ -38,4 +47,4 @@ assert any(f["name"] == "rejected_reference_offset" and
            f["kind"] == "contract-proposition-type" for f in data["findings"]), data
 assert not any(g["name"] == "rejected_reference_offset" and g["rule"] == "goal" and g["proven"]
                for g in data["goals"]), data
-print("scalar reference indexing: direct reads/updates and pure call-entry snapshots replayed; mutating old-call and nonzero offset safely refused")
+print("scalar reference indexing: direct reads/updates, verified pure-call writes, and call-entry snapshots replayed; false call value, mutating old-call, and nonzero offset safely refused")

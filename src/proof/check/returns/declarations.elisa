@@ -1,20 +1,26 @@
 # Private statement-transition submodule for the checker.
 extend ElisaProof:
     private:
-        # A primitive numeric cast is a total, reserved conversion rather than a
-        # user-dispatched call. It is safe to retain as the exact symbolic value
-        # written through a scalar reference; ordinary calls remain effectful.
-        def proof_scalar_reference_write_value_supported(expression: Ast::Expr) -> bool:
+        # Primitive numeric casts are total reserved conversions. A user-defined call
+        # may also be retained as the exact scalar written here, but only when its
+        # verified executable summary proves it pure and scalar-valued. The statement
+        # transition will separately apply that summary and independent replay checks
+        # the resulting fact; this predicate does not itself grant a postcondition.
+        def proof_scalar_reference_write_value_supported(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
             return true if not proof_expr_has_call(expression)
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
                     cast: (known: bool, receiver: Ast::Expr) = proof_contract_numeric_cast_receiver(callee, arguments)
-                    return cast.known and not proof_expr_has_call(cast.receiver) and proof_expr_supported(cast.receiver)
+                    if cast.known:
+                        return not proof_expr_has_call(cast.receiver) and proof_expr_supported(cast.receiver)
+                    called: sview = proof_callable_name(callee)
+                    called_index: usize = proof_function_index(functions, called)
+                    return called != "" and called_index < functions.return_scalar.count and functions.return_scalar[called_index] and proof_contract_calls_are_pure(expression, functions)
                 _:
                     return false
 
         def proof_scalar_reference_write_target(target: Ast::Expr, operator: TokenKind, initializer: Ast::Expr, names: darray[sview]&, frame_parameters: darray[sview]&, functions: ProofFunctionTable&, declarations: darray[Ast::Decl]&, owner: sview) -> (known: bool, name: sview):
-            return (false, "") if operator != TokenKind.LArrow or not proof_scalar_reference_write_value_supported(initializer) or proof_expr_has_move(initializer) or not proof_expr_supported(initializer)
+            return (false, "") if operator != TokenKind.LArrow or not proof_scalar_reference_write_value_supported(initializer, functions) or proof_expr_has_move(initializer) or not proof_expr_supported(initializer)
             match target:
                 Ast::Expr.Index(object, index, _):
                     root: sview = proof_ident_name(object)
@@ -177,7 +183,21 @@ extend ElisaProof:
                         reference_target: (known: bool, name: sview) = proof_scalar_reference_write_target(target, operator, initializer, names, frame_parameters, functions, report.source_declarations, name)
                         proof_check_direct_frame_write(target, names, frame_parameters, changes, preserves, report, name, position.line)
                         if reference_target.known:
-                            value: Ast::Expr = proof_substitute(initializer, names, values)
+                            value: mutable Ast::Expr = proof_substitute(initializer, names, values)
+                            match value:
+                                Ast::Expr.Call(callee, arguments, _, _):
+                                    # Primitive numeric casts use the call-shaped AST but
+                                    # are total conversions, not executable function calls.
+                                    # Preserve their exact symbolic value; only user calls
+                                    # need an executable summary and call-frame check.
+                                    numeric_cast: (known: bool, receiver: Ast::Expr) = proof_contract_numeric_cast_receiver(callee, arguments)
+                                    if not numeric_cast.known:
+                                        proof_check_frame_call_children(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
+                                        call_applied: bool = proof_apply_function(value, value, facts, functions, names, values, frame_parameters, changes, preserves, report, name, annotations)
+                                        proof_check_opaque_call_frame(value, names, frame_parameters, changes, preserves, functions, report, name) if not call_applied
+                                        value <- Ast::Expr.Invalid if not call_applied
+                                _:
+                                    pass
                             target_slot: mutable usize = names.count
                             while target_slot > 0 |target_slot, names, reference_target|:
                                 target_slot <- target_slot - 1
