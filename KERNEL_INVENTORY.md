@@ -260,10 +260,11 @@ claims marked "(checked)".
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_integer_literal_tag` | `proof/expr/literal_types.elisa` | source adapter |
-| `proof_kernel_budget_note` | `proof/model.elisa` | report model |
-| `proof_kernel_report_append_allowed` | `proof/model.elisa` | report model |
+| `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
+| `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some

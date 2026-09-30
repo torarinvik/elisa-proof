@@ -1,0 +1,330 @@
+# Congruence seeds and case-split goal depth for the linear tier.
+extend ElisaProof:
+    public:
+        # Congruence can only seed a class from a positive equality premise. Check that cheap
+        # shape before lowering a large fact frame into a scratch arena; the ordinary arithmetic,
+        # identity, and model tiers already handled every goal that needs no equality premise.
+        # Conjunction is the only proposition whose equality children are exported here, and
+        # `not (a != b)` is the equivalent positive form used by the kernel seed rule.
+        def proof_congruence_has_seed(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_congruence_has_seed(inner, depth + 1)
+                Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
+                    return true
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_congruence_has_seed(left, depth + 1) or proof_congruence_has_seed(right, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    match inner:
+                        Ast::Expr.Binary(_, TokenKind.BangEq, _, _):
+                            return true
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_congruence_has_seed_in_facts(facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts |fact|:
+                return true if proof_congruence_has_seed(fact, 0)
+            return false
+
+        def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool:
+            return false if not proof_kernel_expression_supported(goal)
+            return false if not proof_congruence_has_seed_in_facts(facts)
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            roots: mutable darray[usize] = []
+            for fact in facts |fact, nodes, children, roots, annotations|:
+                continue if not proof_kernel_expression_supported(fact)
+                roots.push(proof_kernel_encode_annotated(fact, &nodes, &children, annotations))
+            return false if roots.count == 0
+            goal_root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, annotations)
+            return ElisaProofKernelReplay::proof_kernel_replay_congruence_report_status(&nodes, &children, roots, goal_root, exhausted)
+
+        def proof_goal_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            # Disjunction introduction from the left must happen before inspecting a right-hand
+            # fixed-width term that is not evaluated once the left proposition is true. The left
+            # subgoal still enters its own source-dispatch and machine-range guards.
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.Or, _, _):
+                    return true if proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                _:
+                    pass
+            # Source-level operator dispatch is checked before every logical shortcut. Runtime
+            # branch conditions, assertions, and imported contracts all enter this fact set; if a
+            # primitive spelling is replaced by an Elisa protocol, the independent kernel must
+            # not reinterpret that fact with built-in semantics or use it to close a contradiction.
+            return false if not proof_source_arithmetic_operator_guard(goal, facts, operator_mask)
+            match proof_strip_parens(goal):
+                Ast::Expr.BoolLit(value, _):
+                    return true if value
+                _:
+                    pass
+            return true if proof_closed_literal_comparison(goal)
+            # An explicitly asserted proposition is accepted before trying the arithmetic
+            # fragment. This matters for one-sided facts such as `x >= 0`: the fact itself is
+            # valid even though it is not enough to construct a finite interval for `x`.
+            for fact in facts:
+                return true if proof_fact_contains(fact, goal) or proof_quantifier_equal(fact, goal, annotations)
+            # A remainder or quotient by a variable divisor is bounded relationally; the rule
+            # re-enters every guard over the generalized goal (`proof_division_goal`).
+            return true if proof_division_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+            return true if proof_negated_name_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+            # A comparison of full-width unsigned literals is decided by their recorded type, never
+            # by their wrapped i64 payloads; untyped comparisons stay with the tiers below.
+            return true if proof_typed_constant_comparison(goal, annotations)
+            # A negated primitive comparison and its complement are propositionally equivalent,
+            # even when an operand holds fixed-width arithmetic whose integer range is unknown.
+            # This reads no arithmetic: both sides compare the same evaluated terms with
+            # complementary operators. The kernel replays it before its own unsigned-wrap guard.
+            match goal:
+                Ast::Expr.Binary(left, operator, right, _):
+                    if proof_is_comparison(operator) and proof_primitive_comparison(left, right, facts):
+                        return true if proof_fact_proves_comparison_negation(left, operator, right, facts)
+                _:
+                    pass
+            # Do not let the unbounded signed interval/model tiers prove a fixed-width unsigned
+            # expression unless every arithmetic subterm is shown to remain in its declared
+            # range. Directly asserted facts were handled above and remain valid path assumptions.
+            return true if proof_unsigned_goal_identity(goal, facts)
+            # A validated same-width subtraction witness can establish that a sum is in range;
+            # consult it before the generic wrap guard rejects the sum under proof.
+            return true if proof_unsigned_sum_upper_shape(facts, goal)
+            return true if proof_unsigned_unit_increment_order_shape(facts, goal)
+            return true if proof_unsigned_scaled_product_upper_shape(facts, goal)
+            # Disjunction introduction reads no arithmetic in the unused alternative.
+            # Each attempted alternative still enters all operator and machine-range guards.
+            match goal:
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return true if proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, split_depth, exhausted) or proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                    # `A or B` from `not A => B`: B is evaluated exactly when A is false, so the
+                    # right alternative still enters every guard under the added premise. The
+                    # symmetric `not B => A` assumes a fact about B that the source may never
+                    # evaluate, so it is taken only when B reads no arithmetic at all.
+                    if split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                        return true if proof_disjunct_goal(facts, left, right, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                        if proof_disjunct_arithmetic_free(right):
+                            return true if proof_disjunct_goal(facts, right, left, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                _:
+                    pass
+            # Propositional inconsistency first. It reads no term as a number, so no wrapping
+            # premise can mislead it, and a contradictory branch must be able to close before the
+            # guard below asks its facts to be range-safe -- the branch a disjunctive premise
+            # refutes often cannot answer that, and does not have to.
+            return true if proof_facts_propositionally_inconsistent(facts)
+            pruned_facts: mutable darray[Ast::Expr] = []
+            return proof_goal_depth(pruned_facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) if proof_disjunct_prune_facts(facts, &pruned_facts)
+            # Alternatives the linear tier refutes from the other facts are removed before a
+            # split opens them; a disjunction left with none closes the goal.
+            linear_pruned: mutable darray[Ast::Expr] = []
+            linear_prune: i64 = proof_linear_prune_facts(facts, &linear_pruned)
+            return true if linear_prune == 2
+            return proof_goal_depth(linear_pruned, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) if linear_prune == 1
+            # A disjunctive premise over call results, `f(x) - x <= c or ...`, is opaque to the
+            # linear pruning above, which reads identifiers only, so every split would open it
+            # blind. Generalizing the witnessed places first, once at the top of a goal, lets the
+            # pruning read them; a failed attempt falls through to the ordinary split. Kernel
+            # mirror in `proof_kernel_replay_goal_depth_remaining`.
+            has_disjunction: mutable bool = false
+            for fact in facts |fact, has_disjunction|:
+                has_disjunction <- true if proof_linear_is_or(fact)
+            if split_depth == 0 and has_disjunction and proof_comparison_goal_shape(goal):
+                return true if proof_field_place_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+            disjunction_index: mutable usize = facts.count
+            disjunction_left: mutable Ast::Expr = Ast::Expr.Absent
+            disjunction_right: mutable Ast::Expr = Ast::Expr.Absent
+            for index in 0..<facts.count |index, facts, disjunction_index, disjunction_left, disjunction_right|:
+                candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(facts[index])
+                if candidate.known:
+                    disjunction_index <- index
+                    disjunction_left <- candidate.left
+                    disjunction_right <- candidate.right
+                    break
+            # A disjunctive premise the split budget refuses to open leaves the goal undecided,
+            # not unprovable: the remaining tiers run without it, and a failure is a timeout.
+            exhausted <- true if disjunction_index < facts.count and split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+            if disjunction_index < facts.count and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                left_facts: mutable darray[Ast::Expr] = []
+                right_facts: mutable darray[Ast::Expr] = []
+                for index in 0..<facts.count |index, facts, left_facts, right_facts, disjunction_index|:
+                    continue if index == disjunction_index
+                    left_facts.push(facts[index])
+                    right_facts.push(facts[index])
+                # Modus ponens: an alternative the other facts refute is dropped and the survivor
+                # is assumed outright, so `a != b or result == b` at a call with `a` and `b` the
+                # same value yields `result == b` without a split that must close both sides.
+                return true if proof_disjunct_modus_ponens(left_facts, disjunction_left, disjunction_right, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                return true if proof_disjunct_modus_ponens(left_facts, disjunction_right, disjunction_left, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                left_facts.push(disjunction_left)
+                right_facts.push(disjunction_right)
+                return proof_goal_depth(left_facts, goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(right_facts, goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+            # Nonnegativity is decided before the wrap guards below. It is the one claim that
+            # holds under both readings of a fixed-width term -- an unsigned machine value is
+            # nonnegative, and so is a subtraction-free combination of nonnegative leaves -- and
+            # it consumes no premise: only the type markers, which state declared types rather
+            # than values. Behind the guards it was unreachable, because a guard written over the
+            # same sum leaves a premise the guard itself refuses.
+            return true if proof_unsigned_nonnegative_shape(facts, goal)
+            return true if proof_unsigned_subtraction_upper_shape(facts, goal)
+            # Equality congruence is valid for deterministic fixed-width operators even when an
+            # intermediate wraps; it does not reinterpret signed operations as unbounded integers.
+            match goal:
+                Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
+                    unsigned_free: mutable bool = proof_unsigned_width_in_expression(goal, facts) == 0
+                    for fact in facts |fact, unsigned_free|:
+                        unsigned_free <- false if proof_unsigned_width_in_expression(fact, facts) != 0
+                    if unsigned_free and proof_source_arithmetic_operator_guard(goal, facts, operator_mask):
+                        return true if proof_congruence_goal(facts, goal, annotations, exhausted)
+                _:
+                    pass
+            return true if proof_closed_safe_constant_comparison(goal)
+            return true if proof_closed_signed_i64_comparison(goal, facts)
+            # Signed decision procedures consume premises as well as the goal.
+            # A true wrapping premise may be false over integers; treating it as
+            # such can discard every actual execution and prove an arbitrary goal.
+            # Each branch of a split above re-enters here, so every premise a tier
+            # below actually consumes has passed this guard in its own branch. A
+            # quantifier is a block, which the guard cannot read; its range bounds
+            # are guarded where they are evaluated and every instance re-enters here.
+            # A quantified fact is likewise skipped: no tier below reads it as a number
+            # (it closes a goal only by exact match, above), and an instance a tactic
+            # derives from it re-enters this guard as an ordinary fact.
+            quantifier_kind: sview = proof_quantifier_kind(goal, annotations)
+            return false if quantifier_kind == "" and proof_has_ambiguous_integer_constant_in(goal, facts, 0)
+            for fact in facts |fact, facts, annotations|:
+                return false if proof_quantifier_kind(fact, annotations) == "" and proof_has_ambiguous_integer_constant_in(fact, facts, 0)
+            for fact in facts |goal, facts, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                # A premise's sum, `left_size + right_size < cap` over two call results, may be
+                # in range only through its places' own bounds, which the guard cannot read.
+                # Generalizing the places re-enters every guard over fresh names.
+                if not proof_unsigned_expression_safe(fact, facts):
+                    return proof_comparison_goal_shape(goal) and (proof_field_place_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) or proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted))
+            return true if proof_facts_inconsistent(facts)
+            return true if proof_linear_disequality_refuted(facts)
+            return true if proof_fact_proves_call_summary(facts, goal)
+            if not proof_unsigned_expression_safe(goal, facts):
+                # The goal's sum may be in range only through a field place, `start + 3` under
+                # `stop <= text.length`, which the guard cannot read. Generalizing the place
+                # re-enters every guard over fresh names.
+                return proof_comparison_goal_shape(goal) and (proof_field_place_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) or proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted))
+            if quantifier_kind != "" and depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                exhausted <- true
+                return false
+            return proof_quantifier_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) if quantifier_kind != ""
+            return true if proof_bounded_model_goal(facts, goal, exhausted)
+            match goal:
+                Ast::Expr.BoolLit(value, _):
+                    return value
+                Ast::Expr.Paren(inner, _):
+                    return proof_goal_depth(facts, inner, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.BoolLit(value, _):
+                            return not value
+                        Ast::Expr.Binary(left, operator, right, _):
+                            negated_operator: TokenKind = proof_comparison_negation(operator)
+                            return proof_linear_goal(left, negated_operator, right, facts) if negated_operator != TokenKind.Eof
+                        _:
+                            pass
+                Ast::Expr.Binary(left, operator, right, position):
+                    if operator == TokenKind.And:
+                        return proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, split_depth, exhausted) and proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                    if operator == TokenKind.Or:
+                        return true if proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, split_depth, exhausted) or proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                        # A conditional shared by both disjuncts, `(a if c else b) == a or ... == b`,
+                        # is split across the whole disjunction so each branch sees one value.
+                        return true if proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                        # Neither disjunct holds alone. `A or B` is `not A => B`, the rule below
+                        # with a derived premise, so prove the right disjunct under the left one's
+                        # negation: `P` itself when the left is `not P`, the shape of an ensure
+                        # `not result or bound`. The premise opens a case, so it spends the split
+                        # budget, and a refused split leaves the goal undecided.
+                        if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                            exhausted <- true
+                            return false
+                        negated_facts: mutable darray[Ast::Expr] = []
+                        negated_facts.extend(facts)
+                        negated_left: mutable Ast::Expr = Ast::Expr.Unary(TokenKind.Not, left, position)
+                        match left:
+                            Ast::Expr.Unary(TokenKind.Not, inner, _):
+                                negated_left <- inner
+                            _:
+                                pass
+                        negated_facts.push(negated_left)
+                        return proof_goal_depth(negated_facts, right, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+                    if operator == TokenKind.FatArrow:
+                        implication_facts: mutable darray[Ast::Expr] = []
+                        implication_facts.extend(facts)
+                        implication_facts.push(left)
+                        return proof_goal_depth(implication_facts, right, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                    # Eliminate a conditional expression by checking both semantic branches.
+                    # The condition and its negation are path assumptions, not asserted facts;
+                    # both branches are required, so an opaque condition cannot manufacture a
+                    # proof. Bound the split with the same small case-splitting budget used for
+                    # disjunctive facts. A conditional the budget refuses to eliminate leaves the
+                    # goal undecided rather than unprovable.
+                    exhausted <- true if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT and (proof_expression_is_conditional(left) or proof_expression_is_conditional(right))
+                    if split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                        match left:
+                            Ast::Expr.If(condition, then_expression, else_expression, _):
+                                then_facts: mutable darray[Ast::Expr] = []
+                                else_facts: mutable darray[Ast::Expr] = []
+                                then_facts.extend(facts)
+                                else_facts.extend(facts)
+                                then_facts.push(condition)
+                                else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
+                                then_goal: Ast::Expr = Ast::Expr.Binary(then_expression, operator, right, position)
+                                else_goal: Ast::Expr = Ast::Expr.Binary(else_expression, operator, right, position)
+                                # A failed case split proves nothing either way, so it must not
+                                # consume the goal; later tiers still get to decide it.
+                                return true if proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+                            _:
+                                pass
+                        match right:
+                            Ast::Expr.If(condition, then_expression, else_expression, _):
+                                then_facts: mutable darray[Ast::Expr] = []
+                                else_facts: mutable darray[Ast::Expr] = []
+                                then_facts.extend(facts)
+                                else_facts.extend(facts)
+                                then_facts.push(condition)
+                                else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
+                                then_goal: Ast::Expr = Ast::Expr.Binary(left, operator, then_expression, position)
+                                else_goal: Ast::Expr = Ast::Expr.Binary(left, operator, else_expression, position)
+                                return true if proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+                            _:
+                                pass
+                    return true if proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                    if proof_is_comparison(operator):
+                        return false if not proof_source_arithmetic_operator_guard(goal, facts, operator_mask)
+                        return true if proof_linear_goal(left, operator, right, facts)
+                        # Cancellation reads each side as a sum over the integers, which is only
+                        # sound here: the wrap guard above has certified every operation in it.
+                        return true if proof_primitive_comparison(left, right, facts) and proof_normalized_difference_goal(left, operator, right, facts)
+                        # General linear tier: Fourier-Motzkin with a checked Farkas certificate.
+                        return true if proof_primitive_comparison(left, right, facts) and proof_linear_arithmetic_goal(left, operator, right, facts)
+                        return true if proof_product_sign_goal(left, operator, right, facts)
+                        return true if proof_comparison_chain_goal(left, operator, right, facts)
+                        return true if proof_strict_shift_goal(left, operator, right, facts)
+                        return true if proof_sum_bound_goal(left, operator, right, facts)
+                        return true if proof_unsigned_nonnegative_goal(left, operator, right, facts)
+                        return true if proof_place_alias_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                        return true if proof_field_place_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                        # Antisymmetry: over integers `a == b` is `a <= b and a >= b`, each of
+                        # which a chain or generalized tier may close where equality has none.
+                        # Kernel mirror in `proof_kernel_replay_goal_depth_remaining`.
+                        if operator == TokenKind.EqEq and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT and proof_primitive_comparison(left, right, facts):
+                            return true if proof_goal_depth(facts, Ast::Expr.Binary(left, TokenKind.LtEq, right, position), annotations, operator_mask, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(facts, Ast::Expr.Binary(left, TokenKind.GtEq, right, position), annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+                        # Congruence is the last equality tier and runs only after the
+                        # fixed-width safety guards above rejected every wrapping premise/goal.
+                        return proof_congruence_goal(facts, goal, annotations, exhausted) if operator == TokenKind.EqEq
+                        return false
+                _:
+                    pass
+            return false
+
+        # A search that ends because a fixed budget ran out is not the same answer as one that
+        # ends because no rule applies. Callers that report a verdict take the second entry point
+        # so the two can be told apart downstream; `exhausted` is advisory and never widens what
+        # is provable.
