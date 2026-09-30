@@ -10539,3 +10539,20 @@ the run environment. The census is therefore an explicit partial baseline, not e
 timed-out inputs are rejected or proved, and A-01 is not fully closed. Census serializer and
 census-diff tests, Python syntax checks, the source-length check, and `git diff --check` passed. The
 full test suite was not rerun.
+
+## Report summary distinguishes open obligations from findings (2026-09-30)
+
+The machine report's legacy `summary.failed` counter is `report.findings.count`, not
+`obligations - proven`. On `examples/rejected_unsigned_local_states.elisa`, it is 17 while 16
+obligations remain unproven: an additional resource diagnostic explains a separate refusal. The
+JSON summary now exposes `unproven` and `finding_count`, retaining `failed` as a compatibility
+alias; the text CLI reports `unproven` and `findings` separately. README documents the distinction.
+The regression test asserts the differing values on that fixture and zero counts on a proved
+fixture.
+
+The full `scripts/test.sh` matrix passed under pinned Stage1 revision
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f`, including the optimized O2/O3 replay checks and final
+census diff (`9,268/12,544` proven versus the committed `6,104/7,844` baseline, no regressions).
+The census totals remain run-dependent because runtime fixtures can exceed the fixed wall-time
+limit; unknown results are not proofs or counterexamples. The build manifest records the exact
+source-tree and binary hashes used for the run.
