@@ -10355,3 +10355,14 @@ gaps in `examples/long_difference_chain.elisa` (10/10 replayed at the new limit)
 load-bearing. `examples/rejected_long_difference_chain.elisa` pins a too-high top, a non-strict
 chain, a broken link and a contradictory cycle; `scripts/test_long_difference_chain.py` runs both,
 with the thirty-two-name chain as the budget case.
+
+## Effect blocks keep untouched facts (BACKLOG D-01, inferred frame)
+
+A `can Effect:` block used to clear every non-type-bound fact once its body could modify
+anything, so `requires n < 100` was lost across an unrelated `a.push(3)`. The block now hands
+back the facts its own body left standing: statements inside it already havoc what their writes
+and mutable-argument calls reach, and facts that mention a block local or binding are dropped
+as they leave scope. Only a block whose body falls through is adopted; other block kinds keep
+the old clear. Fixtures: `examples/can_block_frame.elisa` (proved, replayed) and
+`examples/rejected_can_block_frame.elisa` (own count, assigned local, block-local relation stay
+unproven). An explicit `modifies` clause still needs front-end syntax the compiler lacks.

@@ -1,10 +1,10 @@
 # Refusal census
 
-680 examples, 6037/7751 obligations proven.
+682 examples, 6061/7778 obligations proven.
 
 | Count | Gate |
 | ---: | --- |
-| 433 | no-rule |
+| 436 | no-rule |
 | 390 | function-summary-unverified: callee body has not established a verified executable summary |
 | 147 | wrap-guard-goal |
 | 128 | contract-proposition-type: kernel proposition formation rejected the term or operator |
@@ -97,13 +97,13 @@ Wall time under the census's parallel load, so treat it as a ranking.
 
 | Seconds | Example |
 | ---: | --- |
-| 91.49 | rejected_kernel_arena_cycle.elisa |
-| 11.34 | kernel_intern_runtime.elisa |
-| 7.97 | loop_state_joins.elisa |
-| 3.93 | rejected_loop_state_joins.elisa |
-| 3.76 | unsigned_resource_source_policy.elisa |
-| 2.32 | long_difference_chain.elisa |
-| 1.03 | rejected_dogfood_kernel_core.elisa |
-| 1.00 | rejected_shared_fixed_borrows.elisa |
-| 0.87 | dogfood_kernel_core.elisa |
-| 0.86 | field_places.elisa |
+| 109.66 | rejected_kernel_arena_cycle.elisa |
+| 25.13 | kernel_intern_runtime.elisa |
+| 11.28 | loop_state_joins.elisa |
+| 5.88 | rejected_loop_state_joins.elisa |
+| 5.34 | unsigned_resource_source_policy.elisa |
+| 3.26 | long_difference_chain.elisa |
+| 1.83 | rejected_shared_fixed_borrows.elisa |
+| 1.66 | field_places.elisa |
+| 1.64 | dogfood_kernel_core.elisa |
+| 1.46 | rejected_dogfood_kernel_core.elisa |
