@@ -75,4 +75,14 @@ assert scoped_branch_bound["status"] == scoped_branch_bound["verification_state"
 assert not scoped_branch_bound["findings"], scoped_branch_bound
 assert any(d["name"] == "map_status" and d["verified"] and d["ensures"] == 1
            for d in scoped_branch_bound["declaration_details"]), scoped_branch_bound
-print("module-local, signed, qualified and many-constant extension bounds replay; false contracts stay open")
+u32_branch = report("module_u32_scoped_constant_branch.elisa", 0)
+assert u32_branch["status"] == u32_branch["verification_state"] == "proved", u32_branch
+assert not u32_branch["findings"], u32_branch
+assert any(d["name"] == "delay_status" and d["verified"] and d["ensures"] == 1
+           for d in u32_branch["declaration_details"]), u32_branch
+wrong_u32_branch = report("rejected_module_u32_scoped_constant_branch.elisa", 1)
+assert wrong_u32_branch["status"] == "failed" and wrong_u32_branch["verification_state"] == "disproved", wrong_u32_branch
+assert any(f["kind"] == "ensure-unproven" and f["name"] == "delay_status"
+           and f["status"] == "disproved" and f["counterexample_found"]
+           for f in wrong_u32_branch["findings"]), wrong_u32_branch
+print("module-local u8/u32, signed, qualified and many-constant contracts replay; false controls stay open")
