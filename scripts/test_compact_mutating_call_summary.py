@@ -39,4 +39,10 @@ assert any(finding["kind"] == "ensure-unproven" and
            finding["name"] == "rejected_wrapper_status"
            for finding in negative["findings"]), negative["findings"]
 
-print("compact mutating call summary: bounded status/output contracts and summary replay pass; false mapping rejected")
+cast_stability = run("extend_mut_ref_fact_across_cast", 0)
+assert cast_stability["status"] == cast_stability["verification_state"] == "proved", cast_stability["summary"]
+assert cast_stability["summary"]["proven"] == cast_stability["summary"]["obligations"]
+assert any(entry["name"] == "output_zero_survives_widening" and entry["verified"] and entry["ensures"] == 1
+           for entry in cast_stability["declaration_details"]), cast_stability["declaration_details"]
+
+print("mutating call summaries remain conservative; pure numeric casts preserve reference facts and replay")
