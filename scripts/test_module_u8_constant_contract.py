@@ -65,4 +65,14 @@ assert extension_local_negative["replay"]["gaps"] == 0, extension_local_negative
 assert extension_local_negative["replay"]["certificates"] == extension_local_negative["replay"]["replayed"], extension_local_negative
 assert any(f["kind"] == "ensure-unproven" and f["name"] == "interval_status_wrong_bound"
            for f in extension_local_negative["findings"]), extension_local_negative
-print("module-local, signed and qualified constants preserve scalar bounds across extensions; false contracts stay open")
+timer_error_map = report("extend_timer_wit_error_tag_bound.elisa", 0)
+assert timer_error_map["status"] == timer_error_map["verification_state"] == "proved", timer_error_map
+assert not timer_error_map["findings"], timer_error_map
+assert any(d["name"] == "timer_wit_error_tag" and d["verified"] and d["ensures"] == 1
+           for d in timer_error_map["declaration_details"]), timer_error_map
+scoped_branch_bound = report("extend_scoped_constant_branch_bound.elisa", 0)
+assert scoped_branch_bound["status"] == scoped_branch_bound["verification_state"] == "proved", scoped_branch_bound
+assert not scoped_branch_bound["findings"], scoped_branch_bound
+assert any(d["name"] == "map_status" and d["verified"] and d["ensures"] == 1
+           for d in scoped_branch_bound["declaration_details"]), scoped_branch_bound
+print("module-local, signed, qualified and many-constant extension bounds replay; false contracts stay open")
