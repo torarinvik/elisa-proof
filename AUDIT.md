@@ -10275,3 +10275,13 @@ pushes a strict edge. This is sound over the integers because `a <= b` and `a !=
 The kernel half does real work: with it disabled, examples/disequality_strictness.elisa replayed 6
 of 10 certificates. With it enabled, the example proves 11/11 and replays 11/11. The rejected
 variant (another pair, no order fact, a two-step bound) stays unproven.
+
+## Nested guards and bool flags (BACKLOG K-03, K-04)
+
+Both already worked, with no engine change. `continue if i >= values.count` inside a `for` loop
+and `return 0 if n >= values.count` inside an `if` both make the following index proof go
+through. `ok: bool = i < n; if ok:` gives `i < n` inside the branch.
+
+Three variants stay unproven, as they should: a reassigned flag, an operand moved after the flag
+was bound, and the `not ok` branch. examples/guard_and_flag_facts.elisa proves 9/9 and its
+rejected variant fails exactly those three.
