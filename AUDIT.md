@@ -10263,3 +10263,15 @@ This needed no engine change. The relational rule from bound_propagation already
 `usize` and `u64` `i + 1 > i` proves under `i < n` and under `i < values.count`, in both the
 producer and replay. examples/usize_increment_under_count.elisa (10/10) and its rejected
 variant (non-strict peer, no peer, result held under the count) now lock that in.
+
+## Disequality makes an order fact strict (BACKLOG K-02)
+
+When the producer's difference collector (`proof_facts_state_disequality`) or the kernel's
+(`proof_kernel_replay_facts_state_disequality`) reads `a <= b` or `a >= b`, it checks for a top-level
+fact `a != b` (either order, or `not (a == b)`) over structurally equal terms. If one exists, it
+pushes a strict edge. This is sound over the integers because `a <= b` and `a != b` together mean
+`a < b`. Only top-level facts are consulted. A disequality inside a conjunction is not.
+
+The kernel half does real work: with it disabled, examples/disequality_strictness.elisa replayed 6
+of 10 certificates. With it enabled, the example proves 11/11 and replays 11/11. The rejected
+variant (another pair, no order fact, a two-step bound) stays unproven.
