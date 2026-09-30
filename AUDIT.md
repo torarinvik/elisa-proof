@@ -2432,8 +2432,8 @@ the difference reasoning.
 `proof_close_bounds_through_differences` propagates intervals along the constraints before the
 guard runs: `x - y <= c` with `y <= U` gives `x <= U + c`, and with `x >= L` gives `y >= L - c`.
 Each step is an ordinary interval inference that can only narrow an interval already implied, so
-nothing is admitted that the facts did not already carry. The pass is capped at four rounds, which
-keeps it linear; a bound needing more rounds is simply not derived, which only loses a proof. The
+nothing is admitted that the facts did not already carry. The pass runs to a fixed point (see
+"Bound propagation to a fixed point" below; it was first capped at four rounds). The
 constraint collection moves above the guard for the same reason.
 `proof_kernel_replay_close_bounds_through_differences` is the identical rule in the kernel, which
 is what lets the certificates replay.
@@ -10339,3 +10339,19 @@ the replay driver recorded (`<- kind line L via dependency`, or `unknown origin`
 the report; nothing it prints is admitted. Out-of-range, malformed and missing ids exit 2 with no
 rendering. `scripts/test_explain.py` pins a snapshot of an open goal and cross-checks every goal of
 `rejected_budget.elisa` against the JSON report's gate and fact count.
+
+## Bound propagation to a fixed point (BACKLOG C-01)
+
+The goal tier already closed the difference graph with Floyd–Warshall over at most
+`PROOF_DIFFERENCE_NODE_LIMIT` names. The interval pass that feeds the overflow guard and the
+interval tier did not: it stopped after four rounds, so a bound stated five or more links from the
+term that needed it was never derived, and `v0 * 4` under `v0 < v1 < ... < v5 <= 1000` was refused.
+The pass (`proof_close_bounds_through_differences`, mirrored by
+`proof_kernel_replay_close_bounds_through_differences`) now repeats until a round tightens nothing,
+up to 33 rounds: a chain over N names settles in N rounds, so the limit only stops a
+contradictory cycle that would tighten forever. Each step is still an ordinary interval inference
+over true facts, so nothing new is trusted. Setting the kernel's limit back to four leaves 4 replay
+gaps in `examples/long_difference_chain.elisa` (10/10 replayed at the new limit), so the mirror is
+load-bearing. `examples/rejected_long_difference_chain.elisa` pins a too-high top, a non-strict
+chain, a broken link and a contradictory cycle; `scripts/test_long_difference_chain.py` runs both,
+with the thirty-two-name chain as the budget case.
