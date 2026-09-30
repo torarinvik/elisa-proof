@@ -808,6 +808,8 @@ run_probe fixed_array_constant_indices examples/fixed_array_constant_indices.eli
 run_probe rejected_fixed_array_constant_index examples/rejected_fixed_array_constant_index.elisa 1
 run_probe disjunctive_negation_fallback examples/disjunctive_negation_fallback.elisa 0
 run_probe rejected_disjunctive_negation_fallback examples/rejected_disjunctive_negation_fallback.elisa 1
+run_probe variable_divisor_bounds examples/variable_divisor_bounds.elisa 0
+run_probe rejected_variable_divisor_bounds examples/rejected_variable_divisor_bounds.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.

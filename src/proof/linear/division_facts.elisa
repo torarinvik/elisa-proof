@@ -1,0 +1,122 @@
+const PROOF_DIVISION_TERM_LIMIT: usize = 2
+
+extend ElisaProof:
+    private:
+        # Division and remainder by a variable divisor. The interval tiers bound `a % b` and
+        # `a / b` only through the divisor's constant range, so `frame % count < count` never
+        # closes: the bound it needs is relational. Each such term in the goal is generalized to
+        # a reserved `__elisa_division_term_N` name, which source code cannot spell, and the
+        # generalized goal is decided under relational facts about that name:
+        #
+        #   b >= 1, a >= 0        a % b >= 0 and a % b <= b - 1
+        #   b >= 1, a >= 0        a / b >= 0 and a / b <= a
+        #   b >= 1, x <= b, K >= 0 (a = x * K)    a / b <= K
+        #
+        # Each side condition is itself proved from the facts, under the split budget. The
+        # facts hold for truncating signed division of any value the source computes (the
+        # operation traps rather than wraps; a divisor >= 1 excludes `MIN / -1`), and
+        # instantiating the name back gives the original goal. Unsigned terms are refused. The
+        # kernel mirror is `proof_kernel_replay_division_goal`.
+        def proof_division_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+            return false if not proof_comparison_goal_shape(goal)
+            return false if proof_expr_mentions_name(goal, proof_division_term_name(0))
+            for fact in facts |goal|:
+                return false if proof_expr_mentions_name(fact, proof_division_term_name(0))
+            terms: mutable darray[Ast::Expr] = []
+            proof_collect_division_terms(goal, &terms, 0)
+            return false if terms.count == 0
+            rewritten_goal: mutable Ast::Expr = goal
+            rewritten_facts: mutable darray[Ast::Expr] = []
+            rewritten_facts.extend(facts)
+            added: mutable darray[Ast::Expr] = []
+            # A side condition that fails only means the rule does not apply; its search budget
+            # says nothing about the goal, so it does not mark the goal undecided.
+            side_exhausted: mutable bool = false
+            for index in 0..<terms.count |terms, facts, annotations, operator_mask, depth, budget, split_depth, side_exhausted, rewritten_goal, rewritten_facts, added|:
+                term: Ast::Expr = terms[index]
+                continue if proof_unsigned_width_in_expression(term, facts) != 0 or not proof_scalar_term_witnessed(term, facts, 0)
+                parts: (known: bool, dividend: Ast::Expr, percent: bool, divisor: Ast::Expr) = proof_division_parts(term)
+                continue if not parts.known
+                position: Ast::Pos = Ast::expr_pos(term)
+                one: Ast::Expr = Ast::Expr.IntLit(1, position)
+                zero: Ast::Expr = Ast::Expr.IntLit(0, position)
+                continue if not proof_goal_depth(facts, Ast::Expr.Binary(parts.divisor, TokenKind.GtEq, one, position), annotations, operator_mask, depth, budget, split_depth + 1, &side_exhausted)
+                fresh: Ast::Expr = Ast::Expr.Ident(proof_division_term_name(index), Ast::pos_at_line(0))
+                dividend_nonnegative: bool = proof_goal_depth(facts, Ast::Expr.Binary(parts.dividend, TokenKind.GtEq, zero, position), annotations, operator_mask, depth, budget, split_depth + 1, &side_exhausted)
+                if parts.percent:
+                    continue if not dividend_nonnegative
+                    added.push(Ast::Expr.Binary(fresh, TokenKind.GtEq, zero, position))
+                    added.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, Ast::Expr.Binary(parts.divisor, TokenKind.Minus, one, position), position))
+                else:
+                    if dividend_nonnegative:
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.GtEq, zero, position))
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, parts.dividend, position))
+                    scaled: (known: bool, factor: Ast::Expr, constant: i64) = proof_division_scaled(parts.dividend)
+                    if scaled.known and proof_goal_depth(facts, Ast::Expr.Binary(scaled.factor, TokenKind.LtEq, parts.divisor, position), annotations, operator_mask, depth, budget, split_depth + 1, &side_exhausted):
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, Ast::Expr.IntLit(scaled.constant, position), position))
+                # The fresh name stands for a primitive scalar, as the witnessed term did.
+                added.push(proof_scalar_term_marker(fresh, position))
+                rewritten_goal <- proof_generalize_place(rewritten_goal, term, fresh, 0).value
+                next_facts: mutable darray[Ast::Expr] = []
+                for fact in rewritten_facts |term, fresh, next_facts|:
+                    next_facts.push(proof_generalize_place(fact, term, fresh, 0).value)
+                rewritten_facts <- next_facts
+            return false if added.count == 0
+            rewritten_facts.extend(added)
+            proof_goal_depth(rewritten_facts, rewritten_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+
+        def proof_division_term_name(index: usize) -> sview:
+            return "__elisa_division_term_0" if index == 0
+            "__elisa_division_term_1"
+
+        # `a / b` or `a % b` whose divisor is not an integer constant; constant divisors are
+        # already bounded by the interval tiers.
+        def proof_division_parts(expression: Ast::Expr) -> (known: bool, dividend: Ast::Expr, percent: bool, divisor: Ast::Expr):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (false, left, false, right) if operator != TokenKind.Slash and operator != TokenKind.Percent
+                    return (false, left, false, right) if proof_constant_int(right).known
+                    return (true, left, operator == TokenKind.Percent, right)
+                _:
+                    return (false, expression, false, expression)
+            return (false, expression, false, expression)
+
+        # `x * K` or `K * x` with a nonnegative literal `K`.
+        def proof_division_scaled(expression: Ast::Expr) -> (known: bool, factor: Ast::Expr, constant: i64):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, TokenKind.Star, right, _):
+                    match right:
+                        Ast::Expr.IntLit(value, _):
+                            return (value >= 0, left, value)
+                        _:
+                            pass
+                    match left:
+                        Ast::Expr.IntLit(value, _):
+                            return (value >= 0, right, value)
+                        _:
+                            pass
+                    return (false, expression, 0)
+                _:
+                    return (false, expression, 0)
+            return (false, expression, 0)
+
+        # Outermost division terms of the goal, in pre-order, without descending into calls,
+        # indexes or conditionals.
+        def proof_collect_division_terms(expression: Ast::Expr, terms: mutable darray[Ast::Expr]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or terms.count >= PROOF_DIVISION_TERM_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_division_terms(inner, terms, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_division_terms(operand, terms, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    if proof_division_parts(expression).known:
+                        for existing in terms |expression|:
+                            return if proof_expr_equal(existing, expression)
+                        terms.push(expression)
+                        return
+                    proof_collect_division_terms(left, terms, depth + 1)
+                    proof_collect_division_terms(right, terms, depth + 1)
+                _:
+                    pass
