@@ -10471,6 +10471,23 @@ CPU-active. The census reported no proof-count drop or new refusal gate; this is
 suite because its performance gate failed. Rerun that census under lower host contention before
 claiming the complete suite passes.
 
+## Bounded-model fixed-width overflow boundary (2026-09-30)
+
+Audited the exhaustive nonlinear model rule on both sides of its trust boundary. The producer only
+reaches `proof_bounded_model_goal` after each fact and the goal pass `proof_unsigned_expression_safe`,
+which also requires signed-width range safety. Independent kernel replay applies its own unsigned
+and signed safety checks before `proof_kernel_replay_bounded_model_goal`. Therefore the i64 model
+evaluator cannot turn an overflowing i8 multiplication into a proof merely because its mathematical
+integer result has a different sign.
+
+Added `examples/signed_overflow_bounded_model.elisa` as a paired control: an i8 square over `[-2,2]`
+is verified and replayed, while the same nonnegativity property over `[0,15]` remains unknown
+because `12 * 12` wraps negative in i8. The latter emits no counterexample; it is refused because
+the arithmetic model is not exact for that domain. The focused run had zero semantic errors and
+replayed all three certificates with zero replay gaps. This adds a multiplication-specific control
+beside the existing i8 increment-overflow regression; it does not replace the previously noted
+full-suite/performance rerun requirement.
+
 ## Counterexample model domains preserve Elisa scalar types (2026-09-30)
 
 The diagnostic counterexample search stored all symbols as `i64`, while its admission check treated
