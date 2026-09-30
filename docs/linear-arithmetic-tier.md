@@ -1,6 +1,6 @@
 # Design note: a general linear-arithmetic tier
 
-Status: proposal only. Nothing here is implemented.
+Status: implemented in `src/proof/linear/linear_arithmetic.elisa` (producer) and `src/proof/kernel_replay/linear_arithmetic.elisa` (kernel). Atoms are names only; call terms are not yet admitted. The kernel re-runs the elimination and accepts only a contradiction whose multipliers pass the Farkas check against the original rows.
 
 ## Motivation
 

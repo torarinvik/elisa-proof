@@ -826,6 +826,8 @@ run_probe signed_negated_literals examples/signed_negated_literals.elisa 0
 run_probe rejected_signed_negated_literals examples/rejected_signed_negated_literals.elisa 1
 run_probe qualified_call_widths examples/qualified_call_widths.elisa 0
 run_probe rejected_qualified_call_widths examples/rejected_qualified_call_widths.elisa 1
+run_probe linear_arithmetic_tier examples/linear_arithmetic_tier.elisa 0
+run_probe rejected_linear_arithmetic_tier examples/rejected_linear_arithmetic_tier.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.

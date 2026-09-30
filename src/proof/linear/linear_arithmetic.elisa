@@ -1,0 +1,310 @@
+const PROOF_LINEAR_FM_TERM_LIMIT: usize = 512
+const PROOF_LINEAR_FM_ATOM_LIMIT: usize = 8
+const PROOF_LINEAR_FM_CONSTRAINT_LIMIT: usize = 24
+
+extend ElisaProof:
+    public:
+        # One constraint `sum(terms) <= 0`, as a range of the shared term buffer.
+        struct ProofLinearSpan:
+            start: usize
+            stop: usize
+
+    private:
+        # The general linear tier of `docs/linear-arithmetic-tier.md`. A side is read as an
+        # integer affine form `c0 + sum(ci * xi)` over names: `+`, `-`, their unary forms, and
+        # `*` by a non-negative literal. Every operator node must carry an integer width, as in
+        # the normal collector, so the wrap guard that licensed the reading has decided each
+        # operation. With `signed_only` every name and operator must be signed; that mode is
+        # used before the guards run, where only the signed guard below is applied.
+        # The kernel mirror is `proof_kernel_replay_linear_collect`.
+        def proof_linear_collect(expression: Ast::Expr, sign: i64, signed: bool, signed_only: bool, facts: darray[Ast::Expr]&, terms: mutable darray[ProofNormalTerm]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or terms.count >= PROOF_LINEAR_FM_TERM_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_linear_collect(inner, sign, signed, signed_only, facts, terms, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return false if value < 0
+                    scaled: (known: bool, value: i64) = proof_mul_safe(value, sign)
+                    return false if not scaled.known
+                    terms.push(ProofNormalTerm{name: "", coefficient: scaled.value})
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return false if name == "" or not proof_linear_term_has_width(expression, signed_only, facts)
+                    terms.push(ProofNormalTerm{name: name, coefficient: sign})
+                    return true
+                Ast::Expr.Unary(operator, operand, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    negated: (known: bool, value: i64) = proof_signed_negated_literal(expression, signed)
+                    if negated.known:
+                        scaled: (known: bool, value: i64) = proof_mul_safe(negated.value, sign)
+                        return false if not scaled.known
+                        terms.push(ProofNormalTerm{name: "", coefficient: scaled.value})
+                        return true
+                    return false if not proof_linear_term_has_width(expression, signed_only, facts)
+                    flipped: (known: bool, value: i64) = proof_sub_safe(0, sign)
+                    return false if not flipped.known
+                    return proof_linear_collect(operand, sign if operator == TokenKind.Plus else flipped.value, signed, signed_only, facts, terms, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_linear_term_has_width(expression, signed_only, facts)
+                    if operator == TokenKind.Star:
+                        left_scale: (known: bool, value: i64) = proof_linear_literal(left)
+                        right_scale: (known: bool, value: i64) = proof_linear_literal(right)
+                        if left_scale.known:
+                            scaled: (known: bool, value: i64) = proof_mul_safe(left_scale.value, sign)
+                            return false if not scaled.known
+                            return proof_linear_collect(right, scaled.value, signed, signed_only, facts, terms, depth + 1)
+                        if right_scale.known:
+                            scaled: (known: bool, value: i64) = proof_mul_safe(right_scale.value, sign)
+                            return false if not scaled.known
+                            return proof_linear_collect(left, scaled.value, signed, signed_only, facts, terms, depth + 1)
+                        return false
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    return false if not proof_linear_collect(left, sign, signed, signed_only, facts, terms, depth + 1)
+                    flipped: (known: bool, value: i64) = proof_sub_safe(0, sign)
+                    return false if not flipped.known
+                    return proof_linear_collect(right, sign if operator == TokenKind.Plus else flipped.value, signed, signed_only, facts, terms, depth + 1)
+                _:
+                    return false
+
+        def proof_linear_literal(expression: Ast::Expr) -> (known: bool, value: i64):
+            match proof_strip_parens(expression):
+                Ast::Expr.IntLit(value, _):
+                    return (true, value) if value >= 0
+                _:
+                    pass
+            return (false, 0)
+
+        def proof_linear_term_has_width(expression: Ast::Expr, signed_only: bool, facts: darray[Ast::Expr]&) -> bool:
+            return proof_signed_width_in_expression(expression, facts) != 0 if signed_only
+            return proof_normal_term_has_width(expression, facts)
+
+        # `lower <= upper`, or `lower < upper` when strict, as `lower - upper (+ 1) <= 0`. The
+        # `+ 1` is the integer reading of a strict order.
+        def proof_linear_push_order(lower: Ast::Expr, upper: Ast::Expr, strict: bool, signed: bool, signed_only: bool, facts: darray[Ast::Expr]&, terms: mutable darray[ProofNormalTerm]&, spans: mutable darray[ProofLinearSpan]&) -> bool:
+            return false if spans.count >= PROOF_LINEAR_FM_CONSTRAINT_LIMIT
+            start: usize = terms.count
+            return false if not proof_linear_collect(lower, 1, signed, signed_only, facts, terms, 0)
+            return false if not proof_linear_collect(upper, -1, signed, signed_only, facts, terms, 0)
+            terms.push(ProofNormalTerm{name: "", coefficient: 1}) if strict
+            spans.push(ProofLinearSpan{start: start, stop: terms.count})
+            return true
+
+        # A comparison as one or two constraints; `!=` has no convex reading and is declined.
+        # A failed `==` may leave one of its halves, a weaker premise, which is sound.
+        def proof_linear_push_comparison(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, signed_only: bool, facts: darray[Ast::Expr]&, terms: mutable darray[ProofNormalTerm]&, spans: mutable darray[ProofLinearSpan]&) -> bool:
+            signed: bool = proof_normal_comparison_signed(left, right, facts)
+            read: mutable bool = false
+            if operator == TokenKind.Lt:
+                read <- proof_linear_push_order(left, right, true, signed, signed_only, facts, terms, spans)
+            elif operator == TokenKind.LtEq:
+                read <- proof_linear_push_order(left, right, false, signed, signed_only, facts, terms, spans)
+            elif operator == TokenKind.Gt:
+                read <- proof_linear_push_order(right, left, true, signed, signed_only, facts, terms, spans)
+            elif operator == TokenKind.GtEq:
+                read <- proof_linear_push_order(right, left, false, signed, signed_only, facts, terms, spans)
+            elif operator == TokenKind.EqEq:
+                read <- proof_linear_push_order(left, right, false, signed, signed_only, facts, terms, spans) and proof_linear_push_order(right, left, false, signed, signed_only, facts, terms, spans)
+            return read
+            return true
+
+        # Every witnessed comparison fact the collector reads, in fact order, while room is left
+        # for `reserve` more constraints. Facts that do not read are skipped: dropping a premise
+        # only weakens the system. In `signed_only` mode a fact must also pass the signed wrap
+        # guard, because this mode runs before the goal-level guards.
+        def proof_linear_fact_constraints(facts: darray[Ast::Expr]&, signed_only: bool, reserve: usize, terms: mutable darray[ProofNormalTerm]&, spans: mutable darray[ProofLinearSpan]&) -> void:
+            for fact in facts |fact, facts, signed_only, reserve, terms, spans|:
+                break if spans.count + reserve >= PROOF_LINEAR_FM_CONSTRAINT_LIMIT
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, operator, right, _):
+                        continue if not proof_is_comparison(operator) or operator == TokenKind.BangEq
+                        continue if not proof_primitive_comparison(left, right, facts)
+                        continue if signed_only and not proof_signed_expression_safe(fact, facts)
+                        if spans.count + reserve + 2 <= PROOF_LINEAR_FM_CONSTRAINT_LIMIT or operator != TokenKind.EqEq:
+                            proof_linear_push_comparison(left, operator, right, signed_only, facts, terms, spans)
+                    _:
+                        pass
+
+        def proof_linear_gcd(left: i64, right: i64) -> i64:
+            a: mutable i64 = left if left >= 0 else 0 - left
+            b: mutable i64 = right if right >= 0 else 0 - right
+            for step in 0..<128 |step, a, b|:
+                break if b == 0
+                remainder: i64 = a % b
+                a <- b
+                b <- remainder
+            return a if a > 0 else 1
+
+        # Fourier-Motzkin over the rationals with checked `i64` arithmetic. Row `i` of the
+        # matrix holds the atom coefficients, the constant, and the multipliers of the original
+        # constraints that produced it, so a derived `0 <= -k` names its own Farkas certificate,
+        # which is then checked against the original rows. Any overflow, or more than
+        # `PROOF_LINEAR_FM_ATOM_LIMIT` atoms or `PROOF_LINEAR_FM_CONSTRAINT_LIMIT` rows at any
+        # stage, declines (`linear-budget`). Rational infeasibility implies integer
+        # infeasibility, so a refutation is sound; integer-only infeasibility is not found.
+        def proof_linear_refutes(terms: darray[ProofNormalTerm]&, spans: darray[ProofLinearSpan]&) -> bool:
+            count: usize = spans.count
+            return false if count == 0 or count > PROOF_LINEAR_FM_CONSTRAINT_LIMIT
+            atoms: mutable darray[sview] = []
+            # Only the spans' ranges are read: a comparison that failed to read may have left
+            # terms behind it in the buffer.
+            for span in spans |span, terms, atoms|:
+                for position in span.start..<span.stop |position, terms, atoms|:
+                    term: ProofNormalTerm = terms[position]
+                    continue if term.name == ""
+                    seen: mutable bool = false
+                    for atom in atoms |atom, term, seen|:
+                        seen <- true if atom == term.name
+                    atoms.push(term.name) if not seen
+            return false if atoms.count > PROOF_LINEAR_FM_ATOM_LIMIT
+            width: usize = atoms.count + 1 + count
+            original: mutable darray[i64] = []
+            for index in 0..<count |index, spans, terms, atoms, width, count, original|:
+                row_start: usize = original.count
+                for column in 0..<width |column, original|:
+                    original.push(0)
+                span: ProofLinearSpan = spans[index]
+                for position in span.start..<span.stop |position, terms, atoms, row_start, original|:
+                    term: ProofNormalTerm = terms[position]
+                    column: mutable usize = atoms.count
+                    for atom_index in 0..<atoms.count |atom_index, atoms, term, column|:
+                        column <- atom_index if atoms[atom_index] == term.name
+                    summed: (known: bool, value: i64) = proof_add_safe(original[row_start + column], term.coefficient)
+                    return false if not summed.known
+                    original[row_start + column] <- summed.value
+                original[row_start + atoms.count + 1 + index] <- 1
+            rows: mutable darray[i64] = []
+            rows.extend(original)
+            row_count: mutable usize = count
+            for atom_index in 0..<atoms.count |atom_index, width, rows, row_count|:
+                next: mutable darray[i64] = []
+                next_count: mutable usize = 0
+                for row in 0..<row_count |row, width, atom_index, rows, next, next_count|:
+                    if rows[row * width + atom_index] == 0:
+                        for column in 0..<width |column, row, width, rows, next|:
+                            next.push(rows[row * width + column])
+                        next_count <- next_count + 1
+                for positive in 0..<row_count |positive, width, atom_index, rows, next, next_count|:
+                    upper: i64 = rows[positive * width + atom_index]
+                    continue if upper <= 0
+                    for negative in 0..<row_count |negative, positive, upper, width, atom_index, rows, next, next_count|:
+                        lower: i64 = rows[negative * width + atom_index]
+                        continue if lower >= 0
+                        return false if next_count >= PROOF_LINEAR_FM_CONSTRAINT_LIMIT
+                        divisor: i64 = proof_linear_gcd(upper, lower)
+                        positive_scale: i64 = (0 - lower) / divisor
+                        negative_scale: i64 = upper / divisor
+                        for column in 0..<width |column, positive, negative, positive_scale, negative_scale, width, rows, next|:
+                            first: (known: bool, value: i64) = proof_mul_safe(positive_scale, rows[positive * width + column])
+                            second: (known: bool, value: i64) = proof_mul_safe(negative_scale, rows[negative * width + column])
+                            return false if not first.known or not second.known
+                            combined: (known: bool, value: i64) = proof_add_safe(first.value, second.value)
+                            return false if not combined.known
+                            next.push(combined.value)
+                        next_count <- next_count + 1
+                rows <- next
+                row_count <- next_count
+            for row in 0..<row_count |row, width, atoms, rows, original, count|:
+                continue if rows[row * width + atoms.count] <= 0
+                multipliers: mutable darray[i64] = []
+                for index in 0..<count |index, row, width, atoms, rows, multipliers|:
+                    multipliers.push(rows[row * width + atoms.count + 1 + index])
+                return true if proof_linear_farkas_valid(original, atoms.count, width, multipliers)
+            return false
+
+        # The certificate check: non-negative multipliers, not all zero, whose combination of
+        # the original rows cancels every atom and leaves a positive constant, `0 < sum <= 0`.
+        def proof_linear_farkas_valid(original: darray[i64]&, atom_count: usize, width: usize, multipliers: darray[i64]&) -> bool:
+            any_positive: mutable bool = false
+            for multiplier in multipliers |multiplier, any_positive|:
+                return false if multiplier < 0
+                any_positive <- true if multiplier > 0
+            return false if not any_positive
+            for column in 0..<(atom_count + 1) |column, original, atom_count, width, multipliers|:
+                total: mutable i64 = 0
+                for index in 0..<multipliers.count |index, column, original, width, multipliers, total|:
+                    product: (known: bool, value: i64) = proof_mul_safe(multipliers[index], original[index * width + column])
+                    return false if not product.known
+                    summed: (known: bool, value: i64) = proof_add_safe(total, product.value)
+                    return false if not summed.known
+                    total <- summed.value
+                return false if column < atom_count and total != 0
+                return false if column == atom_count and total <= 0
+            return true
+
+        # The goal tier. It runs after every wrap guard, so the facts and the goal are read over
+        # the integers. `a == b` is two refutations; `!=` is declined.
+        def proof_linear_arithmetic_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            if operator == TokenKind.EqEq:
+                return proof_linear_arithmetic_goal(left, TokenKind.LtEq, right, facts) and proof_linear_arithmetic_goal(left, TokenKind.GtEq, right, facts)
+            negated: TokenKind = proof_comparison_negation(operator)
+            return false if negated != TokenKind.Lt and negated != TokenKind.LtEq and negated != TokenKind.Gt and negated != TokenKind.GtEq
+            terms: mutable darray[ProofNormalTerm] = []
+            spans: mutable darray[ProofLinearSpan] = []
+            proof_linear_fact_constraints(facts, false, 1, &terms, &spans)
+            return false if not proof_linear_push_comparison(left, negated, right, false, facts, &terms, &spans)
+            return proof_linear_refutes(terms, spans)
+
+        # Case-split pruning: an alternative of a disjunctive fact that the other facts refute is
+        # removed before the splitter opens it. Only signed facts that pass the signed wrap guard
+        # are read, since this runs before the goal-level guards. Truth 2 is refuted.
+        def proof_linear_prune(expression: Ast::Expr, facts: darray[Ast::Expr]&, base_terms: darray[ProofNormalTerm]&, base_spans: darray[ProofLinearSpan]&, depth: usize) -> (truth: i64, changed: bool, pruned: Ast::Expr):
+            return (0, false, expression) if depth >= 32
+            stripped: Ast::Expr = proof_strip_parens(expression)
+            match stripped:
+                Ast::Expr.Binary(left, TokenKind.Or, right, position):
+                    left_result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune(left, facts, base_terms, base_spans, depth + 1)
+                    right_result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune(right, facts, base_terms, base_spans, depth + 1)
+                    return (2, true, stripped) if left_result.truth == 2 and right_result.truth == 2
+                    return (right_result.truth, true, right_result.pruned) if left_result.truth == 2
+                    return (left_result.truth, true, left_result.pruned) if right_result.truth == 2
+                    return (0, false, expression) if not left_result.changed and not right_result.changed
+                    return (0, true, Ast::Expr.Binary(left_result.pruned, TokenKind.Or, right_result.pruned, position))
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (0, false, expression) if not proof_is_comparison(operator) or operator == TokenKind.BangEq
+                    return (0, false, expression) if not proof_primitive_comparison(left, right, facts) or not proof_signed_expression_safe(stripped, facts)
+                    terms: mutable darray[ProofNormalTerm] = []
+                    spans: mutable darray[ProofLinearSpan] = []
+                    terms.extend(base_terms)
+                    spans.extend(base_spans)
+                    return (0, false, expression) if not proof_linear_push_comparison(left, operator, right, true, facts, &terms, &spans)
+                    return (2, false, stripped) if proof_linear_refutes(terms, spans)
+                    return (0, false, expression)
+                _:
+                    return (0, false, expression)
+
+        # 0 when nothing changed, 1 when `pruned` lost refuted alternatives, 2 when a
+        # disjunctive fact lost all of them (the facts are inconsistent). The base system is
+        # read from the facts that are not disjunctions. Kernel mirror:
+        # `proof_kernel_replay_linear_prune_facts`.
+        def proof_linear_prune_facts(facts: darray[Ast::Expr]&, pruned: mutable darray[Ast::Expr]&) -> i64:
+            base: mutable darray[Ast::Expr] = []
+            disjunctive: mutable bool = false
+            for fact in facts |fact, base, disjunctive|:
+                if proof_linear_is_or(fact):
+                    disjunctive <- true
+                else:
+                    base.push(fact)
+            return 0 if not disjunctive
+            base_terms: mutable darray[ProofNormalTerm] = []
+            base_spans: mutable darray[ProofLinearSpan] = []
+            proof_linear_fact_constraints(base, true, 2, &base_terms, &base_spans)
+            return 0 if base_spans.count == 0
+            changed: mutable bool = false
+            for fact in facts |fact, facts, base_terms, base_spans, pruned, changed|:
+                if proof_linear_is_or(fact):
+                    result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_linear_prune(fact, facts, base_terms, base_spans, 0)
+                    return 2 if result.truth == 2
+                    if result.changed:
+                        changed <- true
+                        pruned.push(result.pruned)
+                        continue
+                pruned.push(fact)
+            return 1 if changed
+            return 0
+
+        def proof_linear_is_or(expression: Ast::Expr) -> bool:
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(_, TokenKind.Or, _, _):
+                    return true
+                _:
+                    return false
