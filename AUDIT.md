@@ -10392,16 +10392,13 @@ only inspected `_0`. Four adversarial fixtures declare the entry, scalar, field-
 names and require `unsupported` with a `proof-internal-name` finding before theorem admission.
 This is a conservative namespace restriction; it adds no inference rule.
 
-**Evidence.** Stage0 `e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11` is clean, and Stage1
-`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` passed its source-freshness assertion. The project
-build, mutable-reference regressions, four marker-collision attacks, and all twelve source-admission
-routes pass on that pair. The full suite also passed on the previous clean Stage1 snapshot before
-the namespace audit. On the current snapshot, the full suite passed its targeted and fixture matrix
-but the final `kernel-replay-audit` produced no report before the 180-second watchdog; other
-compiler/prover jobs were concurrently using the host. This is incomplete evidence, not a passing
-audit, and the current full suite remains to be rerun without that contention. Do not treat the
-mutable-reference feature as fully generalized: entry snapshots for other aliasing and aggregate
-shapes remain unsupported unless a source-bound state model is established.
+**Evidence at time of this entry.** Stage0 `e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11` is clean,
+and Stage1 `61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` passed its source-freshness assertion. The
+project build, mutable-reference regressions, four marker-collision attacks, and all twelve
+source-admission routes passed on that pair. The full suite had not yet been rerun after the
+field-place kernel fix when this paragraph was first written; see the dated follow-up below for
+newer evidence. Do not treat mutable aggregate entry snapshots as fully generalized: other
+aliasing and aggregate shapes remain unsupported unless a source-bound state model is established.
 
 ## Field-place placeholders are collision-checked in replay (2026-09-30)
 
@@ -10419,6 +10416,24 @@ packages.
 `scripts/test_portable_replay.py` carries the consistent forged package and requires kernel
 rejection. `scripts/test_internal_marker_names.py` checks source-adapter rejection of `_1`, while
 `examples/field_places.elisa` remains a positive control. The portable package suite and focused
-old-state/field-place regressions pass with the kernel fix. The full proof matrix has not yet been
-rerun after this kernel change; its previous run was incomplete at the time watchdog described
-above.
+old-state/field-place regressions pass with the kernel fix.
+
+## Call-graph opaque-edge sentinel (2026-09-30)
+
+The call-name collector inserts `__opaque_call__` when it encounters an AST form whose executable
+edges are not modeled. Function and lemma graph consumers recognize that spelling as an opaque
+edge and, in some cases, skip normal callee dependency scheduling. Source declarations with that
+same name were previously admitted, making one symbol serve as both a real function and the graph's
+unknown-edge sentinel. The name is now reserved at source admission. The regression fixture
+`examples/rejected_opaque_call_marker_collision.elisa` previously imported as a proved function;
+`scripts/test_internal_marker_names.py` now requires a `proof-internal-name` refusal for it. The
+source-admission matrix still refuses all six malformed classes across all twelve routes.
+
+**Follow-up suite evidence.** With the field-place producer/kernel collision checks in place, the
+full `scripts/test.sh` passed against isolated Stage1
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` and Stage0
+`e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11`. Its census reported 6,061/7,782 obligations proven,
+with no regressions from the 6,061/7,778 baseline; O2/O3 replay checks and accepted/rejected exit
+behavior also passed. This complete run preceded the `__opaque_call__` reservation. After that
+reservation, the Stage1 rebuild, five marker-collision regressions, and twelve-route source-admission
+matrix passed. The full suite has not yet been rerun after this final source-admission change.
