@@ -10330,3 +10330,12 @@ obligation failed and every certificate replayed, otherwise `open`) and the text
 `front end diagnostic, engine: proved` in exactly that situation. The verdict itself is unchanged:
 `status` stays `failed` and the exit code stays 1, so no trust boundary moves. Covered by
 `scripts/test_engine_state.py` (proved, open-goal, clean, and malformed sources).
+
+## Explaining one goal (BACKLOG K-08)
+
+`--explain <goal_id> <file>` prints a single goal as plain text: the goal, `proven, certificate N`
+or `open, refused at gate G` (the same gate the JSON report names), and every fact with the origin
+the replay driver recorded (`<- kind line L via dependency`, or `unknown origin`). It only reads
+the report; nothing it prints is admitted. Out-of-range, malformed and missing ids exit 2 with no
+rendering. `scripts/test_explain.py` pins a snapshot of an open goal and cross-checks every goal of
+`rejected_budget.elisa` against the JSON report's gate and fact count.

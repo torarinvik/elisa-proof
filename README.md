@@ -62,6 +62,8 @@ proof-only summary was checked before a caller can consume it.
 location, rule, replay status, structured failure classification/message, optional counterexample,
 and theorem dependencies so an agent can request focused repair without scanning the complete goal
 stream.
+`build/elisa-proof --explain N file.elisa` prints one goal for a terminal: its verdict, the gate
+that refused it when it is open, and each fact the engine held with the origin replay recorded.
 `build/elisa-proof --proof N file.elisa` renders one goal as an Elisa-like proof for a human
 reviewer: its hypotheses as `given` lines annotated with the origin the replay layer recorded, its
 conclusion as a `show` line, and its justification as the certificate that replayed. The block
