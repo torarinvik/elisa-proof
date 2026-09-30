@@ -47,4 +47,12 @@ def lose(c):
 
 lost = diff(variant(lose))
 assert lost.returncode == 1 and "no longer produces a readable report" in lost.stderr, lost.stderr
-print("census diff: drops, new gates, 2x slowdowns and lost reports fail; gains pass")
+
+
+def delete_input(c):
+    del c["files"]["a.elisa"]
+
+
+deleted = diff(variant(delete_input))
+assert deleted.returncode == 1 and "source is absent" in deleted.stderr, deleted.stderr
+print("census diff: drops, new gates, 2x slowdowns, unreadable/missing inputs fail; gains pass")

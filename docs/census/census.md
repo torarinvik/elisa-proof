@@ -2,61 +2,65 @@
 
 Census date: 2026-09-30 (UTC).
 
-691 examples and 1 dogfood proof units; 9262/12265 obligations proven.
+691 examples and 1 dogfood proof units; 6104/7844 obligations proven.
 
-Unreadable inputs: 11.
+Unreadable inputs: 13.
 
-| Count | First refusal gate / diagnostic |
+| Count | First refusal gate |
 | ---: | --- |
-| 1023 | function-summary-unverified: callee body has not established a verified executable summary |
-| 563 | no-rule |
-| 363 | control-flow-analysis-budget: control-flow analysis exceeded its fact snapshot budget |
-| 207 | contract-proposition-type: kernel proposition typing work budget exceeded |
-| 198 | wrap-guard-goal |
-| 158 | contract-proposition-type: kernel proposition formation rejected the term or operator |
-| 58 | expression-unsupported: operator or index may dispatch to an unmodeled user protocol |
-| 58 | region-alias-unsupported: the binding's backing-region lifetime was not established; destruction has not been demonstrated |
-| 56 | region-alias-unsupported: an sview value has no directly tracked live backing region |
-| 56 | wrap-guard-fact |
-| 55 | ambiguous-constant-goal |
-| 53 | borrow-call-opaque: a call argument carries a resource, but no converged callee resource summary is available |
-| 47 | control-flow-analysis-budget: control-flow analysis exceeded its step budget |
-| 47 | region-call-opaque: a region-polymorphic call has no converged lifetime summary |
-| 40 | borrow-call-summary-unsupported: the checked callee resource summary could not be encoded for this call |
-| 39 | budget |
-| 39 | loop-invariant-missing: loop has no invariant for symbolic verification |
-| 35 | borrow-call-opaque: a method-shaped call may write its receiver, and no summary maps a receiver |
-| 35 | resource-write-readonly: a whole-binding write requires a mutable resource binding |
-| 26 | expression-unsupported: unsupported runtime expression cannot enter a verified proof state |
-| 24 | region-call-opaque: a region-polymorphic call is not mapped to a verified caller region |
+| 441 | no-rule |
+| 148 | wrap-guard-goal |
+| 49 | ambiguous-constant-goal |
+| 34 | wrap-guard-fact |
+| 29 | budget |
 | 21 | connective |
-| 17 | region-alias-unsupported: region value aliases require a live, unmoved whole-binding source with the same tracked region |
-| 15 | region-expression-unsupported: region value flows through an assignment without a lifetime summary |
 | 14 | literal-width |
-| 12 | resource-use-after-move: a moved resource is used again |
-| 11 | resource-analysis-budget: resource-state analysis exceeded its bounded symbolic-state budget |
-| 10 | region-store-escape: a region-owned value may be assigned only from a directly tracked whole binding |
 | 9 | quantifier |
-| 8 | recursive-summary-unsupported: recursive executable summaries require matching checked lexicographic termination measures |
-| 7 | borrow-source-opaque: a write through a mutable reference has no directly tracked target place |
+| 7 | non-comparison-goal |
+| 6 | overloaded-operator |
+
+## Non-goal diagnostics
+
+| Count | Diagnostic |
+| ---: | --- |
+| 390 | function-summary-unverified: callee body has not established a verified executable summary |
+| 128 | contract-proposition-type: kernel proposition formation rejected the term or operator |
+| 125 | control-flow-analysis-budget: control-flow analysis exceeded its fact snapshot budget |
+| 69 | contract-proposition-type: kernel proposition typing work budget exceeded |
+| 30 | borrow-call-opaque: a call argument carries a resource, but no converged callee resource summary is available |
+| 28 | expression-unsupported: operator or index may dispatch to an unmodeled user protocol |
+| 27 | borrow-call-opaque: a method-shaped call may write its receiver, and no summary maps a receiver |
+| 25 | loop-invariant-missing: loop has no invariant for symbolic verification |
+| 24 | region-alias-unsupported: the binding's backing-region lifetime was not established; destruction has not been demonstrated |
+| 24 | region-call-opaque: a region-polymorphic call has no converged lifetime summary |
+| 22 | borrow-call-summary-unsupported: the checked callee resource summary could not be encoded for this call |
+| 20 | expression-unsupported: unsupported runtime expression cannot enter a verified proof state |
+| 20 | region-alias-unsupported: an sview value has no directly tracked live backing region |
+| 17 | control-flow-analysis-budget: control-flow analysis exceeded its step budget |
+| 14 | region-call-opaque: a region-polymorphic call is not mapped to a verified caller region |
+| 13 | resource-write-readonly: a whole-binding write requires a mutable resource binding |
+| 12 | resource-use-after-move: a moved resource is used again |
+| 9 | region-alias-unsupported: region value aliases require a live, unmoved whole-binding source with the same tracked region |
 | 7 | borrow-write-conflict: a write to a place overlapping a live borrow is not permitted by the proof resource state |
 | 7 | contract-call-unsupported: logical contracts may use old(...) or calls to verified total pure functions |
 | 7 | contract-expression-unsupported: floating-point parameter verification requires IEEE floating-point semantics |
 | 7 | contract-placement-unsupported: this contract is not read at this position, so its claim would go unchecked |
-| 7 | non-comparison-goal |
 | 7 | proof-internal-name: source identifier collides with a proof-system internal name |
 | 6 | borrow-escape: a borrow cannot escape this lexical proof resource state |
 | 6 | borrow-overlap-unproven: the access may overlap a live borrow; disjointness was not established, but a concrete overlap was not demonstrated |
 | 6 | borrow-source-opaque: reference initializer is not a bounded static address-of borrow |
-| 6 | overloaded-operator |
+| 6 | recursive-summary-unsupported: recursive executable summaries require matching checked lexicographic termination measures |
 | 6 | structural-decreases-unproven: recursive call does not pass a binder from a matched strict subterm |
 | 5 | frame-call-outside: callee changes a place outside the caller's changes frame |
+| 5 | region-expression-unsupported: region value flows through an assignment without a lifetime summary |
+| 5 | resource-analysis-budget: resource-state analysis exceeded its bounded symbolic-state budget |
 | 4 | borrow-alias-conflict: mutable borrow conflicts with another live borrow of the same root |
 | 4 | frame-write-outside: write is outside the function's changes frame |
 | 4 | lemma-summary-unverified: lemma body has not established a verified proof summary |
-| 4 | loop-condition-opaque: loop condition may mutate state and has no frame model |
 | 4 | proof-hole: explicit `assert ?` proof hole is an open obligation |
 | 4 | region-return-witness-unsupported: a region return must be tied to a replayed resource use or returned allocation |
+| 4 | region-store-escape: a region-owned value may be assigned only from a directly tracked whole binding |
+| 3 | borrow-source-opaque: a write through a mutable reference has no directly tracked target place |
 | 3 | call-old-opaque: callee ensure depends on a pre-state that is not tracked across calls |
 | 3 | frame-preserve-write: write violates a preserved function place |
 | 3 | index-bounds-opaque: indexed access has no statically tracked collection bound |
@@ -65,13 +69,13 @@ Unreadable inputs: 11.
 | 3 | region-contract-unsupported: region-owned expressions are not admitted in logical contracts |
 | 3 | region-destroy-live-borrow: a region cannot be destroyed while a borrowed view or reference to it is still live |
 | 3 | region-expression-unsupported: a region-owned expression must be bound or explicitly rejected at this resource boundary |
-| 3 | region-expression-unsupported: region value flows through an expression without a lifetime summary |
 | 3 | region-use-after-destroy: a region-owned binding is accessed after its region was destroyed |
 | 2 | borrow-call-alias: mutable call arguments overlap while the callee is running |
 | 2 | borrow-move-conflict: a live borrow prevents moving the borrowed place |
 | 2 | borrow-mutable-source: mutable borrow requires a writable source binding |
 | 2 | effect-row-exceeded: a called function declares an effect outside this function's row |
 | 2 | import-error: one or more Elisa include files could not be read |
+| 2 | loop-condition-opaque: loop condition may mutate state and has no frame model |
 | 2 | parallel-state-unsupported: parallel loop join semantics are not modeled by the proof state |
 | 2 | region-alias-unsupported: a returned reference must retain the region established by the callee summary |
 | 2 | resource-use-after-move: a moved resource is written again |
@@ -89,6 +93,7 @@ Unreadable inputs: 11.
 | 1 | pattern-unsupported: match pattern bindings are not modeled for proof-state substitution |
 | 1 | proof-impure: proof assertions may not evaluate executable calls or ownership transfers |
 | 1 | region-destroy-unsupported: destroy must name the innermost active tracked region |
+| 1 | region-expression-unsupported: region value flows through an expression without a lifetime summary |
 | 1 | region-return-escape: the returned value lives in a region other than the declared return region |
 | 1 | region-return-witness-unsupported: a mutable reference return must be tied to a replayed mutable reference formal |
 | 1 | region-scope-unsupported: region block must introduce a fresh named lexical region |
@@ -104,9 +109,11 @@ Unreadable inputs: 11.
 - `kernel_effect_runtime.elisa`: timeout
 - `kernel_projection_runtime.elisa`: timeout
 - `kernel_proposition_admission_runtime.elisa`: timeout
+- `kernel_replay_standalone.elisa`: timeout
 - `kernel_sview_lifetimes_runtime.elisa`: timeout
 - `lemma_summary_replay_runtime.elisa`: timeout
 - `marker_dispatch_runtime.elisa`: timeout
+- `rejected_kernel_arena_cycle.elisa`: timeout
 - `tactic_runtime.elisa`: timeout
 
 ## Toolchain provenance

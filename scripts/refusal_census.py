@@ -76,6 +76,7 @@ def tree_sha256(root):
 
 def summarize(results, example_count, dogfood_count, run_date, toolchain):
     gates = Counter()
+    diagnostics = Counter()
     files = {}
     unreadable = []
     unreadable_reasons = {}
@@ -91,15 +92,17 @@ def summarize(results, example_count, dogfood_count, run_date, toolchain):
 
         summary = data["summary"]
         file_gates = set()
+        file_diagnostics = set()
         for finding in data["findings"]:
-            if not isinstance(finding, dict):
-                continue
             gate = finding.get("refusal_gate")
-            if not gate:
-                # Non-goal diagnostics have no goal attempt from which to derive a gate.
-                gate = f"{finding.get('kind', 'unknown')}: {finding.get('message', '')}"
-            gates[gate] += 1
-            file_gates.add(gate)
+            if gate:
+                gates[gate] += 1
+                file_gates.add(gate)
+            else:
+                # A finding without an attempted goal is diagnostic, not a first-refusal gate.
+                diagnostic = f"{finding.get('kind', 'unknown')}: {finding.get('message', '')}"
+                diagnostics[diagnostic] += 1
+                file_diagnostics.add(diagnostic)
 
         file_proven = summary["proven"]
         file_obligations = summary["obligations"]
@@ -109,6 +112,7 @@ def summarize(results, example_count, dogfood_count, run_date, toolchain):
             "proven": file_proven,
             "obligations": file_obligations,
             "gates": sorted(file_gates),
+            "diagnostics": sorted(file_diagnostics),
         }
 
     report = {
@@ -121,6 +125,7 @@ def summarize(results, example_count, dogfood_count, run_date, toolchain):
         "unreadable": unreadable,
         "unreadable_reasons": unreadable_reasons,
         "gates": dict(sorted(gates.items(), key=lambda item: (-item[1], item[0]))),
+        "diagnostics": dict(sorted(diagnostics.items(), key=lambda item: (-item[1], item[0]))),
         "files": files,
     }
     if toolchain is not None:
@@ -194,12 +199,17 @@ def render_markdown(report):
         "",
         f"Unreadable inputs: {len(report['unreadable'])}.",
         "",
-        "| Count | First refusal gate / diagnostic |",
+        "| Count | First refusal gate |",
         "| ---: | --- |",
     ]
     lines.extend(
         f"| {count} | {gate.replace('|', '/')} |"
         for gate, count in report["gates"].items()
+    )
+    lines += ["", "## Non-goal diagnostics", "", "| Count | Diagnostic |", "| ---: | --- |"]
+    lines.extend(
+        f"| {count} | {diagnostic.replace('|', '/')} |"
+        for diagnostic, count in report["diagnostics"].items()
     )
     if report["unreadable"]:
         lines += ["", "## Unreadable inputs", ""]

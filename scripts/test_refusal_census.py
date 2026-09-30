@@ -44,13 +44,18 @@ assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
 assert first["proven"] == 6 and first["obligations"] == 7
 assert first["unreadable"] == ["unreadable.elisa"]
 assert first["unreadable_reasons"] == {"unreadable.elisa": "timeout"}
-assert first["gates"] == {
-    "no-rule": 1,
-    "unsupported: no imported effect row": 1,
-}
+assert first["gates"] == {"no-rule": 1}
+assert first["diagnostics"] == {"unsupported: no imported effect row": 1}
 assert "seconds" not in first["files"]["examples/example.elisa"]
+assert first["files"]["examples/example.elisa"]["gates"] == ["no-rule"]
+assert first["files"]["examples/example.elisa"]["diagnostics"] == [
+    "unsupported: no imported effect row"
+]
 assert "seconds" in refusal_census.measurements(sample, "2026-09-30", toolchain)["files"]["examples/example.elisa"]
-assert "Wall time" not in refusal_census.render_markdown(first)
+summary_markdown = refusal_census.render_markdown(first)
+assert "Wall time" not in summary_markdown
+assert "First refusal gate" in summary_markdown
+assert "Non-goal diagnostics" in summary_markdown
 assert "timings" in refusal_census.render_measurements_markdown(
     refusal_census.measurements(sample, "2026-09-30", toolchain)
 ).lower()

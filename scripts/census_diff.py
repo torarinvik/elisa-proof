@@ -39,9 +39,10 @@ def main():
     for name, old in baseline["files"].items():
         new = current["files"].get(name)
         if new is None:
-            if name not in current["unreadable"]:
-                continue
-            regressions.append(f"{name}: no longer produces a readable report")
+            if name in current["unreadable"]:
+                regressions.append(f"{name}: no longer produces a readable report")
+            else:
+                regressions.append(f"{name}: source is absent from the current census")
             continue
         if new["proven"] < old["proven"]:
             regressions.append(f"{name}: proven {old['proven']} -> {new['proven']}")

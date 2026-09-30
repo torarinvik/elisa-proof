@@ -10529,10 +10529,13 @@ new input a ten-minute timeout.
 
 On 2026-09-30, the pinned Stage1 binary (compiler/frontend revision
 `61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f`, proof HEAD `907c18254e6e1030de66313c48423d41cf766d96`)
-produced reports for 680 of 691 examples plus the kernel-core dogfood unit: 9,262 of 12,265
-obligations proved across readable reports, with 86 distinct refusal buckets. Eleven runtime/test
-harness examples exceeded the 120-second per-input deadline and are listed as unknown in
-`docs/census/census.json`; they are not included in those totals. This is a measured but incomplete
-baseline, not evidence that those eleven inputs are rejected or proved. Census serializer and
+produced reports for 678 of 691 examples plus the kernel-core dogfood unit: 6,104 of 7,844
+obligations proved across readable reports, with 10 actual refusal gates and 76 categories of
+non-goal diagnostics. Thirteen runtime/test harness examples exceeded the 120-second per-input
+deadline and are listed as unknown in `docs/census/census.json`; they are not included in those
+totals. A prior run against the same binary and source tree completed two more inputs and reported
+9,262/12,265 obligations, demonstrating that wall-clock timeouts make corpus coverage dependent on
+the run environment. The census is therefore an explicit partial baseline, not evidence that the
+timed-out inputs are rejected or proved, and A-01 is not fully closed. Census serializer and
 census-diff tests, Python syntax checks, the source-length check, and `git diff --check` passed. The
 full test suite was not rerun.
