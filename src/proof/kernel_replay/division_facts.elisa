@@ -3,9 +3,10 @@ const PROOF_KERNEL_REPLAY_DIVISION_TERM_LIMIT: usize = 2
 extend ElisaProofKernelReplay:
     private:
         # Mirror of `proof_division_goal`: generalize each outermost `a / b` or `a % b` with a
-        # non-constant, signed divisor in a comparison goal to a reserved name, and decide the
+        # non-constant or literal >= 1 signed divisor in a comparison goal to a reserved name, and decide the
         # generalized goal under relational facts whose side conditions replay first:
-        # `b >= 1, a >= 0` give `0 <= a % b <= b - 1` and `0 <= a / b <= a`; `b >= 1, x <= b`
+        # `b >= 1, a >= 0` give `0 <= a % b <= b - 1` and `0 <= a / b <= a`; `b >= 1, a <= 0` give
+        # `a <= a / b <= 0`; `b >= 1, x <= b`
         # give `x * K / b <= K` for a literal `K >= 0`. Truncating signed division obeys each for
         # every value the source computes, so instantiating the name back is sound.
         def proof_kernel_replay_division_goal(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
@@ -30,7 +31,10 @@ extend ElisaProofKernelReplay:
             for fact in facts |fact, rewritten_facts|:
                 rewritten_facts.push(fact)
             added: mutable darray[usize] = []
-            for index in 0..<terms.count |index, nodes, children, facts, terms, split_depth, depth, remaining, rewritten_goal, rewritten_facts, added|:
+            # The single term's proven bounds, for the monotone step; `nodes.count` when unset.
+            lower_bound: mutable usize = nodes.count
+            upper_bound: mutable usize = nodes.count
+            for index in 0..<terms.count |index, nodes, children, facts, terms, split_depth, depth, remaining, rewritten_goal, rewritten_facts, added, lower_bound, upper_bound|:
                 term: usize = terms[index]
                 continue if proof_kernel_replay_unsigned_width_in_expression(nodes, children, term, facts, depth + 1) != 0 or not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, term, 0)
                 node: ElisaProofKernelCore::ProofKernelNode = nodes[term]
@@ -46,22 +50,37 @@ extend ElisaProofKernelReplay:
                     limit: usize = ElisaProofKernelCore::add_node(nodes, "binary", "-", node.right, one, 0, 0, 0, 0, "", "")
                     added.push(ElisaProofKernelCore::add_node(nodes, "binary", ">=", fresh, zero, 0, 0, 0, 0, "", ""))
                     added.push(ElisaProofKernelCore::add_node(nodes, "binary", "<=", fresh, limit, 0, 0, 0, 0, "", ""))
+                    lower_bound <- zero
+                    upper_bound <- limit
                 else:
+                    range: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_division_dividend_range(nodes, children, facts, node.left)
                     if dividend_nonnegative:
                         added.push(ElisaProofKernelCore::add_node(nodes, "binary", ">=", fresh, zero, 0, 0, 0, 0, "", ""))
                         added.push(ElisaProofKernelCore::add_node(nodes, "binary", "<=", fresh, node.left, 0, 0, 0, 0, "", ""))
+                        lower_bound <- zero
+                        upper_bound <- node.left
+                        if range.has_upper:
+                            upper: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, range.upper, "", "")
+                            added.push(ElisaProofKernelCore::add_node(nodes, "binary", "<=", fresh, upper, 0, 0, 0, 0, "", ""))
+                    else:
+                        dividend_upper: usize = ElisaProofKernelCore::add_node(nodes, "binary", "<=", node.left, zero, 0, 0, 0, 0, "", "")
+                        if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, dividend_upper, split_depth + 1, depth + 1, remaining: remaining - 1):
+                            added.push(ElisaProofKernelCore::add_node(nodes, "binary", ">=", fresh, node.left, 0, 0, 0, 0, "", ""))
+                            added.push(ElisaProofKernelCore::add_node(nodes, "binary", "<=", fresh, zero, 0, 0, 0, 0, "", ""))
+                            lower_bound <- node.left
+                            upper_bound <- zero
+                            if range.has_lower:
+                                lower: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, range.lower, "", "")
+                                added.push(ElisaProofKernelCore::add_node(nodes, "binary", ">=", fresh, lower, 0, 0, 0, 0, "", ""))
                     scaled: (known: bool, factor: usize, constant: i64) = proof_kernel_replay_division_scaled(nodes, node.left)
                     if scaled.known:
                         factor_bound: usize = ElisaProofKernelCore::add_node(nodes, "binary", "<=", scaled.factor, node.right, 0, 0, 0, 0, "", "")
                         if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, factor_bound, split_depth + 1, depth + 1, remaining: remaining - 1):
                             constant: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, scaled.constant, "", "")
                             added.push(ElisaProofKernelCore::add_node(nodes, "binary", "<=", fresh, constant, 0, 0, 0, 0, "", ""))
-                # The fresh name stands for a primitive scalar, as the witnessed term did.
-                marker_callee: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, "__elisa_primitive_scalar_type", "")
-                marker_argument: usize = ElisaProofKernelCore::add_node(nodes, "call_arg", "", fresh, 0, 0, 0, 0, 0, "", "")
-                marker_start: usize = children.count
-                children.push(marker_argument)
-                added.push(ElisaProofKernelCore::add_node(nodes, "call", "", marker_callee, 0, 0, marker_start, 1, 0, "", ""))
+                # The fresh name stands for a primitive scalar of its operands' signed width, as
+                # the witnessed term did, so sums over it stay in range.
+                proof_kernel_replay_push_fresh_markers(nodes, children, fresh, proof_kernel_replay_signed_width_in_expression(nodes, children, facts, term, depth + 1), &added)
                 rewritten_goal <- proof_kernel_replay_replace_exact(nodes, children, rewritten_goal, term, fresh, 0).value
                 next_facts: mutable darray[usize] = []
                 for fact in rewritten_facts |fact, nodes, children, term, fresh, next_facts|:
@@ -70,19 +89,90 @@ extend ElisaProofKernelReplay:
             return false if added.count == 0
             for fact in added |fact, rewritten_facts|:
                 rewritten_facts.push(fact)
-            return proof_kernel_replay_goal_depth_remaining(nodes, children, rewritten_facts, rewritten_goal, split_depth + 1, depth + 1, remaining: remaining - 1)
+            return true if proof_kernel_replay_goal_depth_remaining(nodes, children, rewritten_facts, rewritten_goal, split_depth + 1, depth + 1, remaining: remaining - 1)
+            return terms.count == 1 and proof_kernel_replay_division_monotone(nodes, children, goal_root, terms[0], lower_bound, upper_bound)
+
+        # Mirror of `proof_division_monotone`.
+        def proof_kernel_replay_division_monotone(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, goal_root: usize, term: usize, lower_bound: usize, upper_bound: usize) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, goal_root) or not proof_kernel_replay_valid(nodes, lower_bound) or not proof_kernel_replay_valid(nodes, upper_bound)
+            operator: sview = nodes[goal_root].operator
+            return false if nodes[goal_root].kind != "binary" or not (operator == "<=" or operator == "<" or operator == ">=" or operator == ">")
+            marker: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, proof_kernel_replay_division_term_name(0), "")
+            generalized: usize = proof_kernel_replay_replace_exact(nodes, children, goal_root, term, marker, 0).value
+            sum: (known: bool, coefficient: i64, constant: i64) = proof_kernel_replay_division_linear_sum(nodes, generalized, proof_kernel_replay_division_term_name(0), false)
+            return false if not sum.known or sum.coefficient == 0
+            at_least: bool = operator == ">=" or operator == ">"
+            use_upper: bool = sum.coefficient < 0 if at_least else sum.coefficient > 0
+            bound: usize = upper_bound if use_upper else lower_bound
+            substituted: usize = proof_kernel_replay_replace_exact(nodes, children, goal_root, term, bound, 0).value
+            decided: (known: bool, coefficient: i64, constant: i64) = proof_kernel_replay_division_linear_sum(nodes, substituted, proof_kernel_replay_division_term_name(0), true)
+            return false if not decided.known or decided.coefficient != 0
+            return decided.constant >= 0 if operator == ">="
+            return decided.constant > 0 if operator == ">"
+            return decided.constant <= 0 if operator == "<="
+            return decided.constant < 0
+
+        # Mirror of `proof_division_linear_sum`.
+        def proof_kernel_replay_division_linear_sum(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, comparison: usize, marker_name: sview, cancel: bool) -> (known: bool, coefficient: i64, constant: i64):
+            return (false, 0, 0) if not proof_kernel_replay_valid(nodes, comparison) or nodes[comparison].kind != "binary"
+            atoms: mutable darray[sview] = []
+            coefficients: mutable darray[i64] = []
+            constant: mutable i64 = 0
+            return (false, 0, 0) if not proof_kernel_replay_division_collect(nodes, nodes[comparison].left, 1, &atoms, &coefficients, &constant, 0)
+            return (false, 0, 0) if not proof_kernel_replay_division_collect(nodes, nodes[comparison].right, -1, &atoms, &coefficients, &constant, 0)
+            coefficient: mutable i64 = 0
+            for index in 0..<atoms.count |index, atoms, coefficients, marker_name, coefficient|:
+                coefficient <- coefficient + coefficients[index] if atoms[index] == marker_name
+            for index in 0..<atoms.count |index, atoms, coefficients, marker_name, cancel|:
+                continue if not cancel or atoms[index] == marker_name
+                total: mutable i64 = 0
+                for other in 0..<atoms.count |other, index, atoms, coefficients, total|:
+                    total <- total + coefficients[other] if atoms[other] == atoms[index]
+                return (false, 0, 0) if total != 0
+            return (true, coefficient, constant)
+
+        # Mirror of `proof_division_collect`.
+        def proof_kernel_replay_division_collect(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, sign: i64, atoms: mutable darray[sview]&, coefficients: mutable darray[i64]&, constant: mutable i64&, depth: usize) -> bool:
+            requires depth <= 16
+            decreases 16 - depth
+            return false if depth >= 16 or atoms.count >= 16 or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return proof_kernel_replay_division_collect(nodes, node.left, sign, atoms, coefficients, constant, depth + 1) if node.kind == "paren"
+            if node.kind == "int":
+                return false if node.value < -1000000000000 or node.value > 1000000000000
+                constant <- constant + (node.value if sign > 0 else 0 - node.value)
+                return constant >= -1000000000000000 and constant <= 1000000000000000
+            if node.kind == "ident":
+                return false if node.name == ""
+                atoms.push(node.name)
+                coefficients.push(sign)
+                return true
+            return node.operator == "-" and proof_kernel_replay_division_collect(nodes, node.left, 0 - sign, atoms, coefficients, constant, depth + 1) if node.kind == "unary"
+            return false if node.kind != "binary" or (node.operator != "+" and node.operator != "-")
+            return false if not proof_kernel_replay_division_collect(nodes, node.left, sign, atoms, coefficients, constant, depth + 1)
+            return proof_kernel_replay_division_collect(nodes, node.right, sign if node.operator == "+" else 0 - sign, atoms, coefficients, constant, depth + 1)
+
+        # Mirror of `proof_division_dividend_range`.
+        def proof_kernel_replay_division_dividend_range(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], dividend: usize) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
+            bounds: mutable darray[ProofKernelReplayBound] = []
+            for fact in facts |fact, nodes, children, bounds|:
+                proof_kernel_replay_collect_bounds(nodes, children, facts, fact, &bounds, 0)
+            proof_kernel_replay_close_equalities(nodes, children, facts, &bounds)
+            proof_kernel_replay_add_signed_type_bounds(nodes, children, facts, &bounds)
+            return proof_kernel_replay_interval(nodes, dividend, bounds, 0)
 
         def proof_kernel_replay_division_term_name(index: usize) -> sview:
             return "__elisa_division_term_0" if index == 0
             "__elisa_division_term_1"
 
-        # `a / b` or `a % b` whose divisor is not an integer constant.
+        # `a / b` or `a % b` whose divisor is not an integer constant, or is a literal >= 1.
         def proof_kernel_replay_division_term(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
             return false if not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return false if node.kind != "binary" or (node.operator != "/" and node.operator != "%")
             return false if not proof_kernel_replay_valid(nodes, node.left) or not proof_kernel_replay_valid(nodes, node.right)
-            return not proof_kernel_replay_constant_int(nodes, node.right, 0).known
+            constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, node.right, 0)
+            return not constant.known or constant.value >= 1
 
         # `x * K` or `K * x` with a literal `K >= 0`.
         def proof_kernel_replay_division_scaled(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, factor: usize, constant: i64):
@@ -114,3 +204,69 @@ extend ElisaProofKernelReplay:
                     return
                 proof_kernel_replay_collect_division_terms(nodes, children, node.left, terms, depth + 1)
                 proof_kernel_replay_collect_division_terms(nodes, children, node.right, terms, depth + 1)
+
+        # Mirror of `proof_negated_name_goal`: generalize `-x` for the goal's first negated name
+        # `x` to a reserved name bounded by the negated constant range of `x`.
+        def proof_kernel_replay_negated_name_goal(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if split_depth >= PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT or remaining <= 1
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return false if not proof_kernel_replay_valid(nodes, goal_root)
+            goal: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
+            return false if goal.kind != "binary" or not (goal.operator == ">" or goal.operator == ">=" or goal.operator == "<" or goal.operator == "<=" or goal.operator == "==" or goal.operator == "!=")
+            fresh: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, "__elisa_negated_name", "")
+            return false if not proof_kernel_replay_valid(nodes, fresh)
+            return false if proof_kernel_replay_replace_exact(nodes, children, goal_root, fresh, fresh, 0).changed
+            for fact in facts |fact, nodes, children, fresh|:
+                return false if proof_kernel_replay_replace_exact(nodes, children, fact, fresh, fresh, 0).changed
+            term: usize = proof_kernel_replay_negated_name(nodes, goal_root, 0)
+            return false if not proof_kernel_replay_valid(nodes, term)
+            operand: usize = nodes[term].left
+            return false if proof_kernel_replay_unsigned_width_in_expression(nodes, children, operand, facts, depth + 1) != 0 or not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, operand, 0)
+            width: i64 = proof_kernel_replay_signed_width_in_expression(nodes, children, facts, operand, depth + 1)
+            range: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_division_dividend_range(nodes, children, facts, operand)
+            return false if width == 0 or not range.has_lower or not range.has_upper
+            return false if range.lower <= ElisaProofKernelCore::PROOF_KERNEL_I64_MIN or range.upper <= ElisaProofKernelCore::PROOF_KERNEL_I64_MIN
+            rewritten_facts: mutable darray[usize] = []
+            for fact in facts |fact, nodes, children, term, fresh, rewritten_facts|:
+                rewritten_facts.push(proof_kernel_replay_replace_exact(nodes, children, fact, term, fresh, 0).value)
+            lower: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, 0 - range.upper, "", "")
+            upper: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, 0 - range.lower, "", "")
+            rewritten_facts.push(ElisaProofKernelCore::add_node(nodes, "binary", ">=", fresh, lower, 0, 0, 0, 0, "", ""))
+            rewritten_facts.push(ElisaProofKernelCore::add_node(nodes, "binary", "<=", fresh, upper, 0, 0, 0, 0, "", ""))
+            proof_kernel_replay_push_fresh_markers(nodes, children, fresh, width, &rewritten_facts)
+            rewritten_goal: usize = proof_kernel_replay_replace_exact(nodes, children, goal_root, term, fresh, 0).value
+            return proof_kernel_replay_goal_depth_remaining(nodes, children, rewritten_facts, rewritten_goal, split_depth + 1, depth + 1, remaining: remaining - 1)
+
+        # The primitive-scalar marker and, for a nonzero width, the signed type-bound marker.
+        def proof_kernel_replay_push_fresh_markers(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, fresh: usize, width: i64, facts: mutable darray[usize]&) -> void:
+            marker_callee: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, "__elisa_primitive_scalar_type", "")
+            marker_argument: usize = ElisaProofKernelCore::add_node(nodes, "call_arg", "", fresh, 0, 0, 0, 0, 0, "", "")
+            marker_start: usize = children.count
+            children.push(marker_argument)
+            facts.push(ElisaProofKernelCore::add_node(nodes, "call", "", marker_callee, 0, 0, marker_start, 1, 0, "", ""))
+            return if width == 0
+            width_callee: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, "__elisa_signed_type_bound", "")
+            width_value: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, width, "", "")
+            width_term: usize = ElisaProofKernelCore::add_node(nodes, "call_arg", "", fresh, 0, 0, 0, 0, 0, "", "")
+            width_argument: usize = ElisaProofKernelCore::add_node(nodes, "call_arg", "", width_value, 0, 0, 0, 0, 0, "", "")
+            width_start: usize = children.count
+            children.push(width_term)
+            children.push(width_argument)
+            facts.push(ElisaProofKernelCore::add_node(nodes, "call", "", width_callee, 0, 0, width_start, 2, 0, "", ""))
+
+        # The first `-x` node over a name in the expression, in pre-order; `nodes.count` if none.
+        def proof_kernel_replay_negated_name(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> usize:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return nodes.count if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "unary" and node.operator == "-" and proof_kernel_replay_valid(nodes, node.left) and nodes[node.left].kind == "ident" and nodes[node.left].name != "":
+                return root
+            return proof_kernel_replay_negated_name(nodes, node.left, depth + 1) if node.kind == "paren" or node.kind == "unary"
+            return nodes.count if node.kind != "binary"
+            found: usize = proof_kernel_replay_negated_name(nodes, node.left, depth + 1)
+            return found if found < nodes.count
+            return proof_kernel_replay_negated_name(nodes, node.right, depth + 1)
