@@ -100,6 +100,7 @@ python3 "$ROOT_DIR/scripts/test_usize_increment_under_count.py"
 python3 "$ROOT_DIR/scripts/test_disequality_strictness.py"
 python3 "$ROOT_DIR/scripts/test_guard_and_flag_facts.py"
 python3 "$ROOT_DIR/scripts/test_min_max_abs_summaries.py"
+python3 "$ROOT_DIR/scripts/test_literal_count.py"
 python3 "$ROOT_DIR/scripts/test_census_diff.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
@@ -3655,7 +3656,7 @@ if [[ "$literal_extent_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_literal_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; refused = ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_named_count_is_not_a_length", "a_literal_length_is_not_an_element_bound", "a_non_empty_literal_length_is_not_read"); assert all(reasons[owner] == "body-unverified" for owner in refused)'
+run_json_report "$ROOT_DIR/examples/rejected_literal_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; refused = ("a_push_is_not_modelled", "a_parameter_has_no_literal", "a_field_named_count_is_not_a_length", "a_literal_length_is_not_an_element_bound", "a_non_empty_literal_length_is_not_read", "a_short_literal_has_its_own_length_only"); assert all(reasons[owner] == "body-unverified" for owner in refused)'
 rejected_literal_extent_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_literal_extent_status" -ne 0 ]]; then
@@ -3930,7 +3931,7 @@ fi
 # expression equality had no arm for one, so such a fact never matched its own trace and every
 # certificate carrying it gapped. Exact, elementwise: a different literal is a different fact.
 set +e
-run_json_report "$ROOT_DIR/examples/replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; lower = [g for g in report["goals"] if g["rule"] == "index-lower"]; assert len(lower) == 5; assert all(g["proven"] and g["replay_status"] == "replayed" for g in lower); assert {f["kind"] for f in report["findings"]} == {"index-upper-unproven"}'
+run_json_report "$ROOT_DIR/examples/replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; lower = [g for g in report["goals"] if g["rule"] == "index-lower"]; assert len(lower) == 5; assert all(g["proven"] and g["replay_status"] == "replayed" for g in lower); assert report["status"] == "proved"; assert report["findings"] == []'
 replay_literal_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$replay_literal_facts_status" -ne 0 ]]; then

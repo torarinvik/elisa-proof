@@ -10304,3 +10304,19 @@ Evidence: with the kernel line disabled, examples/min_max_abs_summaries.elisa re
 certificates. With it enabled, 19/19 replay, including `clamp` built on both summaries. The
 rejected variant (strict bound, one-sided equality, a shifted arm, abs >= 1, a wrong equality)
 fails all five.
+
+## Short literal lengths by comparison (BACKLOG K-06)
+
+The earlier boundary ("An empty literal is empty") held back non-empty literal lengths. Reading
+one took a `usize` to `i64` conversion that the checker does not verify itself in, and that once
+cost 16 functions and 65 proofs.
+
+`proof_small_literal_count` and its kernel mirror `proof_kernel_replay_small_count` now read
+lengths 0 to 8 by comparing the `usize` count against each value. There is no conversion. The
+kernel helper is non-recursive, sits beside `proof_kernel_replay_constant_leaf`, and adds no
+recursive component.
+
+Evidence: examples/literal_count.elisa proves and replays 11/11: `[1, 2, 3].count == 3`, an
+eight-element literal, a local, and a walk over a three-element table. The
+`rejected_literal_extent` boundary moves to a nine-element literal, and gains a wrong length for
+a short literal. Dogfood and census are measured below in the commit message.
