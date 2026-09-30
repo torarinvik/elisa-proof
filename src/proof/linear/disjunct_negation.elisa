@@ -1,0 +1,220 @@
+extend ElisaProof:
+    private:
+        # The premise added when proving `A or B` from `not A => B`. A witnessed primitive
+        # comparison becomes its complement (`frame != last` gives `frame == last`), which the
+        # arithmetic tiers read directly; any other alternative is kept as `not A`. The kernel
+        # mirror is `proof_kernel_replay_disjunct_negation`.
+        def proof_disjunct_negation(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> Ast::Expr:
+            stripped: Ast::Expr = proof_strip_parens(expression)
+            match stripped:
+                Ast::Expr.Binary(left, operator, right, position):
+                    if proof_is_comparison(operator) and proof_primitive_comparison(left, right, facts):
+                        complement: TokenKind = proof_comparison_negation(operator)
+                        return Ast::Expr.Binary(left, complement, right, position) if complement != TokenKind.Eof
+                    return Ast::Expr.Unary(TokenKind.Not, expression, position)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return inner
+                _:
+                    return Ast::Expr.Unary(TokenKind.Not, expression, Ast::expr_pos(expression))
+            return Ast::Expr.Unary(TokenKind.Not, expression, Ast::expr_pos(expression))
+
+        # A comparison of names and integer literals: its negation is a statement about values
+        # that exist whether or not the source evaluates the comparison.
+        def proof_disjunct_arithmetic_free(expression: Ast::Expr) -> bool:
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_is_comparison(operator) and proof_disjunct_atom(left) and proof_disjunct_atom(right)
+                _:
+                    return false
+            return false
+
+        def proof_disjunct_atom(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.IntLit(_, _):
+                    return true
+                _:
+                    return false
+            return false
+
+        # The premise set for `not A => B`: the facts, the negation of A, and -- when that
+        # negation is a name equality `x == y` or `x == 5` -- a copy of every linear fact with
+        # `x` replaced. The copies are consequences of the premise, never replacements, so they
+        # add nothing unsound; they let the difference tiers, which read two names at most, see
+        # `result <= last - frame` under `frame == last` as `result <= last - last`. Only
+        # binder-free linear comparisons are rewritten, so no substitution can be captured.
+        # The kernel mirror is `proof_kernel_replay_disjunct_premises`.
+        def proof_disjunct_premises(facts: darray[Ast::Expr]&, negation: Ast::Expr) -> darray[Ast::Expr]:
+            premises: mutable darray[Ast::Expr] = []
+            premises.extend(facts)
+            premises.push(negation)
+            rewrite: (known: bool, name: sview, value: Ast::Expr) = proof_disjunct_equality(negation)
+            return premises if not rewrite.known
+            for fact in facts |premises, rewrite, facts|:
+                if proof_disjunct_linear(fact, 0):
+                    copy: Ast::Expr = proof_disjunct_replace(fact, rewrite.name, rewrite.value, 0)
+                    premises.push(copy)
+                    normal: (known: bool, fact: Ast::Expr) = proof_disjunct_normalized(copy, facts)
+                    premises.push(normal.fact) if normal.known
+            return premises
+
+        # A rewritten copy with its cancelled names folded away: `r <= l - l` is `r <= 0`. The
+        # interval tiers read `l - l` as a range, not as zero, so without this the copy says
+        # nothing. Reading the sums over the integers is what the signed tiers already do with
+        # every premise (signed arithmetic traps rather than wraps); a copy that holds unsigned
+        # arithmetic, which wraps, is not folded. The result names at most two names and one
+        # nonnegative literal (atoms are names or call terms), so it adds no arithmetic of its own.
+        def proof_disjunct_normalized(fact: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, fact: Ast::Expr):
+            match proof_strip_parens(fact):
+                Ast::Expr.Binary(left, operator, right, position):
+                    return (false, fact) if not proof_is_comparison(operator) or proof_unsigned_width_in_expression(fact, facts) != 0
+                    atoms: mutable darray[Ast::Expr] = []
+                    coefficients: mutable darray[i64] = []
+                    constant: mutable i64 = 0
+                    return (false, fact) if not proof_disjunct_collect(left, 1, &atoms, &coefficients, &constant, 0)
+                    return (false, fact) if not proof_disjunct_collect(right, -1, &atoms, &coefficients, &constant, 0)
+                    positive: mutable Ast::Expr = Ast::Expr.Absent
+                    negative: mutable Ast::Expr = Ast::Expr.Absent
+                    positives: mutable usize = 0
+                    negatives: mutable usize = 0
+                    for index in 0..<atoms.count |index, atoms, coefficients, positive, negative, positives, negatives|:
+                        seen: mutable bool = false
+                        for earlier in 0..<index |earlier, index, atoms, seen|:
+                            seen <- true if proof_definitionally_equal(atoms[earlier], atoms[index])
+                        continue if seen
+                        total: mutable i64 = 0
+                        for later in index..<atoms.count |later, index, atoms, coefficients, total|:
+                            total <- total + coefficients[later] if proof_definitionally_equal(atoms[later], atoms[index])
+                        continue if total == 0
+                        if total == 1:
+                            positive <- atoms[index]
+                            positives <- positives + 1
+                        elif total == -1:
+                            negative <- atoms[index]
+                            negatives <- negatives + 1
+                        else:
+                            positives <- 2
+                    return (false, fact) if positives > 1 or negatives > 1
+                    # `positive + constant - negative  op  0`
+                    if positives == 1 and negatives == 1:
+                        return (constant == 0, Ast::Expr.Binary(positive, operator, negative, position))
+                    if positives == 1:
+                        return (constant <= 0, Ast::Expr.Binary(positive, operator, Ast::Expr.IntLit(0 - constant, position), position))
+                    if negatives == 1:
+                        return (constant >= 0, Ast::Expr.Binary(Ast::Expr.IntLit(constant, position), operator, negative, position))
+                    return (false, fact)
+                _:
+                    return (false, fact)
+            return (false, fact)
+
+        # The goal under the same rewrite; the goal itself when no rewrite applies.
+        def proof_disjunct_rewritten_goal(goal: Ast::Expr, negation: Ast::Expr) -> (known: bool, goal: Ast::Expr):
+            rewrite: (known: bool, name: sview, value: Ast::Expr) = proof_disjunct_equality(negation)
+            return (false, goal) if not rewrite.known or not proof_disjunct_linear(goal, 0)
+            return (true, proof_disjunct_replace(goal, rewrite.name, rewrite.value, 0))
+
+        # Replace `name` in a linear comparison. A call term is an opaque atom and is left
+        # whole: the tiers already read `nearer(frame, last - frame)` as one value, and a
+        # rewritten `nearer(last, last - last)` would be a different term that no other fact
+        # mentions. Only the linear skeleton outside calls is rewritten.
+        def proof_disjunct_replace(expression: Ast::Expr, name: sview, value: Ast::Expr, depth: usize) -> Ast::Expr:
+            return expression if depth >= 16
+            match expression:
+                Ast::Expr.Ident(found, _):
+                    return value if found == name
+                    return expression
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_disjunct_replace(inner, name, value, depth + 1), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_disjunct_replace(left, name, value, depth + 1), operator, proof_disjunct_replace(right, name, value, depth + 1), position)
+                _:
+                    return expression
+            return expression
+
+        def proof_disjunct_equality(expression: Ast::Expr) -> (known: bool, name: sview, value: Ast::Expr):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.EqEq, right, _):
+                    match right:
+                        Ast::Expr.Ident(other, _):
+                            return (true, name, right) if name != "" and other != "" and other != name
+                        Ast::Expr.IntLit(value, _):
+                            return (true, name, right) if name != "" and value >= 0
+                        _:
+                            pass
+                _:
+                    pass
+            return (false, "", expression)
+
+        # A binder-free comparison over names, nonnegative literals, `+`, `-` and `*`.
+        def proof_disjunct_linear(expression: Ast::Expr, depth: usize) -> bool:
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_is_comparison(operator) and proof_disjunct_term(left, depth + 1) and proof_disjunct_term(right, depth + 1)
+                _:
+                    return false
+            return false
+
+        def proof_disjunct_term(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 16
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name != ""
+                Ast::Expr.IntLit(value, _):
+                    return value >= 0
+                Ast::Expr.Paren(inner, _):
+                    return proof_disjunct_term(inner, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star
+                    return proof_disjunct_term(left, depth + 1) and proof_disjunct_term(right, depth + 1)
+                # A call summary term, `nearer(frame, rest)`: an atom the rewrite leaves whole.
+                Ast::Expr.Call(Ast::Expr.Ident(_, _), arguments, argument_names, _):
+                    return false if argument_names.count != 0
+                    for argument in arguments |depth|:
+                        return false if not proof_disjunct_term(argument, depth + 1)
+                    return true
+                _:
+                    return false
+            return false
+
+        # `expression` as a signed sum of atoms (names and call terms) and one constant.
+        def proof_disjunct_collect(expression: Ast::Expr, sign: i64, atoms: mutable darray[Ast::Expr]&, coefficients: mutable darray[i64]&, constant: mutable i64&, depth: usize) -> bool:
+            return false if depth >= 16 or atoms.count >= 16
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_disjunct_collect(inner, sign, atoms, coefficients, constant, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return false if value < 0 or value > 1000000000000
+                    constant <- constant + (value if sign > 0 else 0 - value)
+                    return constant >= -1000000000000000 and constant <= 1000000000000000
+                Ast::Expr.Ident(_, _) | Ast::Expr.Call(_, _, _, _):
+                    atoms.push(expression)
+                    coefficients.push(sign)
+                    return true
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    return false if not proof_disjunct_collect(left, sign, atoms, coefficients, constant, depth + 1)
+                    return proof_disjunct_collect(right, sign if operator == TokenKind.Plus else 0 - sign, atoms, coefficients, constant, depth + 1)
+                _:
+                    return false
+            return false
+
+        # `first or second` from `not first => second`, under the premises above. The caller has
+        # already tried each alternative alone and checks the split budget.
+        def proof_disjunct_goal(facts: darray[Ast::Expr]&, first: Ast::Expr, second: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            negation: Ast::Expr = proof_disjunct_negation(first, facts)
+            premises: darray[Ast::Expr] = proof_disjunct_premises(facts, negation)
+            return true if proof_goal_depth(premises, second, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+            rewritten: (known: bool, goal: Ast::Expr) = proof_disjunct_rewritten_goal(second, negation)
+            return rewritten.known and proof_goal_depth(premises, rewritten.goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+
+        # A disjunctive fact `refuted or survivor` with `others` the remaining facts: when the
+        # others prove `not refuted`, the survivor holds and is assumed. The kernel mirror is the
+        # modus-ponens step in `proof_kernel_replay_goal_depth_remaining`.
+        def proof_disjunct_modus_ponens(others: darray[Ast::Expr]&, refuted: Ast::Expr, survivor: Ast::Expr, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            negation: Ast::Expr = proof_disjunct_negation(refuted, others)
+            return false if not proof_goal_depth(others, negation, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+            assumed: mutable darray[Ast::Expr] = []
+            assumed.extend(others)
+            assumed.push(survivor)
+            return proof_goal_depth(assumed, goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
