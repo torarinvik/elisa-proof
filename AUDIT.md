@@ -10473,3 +10473,22 @@ as they leave scope. Only a block whose body falls through is adopted; other blo
 the old clear. Fixtures: `examples/can_block_frame.elisa` (proved, replayed) and
 `examples/rejected_can_block_frame.elisa` (own count, assigned local, block-local relation stay
 unproven). An explicit `modifies` clause still needs front-end syntax the compiler lacks.
+
+### Replay refutes contradictory arithmetic facts (2026-09-30)
+
+Kernel replay only knew propositional inconsistency: a literal `false`, or a fact next to its
+own negation. So `c <= 9, c >= 10` could not close even `ensure false`. Any proof that used a
+caller's `requires` to rule out one side of a helper's `ensure A or B` left a replay gap, even
+though the producer proved it. Four goals of the engine's `AnimationPoseIndex` proof hit this.
+
+`proof_kernel_replay_facts_arithmetically_inconsistent`
+(`kernel_replay/arithmetic_refutation.elisa`) handles this. For each comparison fact over
+witnessed primitive scalars, it asks the existing interval and difference-constraint rules
+whether the other facts prove its complement. If they do, the fact set has no model and the
+goal follows. It runs only after the fixed-width guard has accepted every fact, and the
+complement uses the same guard as `proof_kernel_replay_negative_fact`.
+
+Tests:
+- `examples/arithmetic_refutation_replay.elisa` proves with 0 gaps.
+- `examples/rejected_arithmetic_refutation_replay.elisa` (`requires current <= 10`, where the escape disjunct can hold) stays unproven.
+- Control: the prover binary from before the fix leaves 2 replay gaps on the positive example.

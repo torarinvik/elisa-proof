@@ -4016,6 +4016,26 @@ if [[ "$rejected_unreadable_premise_status" -ne 0 ]]; then
     exit 1
 fi
 
+# Replay refutes arithmetically contradictory facts: a helper's escape disjunct ruled out by the
+# caller's bound. A bound that admits the escape still proves nothing.
+set +e
+run_json_report "$ROOT_DIR/examples/arithmetic_refutation_replay.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []'
+arithmetic_refutation_status=${PIPESTATUS[1]}
+set -e
+if [[ "$arithmetic_refutation_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: replay did not refute contradictory arithmetic facts\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_arithmetic_refutation_replay.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}; assert {f["name"] for f in report["findings"]} == {"loose"}'
+rejected_arithmetic_refutation_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_arithmetic_refutation_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a consistent bound was treated as contradictory\n' >&2
+    exit 1
+fi
+
 # A lend that cannot outlive its call leaves nothing a later call could reach, so a loop entered
 # afterwards keeps the binding. It is still a write during its own call, and a callee that can keep
 # it -- through a parameter or a return whose type can hold a reference -- keeps the old answer.
