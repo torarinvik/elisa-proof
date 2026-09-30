@@ -10451,6 +10451,12 @@ identifier, so refusal is at the theorem kernel rather than at package syntax. T
 positive portable rule-family packages and the prior forged-arena/schema controls still replay or
 refuse as expected. Regression is in `scripts/test_portable_replay.py`.
 
+That test also forges `forall k, v in {v: 0}, k == v` under the hypothesis `v == 1`. The dictionary
+key `v` is free in the range, while `v` in the body is the value binder. Sequential substitution
+`k -> v`, then `v -> 0` would incorrectly prove `0 == 0`; the kernel's fresh-marker substitution
+keeps the pair simultaneous and rejects the false theorem. The existing finite-dictionary positive
+package remains a control.
+
 **Full-suite follow-up.** `scripts/test.sh` was rerun after both the opaque-call reservation and this
 portable quantifier regression, using the isolated Stage1
 `61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` and Stage0

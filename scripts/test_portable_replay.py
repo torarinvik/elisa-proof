@@ -161,11 +161,11 @@ def with_theorem(package, theorem):
 
 
 def append_node(package, kind, operator="", left=0, right=0, value="0", name="",
-                children_start=0, children_count=0, auxiliary=0):
+                children_start=0, children_count=0, auxiliary=0, secondary_name=""):
     nodes = package["kernel"]["nodes"]
     nodes.append({"kind": kind, "operator": operator, "left": left, "right": right,
                   "auxiliary": auxiliary, "children_start": children_start, "children_count": children_count,
-                  "value": value, "name": name, "secondary_name": ""})
+                  "value": value, "name": name, "secondary_name": secondary_name})
     return len(nodes) - 1
 
 
@@ -204,22 +204,22 @@ assert not any(node["name"].startswith("__elisa_kernel_quantifier") for node in 
 nested_capture = copy.deepcopy(quantified)
 nested_capture["kernel"] = {"nodes": [], "children": []}
 
-def collection(kind, elements):
-    start = len(nested_capture["kernel"]["children"])
-    nested_capture["kernel"]["children"].extend(elements)
-    return append_node(nested_capture, kind, children_start=start, children_count=len(elements))
+def collection(package, kind, elements):
+    start = len(package["kernel"]["children"])
+    package["kernel"]["children"].extend(elements)
+    return append_node(package, kind, children_start=start, children_count=len(elements))
 
-def marker_call(marker, arguments):
-    callee = append_node(nested_capture, "ident", name=marker)
-    start = len(nested_capture["kernel"]["children"])
+def marker_call(package, marker, arguments):
+    callee = append_node(package, "ident", name=marker)
+    start = len(package["kernel"]["children"])
     for argument in arguments:
-        nested_capture["kernel"]["children"].append(append_node(nested_capture, "call_arg", left=argument))
-    return append_node(nested_capture, "call", left=callee, children_start=start, children_count=len(arguments))
+        package["kernel"]["children"].append(append_node(package, "call_arg", left=argument))
+    return append_node(package, "call", left=callee, children_start=start, children_count=len(arguments))
 
 free_y = append_node(nested_capture, "ident", name="y")
-outer_values = collection("array", [free_y])
+outer_values = collection(nested_capture, "array", [free_y])
 inner_zero = append_node(nested_capture, "int", value="0")
-inner_values = collection("array", [inner_zero])
+inner_values = collection(nested_capture, "array", [inner_zero])
 bound_x = append_node(nested_capture, "ident", name="x")
 bound_y = append_node(nested_capture, "ident", name="y")
 inner_body = append_node(nested_capture, "binary", "==", bound_x, bound_y)
@@ -227,7 +227,7 @@ inner_forall = append_node(nested_capture, "quantifier", "forall", inner_values,
                            name="y", auxiliary=1)
 nested_forall = append_node(nested_capture, "quantifier", "forall", outer_values, inner_forall,
                            name="x", auxiliary=1)
-scalar_y = marker_call("__elisa_primitive_scalar_type", [free_y])
+scalar_y = marker_call(nested_capture, "__elisa_primitive_scalar_type", [free_y])
 nested_theorem = {
     "goal_id": 0, "name": "nested-binder-capture", "line": 1, "rule": "quantifier-forall",
     "hypotheses": [scalar_y], "hypothesis_origins": [{"kind": "forged"}],
@@ -235,6 +235,33 @@ nested_theorem = {
 }
 nested_capture["theorems"] = [reseal(nested_capture, nested_theorem)]
 refused(nested_capture, "nested-quantifier-capture", "rejected", "kernel-rejected")
+
+# Dictionary key/value binders are substituted simultaneously. In `forall k, v in {v: 0},
+# k == v`, the `v` in the dictionary key is free and distinct from the value binder. With
+# hypothesis v == 1, the proposition is false (1 != 0). Sequentially substituting k -> v
+# and then v -> 0 would capture the inserted free key and turn it into 0 == 0.
+dict_capture = copy.deepcopy(quantified)
+dict_capture["kernel"] = {"nodes": [], "children": []}
+free_v = append_node(dict_capture, "ident", name="v")
+dict_zero = append_node(dict_capture, "int", value="0")
+dict_one = append_node(dict_capture, "int", value="1")
+dict_entry = append_node(dict_capture, "dict_entry", left=free_v, right=dict_zero)
+dict_values = collection(dict_capture, "dict", [dict_entry])
+key_var = append_node(dict_capture, "ident", name="k")
+value_var = append_node(dict_capture, "ident", name="v")
+dict_body = append_node(dict_capture, "binary", "==", key_var, value_var)
+dict_forall = append_node(dict_capture, "quantifier", "forall", dict_values, dict_body,
+                          name="k", auxiliary=2, secondary_name="v")
+scalar_free_v = marker_call(dict_capture, "__elisa_primitive_scalar_type", [free_v])
+free_v_is_one = append_node(dict_capture, "binary", "==", free_v, dict_one)
+dict_theorem = {
+    "goal_id": 0, "name": "dictionary-binder-capture", "line": 1, "rule": "quantifier-forall",
+    "hypotheses": [scalar_free_v, free_v_is_one],
+    "hypothesis_origins": [{"kind": "forged"}, {"kind": "forged"}],
+    "conclusion": dict_forall, "statement": "", "goal_fingerprint": 0,
+}
+dict_capture["theorems"] = [reseal(dict_capture, dict_theorem)]
+refused(dict_capture, "dictionary-quantifier-capture", "rejected", "kernel-rejected")
 
 base = packages["verified"]
 assumption = next(t for t in base["theorems"] if t["rule"] == "goal" and t["conclusion"] in t["hypotheses"])
