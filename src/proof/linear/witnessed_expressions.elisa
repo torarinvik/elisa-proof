@@ -397,69 +397,6 @@ extend ElisaProof:
                 _:
                     return false
 
-        # Collect only explicit identifier equalities. This is deliberately narrower than
-        # general expression rewriting: a positive `x == y` fact is safe to use as an alias,
-        # while inventing a canonical form for calls, references, or arithmetic could cross
-        # effects and fixed-width overflow boundaries.
-        def proof_collect_name_equalities(expression: Ast::Expr, facts: darray[Ast::Expr]&, left_names: mutable darray[sview]&, right_names: mutable darray[sview]&) -> void:
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    proof_collect_name_equalities(inner, facts, left_names, right_names)
-                Ast::Expr.Binary(left, operator, right, position):
-                    if operator == TokenKind.And:
-                        proof_collect_name_equalities(left, facts, left_names, right_names)
-                        proof_collect_name_equalities(right, facts, left_names, right_names)
-                    if operator == TokenKind.EqEq:
-                        left_name: sview = proof_ident_name(left)
-                        right_name: sview = proof_ident_name(right)
-                        if left_name != "" and right_name != "" and proof_primitive_comparison(left, right, facts):
-                            left_names.push(left_name)
-                            right_names.push(right_name)
-                _:
-                    pass
-
-        # Equality aliases also transport interval bounds. Iterate by relation count so a
-        # chain such as x == y, y == z reaches every member without relying on a host solver.
-        def proof_close_equalities(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
-            left_names: mutable darray[sview] = []
-            right_names: mutable darray[sview] = []
-            for fact in facts |left_names, right_names|:
-                proof_collect_name_equalities(fact, facts, &left_names, &right_names)
-            rounds: mutable usize = 0
-            max_rounds: usize = facts.count * 2 + 2
-            while rounds < max_rounds |rounds, left_names, right_names, bounds|:
-                for index in 0..<left_names.count |index, left_names, right_names, bounds|:
-                    left_bound: ProofBound = proof_bound_for(bounds, left_names[index])
-                    right_bound: ProofBound = proof_bound_for(bounds, right_names[index])
-                    proof_add_lower(bounds, right_names[index], left_bound.lower) if left_bound.has_lower
-                    proof_add_upper(bounds, right_names[index], left_bound.upper) if left_bound.has_upper
-                    proof_add_lower(bounds, left_names[index], right_bound.lower) if right_bound.has_lower
-                    proof_add_upper(bounds, left_names[index], right_bound.upper) if right_bound.has_upper
-                rounds <- rounds + 1
-            proof_tighten_disequality_bounds(facts, bounds)
-
-        def proof_names_equal_from_facts(left_name: sview, right_name: sview, facts: darray[Ast::Expr]&) -> bool:
-            return false if left_name == "" or right_name == ""
-            return true if left_name == right_name
-            relation_left: mutable darray[sview] = []
-            relation_right: mutable darray[sview] = []
-            for fact in facts |relation_left, relation_right|:
-                proof_collect_name_equalities(fact, facts, &relation_left, &relation_right)
-            reachable: mutable darray[sview] = [left_name]
-            cursor: mutable usize = 0
-            while cursor < reachable.count |cursor, reachable, relation_left, relation_right|:
-                current: sview = reachable[cursor]
-                for index in 0..<relation_left.count |index, relation_left, relation_right, reachable, current, right_name|:
-                    next_name: mutable sview = ""
-                    next_name <- relation_right[index] if relation_left[index] == current
-                    next_name <- relation_left[index] if relation_right[index] == current
-                    if next_name != "":
-                        return true if next_name == right_name
-                        already_seen: bool = any existing in reachable where existing == next_name
-                        reachable.push(next_name) if not already_seen
-                cursor <- cursor + 1
-            return false
-
         # An inconsistent set of explicit interval facts has no reachable state. Applying
         # ex-falso here is sound Hoare reasoning (a function with impossible preconditions has
         # no executions), and it also makes contradictory branch complements useful without
@@ -577,6 +514,13 @@ extend ElisaProof:
                         return (false, 0, 0, false, false) if not lower_quotient.known or not upper_quotient.known
                         return (true, lower_quotient.value, upper_quotient.value, true, true) if b.lower > 0
                         return (true, upper_quotient.value, lower_quotient.value, true, true)
+                    # A divisor bounded to a positive range: truncating division is monotone in
+                    # each operand there, so the corners give the quotient's range. Signed
+                    # division only wraps at `MIN / -1`, which a divisor >= 1 excludes.
+                    if operator == TokenKind.Slash and b.has_lower and b.has_upper and b.lower >= 1 and a.has_lower and a.has_upper:
+                        return (true, a.lower / b.upper, a.upper / b.lower, true, true) if a.lower >= 0
+                        return (true, a.lower / b.lower, a.upper / b.upper, true, true) if a.upper <= 0
+                        return (true, a.lower / b.lower, a.upper / b.lower, true, true)
                     if operator == TokenKind.Percent:
                         divisor: (known: bool, value: i64) = proof_constant_int(right)
                         # `MIN_I64 % -1` is the fixed-width overflow edge. The interval

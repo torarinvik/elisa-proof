@@ -262,8 +262,25 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             proof_add_finding(&report, "parse-error", parse_error.line, "", "source could not be parsed; verification was not attempted")
         proof_add_finding(&report, "parse-error", stray_nul_line, "", "source has a NUL byte outside a comment; verification was not attempted") if stray_nul_line > 0
     else:
+        # Refinement refusals are recorded apart and re-added after checking, which starts
+        # from a fresh report.
+        refinement_refusals: mutable ProofReport = proof_empty_report()
+        refined_functions: mutable darray[sview] = []
+        proof_add_refinement_signature_contracts(&file, &refinement_refusals, &refined_functions)
         proof_check_with_semantic_diagnostics(file, &report, &semantic_diagnostics)
+        for refusal in refinement_refusals.findings |report|:
+            report.proof_obligation(false)
+            proof_add_finding(&report, refusal.kind, refusal.line, refusal.name, refusal.message)
         proof_replay_certificates(&report)
+        # The compiler's ensure check does not read signature contracts, so a refinement-typed
+        # parameter's predicate is invisible to it. In a function that has one, an "unproven"
+        # (never "violated") ensure at a return the engine discharged with kernel-replayed goals
+        # and no finding is superseded. Every other function keeps the diagnostic.
+        kept: mutable darray[Semantic::Diagnostic] = []
+        for diagnostic in semantic_diagnostics |kept, refined_functions, report|:
+            superseded: bool = diagnostic.kind == Semantic::DiagnosticKind.EnsureNotProven and diagnostic.detail != "violated" and (any refined_name in refined_functions where refined_name == diagnostic.name) and proof_report_discharges_return(report, diagnostic.name, diagnostic.line)
+            kept.push(diagnostic) if not superseded
+        semantic_diagnostics <- kept
     proof_add_finding(&report, "import-error", 0, "", "one or more Elisa include files could not be read") if import_failed
     # The compiler's strongest built-in semantic mode is shared with proof checking above. The
     # custom proof kernel remains the verdict for proof obligations; this flag only enables
@@ -566,8 +583,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     proof_push_number(&output, report.kernel_nodes.count.u32())
     proof_push(&output, " nodes, format elisa-proof-kernel-v1\n")
     for diagnostic in semantic_diagnostics |output, report|:
-        continue if diagnostic.kind == Semantic::DiagnosticKind.AssertByUnproven
-        continue if diagnostic.kind == Semantic::DiagnosticKind.MutualDecreasesCycle and any verified_name in report.structural_verified_names where verified_name == diagnostic.name
+        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
         proof_push(&output, "  semantic line ")
         proof_push_number(&output, diagnostic.line)
         proof_push(&output, ": ")

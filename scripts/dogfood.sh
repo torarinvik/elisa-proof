@@ -520,6 +520,8 @@ run_probe unsigned_alias examples/unsigned_alias.elisa 0
 run_probe rejected_unsigned_alias examples/rejected_unsigned_alias.elisa 1
 run_probe unsigned_refinement examples/unsigned_refinement.elisa 0
 run_probe rejected_unsigned_refinement examples/rejected_unsigned_refinement.elisa 1
+run_probe refinement_alias_contracts examples/refinement_alias_contracts.elisa 0
+run_probe rejected_refinement_alias_argument examples/rejected_refinement_alias_argument.elisa 1
 run_probe unsigned_fact_safety examples/unsigned_fact_safety.elisa 0
 run_probe rejected_unsigned_fact_explosion examples/rejected_unsigned_fact_explosion.elisa 1
 python3 - "$REPORT_DIR/rejected_unsigned_fact_explosion.json" <<'PY'
