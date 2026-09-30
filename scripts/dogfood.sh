@@ -840,6 +840,8 @@ run_probe qualified_constant_across_call examples/qualified_constant_across_call
 run_probe rejected_qualified_constant_across_call examples/rejected_qualified_constant_across_call.elisa 1
 run_probe linear_disequality_refuted examples/linear_disequality_refuted.elisa 0
 run_probe rejected_linear_disequality_refuted examples/rejected_linear_disequality_refuted.elisa 1
+run_probe call_width_across_call examples/call_width_across_call.elisa 0
+run_probe rejected_call_width_across_call examples/rejected_call_width_across_call.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.
