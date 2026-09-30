@@ -51,10 +51,9 @@ extend ElisaProofKernelReplay:
                         return true if proof_kernel_replay_expr_equal(nodes, children, summary.left, goal.left, 0) and proof_kernel_replay_fact_contains_negated(nodes, children, fact_root, summary.right, 0)
             return false
 
-        # Mirror of the producer's constant pins. A hypothesis `NAME == <literal>` in this
-        # certificate's own premise set is what makes the reading available; nothing is read
-        # from the source, and a premise the trace cannot justify is rejected before replay
-        # reaches this rule.
+        # Mirror of the producer's constant pins. A structurally exact identifier or qualified
+        # name equality to a literal in this certificate's premise set makes the reading
+        # available; source-boundary replay separately validates imported constant traces.
         def proof_kernel_replay_integer_literal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, value: i64):
             return (false, 0) if root >= nodes.count
             match nodes[root].kind:
@@ -63,12 +62,11 @@ extend ElisaProofKernelReplay:
                 _:
                     return (false, 0)
 
-        def proof_kernel_replay_name_pin(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, name_root: usize) -> (known: bool, value: i64):
+        def proof_kernel_replay_term_pin(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, term_root: usize) -> (known: bool, value: i64):
             return (false, 0) if root >= nodes.count
-            return (false, 0) if name_root >= nodes.count
-            return (false, 0) if not proof_kernel_replay_valid(nodes, name_root)
-            return (false, 0) if nodes[name_root].kind != "ident"
-            return (false, 0) if nodes[name_root].name == ""
+            return (false, 0) if term_root >= nodes.count
+            return (false, 0) if not proof_kernel_replay_valid(nodes, term_root)
+            return (false, 0) if nodes[term_root].kind != "ident" and nodes[term_root].kind != "scope"
             return (false, 0) if not proof_kernel_replay_valid(nodes, root)
             match nodes[root].kind:
                 "binary":
@@ -76,31 +74,39 @@ extend ElisaProofKernelReplay:
                     pin_left: usize = nodes[root].left
                     return (false, 0) if pin_left >= nodes.count
                     return (false, 0) if not proof_kernel_replay_valid(nodes, pin_left)
-                    return (false, 0) if nodes[pin_left].kind != "ident"
-                    return (false, 0) if nodes[pin_left].name != nodes[name_root].name
+                    return (false, 0) if nodes[pin_left].kind != "ident" and nodes[pin_left].kind != "scope"
+                    return (false, 0) if not proof_kernel_replay_expr_equal(nodes, children, pin_left, term_root, 0)
                     pin_right: usize = nodes[root].right
                     return (false, 0) if pin_right >= nodes.count
                     return proof_kernel_replay_integer_literal(nodes, pin_right)
                 _:
                     return (false, 0)
 
-        def proof_kernel_replay_pinned_constant(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, facts: darray[usize], root: usize) -> (known: bool, value: i64):
+        def proof_kernel_replay_pinned_constant(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> (known: bool, value: i64):
             literal: (known: bool, value: i64) = proof_kernel_replay_integer_literal(nodes, root)
             return literal if literal.known
             return (false, 0) if root >= nodes.count
             return (false, 0) if not proof_kernel_replay_valid(nodes, root)
-            return (false, 0) if nodes[root].kind != "ident"
-            return (false, 0) if nodes[root].name == ""
+            return (false, 0) if nodes[root].kind != "ident" and nodes[root].kind != "scope"
             for fact in facts:
-                pin: (known: bool, value: i64) = proof_kernel_replay_name_pin(nodes, fact, root)
+                pin: (known: bool, value: i64) = proof_kernel_replay_term_pin(nodes, children, fact, root)
                 return pin if pin.known
             return (false, 0)
 
+        # Resolve only a qualified name whose exact source expression is pinned to a
+        # literal in this certificate. Bare identifiers remain model variables.
+        def proof_kernel_replay_constant_int_with_pins(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> ProofKernelReplayInt:
+            literal: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, root, 0)
+            return literal if literal.known
+            return ProofKernelReplayInt{known: false, value: 0} if root >= nodes.count or nodes[root].kind != "scope"
+            pinned: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, children, facts, root)
+            return ProofKernelReplayInt{known: pinned.known, value: pinned.value}
+
         def proof_kernel_replay_operand_matches_through_pins(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact_root: usize, goal_root: usize) -> bool:
             return true if proof_kernel_replay_expr_equal(nodes, children, fact_root, goal_root, 0)
-            fact_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, facts, fact_root)
+            fact_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, children, facts, fact_root)
             return false if not fact_constant.known
-            goal_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, facts, goal_root)
+            goal_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, children, facts, goal_root)
             return goal_constant.known and goal_constant.value == fact_constant.value
 
         def proof_kernel_replay_negative_fact(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, left_root: usize, operator: sview, right_root: usize, depth: usize) -> bool:
@@ -222,27 +228,30 @@ extend ElisaProofKernelReplay:
                 proof_kernel_replay_model_collect_names(nodes, node.left, names, depth + 1)
                 proof_kernel_replay_model_collect_names(nodes, node.right, names, depth + 1)
 
-        def proof_kernel_replay_model_int(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, names: darray[sview]&, values: darray[i64]&, depth: usize) -> ProofKernelReplayInt:
+        def proof_kernel_replay_model_int(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, names: darray[sview]&, values: darray[i64]&, depth: usize) -> ProofKernelReplayInt:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
             return ProofKernelReplayInt{known: false, value: 0} if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return ProofKernelReplayInt{known: true, value: node.value} if node.kind == "int"
+            if node.kind == "scope":
+                pinned: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, children, facts, root)
+                return ProofKernelReplayInt{known: pinned.known, value: pinned.value}
             if node.kind == "ident":
                 index: usize = proof_kernel_replay_model_name_index(names, node.name)
                 value: (known: bool, value: i64) = proof_kernel_replay_model_value_at(values, index)
                 return ProofKernelReplayInt{known: true, value: value.value} if value.known
                 return ProofKernelReplayInt{known: false, value: 0}
             if node.kind == "unary":
-                inner: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, node.left, names, values, depth + 1)
+                inner: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, children, facts, node.left, names, values, depth + 1)
                 return ProofKernelReplayInt{known: false, value: 0} if not inner.known
                 return inner if node.operator == "+"
                 if node.operator == "-":
                     return ProofKernelReplayInt{known: false, value: 0} if inner.value == proof_kernel_replay_i64_min()
                     return ProofKernelReplayInt{known: true, value: 0 - inner.value}
             if node.kind == "binary":
-                left: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, node.left, names, values, depth + 1)
-                right: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, node.right, names, values, depth + 1)
+                left: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, children, facts, node.left, names, values, depth + 1)
+                right: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, children, facts, node.right, names, values, depth + 1)
                 return ProofKernelReplayInt{known: false, value: 0} if not left.known or not right.known
                 return proof_kernel_replay_add_safe(left.value, right.value) if node.operator == "+"
                 return proof_kernel_replay_sub_safe(left.value, right.value) if node.operator == "-"
@@ -272,7 +281,7 @@ extend ElisaProofKernelReplay:
             element: (known: bool, root: usize, depth: i64, width: i64) = proof_kernel_replay_element_marker(nodes, children, root)
             return element.known
 
-        def proof_kernel_replay_model_bool(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, names: darray[sview]&, values: darray[i64]&, depth: usize) -> ProofKernelReplayBool:
+        def proof_kernel_replay_model_bool(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, names: darray[sview]&, values: darray[i64]&, depth: usize) -> ProofKernelReplayBool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
             return ProofKernelReplayBool{known: false, value: false} if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
@@ -283,12 +292,12 @@ extend ElisaProofKernelReplay:
             return ProofKernelReplayBool{known: true, value: node.value != 0} if node.kind == "bool"
             return ProofKernelReplayBool{known: true, value: true} if proof_kernel_replay_type_marker_callee(nodes, children, root)
             if node.kind == "unary" and node.operator == "not":
-                inner: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, node.left, names, values, depth + 1)
+                inner: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, facts, node.left, names, values, depth + 1)
                 return ProofKernelReplayBool{known: true, value: not inner.value} if inner.known
                 return ProofKernelReplayBool{known: false, value: false}
             if node.kind == "binary" and (node.operator == "and" or node.operator == "or" or node.operator == "=>"):
-                left_bool: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, node.left, names, values, depth + 1)
-                right_bool: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, node.right, names, values, depth + 1)
+                left_bool: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, facts, node.left, names, values, depth + 1)
+                right_bool: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, facts, node.right, names, values, depth + 1)
                 # Partial models still decide a connective when one operand settles its truth
                 # table (false for `and`, true for `or`, false antecedent/true consequent for
                 # implication). Unknown subterms must not hide those valid constant branches.
@@ -304,8 +313,8 @@ extend ElisaProofKernelReplay:
                 return ProofKernelReplayBool{known: false, value: false} if not left_bool.known or not right_bool.known
                 return ProofKernelReplayBool{known: true, value: not left_bool.value or right_bool.value}
             if node.kind == "binary":
-                left: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, node.left, names, values, depth + 1)
-                right: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, node.right, names, values, depth + 1)
+                left: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, children, facts, node.left, names, values, depth + 1)
+                right: ProofKernelReplayInt = proof_kernel_replay_model_int(nodes, children, facts, node.right, names, values, depth + 1)
                 if left.known and right.known:
                     return ProofKernelReplayBool{known: true, value: left.value == right.value} if node.operator == "=="
                     return ProofKernelReplayBool{known: true, value: left.value != right.value} if node.operator == "!="
@@ -314,8 +323,8 @@ extend ElisaProofKernelReplay:
                     return ProofKernelReplayBool{known: true, value: left.value <= right.value} if node.operator == "<="
                     return ProofKernelReplayBool{known: true, value: left.value >= right.value} if node.operator == ">="
                 if node.operator == "==" or node.operator == "!=":
-                    left_bool: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, node.left, names, values, depth + 1)
-                    right_bool: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, node.right, names, values, depth + 1)
+                    left_bool: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, facts, node.left, names, values, depth + 1)
+                    right_bool: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, facts, node.right, names, values, depth + 1)
                     if left_bool.known and right_bool.known:
                         equal: bool = left_bool.value == right_bool.value
                         return ProofKernelReplayBool{known: true, value: equal} if node.operator == "=="
@@ -352,13 +361,13 @@ extend ElisaProofKernelReplay:
                 budget <- budget - 1
                 facts_hold: mutable bool = true
                 for fact in facts |fact, names, values, nodes, facts_hold, all_known|:
-                    fact_value: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, fact, names, values, 0)
+                    fact_value: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, facts, fact, names, values, 0)
                     if not fact_value.known:
                         all_known <- false
                         return
                     facts_hold <- false if not fact_value.value
                 return if not facts_hold
-                goal_value: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, goal_root, names, values, 0)
+                goal_value: ProofKernelReplayBool = proof_kernel_replay_model_bool(nodes, children, facts, goal_root, names, values, 0)
                 if not goal_value.known:
                     all_known <- false
                     return
