@@ -160,11 +160,12 @@ def with_theorem(package, theorem):
     return forged
 
 
-def append_node(package, kind, operator="", left=0, right=0, value="0"):
+def append_node(package, kind, operator="", left=0, right=0, value="0", name="",
+                children_start=0, children_count=0):
     nodes = package["kernel"]["nodes"]
     nodes.append({"kind": kind, "operator": operator, "left": left, "right": right,
-                  "auxiliary": 0, "children_start": 0, "children_count": 0, "value": value,
-                  "name": "", "secondary_name": ""})
+                  "auxiliary": 0, "children_start": children_start, "children_count": children_count,
+                  "value": value, "name": name, "secondary_name": ""})
     return len(nodes) - 1
 
 
@@ -219,6 +220,60 @@ control = copy.deepcopy(false_goal)
 control["theorems"][0]["conclusion"] = right
 reseal(control, control["theorems"][0])
 assert replay(control, "true-conclusion")[0] == 0
+
+# The independent kernel must not capture a source-supplied `_1` when generalizing the second
+# field place. Without checking every generated marker for availability, these consistent facts
+# become contradictory only after `b.y` is replaced by the existing `__elisa_field_place_1`,
+# allowing the false goal `a.x == b.y` to pass by explosion.
+field_collision = copy.deepcopy(base)
+field_collision["kernel"] = {"nodes": [], "children": []}
+
+def named(kind, name, operator="", left=0, right=0, value="0"):
+    return append_node(field_collision, kind, operator, left, right, value, name)
+
+def call(marker, arguments):
+    callee = named("ident", marker)
+    start = len(field_collision["kernel"]["children"])
+    for argument in arguments:
+        field_collision["kernel"]["children"].append(
+            named("call_arg", "", left=argument)
+        )
+    return append_node(field_collision, "call", left=callee, children_start=start,
+                       children_count=len(arguments))
+
+def binary(operator, left, right):
+    return append_node(field_collision, "binary", operator, left, right)
+
+a_x = named("field", "x", left=named("ident", "a"))
+b_y = named("field", "y", left=named("ident", "b"))
+marker_one = named("ident", "__elisa_field_place_1")
+zero = append_node(field_collision, "int", value="0")
+one = append_node(field_collision, "int", value="1")
+eq_text = named("string", "Eq")
+hypotheses = [
+    binary("==", a_x, zero),
+    binary("==", b_y, one),
+    binary("==", marker_one, zero),
+    call("__elisa_primitive_scalar_type", [a_x]),
+    call("__elisa_primitive_scalar_type", [b_y]),
+    call("__elisa_primitive_scalar_type", [marker_one]),
+    call("__elisa_builtin_operator_type", [a_x, eq_text]),
+    call("__elisa_builtin_operator_type", [b_y, eq_text]),
+    call("__elisa_builtin_operator_type", [marker_one, eq_text]),
+]
+collision_claim = {
+    "goal_id": 0,
+    "name": "field-place-marker-capture",
+    "line": 1,
+    "rule": "goal",
+    "hypotheses": hypotheses,
+    "hypothesis_origins": [{"kind": "forged"}] * len(hypotheses),
+    "conclusion": binary("==", a_x, b_y),
+    "statement": "",
+    "goal_fingerprint": 0,
+}
+field_collision["theorems"] = [reseal(field_collision, collision_claim)]
+refused(field_collision, "field-place-marker-capture", "rejected", "kernel-rejected")
 
 relabeled = copy.deepcopy(assumption)
 relabeled["rule"] = "resource-safety"

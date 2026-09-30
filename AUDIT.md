@@ -10390,11 +10390,11 @@ and the synthetic tuple-result constructor; in particular, a source `_1` field-p
 could have collided with the second generated placeholder because the generalizer's quick check
 only inspected `_0`. Four adversarial fixtures declare the entry, scalar, field-place, and tuple
 names and require `unsupported` with a `proof-internal-name` finding before theorem admission.
-This is a conservative namespace restriction, not an added kernel rule.
+This is a conservative namespace restriction; it adds no inference rule.
 
 **Evidence.** Stage0 `e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11` is clean, and Stage1
 `61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` passed its source-freshness assertion. The project
-build, mutable-reference regression, both marker-collision attacks, and all twelve source-admission
+build, mutable-reference regressions, four marker-collision attacks, and all twelve source-admission
 routes pass on that pair. The full suite also passed on the previous clean Stage1 snapshot before
 the namespace audit. On the current snapshot, the full suite passed its targeted and fixture matrix
 but the final `kernel-replay-audit` produced no report before the 180-second watchdog; other
@@ -10402,3 +10402,23 @@ compiler/prover jobs were concurrently using the host. This is incomplete eviden
 audit, and the current full suite remains to be rerun without that contention. Do not treat the
 mutable-reference feature as fully generalized: entry snapshots for other aliasing and aggregate
 shapes remain unsupported unless a source-bound state model is established.
+
+## Field-place placeholders are collision-checked in replay (2026-09-30)
+
+The source generalizer and kernel replay both used `__elisa_field_place_0` as a sentinel that
+checked whether placeholders were available, then generated up to four names. A valid source name
+`__elisa_field_place_1` could therefore capture the second generated term. More importantly,
+portable replay cannot rely on source admission: an adversarial package with consistent hypotheses
+`a.x = 0`, `b.y = 1`, and `__elisa_field_place_1 = 0` replayed the false goal `a.x = b.y` before
+the fix. Generalization identified `b.y` with the preexisting marker and made the context
+contradictory. The producer now checks all four marker names in the goal and facts; the independent
+kernel performs the equivalent exact-subterm availability check before generalizing. This check
+is required at both boundaries: source collision refusal alone does not protect portable kernel
+packages.
+
+`scripts/test_portable_replay.py` carries the consistent forged package and requires kernel
+rejection. `scripts/test_internal_marker_names.py` checks source-adapter rejection of `_1`, while
+`examples/field_places.elisa` remains a positive control. The portable package suite and focused
+old-state/field-place regressions pass with the kernel fix. The full proof matrix has not yet been
+rerun after this kernel change; its previous run was incomplete at the time watchdog described
+above.
