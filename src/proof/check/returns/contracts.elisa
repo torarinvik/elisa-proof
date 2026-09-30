@@ -52,6 +52,32 @@ extend ElisaProof:
                 _:
                     return (false, goal)
 
+        # A closed integer constant returned from a function of signed width w denotes exactly
+        # its value at w when every step of it fits there. Substituting the bare constant for
+        # `result` loses that width: the goal becomes a comparison of two untyped constants, and
+        # the ambiguity guard rightly refuses a negative or wide one (`0 >= -5` could be a wrapped
+        # unsigned reading). The returned value is instead bound to a fresh reserved symbol that
+        # carries the declared return type, so the typed-constant guard reads every constant the
+        # ensure compares against `result` at w. Only goals the untyped guard refuses take this path.
+        def proof_typed_return_constant_needed(current_goal: Ast::Expr, goal: Ast::Expr, return_value: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&) -> bool:
+            width: i64 = report.current_return_signed_width
+            return false if width <= 0 or report.current_return_unsigned_width != 0
+            return false if not proof_expr_mentions_name(current_goal, "result") or proof_expr_has_call(current_goal)
+            return false if not proof_closed_integer_arithmetic(return_value, 0)
+            return false if not proof_signed_constant_at_width(return_value, width, 0).known
+            return proof_has_ambiguous_integer_constant_in(goal, facts, 0)
+
+        # The symbol's type facts are the declared return type's, recorded exactly as a signed
+        # parameter's are; its value is a local binding of the returned constant.
+        def proof_add_typed_return_constant(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, symbol: sview, return_value: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
+            width: i64 = report.current_return_signed_width
+            symbol_term: Ast::Expr = Ast::Expr.Ident(symbol, position)
+            proof_add_type_bound_fact(facts, report, proof_signed_type_marker(symbol_term, width, position), position.line, owner)
+            proof_add_signed_upper_bound_fact(facts, report, symbol, width, position.line, owner, position)
+            proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(symbol, position), position.line, owner)
+            binding: Ast::Expr = Ast::Expr.Binary(symbol_term, TokenKind.EqEq, return_value, position)
+            proof_add_traced_fact(facts, report, binding, "local-binding", position.line, owner)
+
         def proof_return_value_block(statement: Ast::Stmt) -> (known: bool, body: darray[Ast::Stmt], position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
             empty: mutable darray[Ast::Stmt] = []
             match statement:
@@ -300,17 +326,30 @@ extend ElisaProof:
                         proof_invalidate_moved_roots(moved_roots, names, values, facts, report, name, position)
                         result_name: mutable darray[sview] = ["result"]
                         result_value: mutable darray[Ast::Expr] = [return_value]
-                        for ensure in ensures |report, name, facts, result_name, result_value, position|:
+                        typed_symbol: mutable sview = ""
+                        for ensure in ensures |report, name, facts, result_name, result_value, position, typed_symbol|:
                             current_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
                             goal: mutable Ast::Expr = proof_substitute(current_goal, result_name, result_value)
                             projected_goal: (known: bool, value: Ast::Expr) = proof_project_tuple_result(current_goal, return_value, functions, name)
                             goal <- projected_goal.value if projected_goal.known
-                            goal <- proof_rewrite_pure_call_summaries(goal, facts, functions, 0) if proof_expr_has_call(goal)
-                            proof_add_pure_call_witnesses(goal, facts, functions, report, position.line, name, 0)
-                            proven: bool = proof_certify_return_goal(facts, return_value, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
+                            typed_goal: bool = not projected_goal.known and proof_typed_return_constant_needed(current_goal, goal, return_value, facts, report)
+                            if typed_goal:
+                                typed_symbol <- proof_rebind_symbol(report) if typed_symbol == ""
+                            proven: mutable bool = false
+                            if typed_goal and typed_symbol != "":
+                                goal_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                                proof_add_typed_return_constant(goal_facts, report, typed_symbol, return_value, name, position)
+                                typed_name: darray[Ast::Expr] = [Ast::Expr.Ident(typed_symbol, position)]
+                                goal <- proof_substitute(current_goal, result_name, typed_name)
+                                proven <- proof_certify_return_goal(goal_facts, return_value, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
+                                proof_add_goal_failure(report, "ensure-unproven", position.line, name, "return value does not establish ensure", goal_facts, goal) if not proven
+                            else:
+                                goal <- proof_rewrite_pure_call_summaries(goal, facts, functions, 0) if proof_expr_has_call(goal)
+                                proof_add_pure_call_witnesses(goal, facts, functions, report, position.line, name, 0)
+                                proven <- proof_certify_return_goal(facts, return_value, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
+                                proof_add_goal_failure(report, "ensure-unproven", position.line, name, "return value does not establish ensure", facts, goal) if not proven
                             report.proof_obligation(proven)
                             if not proven:
-                                proof_add_goal_failure(report, "ensure-unproven", position.line, name, "return value does not establish ensure", facts, goal)
                                 if report.findings.count > 0 and report.findings[report.findings.count - 1].counterexample_found and not proof_return_counterexample_parameters_only(report, functions, name):
                                     report.findings[report.findings.count - 1].status <- "unknown"
                                     report.findings[report.findings.count - 1].counterexample_found <- false

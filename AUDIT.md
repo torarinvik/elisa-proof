@@ -10514,3 +10514,22 @@ Tests:
 - `examples/rejected_closed_and_complementary_refutation.elisa` (a true literal, and a weaker
   `e <= d`) stays unproven.
 - Control: the prover binary from before the fix fails 4 goals of the positive example.
+
+### Returned constants keep the signed return type (2026-09-30)
+
+Return goals are built by substituting the returned expression for `result`, which dropped the
+declared return type. A closed returned constant then met the ambiguous-constant refusal, so
+`ensure result >= -5` over `return 0`, `ensure 0 - 5 <= result`, `ensure result <= -5` over
+`return -6`, and constant-offset goals such as `result + 50000 >= 0` over guarded early returns
+never proved. When the declared return type is a strict signed width, the goal mentions `result`
+and no call, and the returned value is a closed integer constant representable at that width, the
+checker now binds a fresh reserved symbol to the value (`local-binding`) with the signed type
+marker, range facts and scalar marker (`type-bound`), and certifies the goal over that symbol.
+Kernel replay already accepts these boundary facts through its typed-constant guard, so no replay
+change was needed. Out-of-width literals and unsigned returns stay refused.
+
+Tests: `examples/typed_return_constants.elisa` proves 17/17 with zero gaps (the previous binary
+proves 9/17); `examples/rejected_typed_return_constants.elisa` keeps each wrong returned constant
+(`-6` against `>= -5`, `0 - 6`, `-4` against `<= -5`, `-50001` against `result + 50000 >= 0`)
+ensure-unproven while the correct returns beside them prove. Both are in `scripts/test.sh` and
+`scripts/dogfood.sh`.

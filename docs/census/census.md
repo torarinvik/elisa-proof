@@ -1,29 +1,29 @@
 # Refusal census
 
-682 examples, 6061/7778 obligations proven.
+696 examples, 6245/8010 obligations proven.
 
 | Count | Gate |
 | ---: | --- |
-| 436 | no-rule |
-| 390 | function-summary-unverified: callee body has not established a verified executable summary |
-| 147 | wrap-guard-goal |
-| 128 | contract-proposition-type: kernel proposition formation rejected the term or operator |
-| 124 | control-flow-analysis-budget: control-flow analysis exceeded its fact snapshot budget |
-| 69 | contract-proposition-type: kernel proposition typing work budget exceeded |
-| 49 | ambiguous-constant-goal |
-| 34 | wrap-guard-fact |
-| 29 | budget |
+| 461 | no-rule |
+| 397 | function-summary-unverified: callee body has not established a verified executable summary |
+| 149 | wrap-guard-goal |
+| 135 | contract-proposition-type: kernel proposition formation rejected the term or operator |
+| 125 | control-flow-analysis-budget: control-flow analysis exceeded its fact snapshot budget |
+| 77 | contract-proposition-type: kernel proposition typing work budget exceeded |
+| 48 | ambiguous-constant-goal |
+| 31 | budget |
+| 30 | wrap-guard-fact |
 | 28 | expression-unsupported: operator or index may dispatch to an unmodeled user protocol |
 | 27 | borrow-call-opaque: a method-shaped call may write its receiver, and no summary maps a receiver |
 | 25 | loop-invariant-missing: loop has no invariant for symbolic verification |
 | 24 | region-alias-unsupported: the binding's backing-region lifetime was not established; destruction has not been demonstrated |
 | 22 | borrow-call-summary-unsupported: the checked callee resource summary could not be encoded for this call |
+| 22 | region-alias-unsupported: an sview value has no directly tracked live backing region |
 | 21 | borrow-call-opaque: a call argument carries a resource, but no converged callee resource summary is available |
 | 21 | connective |
 | 20 | expression-unsupported: unsupported runtime expression cannot enter a verified proof state |
-| 20 | region-alias-unsupported: an sview value has no directly tracked live backing region |
-| 17 | control-flow-analysis-budget: control-flow analysis exceeded its step budget |
 | 17 | region-call-opaque: a region-polymorphic call has no converged lifetime summary |
+| 16 | control-flow-analysis-budget: control-flow analysis exceeded its step budget |
 | 14 | literal-width |
 | 14 | region-call-opaque: a region-polymorphic call is not mapped to a verified caller region |
 | 13 | resource-write-readonly: a whole-binding write requires a mutable resource binding |
@@ -70,6 +70,7 @@
 | 2 | proof-internal-name: source identifier collides with a proof-system internal name |
 | 2 | region-alias-unsupported: a returned reference must retain the region established by the callee summary |
 | 2 | resource-use-after-move: a moved resource is written again |
+| 1 | ambiguous-constant-fact |
 | 1 | borrow-write-conflict: a write through a mutable reference overlaps a live borrow |
 | 1 | contract-proposition-type: kernel proposition statement nesting exceeded its bounded representation |
 | 1 | effect-call-opaque: a called function has no imported effect row |
@@ -97,13 +98,13 @@ Wall time under the census's parallel load, so treat it as a ranking.
 
 | Seconds | Example |
 | ---: | --- |
-| 109.66 | rejected_kernel_arena_cycle.elisa |
-| 25.13 | kernel_intern_runtime.elisa |
-| 11.28 | loop_state_joins.elisa |
-| 5.88 | rejected_loop_state_joins.elisa |
-| 5.34 | unsigned_resource_source_policy.elisa |
-| 3.26 | long_difference_chain.elisa |
-| 1.83 | rejected_shared_fixed_borrows.elisa |
-| 1.66 | field_places.elisa |
-| 1.64 | dogfood_kernel_core.elisa |
-| 1.46 | rejected_dogfood_kernel_core.elisa |
+| 108.52 | rejected_kernel_arena_cycle.elisa |
+| 15.28 | kernel_intern_runtime.elisa |
+| 12.41 | loop_state_joins.elisa |
+| 6.72 | rejected_loop_state_joins.elisa |
+| 5.68 | unsigned_resource_source_policy.elisa |
+| 2.98 | long_difference_chain.elisa |
+| 1.39 | rejected_shared_fixed_borrows.elisa |
+| 1.26 | rejected_dogfood_kernel_core.elisa |
+| 1.13 | rejected_budget.elisa |
+| 1.11 | dogfood_kernel_core.elisa |
