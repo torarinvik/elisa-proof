@@ -1,0 +1,68 @@
+extend ElisaProof:
+    private:
+        # The width of a parameter declared with a bare signed primitive type, else zero. An
+        # alias or a refinement keeps zero, so only a literal the source itself types at a
+        # primitive width is ever bound below.
+        def proof_literal_parameter_signed_width(type_expression: Ast::Expr, index: ProofTypeAuditIndex) -> i64:
+            width: i64 = proof_signed_primitive_width(type_expression)
+            return width if width > 0
+            return 0
+
+        # A literal in range of a signed width, `7` or `-1000000000`; anything else is declined.
+        def proof_literal_argument_fits(argument: Ast::Expr, width: i64, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or width <= 0 or width > 64
+            match argument:
+                Ast::Expr.Paren(inner, _):
+                    return proof_literal_argument_fits(inner, width, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return value >= 0 and (width == 64 or value < (1 << (width - 1)))
+                Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(value, _), _):
+                    return value >= 0 and (width == 64 or value <= (1 << (width - 1)))
+                _:
+                    return false
+
+        def proof_signed_width_type_name(width: i64) -> sview:
+            return "i8" if width == 8
+            return "i16" if width == 16
+            return "i32" if width == 32
+            return "i64" if width == 64
+            return ""
+
+        # A literal argument to a signed parameter is typed by that parameter, but substituting
+        # the bare literal into the callee's contract loses the width: `0 >= -LIMIT` has no
+        # typed side, so every width gate refuses it. Bind the literal to a fresh symbol of the
+        # parameter's primitive type instead, `fresh == literal`, and instantiate the contract
+        # over that symbol. The binding is the call's own parameter passing, so the preconditions
+        # and the summary are the same statements about the same value, now carrying the width.
+        def proof_bind_literal_call_arguments(argument_values: mutable darray[Ast::Expr]&, symbols: mutable darray[sview]&, widths: mutable darray[i64]&, literals: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, function_index: usize, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            return if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
+            start: usize = functions.param_starts[function_index]
+            for slot in 0..<argument_values.count |slot, argument_values, symbols, widths, literals, functions, function_index, facts, report, owner, position, start|:
+                continue if slot >= functions.param_counts[function_index] or start + slot >= functions.all_parameter_signed_widths.count
+                width: i64 = functions.all_parameter_signed_widths[start + slot]
+                continue if proof_signed_width_type_name(width) == "" or not proof_literal_argument_fits(argument_values[slot], width, 0)
+                fresh: sview = proof_rebind_symbol(report)
+                return if fresh == ""
+                symbols.push(fresh)
+                widths.push(width)
+                literals.push(argument_values[slot])
+                proof_add_literal_symbol_facts(fresh, width, argument_values[slot], facts, report, owner, position)
+                argument_values[slot] <- Ast::Expr.Ident(fresh, position)
+
+        def proof_add_literal_symbol_facts(fresh: sview, width: i64, literal: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            symbol: Ast::Expr = Ast::Expr.Ident(fresh, position)
+            proof_add_type_bound_fact(facts, report, proof_signed_type_marker(symbol, width, position), position.line, owner)
+            proof_add_primitive_operator_witnesses(facts, report, symbol, Ast::Expr.Ident(proof_signed_width_type_name(width), position), position)
+            proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(fresh, position), position.line, owner)
+            binding: Ast::Expr = Ast::Expr.Binary(symbol, TokenKind.EqEq, literal, position)
+            for existing in facts |existing, binding|:
+                return if proof_expr_equal(existing, binding)
+            proof_add_traced_fact(facts, report, binding, "local-binding", position.line, owner)
+
+        # The call's havoc keeps only facts over the caller's own names, so the bindings above
+        # would not reach the summary they type. The fresh symbols are this call's alone, and a
+        # value passed by copy cannot change under the callee: establish them again.
+        def proof_restore_literal_call_facts(symbols: darray[sview]&, widths: darray[i64]&, literals: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            for index in 0..<symbols.count |index, symbols, widths, literals, facts, report, owner, position|:
+                continue if index >= widths.count or index >= literals.count
+                proof_add_literal_symbol_facts(symbols[index], widths[index], literals[index], facts, report, owner, position)
