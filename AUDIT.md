@@ -10230,19 +10230,23 @@ call witnesses close it; `examples/widened_call_result.elisa` is the probe and
 ## Enum tag tests as bools (BACKLOG B-05)
 
 `name is Enum.Variant` in a goal gets a primitive scalar witness: `is` is the builtin tag test and
-is never overloaded, and a name denotes one value in a goal, so the test is one bool. A subject
-that is not a bare name gets no witness; a call subject is still refused as
-`contract-proposition-type`. Not yet closed: `ensure result == (c is E.V)` over `if c is E.V:
-return true` needs `true == P` from the fact `P`, a bool-literal equality rule that the producer
-and the kernel both lack.
+is never overloaded, and a name denotes one value in a goal, so the test is one bool. The contract
+`ensure result == (c is E.V)` closes by equality. A subject that is not a bare name gets no
+witness; a call subject is still refused as `contract-proposition-type`. Evidence:
+`scripts/test_enum_tag_equality.py` proves and replays four named-tag obligations (including a
+conjunction), refuses a wrong variant, wrong subject and call subject, and exercises a 24-tag
+conjunction. The separate shape `if c is E.V: return true` still needs a bool-literal equality
+rule (`true == P` from `P`); it is not part of B-05's direct equality contract.
 
 ## Qualified constants in more statements (BACKLOG B-06)
 
 The body rewrite of 4db58a8 now also covers assigned values, expression statements (call
 arguments), `while` conditions and loop contracts (`invariant`, `decreases`), `for` ranges, and
 the arguments of calls inside any rewritten expression. The same shadow guard applies, and a `for`
-variable named like the module counts as a shadow. A remaining, separate gap: over u8, a
-`decreases TOP - y` under `y < TOP` is refused as possibly wrapping, with a literal too.
+variable named like the module counts as a shadow. Evidence: `scripts/test_qualified_constants.py`
+checks positive assignment, call-argument, while-condition and for-range use, rejects oversized
+values in each context, and refuses a shadowed module name. One independent gap remains: over u8,
+a `decreases TOP - y` under `y < TOP` is refused as possibly wrapping, with a literal too.
 
 ## Signed type ranges for locals and fields (BACKLOG B-07)
 
@@ -10253,9 +10257,14 @@ term of a signed type narrower than 64 bits. The parameter path now wraps it. Tw
   kept the upper literal bound but dropped the unary floor, so the lower end was lost.
 - A struct field place gets the range beside its signed place marker.
 
-A reassigned local's new value carries no range and stays unproven. Tuple labels are not covered
-yet. Evidence: examples/signed_local_field_bounds.elisa proves 15/15 and replays 15/15, and
-examples/rejected_signed_local_field_bounds.elisa refuses four bounds that are one step tighter.
+A reassigned local's new value carries no range and stays unproven. Named-tuple scalar labels now
+also receive both signed endpoints when a typed tuple result is projected from a verified-pure call
+with witnessed arguments; tuple-local summary handling emits the same facts for eligible bound
+locals. The existing `type-bound` trace remains a trusted compiler-type boundary, not a
+kernel-reconstructed source-type proof. Evidence: `scripts/test_signed_local_field_bounds.py`
+proves and replays all 15 obligations and refuses four tighter claims;
+`scripts/test_signed_tuple_label_bounds.py` proves and replays both signed endpoints after halving
+and directly, while two parameterized claims one step outside the range remain unproven.
 
 ## Unsigned increment under a strict peer (BACKLOG B-08)
 
