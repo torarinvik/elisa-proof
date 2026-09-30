@@ -10373,11 +10373,14 @@ An `old(field)` read through a mutable aggregate reference cannot be represented
 symbolic state: the reference binding still names the same handle after a field write, while its
 pointee now has exit-state contents. Treating the handle as its own entry value could identify
 `old(cell.value)` with the changed `cell.value` and falsely prove a postcondition. The checker now
-uses an opaque entry-state marker for mutable aggregate reference parameters. This intentionally
-refuses claims it cannot relate to a tracked entry snapshot; it does not invent a field value.
+uses an opaque entry-state marker for non-scalar aggregate parameters (including mutable
+references and owned mutable values). This intentionally refuses claims it cannot relate to a
+tracked entry snapshot; it does not invent a field value. Scalar value parameters and directly
+tracked scalar-reference snapshots retain their separate exact paths.
 `examples/rejected_old_mutable_reference.elisa` checks the changed-field case, and
-`scripts/test_old_mutable_reference.py` requires a failed verification with zero replay gaps and
-all emitted certificates replayed.
+`scripts/test_old_mutable_reference.py` checks both aggregate cases, requires zero replay gaps and
+all emitted certificates replayed, and specifically forbids a return-site certificate that
+collapses a changed owned field into its entry field.
 
 The marker itself is part of the source-adapter trust boundary: because it is an AST identifier,
 a source declaration with the same name could otherwise turn an opaque marker into a resolvable
