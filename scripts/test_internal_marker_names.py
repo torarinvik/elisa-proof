@@ -10,6 +10,8 @@ BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 for filename, reserved_name in (
     ("rejected_entry_state_marker_collision.elisa", "__elisa_proof_entry_state"),
     ("rejected_scalar_reference_marker_collision.elisa", "__elisa_proof_scalar_reference_state"),
+    ("rejected_field_place_marker_collision.elisa", "__elisa_field_place_1"),
+    ("rejected_tuple_result_marker_collision.elisa", "__elisa_tuple_result"),
 ):
     result = subprocess.run(
         [str(BINARY), "--json", str(ROOT / "examples" / filename)],
@@ -33,4 +35,4 @@ for filename, reserved_name in (
         "goal_id": None,
         "counterexample": [],
     }], (filename, report["findings"])
-print("internal marker namespace: both source collisions are refused before proof admission")
+print("internal marker namespace: entry, scalar, tuple, and field-place collisions are refused")

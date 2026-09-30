@@ -10384,9 +10384,12 @@ collapses a changed owned field into its entry field.
 
 The marker itself is part of the source-adapter trust boundary: because it is an AST identifier,
 a source declaration with the same name could otherwise turn an opaque marker into a resolvable
-call. Both the aggregate entry-state and scalar-reference-state marker names are now reserved by
-`proof_name_is_reserved_internal`. Two adversarial fixtures declare those exact names and require
-an `unsupported` result with a `proof-internal-name` finding before any theorem is admitted.
+call. The aggregate entry-state and scalar-reference-state names are reserved by
+`proof_name_is_reserved_internal`. The same gate now reserves every emitted field-place placeholder
+and the synthetic tuple-result constructor; in particular, a source `_1` field-place identifier
+could have collided with the second generated placeholder because the generalizer's quick check
+only inspected `_0`. Four adversarial fixtures declare the entry, scalar, field-place, and tuple
+names and require `unsupported` with a `proof-internal-name` finding before theorem admission.
 This is a conservative namespace restriction, not an added kernel rule.
 
 **Evidence.** Stage0 `e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11` is clean, and Stage1
