@@ -10436,4 +10436,29 @@ full `scripts/test.sh` passed against isolated Stage1
 with no regressions from the 6,061/7,778 baseline; O2/O3 replay checks and accepted/rejected exit
 behavior also passed. This complete run preceded the `__opaque_call__` reservation. After that
 reservation, the Stage1 rebuild, five marker-collision regressions, and twelve-route source-admission
-matrix passed. The full suite has not yet been rerun after this final source-admission change.
+matrix passed. At that point the full suite had not yet been rerun; see the later dated follow-up
+below for the subsequent run and its timing-gate result.
+
+## Portable nested-quantifier capture regression (2026-09-30)
+
+Added a portable forged theorem for
+`forall x in [y], forall y in [0], x == y`. For a free integer `y = 1`, this proposition is false;
+naive textual substitution of the outer `x` with the range value `y` beneath the inner `forall y`
+would capture that free identifier and turn the body into `y == y`. The kernel's current
+capture-avoiding substitution refuses this nested-binder case as `kernel-rejected`. The adversarial
+package recomputes the statement and fingerprint, and retains a scalar-type witness for the free
+identifier, so refusal is at the theorem kernel rather than at package syntax. The nine existing
+positive portable rule-family packages and the prior forged-arena/schema controls still replay or
+refuse as expected. Regression is in `scripts/test_portable_replay.py`.
+
+**Full-suite follow-up.** `scripts/test.sh` was rerun after both the opaque-call reservation and this
+portable quantifier regression, using the isolated Stage1
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` and Stage0
+`e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11`. Structural/unit tests, source-admission routes,
+portable forgery controls, the full-source replay audit, later fixture checks, and optimized O2/O3
+replay all passed. The final census exited nonzero on timing-only comparisons:
+`loop_state_joins` 11.28s -> 30.79s, `rejected_loop_state_joins` 5.88s -> 17.47s, and
+`rejected_kernel_arena_cycle` 109.66s -> 261.04s. Other proof and compiler jobs were concurrently
+CPU-active. The census reported no proof-count drop or new refusal gate; this is not a fully green
+suite because its performance gate failed. Rerun that census under lower host contention before
+claiming the complete suite passes.
