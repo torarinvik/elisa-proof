@@ -10320,3 +10320,13 @@ Evidence: examples/literal_count.elisa proves and replays 11/11: `[1, 2, 3].coun
 eight-element literal, a local, and a walk over a three-element table. The
 `rejected_literal_extent` boundary moves to a nine-element literal, and gains a wrong length for
 a short literal. Dogfood and census are measured below in the commit message.
+
+## Engine state beside front-end diagnostics (BACKLOG K-07)
+
+A front-end diagnostic (for example the stage-1 checker declining a negative-literal `i8` ensure)
+keeps `verification_state` open even when the engine proved and replayed every obligation, which
+read as an unexplained failure. The JSON report now carries `engine_state` (`proved` only when no
+obligation failed and every certificate replayed, otherwise `open`) and the text report prints
+`front end diagnostic, engine: proved` in exactly that situation. The verdict itself is unchanged:
+`status` stays `failed` and the exit code stays 1, so no trust boundary moves. Covered by
+`scripts/test_engine_state.py` (proved, open-goal, clean, and malformed sources).
