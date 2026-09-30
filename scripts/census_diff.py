@@ -8,6 +8,10 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from refusal_census import run as run_census
+
+RETRY_TIMEOUT_SECONDS = 600
 
 
 def attach_measurements(census, path):
@@ -19,6 +23,35 @@ def attach_measurements(census, path):
     for name, measurement in data.get("files", {}).items():
         if name in census["files"] and isinstance(measurement.get("seconds"), (float, int)):
             census["files"][name]["seconds"] = measurement["seconds"]
+
+
+def retry_newly_unreadable(baseline, current, retry=run_census):
+    """Retry only baseline-readable inputs lost to a transient census timeout."""
+    retry_names = [name for name in current.get("unreadable", []) if name in baseline.get("files", {})]
+    for name in retry_names:
+        source = ROOT / name if name.startswith("src/") else ROOT / "examples" / name
+        _, data, seconds, _ = retry(source, RETRY_TIMEOUT_SECONDS)
+        if data is None:
+            continue
+
+        summary = data["summary"]
+        gates = sorted({finding["refusal_gate"] for finding in data["findings"]
+                        if finding.get("refusal_gate")})
+        diagnostics = sorted({
+            f"{finding.get('kind', 'unknown')}: {finding.get('message', '')}"
+            for finding in data["findings"] if not finding.get("refusal_gate")
+        })
+        current["files"][name] = {
+            "proven": summary["proven"],
+            "obligations": summary["obligations"],
+            "gates": gates,
+            "diagnostics": diagnostics,
+            "seconds": seconds,
+        }
+        current["unreadable"].remove(name)
+        current.get("unreadable_reasons", {}).pop(name, None)
+        current["proven"] += summary["proven"]
+        current["obligations"] += summary["obligations"]
 
 
 def main():
@@ -35,6 +68,7 @@ def main():
                            stdout=subprocess.DEVNULL)
             current = json.loads((Path(scratch) / "census.json").read_text())
             attach_measurements(current, Path(scratch) / "measurements.json")
+            retry_newly_unreadable(baseline, current)
     regressions, gains = [], []
     for name, old in baseline["files"].items():
         new = current["files"].get(name)
@@ -65,4 +99,5 @@ def main():
           f"baseline {baseline['proven']}/{baseline['obligations']})")
 
 
-main()
+if __name__ == "__main__":
+    main()

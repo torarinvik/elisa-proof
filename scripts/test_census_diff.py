@@ -7,6 +7,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from census_diff import retry_newly_unreadable
+
 BASE = {"examples": 2, "proven": 5, "obligations": 6, "unreadable": [], "gates": {"no-rule": 1},
         "files": {"a.elisa": {"proven": 3, "obligations": 3, "gates": [], "seconds": 4.0},
                   "b.elisa": {"proven": 2, "obligations": 3, "gates": ["no-rule"]}}}
@@ -55,4 +58,28 @@ def delete_input(c):
 
 deleted = diff(variant(delete_input))
 assert deleted.returncode == 1 and "source is absent" in deleted.stderr, deleted.stderr
+
+transient = variant(lose)
+transient["proven"] = 2
+transient["obligations"] = 3
+transient["unreadable_reasons"] = {"a.elisa": "timeout"}
+
+
+def recovered(path, timeout):
+    assert path == ROOT / "examples/a.elisa"
+    assert timeout == 600
+    return "a.elisa", {"summary": {"proven": 3, "obligations": 3}, "findings": []}, 1.5, None
+
+
+retry_newly_unreadable(BASE, transient, recovered)
+assert transient["unreadable"] == [] and "a.elisa" not in transient["unreadable_reasons"]
+assert transient["proven"] == 5 and transient["obligations"] == 6
+assert transient["files"]["a.elisa"]["seconds"] == 1.5
+
+still_unreadable = variant(lose)
+still_unreadable["unreadable_reasons"] = {"a.elisa": "timeout"}
+retry_newly_unreadable(BASE, still_unreadable,
+                       lambda path, timeout: ("a.elisa", None, timeout, "timeout"))
+assert still_unreadable["unreadable"] == ["a.elisa"]
+assert "a.elisa" not in still_unreadable["files"]
 print("census diff: drops, new gates, 2x slowdowns, unreadable/missing inputs fail; gains pass")
