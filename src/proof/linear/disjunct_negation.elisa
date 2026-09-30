@@ -1,5 +1,49 @@
 extend ElisaProof:
     private:
+        # Literal truth of an alternative: 1 for `true`, `not false`, or a reflexive `==`/`<=`/`>=`
+        # over one witnessed primitive term; 2 for `false`, `not true`, or a reflexive
+        # `!=`/`<`/`>`; 0 otherwise. A disjunction loses its false alternatives and is `true`
+        # when any alternative is, so a call summary instantiated with a literal or repeated
+        # argument (`false or last != last or r == 0`) needs no case split. `changed` reports
+        # that an alternative was removed. The kernel mirror is `proof_kernel_replay_disjunct_prune`.
+        def proof_disjunct_prune(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> (truth: i64, changed: bool, pruned: Ast::Expr):
+            return (0, false, expression) if depth >= 32
+            stripped: Ast::Expr = proof_strip_parens(expression)
+            match stripped:
+                Ast::Expr.Binary(left, TokenKind.Or, right, position):
+                    left_result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune(left, facts, depth + 1)
+                    right_result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune(right, facts, depth + 1)
+                    return (1, true, stripped) if left_result.truth == 1 or right_result.truth == 1
+                    return (right_result.truth, true, right_result.pruned) if left_result.truth == 2
+                    return (left_result.truth, true, left_result.pruned) if right_result.truth == 2
+                    return (0, false, expression) if not left_result.changed and not right_result.changed
+                    return (0, true, Ast::Expr.Binary(left_result.pruned, TokenKind.Or, right_result.pruned, position))
+                Ast::Expr.BoolLit(value, _):
+                    return (1 if value else 2, false, stripped)
+                Ast::Expr.Unary(TokenKind.Not, Ast::Expr.BoolLit(value, _), _):
+                    return (2 if value else 1, false, stripped)
+                Ast::Expr.Binary(left, operator, right, _):
+                    reflexive_true: bool = operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+                    reflexive_false: bool = operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt
+                    return (0, false, expression) if not reflexive_true and not reflexive_false
+                    return (0, false, expression) if not proof_expr_equal(left, right) or not proof_primitive_comparison(left, right, facts)
+                    return (1 if reflexive_true else 2, false, stripped)
+                _:
+                    return (0, false, expression)
+
+        # Facts with literally decided alternatives pruned; a disjunction that is literally true is
+        # dropped. False when nothing changed.
+        def proof_disjunct_prune_facts(facts: darray[Ast::Expr]&, pruned: mutable darray[Ast::Expr]&) -> bool:
+            changed: mutable bool = false
+            for fact in facts |fact, facts, pruned, changed|:
+                result: (truth: i64, changed: bool, pruned: Ast::Expr) = proof_disjunct_prune(fact, facts, 0)
+                if result.changed:
+                    changed <- true
+                    pruned.push(result.pruned) if result.truth != 1
+                else:
+                    pruned.push(fact)
+            return changed
+
         # The premise added when proving `A or B` from `not A => B`. A witnessed primitive
         # comparison becomes its complement (`frame != last` gives `frame == last`), which the
         # arithmetic tiers read directly; any other alternative is kept as `not A`. The kernel
