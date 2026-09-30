@@ -10285,3 +10285,22 @@ through. `ok: bool = i < n; if ok:` gives `i < n` inside the branch.
 Three variants stay unproven, as they should: a reassigned flag, an operand moved after the flag
 was bound, and the `not ok` branch. examples/guard_and_flag_facts.elisa proves 9/9 and its
 rejected variant fails exactly those three.
+
+## min / max / abs summaries (BACKLOG K-01)
+
+Elisa has no `min`, `max` or `abs` builtin. The front end reports `undefined identifier "min"`.
+The item therefore became: user-written versions must carry exact summaries.
+
+The `<=` ensures already proved. The exactness ensure `result == a or result == b` was refused at
+the connective gate. Each disjunct failed alone, and the `not A => B` fallback kept the
+conditional unsplit inside the negated premise.
+
+The fix: `proof_nested_conditional_goal` and its kernel mirror now accept an `and`/`or` goal, and
+the `or` rule tries that split on the whole disjunction before the fallback. Each branch rewrites
+the conditional to one value in the goal and in every fact, and both branches are required, so
+nothing about the condition is assumed beyond the path.
+
+Evidence: with the kernel line disabled, examples/min_max_abs_summaries.elisa replayed 14 of 19
+certificates. With it enabled, 19/19 replay, including `clamp` built on both summaries. The
+rejected variant (strict bound, one-sided equality, a shifted arm, abs >= 1, a wrong equality)
+fails all five.
