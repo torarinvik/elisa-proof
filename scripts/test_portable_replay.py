@@ -161,10 +161,10 @@ def with_theorem(package, theorem):
 
 
 def append_node(package, kind, operator="", left=0, right=0, value="0", name="",
-                children_start=0, children_count=0):
+                children_start=0, children_count=0, auxiliary=0):
     nodes = package["kernel"]["nodes"]
     nodes.append({"kind": kind, "operator": operator, "left": left, "right": right,
-                  "auxiliary": 0, "children_start": children_start, "children_count": children_count,
+                  "auxiliary": auxiliary, "children_start": children_start, "children_count": children_count,
                   "value": value, "name": name, "secondary_name": ""})
     return len(nodes) - 1
 
@@ -195,6 +195,46 @@ quantified = packages["collection_quantifier"]
 last_root = max(max([t["conclusion"]] + t["hypotheses"]) for t in quantified["theorems"])
 assert len(quantified["kernel"]["nodes"]) == last_root + 1, (len(quantified["kernel"]["nodes"]), last_root)
 assert not any(node["name"].startswith("__elisa_kernel_quantifier") for node in quantified["kernel"]["nodes"])
+
+# Substitution for a finite outer quantifier must not capture the free `y` in its range
+# when descending through an inner `forall y`. A naive textual substitution turns
+# `forall x in [y], forall y in [0], x == y` into a tautology, although the original is
+# false when the free integer y is 1. The replay substitution deliberately declines this
+# nested-binder shape until it has a capture-avoiding representation.
+nested_capture = copy.deepcopy(quantified)
+nested_capture["kernel"] = {"nodes": [], "children": []}
+
+def collection(kind, elements):
+    start = len(nested_capture["kernel"]["children"])
+    nested_capture["kernel"]["children"].extend(elements)
+    return append_node(nested_capture, kind, children_start=start, children_count=len(elements))
+
+def marker_call(marker, arguments):
+    callee = append_node(nested_capture, "ident", name=marker)
+    start = len(nested_capture["kernel"]["children"])
+    for argument in arguments:
+        nested_capture["kernel"]["children"].append(append_node(nested_capture, "call_arg", left=argument))
+    return append_node(nested_capture, "call", left=callee, children_start=start, children_count=len(arguments))
+
+free_y = append_node(nested_capture, "ident", name="y")
+outer_values = collection("array", [free_y])
+inner_zero = append_node(nested_capture, "int", value="0")
+inner_values = collection("array", [inner_zero])
+bound_x = append_node(nested_capture, "ident", name="x")
+bound_y = append_node(nested_capture, "ident", name="y")
+inner_body = append_node(nested_capture, "binary", "==", bound_x, bound_y)
+inner_forall = append_node(nested_capture, "quantifier", "forall", inner_values, inner_body,
+                           name="y", auxiliary=1)
+nested_forall = append_node(nested_capture, "quantifier", "forall", outer_values, inner_forall,
+                           name="x", auxiliary=1)
+scalar_y = marker_call("__elisa_primitive_scalar_type", [free_y])
+nested_theorem = {
+    "goal_id": 0, "name": "nested-binder-capture", "line": 1, "rule": "quantifier-forall",
+    "hypotheses": [scalar_y], "hypothesis_origins": [{"kind": "forged"}],
+    "conclusion": nested_forall, "statement": "", "goal_fingerprint": 0,
+}
+nested_capture["theorems"] = [reseal(nested_capture, nested_theorem)]
+refused(nested_capture, "nested-quantifier-capture", "rejected", "kernel-rejected")
 
 base = packages["verified"]
 assumption = next(t for t in base["theorems"] if t["rule"] == "goal" and t["conclusion"] in t["hypotheses"])
