@@ -10492,3 +10492,25 @@ Tests:
 - `examples/arithmetic_refutation_replay.elisa` proves with 0 gaps.
 - `examples/rejected_arithmetic_refutation_replay.elisa` (`requires current <= 10`, where the escape disjunct can hold) stays unproven.
 - Control: the prover binary from before the fix leaves 2 replay gaps on the positive example.
+
+### Closed false and complementary premises close a case split (2026-09-30)
+
+A callee summary `result == 7 or d > 0` could not be used at a call with the literal `0`. The
+argument was substituted correctly, but the branch holding `0 > 0` never closed: inconsistency
+only read per-variable bounds, and a comparison between constants names no variable. The same
+happened when the caller's `requires e >= d` faced the disjunct `e < d`, since two variables
+give no single-variable interval. The engine's `PoseFadeIndex` proof hit both.
+
+- `proof_closed_safe_constant_comparison_false` (`linear/fixed_width_arithmetic.elisa`) marks a
+  premise comparing two safe constants that evaluates false. It joins the propositional check,
+  and replay mirrors it with `proof_kernel_replay_false_constant_comparison`
+  (`kernel_replay/fact_model.elisa`), built on the existing negated constant-comparison rule.
+- `proof_facts_order_complementary` (`linear/order_and_sign.elisa`) finds two witnessed
+  primitive orders over the same operands that complement each other, in either spelling.
+  It runs only inside a case split, like the replay refutation it relies on.
+
+Tests:
+- `examples/closed_and_complementary_refutation.elisa` proves with 0 gaps.
+- `examples/rejected_closed_and_complementary_refutation.elisa` (a true literal, and a weaker
+  `e <= d`) stays unproven.
+- Control: the prover binary from before the fix fails 4 goals of the positive example.

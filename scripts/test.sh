@@ -4036,6 +4036,27 @@ if [[ "$rejected_arithmetic_refutation_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A disjunctive summary is refuted at the call site by a closed false comparison (a literal
+# argument) or by the caller's complementary order fact. A true literal or a weaker order
+# still proves nothing.
+set +e
+run_json_report "$ROOT_DIR/examples/closed_and_complementary_refutation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []'
+closed_complementary_status=${PIPESTATUS[1]}
+set -e
+if [[ "$closed_complementary_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a closed false or complementary premise did not close its branch\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_closed_and_complementary_refutation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}; assert {f["name"] for f in report["findings"]} == {"positive_literal", "weak_requirement"}'
+rejected_closed_complementary_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_closed_complementary_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a satisfiable premise was treated as contradictory\n' >&2
+    exit 1
+fi
+
 # A lend that cannot outlive its call leaves nothing a later call could reach, so a loop entered
 # afterwards keeps the binding. It is still a write during its own call, and a callee that can keep
 # it -- through a parameter or a return whose type can hold a reference -- keeps the old answer.
