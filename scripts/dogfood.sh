@@ -814,6 +814,8 @@ run_probe call_arithmetic_arguments examples/call_arithmetic_arguments.elisa 0
 run_probe rejected_call_arithmetic_arguments examples/rejected_call_arithmetic_arguments.elisa 1
 run_probe constant_divisor_bounds examples/constant_divisor_bounds.elisa 0
 run_probe rejected_constant_divisor_bounds examples/rejected_constant_divisor_bounds.elisa 1
+run_probe nested_qualified_constants examples/nested_qualified_constants.elisa 0
+run_probe rejected_nested_qualified_constants examples/rejected_nested_qualified_constants.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.
