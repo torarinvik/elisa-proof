@@ -836,6 +836,8 @@ run_probe same_name_module_constants examples/same_name_module_constants.elisa 0
 run_probe rejected_same_name_module_constants examples/rejected_same_name_module_constants.elisa 1
 run_probe call_place_disjunctions examples/call_place_disjunctions.elisa 0
 run_probe rejected_call_place_disjunctions examples/rejected_call_place_disjunctions.elisa 1
+run_probe qualified_constant_across_call examples/qualified_constant_across_call.elisa 0
+run_probe rejected_qualified_constant_across_call examples/rejected_qualified_constant_across_call.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.
