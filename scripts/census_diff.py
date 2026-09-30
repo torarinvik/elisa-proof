@@ -12,6 +12,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from refusal_census import run as run_census
 
 RETRY_TIMEOUT_SECONDS = 600
+PERFORMANCE_RECHECK_COUNT = 2
 
 
 def attach_measurements(census, path):
@@ -54,6 +55,32 @@ def retry_newly_unreadable(baseline, current, retry=run_census):
         current["obligations"] += summary["obligations"]
 
 
+def retry_timing_outliers(baseline, current, retry=run_census):
+    """Use a three-run median for apparent slowdowns; keep failing closed on persistent ones."""
+    for name, old in baseline["files"].items():
+        new = current["files"].get(name)
+        if new is None:
+            continue
+        old_seconds = old.get("seconds", 0)
+        measured_seconds = new.get("seconds", 0)
+        if old_seconds < 2 or measured_seconds <= 2 * old_seconds + 5:
+            continue
+
+        source = ROOT / name if name.startswith("src/") else ROOT / "examples" / name
+        timings = [measured_seconds]
+        complete = True
+        for _ in range(PERFORMANCE_RECHECK_COUNT):
+            _, data, seconds, _ = retry(source, RETRY_TIMEOUT_SECONDS)
+            if data is None:
+                complete = False
+                break
+            timings.append(seconds)
+        if complete:
+            median_seconds = sorted(timings)[len(timings) // 2]
+            new["seconds"] = median_seconds
+            print(f"census timing recheck: {name}: {timings} -> median {median_seconds:.2f}s")
+
+
 def main():
     # Optional arguments: BASELINE CURRENT census files, compared without rerunning (used by the tests).
     baseline = json.loads(Path(sys.argv[1] if len(sys.argv) > 2 else ROOT / "docs/census/census.json").read_text())
@@ -69,6 +96,7 @@ def main():
             current = json.loads((Path(scratch) / "census.json").read_text())
             attach_measurements(current, Path(scratch) / "measurements.json")
             retry_newly_unreadable(baseline, current)
+            retry_timing_outliers(baseline, current)
     regressions, gains = [], []
     for name, old in baseline["files"].items():
         new = current["files"].get(name)

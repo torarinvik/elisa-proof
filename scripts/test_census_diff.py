@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from census_diff import retry_newly_unreadable
+from census_diff import retry_newly_unreadable, retry_timing_outliers
 
 BASE = {"examples": 2, "proven": 5, "obligations": 6, "unreadable": [], "gates": {"no-rule": 1},
         "files": {"a.elisa": {"proven": 3, "obligations": 3, "gates": [], "seconds": 4.0},
@@ -41,6 +41,35 @@ assert gate.returncode == 1 and "new refusal gates ['budget']" in gate.stderr, g
 slow = diff(variant(lambda c: c["files"]["a.elisa"].update(seconds=13.5)))
 assert slow.returncode == 1 and "a.elisa: wall time 4.0s -> 13.5s" in slow.stderr, slow.stderr
 assert diff(variant(lambda c: c["files"]["a.elisa"].update(seconds=12.5))).returncode == 0
+
+noisy_timing = variant(lambda c: c["files"]["a.elisa"].update(seconds=13.5))
+remeasurements = iter((8.0, 9.0))
+
+
+def remeasure(path, timeout):
+    assert path == ROOT / "examples/a.elisa"
+    assert timeout == 600
+    return "a.elisa", {"summary": {}}, next(remeasurements), None
+
+
+retry_timing_outliers(BASE, noisy_timing, remeasure)
+assert noisy_timing["files"]["a.elisa"]["seconds"] == 9.0
+assert diff(noisy_timing).returncode == 0
+
+persistent_slowdown = variant(lambda c: c["files"]["a.elisa"].update(seconds=13.5))
+slow_remeasurements = iter((14.0, 15.0))
+retry_timing_outliers(
+    BASE, persistent_slowdown,
+    lambda path, timeout: ("a.elisa", {"summary": {}}, next(slow_remeasurements), None),
+)
+assert persistent_slowdown["files"]["a.elisa"]["seconds"] == 14.0
+assert diff(persistent_slowdown).returncode == 1
+
+incomplete_recheck = variant(lambda c: c["files"]["a.elisa"].update(seconds=13.5))
+retry_timing_outliers(BASE, incomplete_recheck,
+                      lambda path, timeout: ("a.elisa", None, timeout, "timeout"))
+assert incomplete_recheck["files"]["a.elisa"]["seconds"] == 13.5
+assert diff(incomplete_recheck).returncode == 1
 
 
 def lose(c):
@@ -82,4 +111,4 @@ retry_newly_unreadable(BASE, still_unreadable,
                        lambda path, timeout: ("a.elisa", None, timeout, "timeout"))
 assert still_unreadable["unreadable"] == ["a.elisa"]
 assert "a.elisa" not in still_unreadable["files"]
-print("census diff: drops, new gates, 2x slowdowns, unreadable/missing inputs fail; gains pass")
+print("census diff: drops, new gates, persistent 2x slowdowns, unreadable/missing inputs fail; gains pass")

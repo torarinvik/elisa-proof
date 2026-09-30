@@ -10565,3 +10565,41 @@ census diff (`9,268/12,544` proven versus the committed `6,104/7,844` baseline, 
 The census totals remain run-dependent because runtime fixtures can exceed the fixed wall-time
 limit; unknown results are not proofs or counterexamples. The build manifest records the exact
 source-tree and binary hashes used for the run.
+
+## Cached-global proposition typing work accounting (2026-10-01)
+
+The source adapter was charging `global_bindings + local_bindings` times proposition node count
+times a safety factor against one cumulative per-function budget. That product remains a useful
+per-proposition admission guard, and is still enforced in both the source adapter and kernel.
+But declaration globals are snapshotted and indexed once per source check; charging their full
+cardinality again for every proposition caused false `kernel proposition typing work budget
+exceeded` refusals in the large self-hosting runtime fixture.
+
+The per-function counter now accumulates the kernel's actual bounded proposition-typing work
+across the function's contracts. The source adapter passes the same counter through the cache-aware
+replay path and resets it at the function boundary. This changes only a conservative resource
+refusal budget: every admitted proposition is still formed by the typed kernel, and every claimed
+proof still requires kernel replay. The previous public one-proposition cached-global API keeps its
+original arity and initializes a fresh counter; batching uses a separately named entry point with
+an explicit cumulative counter.
+
+The native proposition-admission harness now checks that measured work increases across two cached
+calls, the first operation beyond the budget refuses at the boundary, a later call recovers after
+the counter is reset, and the legacy entry point remains usable. Malformed local environments, cache
+mutation, recovery, and shared-DAG budget controls also pass. With pinned Stage1 compiler/frontend
+revision `61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` (product SHA-256
+`51b5a29b9cdea44cf79ca5901834233b5664b1dd5f6dc4cce939f697e0a76aeb`), the large runtime fixture
+reported 1,608/2,206 obligations proven, all 1,608 certificates replayed, zero replay gaps, and
+zero typing-work-budget refusals. The prior committed census had 1,579 proofs for this fixture;
+the refreshed full census gained 29 with no per-input proof-count regression or new refusal gate.
+
+One full `scripts/test.sh` run reached and passed the native harness, all functional/adversarial
+groups, and O2/O3 replay, but the final timing gate sampled `kernel_intern_runtime.elisa` at 28.26s
+against a 10.23s baseline while a separate proof process was saturating a core. A direct rerun on
+the same binary took 7.65s. To avoid turning one scheduling outlier into a false regression, the
+census diff now reruns only measurements beyond its existing slowdown threshold and compares the
+median of three completed runs; persistent slowdowns still fail, and incomplete rechecks preserve
+the original failure. Unit tests cover noisy, persistent, and timed-out rechecks. The full census
+diff subsequently passed at 10,972/14,684 proven versus the partial 6,104/7,844 baseline, with no
+proof-count drops or new gates. The whole `scripts/test.sh` command was not repeated from its first
+step after this measurement-only harness adjustment.
