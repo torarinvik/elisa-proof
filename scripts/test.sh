@@ -410,7 +410,7 @@ fi
 # The replay checker deliberately bounds branch-state retention to keep the self-hosting corpus
 # deterministic. Keep a coverage floor, require the important summaries, and require every
 # budget exhaustion to be classified as unsupported rather than silently unknown.
-KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-1200000}"
+KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-4000000}"
 kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
 kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
 ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \
