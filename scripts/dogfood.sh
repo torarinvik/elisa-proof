@@ -830,6 +830,8 @@ run_probe linear_arithmetic_tier examples/linear_arithmetic_tier.elisa 0
 run_probe rejected_linear_arithmetic_tier examples/rejected_linear_arithmetic_tier.elisa 1
 run_probe signed_negative_constant_replay examples/signed_negative_constant_replay.elisa 0
 run_probe rejected_signed_negative_constant_replay examples/rejected_signed_negative_constant_replay.elisa 1
+run_probe linear_compound_facts examples/linear_compound_facts.elisa 0
+run_probe rejected_linear_compound_facts examples/rejected_linear_compound_facts.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.

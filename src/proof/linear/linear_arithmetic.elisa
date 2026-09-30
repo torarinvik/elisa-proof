@@ -1,6 +1,7 @@
 const PROOF_LINEAR_FM_TERM_LIMIT: usize = 512
 const PROOF_LINEAR_FM_ATOM_LIMIT: usize = 8
 const PROOF_LINEAR_FM_CONSTRAINT_LIMIT: usize = 24
+const PROOF_LINEAR_FM_ROW_LIMIT: usize = 256
 
 extend ElisaProof:
     public:
@@ -114,15 +115,31 @@ extend ElisaProof:
         def proof_linear_fact_constraints(facts: darray[Ast::Expr]&, signed_only: bool, reserve: usize, terms: mutable darray[ProofNormalTerm]&, spans: mutable darray[ProofLinearSpan]&) -> void:
             for fact in facts |fact, facts, signed_only, reserve, terms, spans|:
                 break if spans.count + reserve >= PROOF_LINEAR_FM_CONSTRAINT_LIMIT
-                match proof_strip_parens(fact):
-                    Ast::Expr.Binary(left, operator, right, _):
-                        continue if not proof_is_comparison(operator) or operator == TokenKind.BangEq
-                        continue if not proof_primitive_comparison(left, right, facts)
-                        continue if signed_only and not proof_signed_expression_safe(fact, facts)
-                        if spans.count + reserve + 2 <= PROOF_LINEAR_FM_CONSTRAINT_LIMIT or operator != TokenKind.EqEq:
-                            proof_linear_push_comparison(left, operator, right, signed_only, facts, terms, spans)
-                    _:
-                        pass
+                proof_linear_fact_parts(fact, false, facts, signed_only, reserve, terms, spans, 0)
+
+        # The comparisons a fact asserts conjunctively: `A and B` asserts both, `not (A or B)`
+        # asserts `not A` and `not B`, and `not (a < b)` asserts `a >= b`. Negating a primitive
+        # comparison keeps its operands, so the guards run on the comparison node as written.
+        # A negated `==` is a disjunction (`<` or `>`) and is skipped, as is a bare `!=`.
+        def proof_linear_fact_parts(fact: Ast::Expr, negated: bool, facts: darray[Ast::Expr]&, signed_only: bool, reserve: usize, terms: mutable darray[ProofNormalTerm]&, spans: mutable darray[ProofLinearSpan]&, depth: usize) -> void:
+            return if depth >= 16 or spans.count + reserve >= PROOF_LINEAR_FM_CONSTRAINT_LIMIT
+            match proof_strip_parens(fact):
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    proof_linear_fact_parts(operand, not negated, facts, signed_only, reserve, terms, spans, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if (operator == TokenKind.And and not negated) or (operator == TokenKind.Or and negated):
+                        proof_linear_fact_parts(left, negated, facts, signed_only, reserve, terms, spans, depth + 1)
+                        proof_linear_fact_parts(right, negated, facts, signed_only, reserve, terms, spans, depth + 1)
+                        return
+                    return if not proof_is_comparison(operator)
+                    effective: TokenKind = proof_comparison_negation(operator) if negated else operator
+                    return if effective == TokenKind.BangEq or effective == TokenKind.Eof
+                    return if not proof_primitive_comparison(left, right, facts)
+                    return if signed_only and not proof_signed_expression_safe(proof_strip_parens(fact), facts)
+                    if spans.count + reserve + 2 <= PROOF_LINEAR_FM_CONSTRAINT_LIMIT or effective != TokenKind.EqEq:
+                        proof_linear_push_comparison(left, effective, right, signed_only, facts, terms, spans)
+                _:
+                    pass
 
         def proof_linear_gcd(left: i64, right: i64) -> i64:
             a: mutable i64 = left if left >= 0 else 0 - left
@@ -189,7 +206,7 @@ extend ElisaProof:
                     for negative in 0..<row_count |negative, positive, upper, width, atom_index, rows, next, next_count|:
                         lower: i64 = rows[negative * width + atom_index]
                         continue if lower >= 0
-                        return false if next_count >= PROOF_LINEAR_FM_CONSTRAINT_LIMIT
+                        return false if next_count >= PROOF_LINEAR_FM_ROW_LIMIT
                         divisor: i64 = proof_linear_gcd(upper, lower)
                         positive_scale: i64 = (0 - lower) / divisor
                         negative_scale: i64 = upper / divisor
