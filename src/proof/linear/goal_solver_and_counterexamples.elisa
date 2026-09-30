@@ -316,6 +316,46 @@ extend ElisaProof:
             return (a.has_upper and b.has_lower and a.upper < b.lower) or (a.has_lower and b.has_upper and a.lower > b.upper) if operator == TokenKind.BangEq
             return false
 
+        # Discharge a primitive comparison of a source term when the path already records that
+        # exact term equal to a small literal. This local step intentionally ignores unrelated
+        # path facts: a later unsupported fixed-width expression must not hide a direct fact
+        # such as `WbRuntime::TIMER_DUE_INTERVAL == 2`. Kernel replay repeats the same narrow
+        # rule from the exact premise and literal nodes.
+        def proof_comparison_from_equality_literal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if not proof_is_comparison(operator)
+            left_constant: (known: bool, value: i64) = proof_small_nonnegative_constant(left)
+            right_constant: (known: bool, value: i64) = proof_small_nonnegative_constant(right)
+            return false if left_constant.known == right_constant.known
+            return false if not proof_primitive_comparison(left, right, facts)
+            term: Ast::Expr = right if left_constant.known else left
+            goal_constant: i64 = left_constant.value if left_constant.known else right_constant.value
+            term_is_left: bool = not left_constant.known
+            for fact in facts |term, operator, goal_constant, term_is_left, facts|:
+                match fact:
+                    Ast::Expr.Binary(fact_left, TokenKind.EqEq, fact_right, _):
+                        if proof_expr_equal(fact_left, term) and proof_primitive_comparison(fact_left, fact_right, facts):
+                            fact_constant: (known: bool, value: i64) = proof_small_nonnegative_constant(fact_right)
+                            if fact_constant.known:
+                                return proof_small_comparison_value(fact_constant.value, operator, goal_constant) if term_is_left
+                                return proof_small_comparison_value(goal_constant, operator, fact_constant.value)
+                        if proof_expr_equal(fact_right, term) and proof_primitive_comparison(fact_left, fact_right, facts):
+                            fact_constant: (known: bool, value: i64) = proof_small_nonnegative_constant(fact_left)
+                            if fact_constant.known:
+                                return proof_small_comparison_value(fact_constant.value, operator, goal_constant) if term_is_left
+                                return proof_small_comparison_value(goal_constant, operator, fact_constant.value)
+                    _:
+                        pass
+            return false
+
+        def proof_small_comparison_value(left: i64, operator: TokenKind, right: i64) -> bool:
+            return left == right if operator == TokenKind.EqEq
+            return left != right if operator == TokenKind.BangEq
+            return left < right if operator == TokenKind.Lt
+            return left > right if operator == TokenKind.Gt
+            return left <= right if operator == TokenKind.LtEq
+            return left >= right if operator == TokenKind.GtEq
+            return false
+
         # A bounded, deterministic counterexample search for the same small integer fragment
         # used by the prover. This is a diagnostic aid, never an acceptance rule: a witness is
         # emitted only when every fact and the failed goal evaluate exactly under the assignment.
@@ -327,40 +367,74 @@ extend ElisaProof:
                 index <- index + 1
             return names.count
 
-        def proof_counterexample_collect_names(expression: Ast::Expr, names: mutable darray[sview]&) -> void:
+        def proof_counterexample_collect_names(expression: Ast::Expr, names: mutable darray[sview]&, facts: darray[Ast::Expr]&) -> void:
             match expression:
                 Ast::Expr.Ident(name, _):
-                    if name != "" and proof_counterexample_name_index(names, name) == names.count:
+                    literal: (known: bool, value: i64) = proof_counterexample_fact_literal(expression, facts)
+                    if name != "" and not literal.known and proof_counterexample_name_index(names, name) == names.count:
                         names.push(name)
                 Ast::Expr.Paren(inner, _):
-                    proof_counterexample_collect_names(inner, names)
+                    proof_counterexample_collect_names(inner, names, facts)
                 Ast::Expr.Unary(_, operand, _):
-                    proof_counterexample_collect_names(operand, names)
+                    proof_counterexample_collect_names(operand, names, facts)
                 Ast::Expr.Binary(left, _, right, _):
-                    proof_counterexample_collect_names(left, names)
-                    proof_counterexample_collect_names(right, names)
+                    proof_counterexample_collect_names(left, names, facts)
+                    proof_counterexample_collect_names(right, names, facts)
                 _:
                     pass
 
-        def proof_counterexample_int(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&) -> (known: bool, value: i64):
+        # A qualified constant is evaluable only when this exact term has an equality
+        # premise to one integer literal. This also folds a local scalar constrained to an
+        # exact literal, avoiding needless Cartesian enumeration of source constant aliases.
+        # Conflicting literal premises make resolution unknown.
+        def proof_counterexample_fact_literal(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, value: i64):
+            found: mutable bool = false
+            value: mutable i64 = 0
+            for fact in facts |expression, found, value|:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        candidate: mutable Ast::Expr = Ast::Expr.Invalid
+                        if proof_expr_equal(expression, left):
+                            candidate <- right
+                        elif proof_expr_equal(expression, right):
+                            candidate <- left
+                        else:
+                            continue
+                        match proof_strip_parens(candidate):
+                            Ast::Expr.IntLit(literal, _):
+                                if found and value != literal:
+                                    return (false, 0)
+                                value <- literal
+                                found <- true
+                            _:
+                                pass
+                    _:
+                        pass
+            return (found, value)
+
+        def proof_counterexample_int(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&, facts: darray[Ast::Expr]&) -> (known: bool, value: i64):
             match expression:
                 Ast::Expr.IntLit(value, _):
                     return (true, value)
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_int(inner, names, values)
+                    return proof_counterexample_int(inner, names, values, facts)
                 Ast::Expr.Ident(name, _):
+                    literal: (known: bool, value: i64) = proof_counterexample_fact_literal(expression, facts)
+                    return literal if literal.known
                     index: usize = proof_counterexample_name_index(names, name)
                     return (true, values[index]) if index < values.count
+                Ast::Expr.Scope(_, _, _):
+                    return proof_counterexample_fact_literal(expression, facts)
                 Ast::Expr.Unary(operator, operand, _):
-                    inner: (known: bool, value: i64) = proof_counterexample_int(operand, names, values)
+                    inner: (known: bool, value: i64) = proof_counterexample_int(operand, names, values, facts)
                     return (false, 0) if not inner.known
                     return inner if operator == TokenKind.Plus
                     if operator == TokenKind.Minus:
                         return (false, 0) if inner.value == proof_i64_min()
                         return (true, 0 - inner.value)
                 Ast::Expr.Binary(left, operator, right, _):
-                    a: (known: bool, value: i64) = proof_counterexample_int(left, names, values)
-                    b: (known: bool, value: i64) = proof_counterexample_int(right, names, values)
+                    a: (known: bool, value: i64) = proof_counterexample_int(left, names, values, facts)
+                    b: (known: bool, value: i64) = proof_counterexample_int(right, names, values, facts)
                     return (false, 0) if not a.known or not b.known
                     if operator == TokenKind.Plus:
                         return proof_add_safe(a.value, b.value)
@@ -386,7 +460,7 @@ extend ElisaProof:
                     pass
             return (false, 0)
 
-        def proof_counterexample_bool(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&) -> (known: bool, value: bool):
+        def proof_counterexample_bool(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&, facts: darray[Ast::Expr]&) -> (known: bool, value: bool):
             # A compiler type marker states a declared type, not a constraint on the model. It
             # holds at every point of the domain, so bounded enumeration must read it as true
             # rather than as an unknown fact that abandons the search.
@@ -395,20 +469,20 @@ extend ElisaProof:
                 Ast::Expr.BoolLit(value, _):
                     return (true, value)
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_bool(inner, names, values)
+                    return proof_counterexample_bool(inner, names, values, facts)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
-                    inner: (known: bool, value: bool) = proof_counterexample_bool(operand, names, values)
+                    inner: (known: bool, value: bool) = proof_counterexample_bool(operand, names, values, facts)
                     return (inner.known, not inner.value) if inner.known
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And or operator == TokenKind.Or:
-                        a_bool: (known: bool, value: bool) = proof_counterexample_bool(left, names, values)
-                        b_bool: (known: bool, value: bool) = proof_counterexample_bool(right, names, values)
+                        a_bool: (known: bool, value: bool) = proof_counterexample_bool(left, names, values, facts)
+                        b_bool: (known: bool, value: bool) = proof_counterexample_bool(right, names, values, facts)
                         return (false, false) if not a_bool.known or not b_bool.known
                         return (true, a_bool.value and b_bool.value) if operator == TokenKind.And
                         return (true, a_bool.value or b_bool.value)
                     if proof_is_comparison(operator):
-                        a: (known: bool, value: i64) = proof_counterexample_int(left, names, values)
-                        b: (known: bool, value: i64) = proof_counterexample_int(right, names, values)
+                        a: (known: bool, value: i64) = proof_counterexample_int(left, names, values, facts)
+                        b: (known: bool, value: i64) = proof_counterexample_int(right, names, values, facts)
                         if a.known and b.known:
                             return (true, a.value == b.value) if operator == TokenKind.EqEq
                             return (true, a.value != b.value) if operator == TokenKind.BangEq
@@ -417,8 +491,8 @@ extend ElisaProof:
                             return (true, a.value <= b.value) if operator == TokenKind.LtEq
                             return (true, a.value >= b.value) if operator == TokenKind.GtEq
                         if operator == TokenKind.EqEq or operator == TokenKind.BangEq:
-                            left_bool: (known: bool, value: bool) = proof_counterexample_bool(left, names, values)
-                            right_bool: (known: bool, value: bool) = proof_counterexample_bool(right, names, values)
+                            left_bool: (known: bool, value: bool) = proof_counterexample_bool(left, names, values, facts)
+                            right_bool: (known: bool, value: bool) = proof_counterexample_bool(right, names, values, facts)
                             if left_bool.known and right_bool.known:
                                 equal: bool = left_bool.value == right_bool.value
                                 return (true, equal) if operator == TokenKind.EqEq
@@ -427,18 +501,34 @@ extend ElisaProof:
                     pass
             return (false, false)
 
+        def proof_counterexample_source_constant_term(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview) -> bool:
+            return false if not proof_counterexample_fact_literal(expression, facts).known
+            for fact in facts |expression, report, owner|:
+                continue if not proof_fact_is_source_global_constant(report, fact, owner)
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, TokenKind.EqEq, Ast::Expr.IntLit(_, _), _):
+                        return true if proof_expr_equal(expression, left)
+                    _:
+                        pass
+            return false
+
         # Counterexample assignments are user-facing semantic claims, unlike heuristic proof
         # search. Restrict them to atomic scalar comparisons: the evaluator stores every value in
         # i64 and cannot model narrower-width wrapping or overloaded operations on computed terms.
-        def proof_counterexample_integer_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+        # Source-constant equalities are the sole exception to requiring a primitive marker: their
+        # exact immutable declaration and integer value are independently recorded as a trace.
+        def proof_counterexample_integer_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(_, _):
                     return true
                 Ast::Expr.Ident(_, _):
-                    return proof_scalar_term_witnessed(expression, facts, depth + 1)
+                    return proof_scalar_term_witnessed(expression, facts, depth + 1) or proof_counterexample_source_constant_term(expression, facts, report, owner)
+                Ast::Expr.Scope(_, _, _):
+                    constant: (known: bool, value: i64) = proof_counterexample_fact_literal(expression, facts)
+                    return constant.known and (proof_scalar_term_witnessed(expression, facts, depth + 1) or proof_counterexample_source_constant_term(expression, facts, report, owner))
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_integer_atom(inner, facts, depth + 1)
+                    return proof_counterexample_integer_atom(inner, facts, report, owner, depth + 1)
                 Ast::Expr.Unary(TokenKind.Plus, _, _) | Ast::Expr.Unary(TokenKind.Minus, _, _):
                     return proof_constant_int(expression).known
                 _:
@@ -456,21 +546,21 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_counterexample_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+        def proof_counterexample_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             return true if proof_type_marker_callee(expression)
             match expression:
                 Ast::Expr.BoolLit(_, _):
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_fragment(inner, facts, depth + 1)
+                    return proof_counterexample_fragment(inner, facts, report, owner, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
-                    return proof_counterexample_fragment(operand, facts, depth + 1)
+                    return proof_counterexample_fragment(operand, facts, report, owner, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And or operator == TokenKind.Or:
-                        return proof_counterexample_fragment(left, facts, depth + 1) and proof_counterexample_fragment(right, facts, depth + 1)
+                        return proof_counterexample_fragment(left, facts, report, owner, depth + 1) and proof_counterexample_fragment(right, facts, report, owner, depth + 1)
                     return false if not proof_is_comparison(operator)
-                    return true if proof_counterexample_integer_atom(left, facts, depth + 1) and proof_counterexample_integer_atom(right, facts, depth + 1)
+                    return true if proof_counterexample_integer_atom(left, facts, report, owner, depth + 1) and proof_counterexample_integer_atom(right, facts, report, owner, depth + 1)
                     return (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and proof_counterexample_boolean_atom(left, facts, depth + 1) and proof_counterexample_boolean_atom(right, facts, depth + 1)
                 _:
                     return false
@@ -521,9 +611,9 @@ extend ElisaProof:
                 return false if budget == 0
                 budget <- budget - 1
                 for fact in facts |fact, names, values|:
-                    fact_value: (known: bool, value: bool) = proof_counterexample_bool(fact, names, values)
+                    fact_value: (known: bool, value: bool) = proof_counterexample_bool(fact, names, values, facts)
                     return false if not fact_value.known or not fact_value.value
-                goal_value: (known: bool, value: bool) = proof_counterexample_bool(goal, names, values)
+                goal_value: (known: bool, value: bool) = proof_counterexample_bool(goal, names, values, facts)
                 return goal_value.known and not goal_value.value
             start: usize = starts[index]
             end: usize = start + counts[index]
@@ -536,14 +626,14 @@ extend ElisaProof:
 
         # Populate `assignments` only after an exact falsifying state is found. The result uses
         # ordinary equality expressions so existing JSON tooling can display/replay it directly.
-        def proof_find_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, assignments: mutable darray[Ast::Expr]&) -> bool:
-            return false if not proof_counterexample_fragment(goal, facts, 0)
+        def proof_find_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: ProofReport&, owner: sview, assignments: mutable darray[Ast::Expr]&) -> bool:
+            return false if not proof_counterexample_fragment(goal, facts, report, owner, 0)
             for fact in facts:
-                return false if not proof_counterexample_fragment(fact, facts, 0)
+                return false if not proof_counterexample_fragment(fact, facts, report, owner, 0)
             names: mutable darray[sview] = []
             for fact in facts |names|:
-                proof_counterexample_collect_names(fact, &names)
-            proof_counterexample_collect_names(goal, &names)
+                proof_counterexample_collect_names(fact, &names, facts)
+            proof_counterexample_collect_names(goal, &names, facts)
             return false if names.count > ElisaProofKernelCore::PROOF_KERNEL_FINITE_MODEL_SYMBOL_LIMIT
             bounds: mutable darray[ProofBound] = []
             for fact in facts |bounds|:

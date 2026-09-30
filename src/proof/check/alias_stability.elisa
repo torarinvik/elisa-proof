@@ -71,6 +71,29 @@ extend ElisaProof:
                 return true if proof_expr_equal(existing, expression)
             return false
 
+        # A qualified module constant is immutable independently of the function's alias
+        # analysis. Preserve only the exact fact that entered through the source-constant
+        # boundary; replay separately resolves that trace to one immutable declaration.
+        def proof_source_global_constant_term(report: ProofReport&, term: Ast::Expr, owner: sview) -> bool:
+            for trace in report.fact_traces:
+                continue if trace.name != owner or trace.kind != "global-constant-qualified"
+                match trace.expression:
+                    Ast::Expr.Binary(reference, TokenKind.EqEq, Ast::Expr.IntLit(_, _), _):
+                        return true if proof_expr_equal(reference, term)
+                    _:
+                        pass
+            return false
+
+        def proof_fact_is_source_global_constant(report: ProofReport&, expression: Ast::Expr, owner: sview) -> bool:
+            for trace in report.fact_traces:
+                continue if trace.name != owner
+                if proof_expr_equal(trace.expression, expression):
+                    return true if trace.kind == "global-constant" or trace.kind == "global-constant-qualified"
+                    if trace.kind == "type-bound":
+                        scalar_marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+                        return true if scalar_marker.known and proof_source_global_constant_term(report, scalar_marker.term, owner)
+            return false
+
         # Type bounds come from the compiler's variable type, not from mutable program state.
         # Preserve only those explicitly traced facts across an opaque/recursive call, and only
         # while their lexical binding is still live. Move-containing calls are excluded because
@@ -372,7 +395,7 @@ extend ElisaProof:
         # its caller's state only through references and globals, so such a fact holds after
         # the call exactly as before it. Anything else — a field, an element, a container, a
         # call, a name the body may reference — is not stable.
-        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, local_extents: darray[sview]&, depth: usize) -> bool:
+        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, local_extents: darray[sview]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(_, _):
@@ -387,6 +410,8 @@ extend ElisaProof:
                     return false if any existing in aliased where existing == name
                     return false if not (any candidate in names where candidate == name) and not (any parameter in parameters where parameter == name)
                     return proof_scalar_witnessed(facts, name)
+                Ast::Expr.Scope(_, _, _):
+                    return proof_source_global_constant_term(report, expression, owner)
                 Ast::Expr.Tuple(_, _):
                     # A loop binder's atom `(name, offset)`: the binder is a local of this body.
                     binder: sview = proof_place_root_name(expression, 0)
@@ -422,14 +447,14 @@ extend ElisaProof:
                     # record -- subject to the same reachability test on the binding itself that
                     # every other retained value passes.
                     for element in elements |facts, names, parameters, aliased, shared_extents, local_extents, depth|:
-                        return false if not proof_expr_call_stable(element, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                        return false if not proof_expr_call_stable(element, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1)
                     return true
                 Ast::Expr.Call(_, arguments, _, _):
                     # A scalar-term marker is a statement about a term's *type*, so it is worth
                     # exactly what the term's identity is worth: if the term still denotes the same
                     # value after the call, the type statement about it still holds.
                     marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
-                    return proof_expr_call_stable(marker.term, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) if marker.known
+                    return proof_expr_call_stable(marker.term, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1) if marker.known
                     # An ordinary call term keeps its value across another call when a pure-call
                     # witness says it denotes one value, and its arguments are themselves stable
                     # so the same text still names the same arguments. This is what carries a
@@ -437,17 +462,17 @@ extend ElisaProof:
                     # together with the witness recorded beside that fact when it is built.
                     return false if not proof_scalar_term_witnessed(expression, facts, 0)
                     for argument in arguments |facts, names, parameters, aliased, shared_extents, local_extents, depth|:
-                        return false if not proof_expr_call_stable(argument, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                        return false if not proof_expr_call_stable(argument, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1)
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
-                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, local_extents, depth + 1)
+                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, local_extents, report, owner, depth + 1)
                 _:
                     return false
 

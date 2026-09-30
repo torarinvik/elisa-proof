@@ -24,16 +24,16 @@ positive = report("module_u8_constant_contract.elisa", 0)
 assert positive["status"] == positive["verification_state"] == "proved", positive
 assert not positive["findings"], positive
 negative = report("rejected_module_u8_constant_contract.elisa", 1)
-assert negative["status"] == "failed" and negative["verification_state"] == "unknown", negative
+assert negative["status"] == "failed" and negative["verification_state"] == "disproved", negative
 assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong_action"
-           and not f["counterexample_found"] for f in negative["findings"]), negative
+           and f["status"] == "disproved" and f["counterexample_found"] for f in negative["findings"]), negative
 signed = report("module_negative_i64_constant_contract.elisa", 0)
 assert signed["status"] == signed["verification_state"] == "proved", signed
 assert not signed["findings"], signed
 wrong_signed = report("rejected_negative_i64_module_constant_contract.elisa", 1)
-assert wrong_signed["status"] == "failed" and wrong_signed["verification_state"] == "unknown", wrong_signed
+assert wrong_signed["status"] == "failed" and wrong_signed["verification_state"] == "disproved", wrong_signed
 assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong_status"
-           and not f["counterexample_found"] for f in wrong_signed["findings"]), wrong_signed
+           and f["status"] == "disproved" and f["counterexample_found"] for f in wrong_signed["findings"]), wrong_signed
 qualified = report("module_qualified_global_constant_contract.elisa", 0)
 assert qualified["status"] == qualified["verification_state"] == "proved", qualified
 assert not qualified["findings"], qualified
@@ -41,4 +41,28 @@ qualified_negative = report("rejected_qualified_global_constant_boundary.elisa",
 assert qualified_negative["status"] == "failed" and qualified_negative["verification_state"] == "unknown", qualified_negative
 assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong_boundary"
            for f in qualified_negative["findings"]), qualified_negative
-print("module-local u8, signed i64 and qualified constants preserve range/scope; false contracts stay open")
+extended = report("extend_qualified_u8_return.elisa", 0)
+assert extended["status"] == extended["verification_state"] == "proved", extended
+assert not extended["findings"], extended
+assert any(d["name"] == "interval_status" and d["verified"] and d["ensures"] == 1
+           for d in extended["declaration_details"]), extended
+extended_negative = report("rejected_extend_qualified_u8_return.elisa", 1)
+assert extended_negative["status"] == "failed", extended_negative
+assert extended_negative["summary"]["semantic_errors"] == 0, extended_negative
+assert extended_negative["replay"]["gaps"] == 0, extended_negative
+assert extended_negative["replay"]["certificates"] == extended_negative["replay"]["replayed"], extended_negative
+assert any(f["kind"] == "ensure-unproven" and f["name"] == "interval_status_wrong_bound"
+           for f in extended_negative["findings"]), extended_negative
+extension_local = report("extend_scope_local_u8_constant.elisa", 0)
+assert extension_local["status"] == extension_local["verification_state"] == "proved", extension_local
+assert not extension_local["findings"], extension_local
+assert any(d["name"] == "interval_status" and d["verified"] and d["ensures"] == 1
+           for d in extension_local["declaration_details"]), extension_local
+extension_local_negative = report("rejected_extend_scope_local_u8_constant.elisa", 1)
+assert extension_local_negative["status"] == "failed", extension_local_negative
+assert extension_local_negative["summary"]["semantic_errors"] == 0, extension_local_negative
+assert extension_local_negative["replay"]["gaps"] == 0, extension_local_negative
+assert extension_local_negative["replay"]["certificates"] == extension_local_negative["replay"]["replayed"], extension_local_negative
+assert any(f["kind"] == "ensure-unproven" and f["name"] == "interval_status_wrong_bound"
+           for f in extension_local_negative["findings"]), extension_local_negative
+print("module-local, signed and qualified constants preserve scalar bounds across extensions; false contracts stay open")
