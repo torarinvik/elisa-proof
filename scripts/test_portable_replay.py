@@ -263,6 +263,22 @@ dict_theorem = {
 dict_capture["theorems"] = [reseal(dict_capture, dict_theorem)]
 refused(dict_capture, "dictionary-quantifier-capture", "rejected", "kernel-rejected")
 
+# Positive control: under the same v == 1 hypothesis and dictionary, k != v is true.
+# This confirms the forged sequent above reaches quantifier replay with a usable free scalar.
+dict_control = copy.deepcopy(dict_capture)
+not_equal_body = append_node(dict_control, "binary", "!=", key_var, value_var)
+not_equal_forall = append_node(dict_control, "quantifier", "forall", dict_values, not_equal_body,
+                               name="k", auxiliary=2, secondary_name="v")
+dict_control_theorem = {
+    "goal_id": 0, "name": "dictionary-binder-capture-control", "line": 1,
+    "rule": "quantifier-forall", "hypotheses": [scalar_free_v, free_v_is_one],
+    "hypothesis_origins": [{"kind": "forged"}, {"kind": "forged"}],
+    "conclusion": not_equal_forall, "statement": "", "goal_fingerprint": 0,
+}
+dict_control["theorems"] = [reseal(dict_control, dict_control_theorem)]
+control_code, control_result = replay(dict_control, "dictionary-quantifier-capture-control")
+assert control_code == 0 and control_result["status"] == "replayed", control_result
+
 base = packages["verified"]
 assumption = next(t for t in base["theorems"] if t["rule"] == "goal" and t["conclusion"] in t["hypotheses"])
 code, result = replay(with_theorem(base, assumption), "assumption")

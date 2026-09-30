@@ -10454,8 +10454,10 @@ refuse as expected. Regression is in `scripts/test_portable_replay.py`.
 That test also forges `forall k, v in {v: 0}, k == v` under the hypothesis `v == 1`. The dictionary
 key `v` is free in the range, while `v` in the body is the value binder. Sequential substitution
 `k -> v`, then `v -> 0` would incorrectly prove `0 == 0`; the kernel's fresh-marker substitution
-keeps the pair simultaneous and rejects the false theorem. The existing finite-dictionary positive
-package remains a control.
+keeps the pair simultaneous and rejects the false theorem. A paired positive package with `k != v`
+under the same `v == 1` hypothesis replays, confirming the forged case reaches quantifier replay
+with a usable free scalar; the existing finite-dictionary positive package remains an additional
+control.
 
 **Full-suite follow-up.** `scripts/test.sh` was rerun after both the opaque-call reservation and this
 portable quantifier regression, using the isolated Stage1
