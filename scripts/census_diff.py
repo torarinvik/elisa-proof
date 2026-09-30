@@ -10,9 +10,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def attach_measurements(census, path):
+    """Attach optional wall times for comparisons without polluting stable census data."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    for name, measurement in data.get("files", {}).items():
+        if name in census["files"] and isinstance(measurement.get("seconds"), (float, int)):
+            census["files"][name]["seconds"] = measurement["seconds"]
+
+
 def main():
     # Optional arguments: BASELINE CURRENT census files, compared without rerunning (used by the tests).
     baseline = json.loads(Path(sys.argv[1] if len(sys.argv) > 2 else ROOT / "docs/census/census.json").read_text())
+    if len(sys.argv) <= 2:
+        # Accept the historical combined report while migrating to the stable report + timing sidecar.
+        attach_measurements(baseline, ROOT / "docs/census/measurements.json")
     if len(sys.argv) > 2:
         current = json.loads(Path(sys.argv[2]).read_text())
     else:
@@ -20,6 +34,7 @@ def main():
             subprocess.run([sys.executable, str(ROOT / "scripts/refusal_census.py"), scratch], check=True,
                            stdout=subprocess.DEVNULL)
             current = json.loads((Path(scratch) / "census.json").read_text())
+            attach_measurements(current, Path(scratch) / "measurements.json")
     regressions, gains = [], []
     for name, old in baseline["files"].items():
         new = current["files"].get(name)

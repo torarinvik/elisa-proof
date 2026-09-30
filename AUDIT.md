@@ -10515,3 +10515,24 @@ passed. The build used the clean compiler worktree at pinned revision
 did not match this proof checkout's compiler pin. The full test matrix and performance census were
 not rerun: unrelated compiler/proof jobs were actively consuming CPU. Do not call the complete suite
 green on the basis of these focused results.
+
+## Refusal census baseline and timeouts (2026-09-30)
+
+The census runner now checks the proof binary hash against its build manifest, requires the pinned
+Stage1 compiler/frontend revision, and verifies the proof source-tree digest before and after a
+run. The stable count report excludes timing data; per-input wall times and the slowest-input list
+are in the separate measurements sidecar. The dogfood inventory explicitly includes
+`src/proof/kernel_core.elisa` in addition to the examples directory. A timeout is recorded as
+unreadable/unknown, never as a failed proof obligation. Newly discovered unreadable inputs may be
+retried explicitly with `--retry-unreadable`; routine census-diff runs do not silently grant every
+new input a ten-minute timeout.
+
+On 2026-09-30, the pinned Stage1 binary (compiler/frontend revision
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f`, proof HEAD `907c18254e6e1030de66313c48423d41cf766d96`)
+produced reports for 680 of 691 examples plus the kernel-core dogfood unit: 9,262 of 12,265
+obligations proved across readable reports, with 86 distinct refusal buckets. Eleven runtime/test
+harness examples exceeded the 120-second per-input deadline and are listed as unknown in
+`docs/census/census.json`; they are not included in those totals. This is a measured but incomplete
+baseline, not evidence that those eleven inputs are rejected or proved. Census serializer and
+census-diff tests, Python syntax checks, the source-length check, and `git diff --check` passed. The
+full test suite was not rerun.
