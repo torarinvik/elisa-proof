@@ -68,7 +68,7 @@ assert any(f["kind"] == "ensure-unproven" and f["name"] == "interval_status_wron
 timer_error_map = report("extend_timer_wit_error_tag_bound.elisa", 0)
 assert timer_error_map["status"] == timer_error_map["verification_state"] == "proved", timer_error_map
 assert not timer_error_map["findings"], timer_error_map
-assert any(d["name"] == "timer_wit_error_tag" and d["verified"] and d["ensures"] == 1
+assert any(d["name"] == "timer_wit_error_tag" and d["verified"] and d["ensures"] == 2
            for d in timer_error_map["declaration_details"]), timer_error_map
 scoped_branch_bound = report("extend_scoped_constant_branch_bound.elisa", 0)
 assert scoped_branch_bound["status"] == scoped_branch_bound["verification_state"] == "proved", scoped_branch_bound
