@@ -10366,3 +10366,33 @@ as they leave scope. Only a block whose body falls through is adopted; other blo
 the old clear. Fixtures: `examples/can_block_frame.elisa` (proved, replayed) and
 `examples/rejected_can_block_frame.elisa` (own count, assigned local, block-local relation stay
 unproven). An explicit `modifies` clause still needs front-end syntax the compiler lacks.
+
+## Mutable aggregate `old(...)` snapshots and marker namespace (2026-09-30)
+
+An `old(field)` read through a mutable aggregate reference cannot be represented by the current
+symbolic state: the reference binding still names the same handle after a field write, while its
+pointee now has exit-state contents. Treating the handle as its own entry value could identify
+`old(cell.value)` with the changed `cell.value` and falsely prove a postcondition. The checker now
+uses an opaque entry-state marker for mutable aggregate reference parameters. This intentionally
+refuses claims it cannot relate to a tracked entry snapshot; it does not invent a field value.
+`examples/rejected_old_mutable_reference.elisa` checks the changed-field case, and
+`scripts/test_old_mutable_reference.py` requires a failed verification with zero replay gaps and
+all emitted certificates replayed.
+
+The marker itself is part of the source-adapter trust boundary: because it is an AST identifier,
+a source declaration with the same name could otherwise turn an opaque marker into a resolvable
+call. Both the aggregate entry-state and scalar-reference-state marker names are now reserved by
+`proof_name_is_reserved_internal`. Two adversarial fixtures declare those exact names and require
+an `unsupported` result with a `proof-internal-name` finding before any theorem is admitted.
+This is a conservative namespace restriction, not an added kernel rule.
+
+**Evidence.** Stage0 `e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11` is clean, and Stage1
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` passed its source-freshness assertion. The project
+build, mutable-reference regression, both marker-collision attacks, and all twelve source-admission
+routes pass on that pair. The full suite also passed on the previous clean Stage1 snapshot before
+the namespace audit. On the current snapshot, the full suite passed its targeted and fixture matrix
+but the final `kernel-replay-audit` produced no report before the 180-second watchdog; other
+compiler/prover jobs were concurrently using the host. This is incomplete evidence, not a passing
+audit, and the current full suite remains to be rerun without that contention. Do not treat the
+mutable-reference feature as fully generalized: entry snapshots for other aliasing and aggregate
+shapes remain unsupported unless a source-bound state model is established.
