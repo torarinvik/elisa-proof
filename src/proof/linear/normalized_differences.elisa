@@ -89,8 +89,86 @@ extend ElisaProof:
         def proof_normalized_difference_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             return false if not proof_is_comparison(operator) or operator == TokenKind.BangEq
             normal: (known: bool, first: ProofAffine, second: ProofAffine) = proof_normal_difference(left, right, facts)
-            return false if not normal.known
+            if not normal.known:
+                scaled: (known: bool, first: ProofAffine, second: ProofAffine, operator: TokenKind) = proof_scaled_single_difference(left, operator, right, facts)
+                return false if not scaled.known
+                return proof_difference_affine_goal(scaled.first, scaled.operator, scaled.second, facts, true)
             return proof_difference_affine_goal(normal.first, operator, normal.second, facts, true)
+
+        # `numerator / divisor` rounded toward negative infinity, for a positive divisor.
+        def proof_floor_quotient(numerator: i64, divisor: i64) -> (known: bool, value: i64):
+            return (false, 0) if divisor <= 0
+            quotient: i64 = numerator / divisor
+            product: (known: bool, value: i64) = proof_mul_safe(quotient, divisor)
+            return (false, 0) if not product.known
+            return (true, quotient - 1) if product.value > numerator
+            return (true, quotient)
+
+        # One name left with a coefficient of two or more, `origin - (origin + cap) <= cap`
+        # reading as `-2 * cap <= 0`. Over the integers `k * x + c <= 0` is exactly
+        # `x <= floor(-c / k)` for positive `k`, and `x >= ceil(c / -k)` for negative `k`;
+        # strict and reversed comparisons move by one first, and an equality needs `k` to
+        # divide `c`. The result is a unit difference claim, which the same tier then decides.
+        def proof_scaled_single_difference(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, first: ProofAffine, second: ProofAffine, operator: TokenKind):
+            empty: ProofAffine = ProofAffine{known: false, base: "", offset: 0, negative: false}
+            terms: mutable darray[ProofNormalTerm] = []
+            return (false, empty, empty, operator) if not proof_collect_normal_terms(left, 1, facts, &terms, 0)
+            return (false, empty, empty, operator) if not proof_collect_normal_terms(right, -1, facts, &terms, 0)
+            constant: mutable i64 = 0
+            name: mutable sview = ""
+            scale: mutable i64 = 0
+            for index in 0..<terms.count |index, terms, constant, name, scale|:
+                term: ProofNormalTerm = terms[index]
+                if term.name == "":
+                    folded: (known: bool, value: i64) = proof_add_safe(constant, term.coefficient)
+                    return (false, empty, empty, operator) if not folded.known
+                    constant <- folded.value
+                    continue
+                seen: mutable bool = false
+                for earlier in 0..<index |earlier, index, terms, term, seen|:
+                    seen <- true if terms[earlier].name == term.name
+                continue if seen
+                # Unit coefficients under a capped term count: this sum cannot overflow.
+                total: mutable i64 = 0
+                for later in index..<terms.count |later, terms, term, total|:
+                    total <- total + terms[later].coefficient if terms[later].name == term.name
+                continue if total == 0
+                return (false, empty, empty, operator) if name != ""
+                name <- term.name
+                scale <- total
+            return (false, empty, empty, operator) if name == "" or scale == 1 or scale == -1 or scale == 0
+            if operator == TokenKind.EqEq:
+                quotient: i64 = constant / scale
+                product: (known: bool, value: i64) = proof_mul_safe(quotient, scale)
+                return (false, empty, empty, operator) if not product.known or product.value != constant
+                return (true, ProofAffine{known: true, base: name, offset: quotient, negative: false}, ProofAffine{known: true, base: "", offset: 0, negative: false}, TokenKind.EqEq)
+            coefficient: mutable i64 = scale
+            offset: mutable i64 = constant
+            if operator == TokenKind.Lt or operator == TokenKind.Gt or operator == TokenKind.GtEq:
+                if operator == TokenKind.Gt or operator == TokenKind.GtEq:
+                    coefficient <- 0 - scale
+                    flipped: (known: bool, value: i64) = proof_sub_safe(0, constant)
+                    return (false, empty, empty, operator) if not flipped.known
+                    offset <- flipped.value
+                if operator == TokenKind.Lt or operator == TokenKind.Gt:
+                    stepped: (known: bool, value: i64) = proof_add_safe(offset, 1)
+                    return (false, empty, empty, operator) if not stepped.known
+                    offset <- stepped.value
+            elif operator != TokenKind.LtEq:
+                return (false, empty, empty, operator)
+            negated: (known: bool, value: i64) = proof_sub_safe(0, offset)
+            return (false, empty, empty, operator) if not negated.known
+            if coefficient > 0:
+                upper: (known: bool, value: i64) = proof_floor_quotient(negated.value, coefficient)
+                return (false, empty, empty, operator) if not upper.known
+                shifted: (known: bool, value: i64) = proof_sub_safe(0, upper.value)
+                return (false, empty, empty, operator) if not shifted.known
+                return (true, ProofAffine{known: true, base: name, offset: shifted.value, negative: false}, ProofAffine{known: true, base: "", offset: 0, negative: false}, TokenKind.LtEq)
+            floor: (known: bool, value: i64) = proof_floor_quotient(negated.value, 0 - coefficient)
+            return (false, empty, empty, operator) if not floor.known
+            lower: (known: bool, value: i64) = proof_sub_safe(0, floor.value)
+            return (false, empty, empty, operator) if not lower.known
+            return (true, ProofAffine{known: true, base: "", offset: lower.value, negative: false}, ProofAffine{known: true, base: name, offset: 0, negative: false}, TokenKind.LtEq)
 
         # A counter's rebind, `next == count + 1`, is an order fact in disguise once the step is
         # known not to wrap: it then says `next - count == 1` over the integers. The strict peer

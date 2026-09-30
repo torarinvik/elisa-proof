@@ -818,6 +818,8 @@ run_probe nested_qualified_constants examples/nested_qualified_constants.elisa 0
 run_probe rejected_nested_qualified_constants examples/rejected_nested_qualified_constants.elisa 1
 run_probe literal_disjunct_pruning examples/literal_disjunct_pruning.elisa 0
 run_probe rejected_literal_disjunct_pruning examples/rejected_literal_disjunct_pruning.elisa 1
+run_probe scaled_single_difference examples/scaled_single_difference.elisa 0
+run_probe rejected_scaled_single_difference examples/rejected_scaled_single_difference.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.
