@@ -810,6 +810,8 @@ run_probe unsigned_disjunction_introduction examples/unsigned_disjunction_introd
 run_probe rejected_unsigned_disjunction examples/rejected_unsigned_disjunction.elisa 1
 run_probe fixed_array_constant_indices examples/fixed_array_constant_indices.elisa 0
 run_probe rejected_fixed_array_constant_index examples/rejected_fixed_array_constant_index.elisa 1
+run_probe unreadable_premise_weakening examples/unreadable_premise_weakening.elisa 0
+run_probe rejected_unreadable_premise_weakening examples/rejected_unreadable_premise_weakening.elisa 1
 
 # A declared effect row is evidence only when every direct call resolves to a declared callee
 # whose row it contains. An exceeded row is a refutation; an unresolved callee is unsupported.

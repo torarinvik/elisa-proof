@@ -3979,6 +3979,26 @@ if [[ "$rejected_negated_guard_range_status" -ne 0 ]]; then
     exit 1
 fi
 
+# A premise the wrap guard cannot read, `(index % n) < 0`, is set aside rather than abandoning
+# every goal on its path; replay drops the same premises. A false claim stays unproven.
+set +e
+run_json_report "$ROOT_DIR/examples/unreadable_premise_weakening.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"wrapped", "guarded_zero"}'
+unreadable_premise_status=${PIPESTATUS[1]}
+set -e
+if [[ "$unreadable_premise_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an unreadable premise still abandoned an unrelated goal\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_unreadable_premise_weakening.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}; assert {f["name"] for f in report["findings"]} == {"too_far"}'
+rejected_unreadable_premise_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_unreadable_premise_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: setting a premise aside proved a false claim\n' >&2
+    exit 1
+fi
+
 # A lend that cannot outlive its call leaves nothing a later call could reach, so a loop entered
 # afterwards keeps the binding. It is still a write during its own call, and a callee that can keep
 # it -- through a parameter or a return whose type can hold a reference -- keeps the old answer.

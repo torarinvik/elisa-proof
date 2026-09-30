@@ -10175,3 +10175,28 @@ or duplicate constants, functions declared inside a module, non-integer initiali
 Not covered: a qualified constant used in a function *body* (e.g. `return Limits::TOP`) is not
 rewritten and stays unproven.
 Tests: `scripts/test_qualified_constants.py`.
+
+### Unreadable premises are set aside, not fatal (2026-09-30)
+
+A premise that the wrap guard could not range-check, for example the guard
+`(index % n) < 0` over a signed remainder by a variable divisor, used to end
+every goal on its path. Goals that never mention it, like `0 < n` under
+`requires n > 0`, were affected too. The engine's filter-tap bound
+(`MotionFilterIndex::wrapped` in elisa-engine) met this.
+
+When the field-place and nested-conditional generalizations do not close the
+goal, the producer (`proof_goal_without_unsafe_premises`) now drops every
+premise the guard refuses and decides the goal over the rest. The kernel
+mirror in `resource_model.elisa` does the same. It filters with its own
+unsigned and signed safety checks and recomputes bounds over the kept
+premises, and the recursion is limited by `remaining`. This is sound because
+removing premises can only weaken what follows.
+
+Tests:
+- `examples/unreadable_premise_weakening.elisa` proves; all replayed.
+- `examples/rejected_unreadable_premise_weakening.elisa`, which returns `n`
+  against `result < n`, stays unproven.
+- `scripts/test.sh` assertions and `dogfood.sh` probes.
+
+Still open: a real signed-remainder rule. `index % n` with `n > 0` has
+`|r| < n` and takes the sign of `index`, but nothing reads that yet.
