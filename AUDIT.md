@@ -10603,3 +10603,37 @@ the original failure. Unit tests cover noisy, persistent, and timed-out rechecks
 diff subsequently passed at 10,972/14,684 proven versus the partial 6,104/7,844 baseline, with no
 proof-count drops or new gates. The whole `scripts/test.sh` command was not repeated from its first
 step after this measurement-only harness adjustment.
+
+## Effectful branch-condition stale facts (2026-10-01)
+
+An adversarial operator-dispatch fixture exposed a source-adapter state bug: a branch condition
+could read a global bound, then call a helper whose overloaded operator writes that global, and
+still publish the entire pre-call condition as a branch fact. The checker cleared unstable facts
+after condition evaluation but then re-added the condition, allowing one replayed index-bound
+certificate to rely on a stale global value even though the containing function was refused.
+
+Branch facts are now admitted only for call-stable conditions, and the branch-fact helper refuses
+source-overloaded operators because replay interprets only builtin operator semantics. An
+effectful condition also clears symbolic values and facts before either branch is checked. The
+short-circuit index walker checks an overloaded left guard with an empty fact set, preventing a
+mutation hidden in that guard from carrying earlier bounds into the right operand. Purity used for
+state preservation now additionally requires a completed verified callee summary; syntactic
+purity alone is insufficient when an unsupported operator can hide effects.
+
+The regression in `examples/rejected_deterministic_operator_global.elisa` covers an unverified
+helper call, a direct overloaded operator in an `if` condition, and a direct overloaded operator
+inside a short-circuit index guard. Every affected lower/upper index obligation remains open and
+uncertified; all produced certificates replay with zero gaps. The focused regression, deterministic
+call-chain tests, guard/flag facts, refusal-gate tests, source-length check, and `git diff --check`
+passed after an O0 build using the current Stage1 wrapper. Its Stage1 product hash was
+`4b36ce5a7dcf4c448ee037dce4ec393b603ed90d15aa534a90ee3888be8e83fe`; the compiler source checkout
+was dirty, so this identifies the exact tested product but is not a claim that the compiler tree
+was clean or pinned to a committed Stage1 revision.
+
+The full `scripts/test.sh` run reached the compiler integration matrix and stopped on the existing
+mutable-call-alias diagnostic assertion. The current dirty compiler source changes that diagnostic
+to call the source place `x` a “mutable reference parameter,” while the proof repository's test
+expects the formal parameter names `left`/`right`. The compiler still rejected the alias; this is
+a cross-repository diagnostic/test mismatch, not a proof regression. No compiler files were
+modified. Because the script stops there, its later optimized replay and census gates were not
+completed in this run.
