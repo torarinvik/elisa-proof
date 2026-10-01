@@ -38,6 +38,7 @@ python3 "$ROOT_DIR/scripts/test_integer_disjunction_denial.py"
 python3 "$ROOT_DIR/scripts/test_disjunctive_syllogism.py"
 python3 "$ROOT_DIR/scripts/test_quantifier_dispatch.py"
 python3 "$ROOT_DIR/scripts/test_local_call_result_binding.py"
+python3 "$ROOT_DIR/scripts/test_capture_result_alias.py"
 python3 "$ROOT_DIR/scripts/test_null_store_identity.py"
 python3 "$ROOT_DIR/scripts/test_global_constant_relevance.py"
 
@@ -238,6 +239,18 @@ if ! "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-quantifi
 fi
 if ! "$standalone_probe_dir/kernel-quantifier-instances"; then
     printf 'proof test matrix failed: quantifier replay skipped a later instance or witness\n' >&2
+    exit 1
+fi
+if ! "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-interval-contradiction.o" "$ROOT_DIR/examples/kernel_interval_contradiction_runtime.elisa" >/dev/null 2>&1; then
+    printf 'proof test matrix failed: direct interval contradiction probe did not compile\n' >&2
+    exit 1
+fi
+if ! "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-interval-contradiction" "$standalone_probe_dir/kernel-interval-contradiction.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"; then
+    printf 'proof test matrix failed: direct interval contradiction probe did not link\n' >&2
+    exit 1
+fi
+if ! "$standalone_probe_dir/kernel-interval-contradiction"; then
+    printf 'proof test matrix failed: integer contradiction replay or consistent/wrap rejection failed\n' >&2
     exit 1
 fi
 # This AST-level test uses the same immutable frontend export as the proof build.
