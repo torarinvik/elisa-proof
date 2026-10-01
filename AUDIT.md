@@ -10384,6 +10384,22 @@ the old clear. Fixtures: `examples/can_block_frame.elisa` (proved, replayed) and
 `examples/rejected_can_block_frame.elisa` (own count, assigned local, block-local relation stay
 unproven). An explicit `modifies` clause still needs front-end syntax the compiler lacks.
 
+## Builtin push grows the count by one (BACKLOG D-02)
+
+`v.push(x)` on a parameter declared as a mutable reference to a builtin `darray` now records
+`v.count == T + 1`, where T is the count before the call: a ghost term already equal to the
+count, or a fresh symbol bound to it whose facts are restated by kernel-checked steps. When an
+ensure mentions such a parameter, `old(v.count)` is a fresh entry symbol E fixed by
+`E == v.count` at entry. New trusted boundary kinds, shape-checked only by replay:
+`collection-push` (T is an unsigned 64-bit scalar; T stays at most 2^63 - 2, since no darray
+buffer reaches 2^63 elements) and `entry-count` (E is an unsigned 64-bit scalar). Ghost symbols
+are registered as frame constants so their facts survive later call boundaries; no source text
+can spell them. The model declines a user function named `push`, named or computed arguments,
+a rebound name and any receiver that is not such a parameter, and every other write to `v`
+still forgets its count. Fixtures: `examples/collection_push_count.elisa` (proved, replayed),
+`examples/rejected_collection_push_count.elisa` and
+`examples/rejected_collection_push_user_method.elisa` (all claims unproven).
+
 ## Mutable aggregate `old(...)` snapshots and marker namespace (2026-09-30)
 
 An `old(field)` read through a mutable aggregate reference cannot be represented by the current
