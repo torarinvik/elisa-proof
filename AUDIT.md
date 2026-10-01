@@ -10652,3 +10652,33 @@ uncertified, replay reports zero gaps, and the match/value-match functions remai
 focused regression, positive deterministic-call and guard/fact tests, refusal gate, certificate
 reuse, kernel inventory, portable replay, source-length check, and whitespace check all passed on
 the Stage1-built O0 proof binary. The complete suite was not rerun after this follow-on change.
+
+## Overloaded-operator effects before index certification (2026-10-01)
+
+The follow-on audit found a more direct unsoundness in three evaluation positions. After a valid
+range guard, a source-overloaded `==` can write `guard_index = 100`; when that operator appeared
+in a local initializer, assignment RHS, or return expression, the statement checker eventually
+invalidated state, but only after the separate index-safety prepass had already certified the
+subsequent `guard_index < values.count` goal. Those three certificates replayed successfully, so
+the defect was in source-state construction, not kernel replay. The expression-statement shape
+already refused the same stale upper-bound claim.
+
+The statement index-safety pass now detects source-overloaded operators and drops mutable symbolic
+values plus non-type facts before it walks any index access in that statement. It does this across
+returns, expression statements, declarations, assignments, branch/loop conditions, iterables,
+match scrutinees/guards, and runtime assertions. This deliberately treats the entire containing
+expression as effectful rather than assuming an evaluation order for its nested subexpressions.
+The ordinary statement checker independently marks expression statements, declarations,
+assignments, returns, and iterable expressions unsupported, and havocs state again after
+evaluation; the branch/loop/match/assert handlers also suppress or invalidate facts at their own
+boundaries. Thus later postconditions cannot regain pre-operator facts from a call summary or
+symbolic RHS. Branch, match, block, and captured-block effect scans now also count overloaded
+operators as writes when deciding whether a join may retain facts.
+
+The adversarial fixture reproduces each former false certificate, checks the expression-statement
+case, and checks a branch-body effect at a join. Every affected index lower/upper goal remains
+open and uncertified; all certificates that are emitted replay with zero gaps. The focused
+regression, deterministic-call and guard/fact tests, refusal gate, certificate reuse, kernel
+inventory, portable replay, source-length check, and whitespace check passed after an O0 build
+with the current Stage1 product. The full integration script was not rerun; its most recent run
+still stopped at the known mutable-call-alias diagnostic wording mismatch documented above.

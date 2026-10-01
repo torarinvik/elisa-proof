@@ -25,6 +25,11 @@ assert declarations["rejected_operator_match_guard_index"]["verified"] is False,
 assert declarations["rejected_value_match_operator_guard"]["verified"] is False, declarations["rejected_value_match_operator_guard"]
 assert declarations["rejected_value_match_operator_scrutinee"]["verified"] is False, declarations["rejected_value_match_operator_scrutinee"]
 assert declarations["rejected_operator_loop_index"]["verified"] is False, declarations["rejected_operator_loop_index"]
+assert declarations["rejected_operator_expression_statement"]["verified"] is False, declarations["rejected_operator_expression_statement"]
+assert declarations["rejected_operator_initializer_effect"]["verified"] is False, declarations["rejected_operator_initializer_effect"]
+assert declarations["rejected_operator_assignment_effect"]["verified"] is False, declarations["rejected_operator_assignment_effect"]
+assert declarations["rejected_operator_return_effect"]["verified"] is False, declarations["rejected_operator_return_effect"]
+assert declarations["rejected_operator_branch_body_index"]["verified"] is False, declarations["rejected_operator_branch_body_index"]
 
 # Both signed index obligations need to remain open after the RHS can mutate the global index.
 for function_name in (
@@ -33,6 +38,11 @@ for function_name in (
     "rejected_nested_shortcircuit_operator_index",
     "rejected_operator_assert_index",
     "rejected_operator_loop_index",
+    "rejected_operator_expression_statement",
+    "rejected_operator_initializer_effect",
+    "rejected_operator_assignment_effect",
+    "rejected_operator_return_effect",
+    "rejected_operator_branch_body_index",
 ):
     index_goals = [goal for goal in report["goals"] if goal["name"] == function_name and goal["rule"].startswith("index-")]
     assert {goal["rule"] for goal in index_goals} == {"index-lower", "index-upper"}, index_goals
