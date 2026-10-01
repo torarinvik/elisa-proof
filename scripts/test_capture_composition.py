@@ -41,3 +41,26 @@ else:
     assert summary["proven"] == 74 and summary["failed"] == 0
     assert not report["findings"]
     print("capture composition fully proved and independently replayed: 74/74")
+
+# These controls call the two verified leaves directly. Rejection caused only by
+# depending on the currently unverified composition would not test soundness.
+for target in ("capture_composition_false_success", "capture_composition_false_touch",
+               "capture_composition_false_invalid"):
+    rejected = subprocess.run(
+        [binary, "--function-json", target,
+         str(ROOT / "examples/capture_composition_rejected.elisa")],
+        capture_output=True, text=True, timeout=60)
+    negative = json.loads(rejected.stdout)
+    assert rejected.returncode == 1 and negative["status"] == "failed"
+    assert negative["summary"]["semantic_errors"] == 0
+    assert len(negative["findings"]) == 1
+    finding = negative["findings"][0]
+    assert finding["name"] == target and finding["kind"] == "ensure-unproven"
+    assert negative["replay"]["gaps"] == 0
+    assert negative["replay"]["certificates"] == negative["replay"]["replayed"] > 0
+    assert not negative["trust"]["trusted_assumptions"]
+    leaves = [d for d in negative["declaration_details"]
+              if d.get("kind") == "function" and d.get("name") in
+              ("capture_classify", "capture_stage")]
+    assert len(leaves) == 2 and all(d["verified"] for d in leaves)
+print("wrong success, touch denial, and invalid publication compositions rejected")
