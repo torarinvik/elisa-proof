@@ -1,0 +1,93 @@
+extend ElisaProof:
+    private:
+        # Decomposing conjunctions relies on the source's boolean connectives having their
+        # builtin short-circuit semantics. Ignore opaque leaves here; the individual facts
+        # are checked separately before they enter the kernel context.
+        def proof_branch_connectives_are_builtin(expression: Ast::Expr, operator_mask: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_branch_connectives_are_builtin(inner, operator_mask, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    protocol: sview = proof_builtin_unary_operator_protocol(TokenKind.Not)
+                    return false if protocol != "" and proof_source_primitive_operator_mask_has(operator_mask, protocol)
+                    return proof_branch_connectives_are_builtin(operand, operator_mask, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        protocol: sview = proof_builtin_operator_protocol(operator)
+                        return false if protocol != "" and proof_source_primitive_operator_mask_has(operator_mask, protocol)
+                        return proof_branch_connectives_are_builtin(left, operator_mask, depth + 1) and proof_branch_connectives_are_builtin(right, operator_mask, depth + 1)
+                _:
+                    pass
+            return true
+
+        # Record a branch condition and every supported conjunct it entails. If the complete
+        # condition contains a recovery/opaque placeholder, use individually admissible
+        # conjuncts as branch facts instead of losing facts that do not depend on that hole.
+        # For a kernel-admissible condition, conjuncts remain derived facts and replay proves
+        # each from the recorded branch premise.
+        def proof_add_branch_condition_facts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, condition: Ast::Expr, line: u32, name: sview) -> void:
+            return if not proof_branch_connectives_are_builtin(condition, report.source_primitive_operator_mask, 0)
+            components: mutable darray[Ast::Expr] = []
+            proof_conjunct_components(condition, &components)
+            condition_admissible: bool = proof_kernel_expression_supported(condition) and not proof_source_expression_has_overloaded_operator(condition, report.source_primitive_operator_mask, 0)
+            proof_add_traced_fact(facts, report, condition, "branch-condition", line, name) if condition_admissible
+            return if components.count < 2
+            premises: darray[Ast::Expr] = [condition]
+            for component in components |facts, report, line, name, premises, condition_admissible|:
+                continue if any existing in facts where proof_expr_equal(existing, component)
+                continue if not proof_kernel_expression_supported(component)
+                continue if proof_source_expression_has_overloaded_operator(component, report.source_primitive_operator_mask, 0)
+                if condition_admissible:
+                    proof_add_derived_fact_from(facts, report, component, premises, "branch-conjunct", line, name)
+                else:
+                    proof_add_traced_fact(facts, report, component, "branch-condition", line, name)
+
+        # An else path after `if not condition` carries condition itself, not a redundant
+        # double negation. Preserve negated conjunctions whole; replay handles their cases.
+        def proof_branch_negation(expression: Ast::Expr, position: Ast::Pos) -> Ast::Expr:
+            match expression:
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return inner
+                Ast::Expr.BoolLit(value, _):
+                    return Ast::Expr.BoolLit(not value, Ast::pos_at_line(0))
+                Ast::Expr.Binary(_, TokenKind.And, _, _):
+                    return Ast::Expr.Unary(TokenKind.Not, expression, position)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, left, position), TokenKind.And, Ast::Expr.Unary(TokenKind.Not, right, position), position)
+                _:
+                    return Ast::Expr.Unary(TokenKind.Not, expression, position)
+
+        # An effectful right operand cannot erase every consequence of short-circuit
+        # evaluation. For `A and B` on the true edge, and `A or B` on the false edge,
+        # `A` is necessary. Retain it only when alias analysis says the call cannot change it.
+        def proof_short_circuit_branch_consequence(condition: Ast::Expr, branch_taken: bool, position: Ast::Pos, depth: usize) -> (known: bool, consequence: Ast::Expr):
+            empty: Ast::Expr = Ast::Expr.Invalid
+            return (false, empty) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_short_circuit_branch_consequence(inner, branch_taken, position, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    return proof_short_circuit_branch_consequence(operand, not branch_taken, position, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.And, _, _):
+                    return (true, left) if branch_taken
+                Ast::Expr.Binary(left, TokenKind.Or, _, _):
+                    return (true, Ast::Expr.Unary(TokenKind.Not, left, position)) if not branch_taken
+                _:
+                    pass
+            return (false, empty)
+
+        def proof_add_effect_stable_short_circuit_branch_fact(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, condition: Ast::Expr, branch_taken: bool, line: u32) -> void:
+            return if proof_source_expression_has_overloaded_operator(condition, report.source_primitive_operator_mask, 0)
+            consequence: (known: bool, consequence: Ast::Expr) = proof_short_circuit_branch_consequence(condition, branch_taken, Ast::pos_at_line(line), 0)
+            return if not consequence.known or proof_expr_has_call(consequence.consequence)
+            return if proof_source_expression_has_overloaded_operator(consequence.consequence, report.source_primitive_operator_mask, 0)
+            return if not proof_kernel_expression_supported(consequence.consequence)
+            return if any existing in facts where proof_expr_equal(existing, consequence.consequence)
+            stable: bool = proof_expr_call_stable(consequence.consequence, facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+            return if not stable
+            branch_observation: Ast::Expr = condition if branch_taken else proof_branch_negation(condition, Ast::pos_at_line(line))
+            return if not proof_kernel_expression_supported(branch_observation)
+            return if not proof_trace_fact(report, branch_observation, "branch-condition", line, owner)
+            premises: darray[Ast::Expr] = [branch_observation]
+            proof_add_derived_fact_from(facts, report, consequence.consequence, premises, "branch-conjunct", line, owner)
