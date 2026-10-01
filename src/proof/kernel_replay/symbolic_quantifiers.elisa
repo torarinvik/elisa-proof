@@ -1,0 +1,106 @@
+# Kernel replay of the symbolic-range forall rules (BACKLOG W-02; checker side in
+# linear/symbolic_quantifiers.elisa): empty `b <= a`, cover by a fact `forall j in c..<d`
+# with an alpha-equal body and `c <= a`, `b <= d`, or extend with `b <= d + 1` and P(d).
+# Bodies are compared after both binders become a marker that is absent from the arena.
+# The arena is shared by every certificate and a failed side search may fill its node budget,
+# so the marker, each failed side search and finally the whole search are rolled back: nodes
+# are append-only and only point at older nodes, so truncating to a saved count is exact.
+const PROOF_KERNEL_REPLAY_SYMBOLIC_MARKER: sview = "__elisa_kernel_symbolic_binder"
+const PROOF_KERNEL_REPLAY_SYMBOLIC_MAX_FACTS: usize = 256
+
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_symbolic_range(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, root)
+            quantifier: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if quantifier.kind != "quantifier" or quantifier.operator != "forall"
+            return false if not proof_kernel_replay_valid(nodes, quantifier.left) or not proof_kernel_replay_valid(nodes, quantifier.right)
+            range: ElisaProofKernelCore::ProofKernelNode = nodes[quantifier.left]
+            return false if range.kind != "binary" or range.operator != "range_lt"
+            return proof_kernel_replay_valid(nodes, range.left) and proof_kernel_replay_valid(nodes, range.right)
+
+        # Prove `operator(left, right)` (or `left` itself when operator is empty) and undo every
+        # node the search added when it fails.
+        def proof_kernel_replay_symbolic_side(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], operator: sview, left: usize, right: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            saved_nodes: usize = nodes.count
+            saved_children: usize = children.count
+            goal: mutable usize = left
+            goal <- ElisaProofKernelCore::add_node(nodes, "binary", operator, left, right, 0, 0, 0, 0, "", "") if operator != ""
+            return true if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal, 0, depth + 1, remaining: remaining - 1)
+            nodes.truncate(saved_nodes)
+            children.truncate(saved_children)
+            return false
+
+        def proof_kernel_replay_symbolic_quantifier_remaining(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], root: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return false if remaining <= 1
+            return false if not proof_kernel_replay_symbolic_range(nodes, root)
+            goal: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            goal_range: ElisaProofKernelCore::ProofKernelNode = nodes[goal.left]
+            return true if proof_kernel_replay_symbolic_side(nodes, children, facts, "<=", goal_range.right, goal_range.left, depth + 1, remaining: remaining - 1)
+            return false if not proof_kernel_replay_quantifier_marker_available(nodes, PROOF_KERNEL_REPLAY_SYMBOLIC_MARKER)
+            saved_nodes: usize = nodes.count
+            saved_children: usize = children.count
+            marker: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, PROOF_KERNEL_REPLAY_SYMBOLIC_MARKER, "")
+            goal_marked: usize = proof_kernel_replay_substitute(nodes, children, goal.right, goal.name, marker, 0)
+            scanned: mutable usize = 0
+            found: mutable bool = false
+            for fact_root in facts |fact_root, nodes, children, facts, root, goal_marked, marker, depth, remaining, scanned, found|:
+                break if found or scanned >= PROOF_KERNEL_REPLAY_SYMBOLIC_MAX_FACTS
+                scanned <- scanned + 1
+                found <- fact_root != root and proof_kernel_replay_symbolic_from_fact(nodes, children, facts, root, fact_root, goal_marked, marker, depth + 1, remaining: remaining - 1)
+            # The arena is shared by every certificate: leaving the marker in it would make the
+            # marker look taken to the next one.
+            nodes.truncate(saved_nodes)
+            children.truncate(saved_children)
+            return found
+
+        # `upper` is literally `bound + 1`, read structurally.
+        def proof_kernel_replay_symbolic_successor(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, upper: usize, bound: usize) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, upper)
+            sum: ElisaProofKernelCore::ProofKernelNode = nodes[upper]
+            return false if sum.kind != "binary" or sum.operator != "+"
+            return false if not proof_kernel_replay_valid(nodes, sum.right) or nodes[sum.right].kind != "int" or nodes[sum.right].operator != "" or nodes[sum.right].value != 1
+            return proof_kernel_replay_expr_equal(nodes, children, sum.left, bound, 0)
+
+        def proof_kernel_replay_symbolic_grown(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], upper: usize, bound: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            saved_nodes: usize = nodes.count
+            saved_children: usize = children.count
+            one: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+            next: usize = ElisaProofKernelCore::add_node(nodes, "binary", "+", bound, one, 0, 0, 0, 0, "", "")
+            return true if proof_kernel_replay_symbolic_side(nodes, children, facts, "<=", upper, next, depth + 1, remaining: remaining - 1)
+            nodes.truncate(saved_nodes)
+            children.truncate(saved_children)
+            return false
+
+        # Cover or extend the goal quantifier `root` by the fact quantifier `fact_root`. Kept out
+        # of the fact loop so that loop declares nothing per iteration.
+        def proof_kernel_replay_symbolic_from_fact(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], root: usize, fact_root: usize, goal_marked: usize, marker: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or remaining <= 1
+            return false if not proof_kernel_replay_symbolic_range(nodes, root) or not proof_kernel_replay_symbolic_range(nodes, fact_root)
+            goal: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            goal_range: ElisaProofKernelCore::ProofKernelNode = nodes[goal.left]
+            fact: ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
+            fact_range: ElisaProofKernelCore::ProofKernelNode = nodes[fact.left]
+            fact_marked: usize = proof_kernel_replay_substitute(nodes, children, fact.right, fact.name, marker, 0)
+            return false if not proof_kernel_replay_expr_equal(nodes, children, fact_marked, goal_marked, 0)
+            return false if not proof_kernel_replay_symbolic_side(nodes, children, facts, "<=", fact_range.left, goal_range.left, depth + 1, remaining: remaining - 1)
+            return true if proof_kernel_replay_symbolic_side(nodes, children, facts, "<=", goal_range.right, fact_range.right, depth + 1, remaining: remaining - 1)
+            grown: bool = proof_kernel_replay_symbolic_successor(nodes, children, goal_range.right, fact_range.right) or proof_kernel_replay_symbolic_grown(nodes, children, facts, goal_range.right, fact_range.right, depth + 1, remaining: remaining - 1)
+            return false if not grown
+            instance: usize = proof_kernel_replay_substitute(nodes, children, goal.right, goal.name, fact_range.right, 0)
+            return proof_kernel_replay_symbolic_side(nodes, children, facts, "", instance, 0, depth + 1, remaining: remaining - 1)

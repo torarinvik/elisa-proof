@@ -10804,3 +10804,22 @@ with the oracle; it proposed 16 hints and only the fixture's closed a goal, so t
 unproven linear goals fail before the certificate tier (gates, widths) rather than for want of
 multipliers. The plain census is unchanged: no regressions, 13093/17773. Known gap: `k * x` with a
 literal `k` is not a linear term to the shared collector, so such goals export no rows.
+
+## Symbolic-range quantifiers (BACKLOG W-02, 2026-10-01)
+
+A `forall i in a..<b: P(i)` goal whose bounds are not literals no longer fails outright. The
+checker (`linear/symbolic_quantifiers.elisa`) and the kernel
+(`kernel_replay/symbolic_quantifiers.elisa`) each accept three rules: empty (`b <= a`), cover by a
+fact `forall j in c..<d: Q(j)` whose body equals the goal's once both binders become a fresh
+marker, with `c <= a` and `b <= d`, and extend by one (`b <= d + 1` and `P(d)`). Every side goal is
+proven by the ordinary search, so the kernel trusts nothing new. Only `..<` ranges are read, at
+most 256 facts are scanned, and a binder captured by the other body is rejected when the
+proposition is formed. The kernel arena is shared by all certificates, so the marker and every
+failed side search are rolled back; before that, the first certificate's marker made the rule
+refuse every later certificate (found by noticing that only non-first functions failed).
+`examples/symbolic_quantifier.elisa` proves and replays cover, extend, empty, a later certificate
+and a fill loop whose invariant forall grows with the counter; `rejected_symbolic_quantifier.elisa`
+keeps off-by-one, wrong lower bound, other body and captured binder unproven.
+`scripts/test_symbolic_quantifiers.py` adds a non-range malformed case and a budget case (cover
+fact past the scan limit). Open: prefix-sorted examples need two-binder bodies, and triggered
+instances for reads `xs[k]` inside a covered range.
