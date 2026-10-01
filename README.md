@@ -47,6 +47,9 @@ report with the compatibility verdict, an explicit `verification_state` (`proved
 `unsupported`, or `unknown`), the expanded-source byte count and observational FNV-1a fingerprint,
 trust-boundary counters, structured findings, replay coverage, compiler semantic diagnostics, and
 every goal attempt (including failed goals) with its hypotheses and structured expression tree.
+In `summary`, `unproven` is `obligations - proven`; `finding_count` is the number of entries in
+the top-level `findings` array. The legacy `failed` field remains an alias for that finding count,
+not a count of unproven obligations, because one obligation may also produce non-goal diagnostics.
 The `trust` object contains an itemized `boundary_facts` ledger (kind, source owner/line, and
 source-neutral kernel root) whose length must equal `trusted_boundary_facts`, plus an explicit
 `trusted_assumptions` ledger. The latter is empty in the current system, and future foreign axioms

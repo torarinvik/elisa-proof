@@ -160,11 +160,12 @@ def with_theorem(package, theorem):
     return forged
 
 
-def append_node(package, kind, operator="", left=0, right=0, value="0"):
+def append_node(package, kind, operator="", left=0, right=0, value="0", name="",
+                children_start=0, children_count=0, auxiliary=0, secondary_name=""):
     nodes = package["kernel"]["nodes"]
     nodes.append({"kind": kind, "operator": operator, "left": left, "right": right,
-                  "auxiliary": 0, "children_start": 0, "children_count": 0, "value": value,
-                  "name": "", "secondary_name": ""})
+                  "auxiliary": auxiliary, "children_start": children_start, "children_count": children_count,
+                  "value": value, "name": name, "secondary_name": secondary_name})
     return len(nodes) - 1
 
 
@@ -195,6 +196,89 @@ last_root = max(max([t["conclusion"]] + t["hypotheses"]) for t in quantified["th
 assert len(quantified["kernel"]["nodes"]) == last_root + 1, (len(quantified["kernel"]["nodes"]), last_root)
 assert not any(node["name"].startswith("__elisa_kernel_quantifier") for node in quantified["kernel"]["nodes"])
 
+# Substitution for a finite outer quantifier must not capture the free `y` in its range
+# when descending through an inner `forall y`. A naive textual substitution turns
+# `forall x in [y], forall y in [0], x == y` into a tautology, although the original is
+# false when the free integer y is 1. The replay substitution deliberately declines this
+# nested-binder shape until it has a capture-avoiding representation.
+nested_capture = copy.deepcopy(quantified)
+nested_capture["kernel"] = {"nodes": [], "children": []}
+
+def collection(package, kind, elements):
+    start = len(package["kernel"]["children"])
+    package["kernel"]["children"].extend(elements)
+    return append_node(package, kind, children_start=start, children_count=len(elements))
+
+def marker_call(package, marker, arguments):
+    callee = append_node(package, "ident", name=marker)
+    start = len(package["kernel"]["children"])
+    for argument in arguments:
+        package["kernel"]["children"].append(append_node(package, "call_arg", left=argument))
+    return append_node(package, "call", left=callee, children_start=start, children_count=len(arguments))
+
+free_y = append_node(nested_capture, "ident", name="y")
+outer_values = collection(nested_capture, "array", [free_y])
+inner_zero = append_node(nested_capture, "int", value="0")
+inner_values = collection(nested_capture, "array", [inner_zero])
+bound_x = append_node(nested_capture, "ident", name="x")
+bound_y = append_node(nested_capture, "ident", name="y")
+inner_body = append_node(nested_capture, "binary", "==", bound_x, bound_y)
+inner_forall = append_node(nested_capture, "quantifier", "forall", inner_values, inner_body,
+                           name="y", auxiliary=1)
+nested_forall = append_node(nested_capture, "quantifier", "forall", outer_values, inner_forall,
+                           name="x", auxiliary=1)
+scalar_y = marker_call(nested_capture, "__elisa_primitive_scalar_type", [free_y])
+nested_theorem = {
+    "goal_id": 0, "name": "nested-binder-capture", "line": 1, "rule": "quantifier-forall",
+    "hypotheses": [scalar_y], "hypothesis_origins": [{"kind": "forged"}],
+    "conclusion": nested_forall, "statement": "", "goal_fingerprint": 0,
+}
+nested_capture["theorems"] = [reseal(nested_capture, nested_theorem)]
+refused(nested_capture, "nested-quantifier-capture", "rejected", "kernel-rejected")
+
+# Dictionary key/value binders are substituted simultaneously. In `forall k, v in {v: 0},
+# k == v`, the `v` in the dictionary key is free and distinct from the value binder. With
+# hypothesis v == 1, the proposition is false (1 != 0). Sequentially substituting k -> v
+# and then v -> 0 would capture the inserted free key and turn it into 0 == 0.
+dict_capture = copy.deepcopy(quantified)
+dict_capture["kernel"] = {"nodes": [], "children": []}
+free_v = append_node(dict_capture, "ident", name="v")
+dict_zero = append_node(dict_capture, "int", value="0")
+dict_one = append_node(dict_capture, "int", value="1")
+dict_entry = append_node(dict_capture, "dict_entry", left=free_v, right=dict_zero)
+dict_values = collection(dict_capture, "dict", [dict_entry])
+key_var = append_node(dict_capture, "ident", name="k")
+value_var = append_node(dict_capture, "ident", name="v")
+dict_body = append_node(dict_capture, "binary", "==", key_var, value_var)
+dict_forall = append_node(dict_capture, "quantifier", "forall", dict_values, dict_body,
+                          name="k", auxiliary=2, secondary_name="v")
+scalar_free_v = marker_call(dict_capture, "__elisa_primitive_scalar_type", [free_v])
+free_v_is_one = append_node(dict_capture, "binary", "==", free_v, dict_one)
+dict_theorem = {
+    "goal_id": 0, "name": "dictionary-binder-capture", "line": 1, "rule": "quantifier-forall",
+    "hypotheses": [scalar_free_v, free_v_is_one],
+    "hypothesis_origins": [{"kind": "forged"}, {"kind": "forged"}],
+    "conclusion": dict_forall, "statement": "", "goal_fingerprint": 0,
+}
+dict_capture["theorems"] = [reseal(dict_capture, dict_theorem)]
+refused(dict_capture, "dictionary-quantifier-capture", "rejected", "kernel-rejected")
+
+# Positive control: under the same v == 1 hypothesis and dictionary, k != v is true.
+# This confirms the forged sequent above reaches quantifier replay with a usable free scalar.
+dict_control = copy.deepcopy(dict_capture)
+not_equal_body = append_node(dict_control, "binary", "!=", key_var, value_var)
+not_equal_forall = append_node(dict_control, "quantifier", "forall", dict_values, not_equal_body,
+                               name="k", auxiliary=2, secondary_name="v")
+dict_control_theorem = {
+    "goal_id": 0, "name": "dictionary-binder-capture-control", "line": 1,
+    "rule": "quantifier-forall", "hypotheses": [scalar_free_v, free_v_is_one],
+    "hypothesis_origins": [{"kind": "forged"}, {"kind": "forged"}],
+    "conclusion": not_equal_forall, "statement": "", "goal_fingerprint": 0,
+}
+dict_control["theorems"] = [reseal(dict_control, dict_control_theorem)]
+control_code, control_result = replay(dict_control, "dictionary-quantifier-capture-control")
+assert control_code == 0 and control_result["status"] == "replayed", control_result
+
 base = packages["verified"]
 assumption = next(t for t in base["theorems"] if t["rule"] == "goal" and t["conclusion"] in t["hypotheses"])
 code, result = replay(with_theorem(base, assumption), "assumption")
@@ -219,6 +303,60 @@ control = copy.deepcopy(false_goal)
 control["theorems"][0]["conclusion"] = right
 reseal(control, control["theorems"][0])
 assert replay(control, "true-conclusion")[0] == 0
+
+# The independent kernel must not capture a source-supplied `_1` when generalizing the second
+# field place. Without checking every generated marker for availability, these consistent facts
+# become contradictory only after `b.y` is replaced by the existing `__elisa_field_place_1`,
+# allowing the false goal `a.x == b.y` to pass by explosion.
+field_collision = copy.deepcopy(base)
+field_collision["kernel"] = {"nodes": [], "children": []}
+
+def named(kind, name, operator="", left=0, right=0, value="0"):
+    return append_node(field_collision, kind, operator, left, right, value, name)
+
+def call(marker, arguments):
+    callee = named("ident", marker)
+    start = len(field_collision["kernel"]["children"])
+    for argument in arguments:
+        field_collision["kernel"]["children"].append(
+            named("call_arg", "", left=argument)
+        )
+    return append_node(field_collision, "call", left=callee, children_start=start,
+                       children_count=len(arguments))
+
+def binary(operator, left, right):
+    return append_node(field_collision, "binary", operator, left, right)
+
+a_x = named("field", "x", left=named("ident", "a"))
+b_y = named("field", "y", left=named("ident", "b"))
+marker_one = named("ident", "__elisa_field_place_1")
+zero = append_node(field_collision, "int", value="0")
+one = append_node(field_collision, "int", value="1")
+eq_text = named("string", "Eq")
+hypotheses = [
+    binary("==", a_x, zero),
+    binary("==", b_y, one),
+    binary("==", marker_one, zero),
+    call("__elisa_primitive_scalar_type", [a_x]),
+    call("__elisa_primitive_scalar_type", [b_y]),
+    call("__elisa_primitive_scalar_type", [marker_one]),
+    call("__elisa_builtin_operator_type", [a_x, eq_text]),
+    call("__elisa_builtin_operator_type", [b_y, eq_text]),
+    call("__elisa_builtin_operator_type", [marker_one, eq_text]),
+]
+collision_claim = {
+    "goal_id": 0,
+    "name": "field-place-marker-capture",
+    "line": 1,
+    "rule": "goal",
+    "hypotheses": hypotheses,
+    "hypothesis_origins": [{"kind": "forged"}] * len(hypotheses),
+    "conclusion": binary("==", a_x, b_y),
+    "statement": "",
+    "goal_fingerprint": 0,
+}
+field_collision["theorems"] = [reseal(field_collision, collision_claim)]
+refused(field_collision, "field-place-marker-capture", "rejected", "kernel-rejected")
 
 relabeled = copy.deepcopy(assumption)
 relabeled["rule"] = "resource-safety"

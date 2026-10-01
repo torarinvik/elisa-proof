@@ -4,9 +4,13 @@ extend ElisaProof:
             match statement:
                 Ast::Stmt.Match(scrutinee, arms, match_position):
                     scrutinee_value: mutable Ast::Expr = proof_substitute(scrutinee, names, values)
-                    proof_check_frame_calls_in_expression(scrutinee, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(scrutinee)
-                    scrutinee_value <- proof_substitute(scrutinee, names, values) if proof_expr_has_call(scrutinee)
-                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(scrutinee)) if proof_expr_has_call(scrutinee)
+                    scrutinee_has_call: bool = proof_expr_has_call(scrutinee)
+                    scrutinee_has_overloaded_operator: bool = proof_source_expression_has_overloaded_operator(scrutinee, report.source_primitive_operator_mask, 0)
+                    scrutinee_effectful: bool = scrutinee_has_call or scrutinee_has_overloaded_operator
+                    proof_check_frame_calls_in_expression(scrutinee, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if scrutinee_has_call
+                    scrutinee_value <- proof_substitute(scrutinee, names, values) if scrutinee_has_call
+                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(scrutinee)) if scrutinee_effectful
+                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if scrutinee_effectful
                     arms_may_modify: mutable bool = false
                     match_has_normal: mutable bool = false
                     match_valid: mutable bool = true
@@ -14,6 +18,10 @@ extend ElisaProof:
                     # unguarded arm's pattern failed. Only exact conditions may be negated.
                     refuted: mutable darray[Ast::Expr] = []
                     refuting: mutable bool = true
+                    if scrutinee_has_overloaded_operator:
+                        match_valid <- false
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "expression-unsupported", match_position.line, name, "match scrutinee uses a source-overloaded operator with unmodeled effects")
                     for arm in arms |names, values, facts, ensures, lemmas, report, name, lemma_steps, arms_may_modify, match_position, refuted, refuting|:
                         # Check the shared per-function budget before cloning three symbolic
                         # arrays. The recursive checker performs the same check, but doing it
@@ -33,7 +41,7 @@ extend ElisaProof:
                         arm_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                         arm_flow: mutable ProofFlow = proof_empty_flow()
                         arm_refuted: mutable Ast::Expr = Ast::Expr.Invalid
-                        arm_facts.clear() if proof_expr_has_call(scrutinee)
+                        arm_facts.clear() if scrutinee_effectful
                         first_binding: usize = arm_values.count
                         pattern_supported: bool = proof_bind_pattern(arm.pattern, match_position, scrutinee_value, &arm_names, &arm_values)
                         proof_freshen_opaque_bindings(&arm_values, first_binding, scrutinee_value, report, match_position) if pattern_supported
@@ -46,7 +54,7 @@ extend ElisaProof:
                             report.proof_obligation(false)
                             proof_add_finding(report, "pattern-unsupported", match_position.line, name, "match pattern bindings are not modeled for proof-state substitution")
                             arm_facts.clear()
-                        if pattern_supported and not proof_expr_has_call(scrutinee):
+                        if pattern_supported and not scrutinee_effectful:
                             pattern_condition: Ast::Expr? = proof_pattern_condition(arm.pattern, scrutinee_value, match_position)
                             for earlier in refuted |earlier, arm_facts, report, name, match_position|:
                                 proof_add_traced_fact(arm_facts, report, Ast::Expr.Unary(TokenKind.Not, earlier, match_position), "branch-condition", match_position.line, name)
@@ -61,9 +69,11 @@ extend ElisaProof:
                             _:
                                 guard_present <- true
                         guard_has_call: mutable bool = false
+                        guard_has_overloaded_operator: mutable bool = false
                         refuted.push(arm_refuted) if refuting and not guard_present and not (arm_refuted is Ast::Expr.Invalid)
                         if guard_present:
-                            guard_supported: bool = proof_expr_supported(arm.guard)
+                            guard_has_overloaded_operator <- proof_source_expression_has_overloaded_operator(arm.guard, report.source_primitive_operator_mask, 0)
+                            guard_supported: bool = proof_expr_supported(arm.guard) and not guard_has_overloaded_operator
                             if not guard_supported:
                                 arm_flow.valid <- false
                                 report.proof_obligation(false)
@@ -71,15 +81,21 @@ extend ElisaProof:
                                 arm_facts.clear()
                             guard_value: mutable Ast::Expr = proof_substitute(arm.guard, arm_names, arm_values)
                             guard_has_call <- proof_expr_has_call(arm.guard)
+                            guard_facts_stable: bool = not guard_has_overloaded_operator and (not guard_has_call or proof_contract_calls_are_pure(arm.guard, functions))
                             proof_check_frame_calls_in_expression(arm.guard, arm_facts, arm_names, arm_values, frame_parameters, changes, preserves, functions, report, name, annotations) if guard_has_call and guard_supported
                             guard_value <- proof_substitute(arm.guard, arm_names, arm_values) if guard_has_call and guard_supported
                             proof_forget_values(arm_names, arm_values, match_position) if guard_has_call and guard_supported
                             arm_facts.clear() if guard_has_call and guard_supported
-                            # A guard's call may rewrite what the scrutinee term denotes.
-                            if guard_has_call:
+                            # Unsupported or effectful guards may mutate values that existing
+                            # pattern facts describe. Retain no such fact, and never publish the
+                            # guard's mixed pre/post-state formula as a branch condition.
+                            if guard_has_overloaded_operator or (guard_has_call and not guard_facts_stable):
+                                proof_forget_values(arm_names, arm_values, match_position)
+                                arm_facts.clear()
+                            if guard_has_call or guard_has_overloaded_operator:
                                 refuted.clear()
                                 refuting <- false
-                            proof_add_traced_fact(arm_facts, report, guard_value, "branch-condition", match_position.line, name) if guard_supported
+                            proof_add_traced_fact(arm_facts, report, guard_value, "branch-condition", match_position.line, name) if guard_supported and guard_facts_stable
                         proof_check_returns(arm.body, &arm_names, &arm_values, &arm_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &arm_flow)
                         match_has_normal <- true if arm_flow.normal
                         flow.breaks <- flow.breaks or arm_flow.breaks
@@ -89,7 +105,7 @@ extend ElisaProof:
                         # A guard's call runs whenever its pattern matches, even when a later arm
                         # is taken, so it always weakens the join. An arm's own effects matter
                         # only when the arm falls through to the statement after the match.
-                        arms_may_modify <- true if not pattern_supported or guard_has_call or (arm_flow.normal and proof_body_may_modify(arm.body))
+                        arms_may_modify <- true if not pattern_supported or guard_has_call or guard_has_overloaded_operator or (arm_flow.normal and proof_body_may_modify(arm.body, report.source_primitive_operator_mask, report))
                         if report.return_analysis_budget_reported:
                             match_valid <- false
                             match_has_normal <- true
@@ -108,12 +124,14 @@ extend ElisaProof:
                                 Ast::Stmt.Contract(_, block_goal, _):
                                     runtime_goal: mutable Ast::Expr = proof_substitute(block_goal, names, values)
                                     runtime_goal_has_call: bool = proof_expr_has_call(block_goal)
+                                    runtime_goal_has_overloaded_operator: bool = proof_source_expression_has_overloaded_operator(block_goal, report.source_primitive_operator_mask, 0)
+                                    runtime_goal_may_mutate_state: bool = runtime_goal_has_call or runtime_goal_has_overloaded_operator
                                     # `assert ... by:` still evaluates its runtime guard after
                                     # the erased proof body. Its calls cannot be allowed to
                                     # preserve facts established before guard evaluation.
                                     proof_check_frame_calls_in_expression(block_goal, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if runtime_goal_has_call
-                                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(block_goal)) if runtime_goal_has_call
-                                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if runtime_goal_has_call
+                                    proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, Ast::expr_pos(block_goal)) if runtime_goal_may_mutate_state
+                                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if runtime_goal_may_mutate_state
                                     proof_add_traced_fact(facts, report, runtime_goal, "runtime-guard", block_position.line, name) if proof_runtime_fact_is_stable(runtime_goal, functions, report.source_primitive_operator_mask)
                                 _:
                                     pass
@@ -146,7 +164,7 @@ extend ElisaProof:
                         flow.continues <- block_flow.continues
                         flow.valid <- flow.valid and block_flow.valid
                         proof_append_continue_states(flow, block_flow)
-                        if proof_body_may_modify(block_body):
+                        if proof_body_may_modify(block_body, report.source_primitive_operator_mask, report):
                             proof_forget_values(names, values, block_position)
                             if block_kind == "can" and block_flow.normal:
                                 # An effect block only grants capabilities; its body already
