@@ -36,6 +36,7 @@ python3 "$ROOT_DIR/scripts/test_record_branch_state.py"
 python3 "$ROOT_DIR/scripts/test_disjunction_denial.py"
 python3 "$ROOT_DIR/scripts/test_integer_disjunction_denial.py"
 python3 "$ROOT_DIR/scripts/test_disjunctive_syllogism.py"
+python3 "$ROOT_DIR/scripts/test_quantifier_dispatch.py"
 python3 "$ROOT_DIR/scripts/test_null_store_identity.py"
 python3 "$ROOT_DIR/scripts/test_global_constant_relevance.py"
 
@@ -226,6 +227,18 @@ if [[ -z "$kernel_runtime_obj" ]] && elisa_compiler_is_stage0 "$SELF_HOST_COMPIL
     fi
 fi
 [[ -n "$kernel_runtime_obj" ]] && kernel_runtime_inputs+=("$kernel_runtime_obj")
+if ! "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-quantifier-instances.o" "$ROOT_DIR/examples/kernel_quantifier_instances_runtime.elisa" >/dev/null 2>&1; then
+    printf 'proof test matrix failed: direct quantifier instance probe did not compile\n' >&2
+    exit 1
+fi
+if ! "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-quantifier-instances" "$standalone_probe_dir/kernel-quantifier-instances.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"; then
+    printf 'proof test matrix failed: direct quantifier instance probe did not link\n' >&2
+    exit 1
+fi
+if ! "$standalone_probe_dir/kernel-quantifier-instances"; then
+    printf 'proof test matrix failed: quantifier replay skipped a later instance or witness\n' >&2
+    exit 1
+fi
 # This AST-level test uses the same immutable frontend export as the proof build.
 # Stage0's frontend-linked object already contains the runtime definitions.
 field_runtime_inputs=()
