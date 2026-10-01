@@ -192,9 +192,15 @@ extend ElisaProof:
         # facts justify another arm.
         def proof_check_value_match_return(scrutinee: Ast::Expr, arms: darray[Ast::MatchArm], names: darray[sview]&, values: darray[Ast::Expr]&, facts: darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, position: Ast::Pos) -> void:
             scrutinee_value: Ast::Expr = proof_substitute(scrutinee, names, values)
+            scrutinee_has_overloaded_operator: bool = proof_source_expression_has_overloaded_operator(scrutinee, report.source_primitive_operator_mask, 0)
+            scrutinee_stable: bool = not scrutinee_has_overloaded_operator and (not proof_expr_has_call(scrutinee) or proof_contract_calls_are_pure(scrutinee, functions))
+            if not scrutinee_stable:
+                report.proof_obligation(false)
+                proof_add_finding(report, "expression-unsupported", position.line, name, "value-match scrutinee may have unmodeled state effects")
+            pattern_source: Ast::Expr = scrutinee_value if scrutinee_stable else Ast::Expr.Invalid
             # Every earlier unguarded arm with an exact condition failed; guards here never call.
             refuted: mutable darray[Ast::Expr] = []
-            for arm in arms |arms, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, scrutinee_value, position, refuted|:
+            for arm in arms |arms, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, scrutinee_value, pattern_source, scrutinee_stable, position, refuted|:
                 if not proof_return_analysis_budget_available(facts, names, values, report, name, position.line):
                     report.proof_obligation(false)
                     return
@@ -202,12 +208,16 @@ extend ElisaProof:
                 arm_names: mutable darray[sview] = proof_copy_names(names)
                 arm_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
                 arm_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
-                pattern_supported: bool = proof_match_closed_pattern(arm.pattern) and proof_bind_pattern(arm.pattern, position, scrutinee_value, &arm_names, &arm_values)
+                arm_facts.clear() if not scrutinee_stable
+                proof_forget_values(arm_names, arm_values, position) if not scrutinee_stable
+                first_binding: usize = arm_values.count
+                pattern_supported: bool = proof_match_closed_pattern(arm.pattern) and proof_bind_pattern(arm.pattern, position, pattern_source, &arm_names, &arm_values)
+                proof_freshen_opaque_bindings(&arm_values, first_binding, pattern_source, report, position) if pattern_supported
                 if not pattern_supported:
                     report.proof_obligation(false)
                     proof_add_finding(report, "pattern-unsupported", position.line, name, "value-match pattern cannot enter a verified proof state")
-                pattern_condition: Ast::Expr? = proof_pattern_condition(arm.pattern, scrutinee_value, position) if pattern_supported else null
-                if pattern_supported:
+                pattern_condition: Ast::Expr? = proof_pattern_condition(arm.pattern, pattern_source, position) if pattern_supported and scrutinee_stable else null
+                if pattern_supported and scrutinee_stable:
                     for earlier in refuted |earlier, arm_facts, report, name, position|:
                         proof_add_traced_fact(arm_facts, report, Ast::Expr.Unary(TokenKind.Not, earlier, position), "branch-condition", position.line, name)
                 if pattern_condition is condition:
@@ -225,10 +235,13 @@ extend ElisaProof:
                     Ast::Expr.Absent:
                         pass
                     _:
-                        guard_supported: bool = proof_expr_supported(arm.guard) and not proof_expr_has_call(arm.guard) and not proof_expr_has_move(arm.guard)
+                        guard_has_effectful_operator: bool = proof_source_expression_has_overloaded_operator(arm.guard, report.source_primitive_operator_mask, 0)
+                        guard_supported: bool = proof_expr_supported(arm.guard) and not proof_expr_has_call(arm.guard) and not proof_expr_has_move(arm.guard) and not guard_has_effectful_operator
                         if not guard_supported:
                             report.proof_obligation(false)
                             proof_add_finding(report, "expression-unsupported", position.line, name, "value-match guard cannot enter a verified proof state")
+                            arm_facts.clear()
+                            proof_forget_values(arm_names, arm_values, position) if guard_has_effectful_operator or proof_expr_has_call(arm.guard)
                         else:
                             guard_value: Ast::Expr = proof_substitute(arm.guard, arm_names, arm_values)
                             proof_add_traced_fact(arm_facts, report, guard_value, "branch-condition", position.line, name)

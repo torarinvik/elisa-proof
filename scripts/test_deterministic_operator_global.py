@@ -20,12 +20,30 @@ assert declarations["hidden_index_mutator"]["verified"] is False, declarations["
 assert declarations["rejected_shortcircuit_index"]["verified"] is False, declarations["rejected_shortcircuit_index"]
 assert declarations["rejected_direct_overload_index"]["verified"] is False, declarations["rejected_direct_overload_index"]
 assert declarations["rejected_nested_shortcircuit_operator_index"]["verified"] is False, declarations["rejected_nested_shortcircuit_operator_index"]
+assert declarations["rejected_operator_assert_index"]["verified"] is False, declarations["rejected_operator_assert_index"]
+assert declarations["rejected_operator_match_guard_index"]["verified"] is False, declarations["rejected_operator_match_guard_index"]
+assert declarations["rejected_value_match_operator_guard"]["verified"] is False, declarations["rejected_value_match_operator_guard"]
+assert declarations["rejected_value_match_operator_scrutinee"]["verified"] is False, declarations["rejected_value_match_operator_scrutinee"]
+assert declarations["rejected_operator_loop_index"]["verified"] is False, declarations["rejected_operator_loop_index"]
 
 # Both signed index obligations need to remain open after the RHS can mutate the global index.
-for function_name in ("rejected_shortcircuit_index", "rejected_direct_overload_index", "rejected_nested_shortcircuit_operator_index"):
+for function_name in (
+    "rejected_shortcircuit_index",
+    "rejected_direct_overload_index",
+    "rejected_nested_shortcircuit_operator_index",
+    "rejected_operator_assert_index",
+    "rejected_operator_loop_index",
+):
     index_goals = [goal for goal in report["goals"] if goal["name"] == function_name and goal["rule"].startswith("index-")]
     assert {goal["rule"] for goal in index_goals} == {"index-lower", "index-upper"}, index_goals
     assert all(not goal["proven"] and goal["replay_status"] == "not_certified" for goal in index_goals), index_goals
+for function_name in (
+    "rejected_operator_match_guard_index",
+    "rejected_value_match_operator_guard",
+    "rejected_value_match_operator_scrutinee",
+):
+    match_goals = [goal for goal in report["goals"] if goal["name"] == function_name and goal["rule"] != "resource-safety"]
+    assert match_goals and all(not goal["proven"] and goal["replay_status"] == "not_certified" for goal in match_goals), match_goals
 assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_shortcircuit_index" for finding in report["findings"]), report["findings"]
 
 print("unverified calls and overloaded operators cannot carry stale index facts across branches")

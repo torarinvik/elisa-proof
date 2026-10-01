@@ -10637,3 +10637,18 @@ expects the formal parameter names `left`/`right`. The compiler still rejected t
 a cross-repository diagnostic/test mismatch, not a proof regression. No compiler files were
 modified. Because the script stops there, its later optimized replay and census gates were not
 completed in this run.
+
+The same evaluation-boundary rule was then applied to statement-match scrutinees and guards,
+value-match scrutinees and guards, `while` conditions, runtime `assert` propositions, and
+`assert ... by` runtime guards. An unmodeled operator in any of these expressions clears facts and
+symbolic values before subsequent proof-state use; match/loop/assert conditions are not
+republished as logical facts unless their evaluation is stable. Ordinary verified pure-call guards
+retain their supported path. The adversarial fixture exercises an assertion between a valid bound
+check and the access, overloaded statement- and value-match guards with result contracts that would
+otherwise be provable from stale facts, an overloaded value-match scrutinee, and an overloaded
+loop condition; the committed regression also retains the earlier short-circuit cases. Each tested
+index obligation remains open and uncertified, each match result contract remains open and
+uncertified, replay reports zero gaps, and the match/value-match functions remain unverified. The
+focused regression, positive deterministic-call and guard/fact tests, refusal gate, certificate
+reuse, kernel inventory, portable replay, source-length check, and whitespace check all passed on
+the Stage1-built O0 proof binary. The complete suite was not rerun after this follow-on change.

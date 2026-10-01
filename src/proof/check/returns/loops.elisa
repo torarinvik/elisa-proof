@@ -14,12 +14,15 @@ extend ElisaProof:
                     # A loop without an invariant is not treated as verified. With one,
                     # establish and check preservation on the one symbolic iteration.
                     invariants: darray[Ast::Expr] = proof_contracts(while_body, "invariant")
+                    loop_condition_has_overloaded_operator: bool = proof_source_expression_has_overloaded_operator(condition, report.source_primitive_operator_mask, 0)
+                    loop_condition_may_mutate_state: bool = proof_expr_has_call(condition) or loop_condition_has_overloaded_operator
                     loop_condition_value: mutable Ast::Expr = proof_substitute(condition, names, values)
                     proof_check_frame_calls_in_expression(condition, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(condition)
                     loop_condition_value <- proof_substitute(condition, names, values) if proof_expr_has_call(condition)
-                    proof_add_finding(report, "loop-condition-opaque", position.line, name, "loop condition may mutate state and has no frame model") if proof_expr_has_call(condition)
-                    proof_forget_values(names, values, position) if proof_expr_has_call(condition)
-                    loop_exit_valid: mutable bool = invariants.count > 0 and not proof_expr_has_call(condition)
+                    proof_add_finding(report, "loop-condition-opaque", position.line, name, "loop condition may mutate state and has no frame model") if loop_condition_may_mutate_state
+                    proof_forget_values(names, values, position) if loop_condition_may_mutate_state
+                    proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if loop_condition_may_mutate_state
+                    loop_exit_valid: mutable bool = invariants.count > 0 and not loop_condition_may_mutate_state
                     loop_scope_count: usize = names.count
                     loop_body_flow: mutable ProofFlow = proof_empty_flow()
                     loop_block: (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) = proof_single_captured_block(while_body)
@@ -31,11 +34,11 @@ extend ElisaProof:
                         # so nested indexing, calls, moves, and returns remain visible to the
                         # fail-closed checker without the entry values standing in for them.
                         # The body runs only when the condition holds, so the condition is a
-                        # fact at every iteration's entry -- over that opaque state. A
-                        # condition that calls is excluded: it may mutate the state the body
-                        # is then checked in, and its own value is already reported opaque.
+                        # fact at every iteration's entry -- over that opaque state. Any call
+                        # or overloaded operator in the condition is excluded: it may mutate
+                        # the state the body is then checked in, and its value is reported opaque.
                         entry_conditions: mutable darray[Ast::Expr] = []
-                        entry_conditions.push(condition) if not proof_expr_has_call(condition)
+                        entry_conditions.push(condition) if not loop_condition_may_mutate_state
                         no_entry_invariants: mutable darray[Ast::Expr] = []
                         unchecked_loop_names: mutable darray[sview] = proof_copy_names(names)
                         unchecked_loop_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
@@ -65,10 +68,11 @@ extend ElisaProof:
                             loop_exit_valid <- false if not established
                             established_invariants.push(invariant) if established
                         # One arbitrary iteration: the bindings the body may rewrite are opaque
-                        # at entry, and the established invariants and the condition are the
-                        # facts over that state. Preservation is checked on the body's end
+                        # at entry, and the established invariants plus any stable condition
+                        # are the facts over that state. Preservation is checked on the body's end
                         # state.
-                        loop_entry_conditions: mutable darray[Ast::Expr] = [condition]
+                        loop_entry_conditions: mutable darray[Ast::Expr] = []
+                        loop_entry_conditions.push(condition) if not loop_condition_may_mutate_state
                         loop_names: mutable darray[sview] = proof_copy_names(names)
                         loop_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
                         loop_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
@@ -81,7 +85,7 @@ extend ElisaProof:
                             loop_body_flow.normal <- loop_end_flow.normal
                         else:
                             proof_forget_loop_entry(loop_names, &loop_values, &loop_facts, while_body, functions, frame_parameters, report, name, position)
-                            proof_add_traced_fact(loop_facts, report, proof_substitute(condition, loop_names, loop_values), "loop-condition", position.line, name)
+                            proof_add_traced_fact(loop_facts, report, proof_substitute(condition, loop_names, loop_values), "loop-condition", position.line, name) if not loop_condition_may_mutate_state
                             for invariant in established_invariants |loop_facts, loop_names, loop_values, frame_parameters, old_values, loop_scope_count, report, name, position|:
                                 proof_add_traced_fact(loop_facts, report, proof_substitute_scoped_contract(invariant, loop_names, loop_values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
                             proof_check_returns(while_body, &loop_names, &loop_values, &loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &loop_body_flow)
@@ -133,7 +137,7 @@ extend ElisaProof:
                             measure_components.push(proof_substitute(component, termination_entry_names, termination_entry_values))
                         for invariant in invariants |termination_facts, termination_entry_names, termination_entry_values, report, name, position|:
                             proof_add_traced_fact(termination_facts, report, proof_substitute_scoped_contract(invariant, termination_entry_names, termination_entry_values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
-                        proof_add_traced_fact(termination_facts, report, proof_substitute(condition, termination_entry_names, termination_entry_values), "loop-condition", position.line, name) if not proof_expr_has_call(condition)
+                        proof_add_traced_fact(termination_facts, report, proof_substitute(condition, termination_entry_names, termination_entry_values), "loop-condition", position.line, name) if not loop_condition_may_mutate_state
                         nonnegative_proven: mutable bool = true
                         for measure in measure_components |termination_facts, annotations, report, name, position, nonnegative_proven|:
                             measure_nonnegative: Ast::Expr = Ast::Expr.Binary(measure, TokenKind.GtEq, Ast::Expr.IntLit(0, Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0}), Ast::Pos{line: position.line, column: 0, offset: 0, end_line: position.line, end_column: 0, end_offset: 0})
@@ -150,7 +154,7 @@ extend ElisaProof:
                             # already opaque state, which changes nothing; the entry facts it is
                             # given are the ones just recorded.
                             termination_entry_conditions: mutable darray[Ast::Expr] = []
-                            termination_entry_conditions.push(condition) if not proof_expr_has_call(condition)
+                            termination_entry_conditions.push(condition) if not loop_condition_may_mutate_state
                             termination_end_names: mutable darray[sview] = []
                             termination_end_values: mutable darray[Ast::Expr] = []
                             termination_end_facts: mutable darray[Ast::Expr] = []
