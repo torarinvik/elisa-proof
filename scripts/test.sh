@@ -3762,7 +3762,7 @@ if [[ "$no_op_statement_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_no_op_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"expression-unsupported"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_dropped_arm_is_refused"] == "body-unverified"; assert reasons["the_refusal_reaches_past_the_match"] == "body-unverified"'
+run_json_report "$ROOT_DIR/examples/rejected_no_op_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"expression-unsupported", "call-requires-unproven"}; assert sum(f["kind"] == "expression-unsupported" for f in report["findings"]) == 2; assert any(f["kind"] == "call-requires-unproven" and f["name"] == "the_refusal_reaches_past_the_match" for f in report["findings"]); reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_dropped_arm_is_refused"] == "body-unverified"; assert reasons["the_refusal_reaches_past_the_match"] == "body-unverified"'
 rejected_no_op_statement_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_no_op_statement_status" -ne 0 ]]; then
