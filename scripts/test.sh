@@ -37,6 +37,7 @@ python3 "$ROOT_DIR/scripts/test_disjunction_denial.py"
 python3 "$ROOT_DIR/scripts/test_integer_disjunction_denial.py"
 python3 "$ROOT_DIR/scripts/test_disjunctive_syllogism.py"
 python3 "$ROOT_DIR/scripts/test_quantifier_dispatch.py"
+python3 "$ROOT_DIR/scripts/test_local_call_result_binding.py"
 python3 "$ROOT_DIR/scripts/test_null_store_identity.py"
 python3 "$ROOT_DIR/scripts/test_global_constant_relevance.py"
 
