@@ -2,6 +2,27 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+standalone_probe_dir=""
+kernel_core_repeat_a=""
+kernel_core_repeat_b=""
+proof_render_dir=""
+large_source_dir=""
+
+cleanup_test_scratch() {
+    local scratch_dir scratch_file
+    for scratch_dir in "$standalone_probe_dir" "$proof_render_dir" "$large_source_dir"; do
+        if [[ -n "$scratch_dir" && -d "$scratch_dir" ]]; then
+            rm -rf -- "$scratch_dir" || true
+        fi
+    done
+    for scratch_file in "$kernel_core_repeat_a" "$kernel_core_repeat_b"; do
+        if [[ -n "$scratch_file" && -f "$scratch_file" ]]; then
+            rm -f -- "$scratch_file" || true
+        fi
+    done
+}
+trap cleanup_test_scratch EXIT
+
 python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 "$ROOT_DIR/scripts/build.sh"
@@ -1373,7 +1394,6 @@ if ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["stat
 fi
 kernel_core_repeat_a="$(mktemp)"
 kernel_core_repeat_b="$(mktemp)"
-trap 'rm -f "$kernel_core_repeat_a" "$kernel_core_repeat_b"' EXIT
 run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" >"$kernel_core_repeat_a"
 run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" >"$kernel_core_repeat_b"
 if ! cmp -s "$kernel_core_repeat_a" "$kernel_core_repeat_b"; then
@@ -3574,7 +3594,6 @@ fi
 # only `proof ... qed` means the kernel checked it, so a goal that is unproven, or proven without a
 # replayed certificate, must never render one.
 proof_render_dir="$(mktemp -d)"
-trap 'rm -rf "$proof_render_dir"' EXIT
 set +e
 proved_goal=$(run_json_report "$ROOT_DIR/examples/condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if goal["rule"] == "index-upper" and goal["proven"]))')
 "$ROOT_DIR/build/elisa-proof" --proof "$proved_goal" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/proved.txt"
