@@ -1,8 +1,8 @@
 """Symbolic-range quantifiers (BACKLOG W-02).
 
-Positive: cover, extend, empty, a later certificate in the shared arena and a fill loop's growing
+Positive: cover, extend, empty, weaken (also over a narrower range), a later certificate in the shared arena and a fill loop's growing
 invariant are proven and replayed by the kernel. Adversarial: an off-by-one extension, a wrong lower
-bound, another body and a captured binder stay unproven. Malformed: a forall over a non-range is not
+bound, another body and a captured binder, a weakening against the wrong bound and one over a wider range stay unproven. Malformed: a forall over a non-range is not
 taken by the rule. Budget: a covering fact past the 256-fact scan limit is not found, and the run
 stays fast.
 """
@@ -48,7 +48,7 @@ negative = report(ROOT / "examples/rejected_symbolic_quantifier.elisa")
 check(negative is not None, "adversarial fixture produced no report")
 if negative:
     names = {item.get("name") for item in negative["certificates"] if item.get("rule", "").startswith("quantifier")}
-    for name in ("off_by_one", "wrong_lower", "other_body", "shadow"):
+    for name in ("off_by_one", "wrong_lower", "other_body", "shadow", "weaken_wrong_way", "weaken_wider"):
         check(name not in names, f"adversarial goal {name} was proven")
     check(negative["replay"]["gaps"] == 0, f"adversarial fixture has replay gaps: {negative['replay']}")
 

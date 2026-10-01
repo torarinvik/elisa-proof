@@ -2,10 +2,12 @@
 # constants cannot be enumerated, but it follows from three sound rules:
 #   empty   b <= a;
 #   cover   a fact `forall j in c..<d: Q(j)` with Q alpha-equal to P, c <= a and b <= d;
-#   extend  the same fact with c <= a, b <= d + 1 and P(d) -- the range grew by one element.
+#   extend  the same fact with c <= a, b <= d + 1 and P(d) -- the range grew by one element;
+#   weaken  a fact over a covering range whose body Q, at a binder absent from every fact,
+#           proves P there: `forall i in 0..<k: xs[i] <= m` with `m <= w` gives `... <= w`.
 # Bodies are compared after both binders become one reserved marker, so a free variable of
 # either body can never be confused with a binder. Every side condition is an ordinary goal,
-# and the kernel replays the same three rules (kernel_replay/symbolic_quantifiers.elisa).
+# and the kernel replays the same four rules (kernel_replay/symbolic_quantifiers.elisa).
 const PROOF_SYMBOLIC_QUANTIFIER_MARKER: sview = "__elisa_symbolic_quantifier_binder"
 const PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS: usize = 256
 
@@ -57,7 +59,10 @@ extend ElisaProof:
                 if proof_quantifier_kind(fact, annotations) == "forall":
                     known: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
                     fact_names: darray[sview] = [known.binder]
-                    if known.known and proof_expr_equal(proof_substitute(known.body, fact_names, marker_values), goal_marked):
+                    fact_marked: Ast::Expr = proof_substitute(known.body, fact_names, marker_values)
+                    if known.known and not proof_expr_equal(fact_marked, goal_marked):
+                        return true if proof_symbolic_weakened(facts, fact_marked, goal_marked, known.lower, known.upper, goal.lower, goal.upper, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                    if known.known and proof_expr_equal(fact_marked, goal_marked):
                         starts: Ast::Expr = Ast::Expr.Binary(known.lower, TokenKind.LtEq, goal.lower, position)
                         if proof_symbolic_side_goal(facts, starts, annotations, operator_mask, depth, budget, split_depth, exhausted):
                             covered: Ast::Expr = Ast::Expr.Binary(goal.upper, TokenKind.LtEq, known.upper, position)
@@ -68,3 +73,33 @@ extend ElisaProof:
                                 goal_binder: darray[sview] = [goal.binder]
                                 return true if proof_symbolic_side_goal(facts, proof_substitute(goal.body, goal_binder, upper_values), annotations, operator_mask, depth, budget, split_depth, exhausted)
             return false
+
+        # The weaken rule: the fact's range covers the goal's and its body, at the marker, proves
+        # the goal's body there. The marker must be absent from every fact, so it stands for an
+        # arbitrary index of the range.
+        def proof_symbolic_weakened(facts: darray[Ast::Expr]&, fact_marked: Ast::Expr, goal_marked: Ast::Expr, fact_lower: Ast::Expr, fact_upper: Ast::Expr, goal_lower: Ast::Expr, goal_upper: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if any fact in facts where proof_expr_mentions_name(fact, PROOF_SYMBOLIC_QUANTIFIER_MARKER)
+            position: Ast::Pos = Ast::pos_at_line(0)
+            return false if not proof_symbolic_side_goal(facts, Ast::Expr.Binary(fact_lower, TokenKind.LtEq, goal_lower, position), annotations, operator_mask, depth, budget, split_depth, exhausted)
+            return false if not proof_symbolic_side_goal(facts, Ast::Expr.Binary(goal_upper, TokenKind.LtEq, fact_upper, position), annotations, operator_mask, depth, budget, split_depth, exhausted)
+            instance_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+            marker: Ast::Expr = Ast::Expr.Ident(PROOF_SYMBOLIC_QUANTIFIER_MARKER, position)
+            proof_symbolic_type_marker(facts, goal_upper, marker, instance_facts)
+            instance_facts.push(Ast::Expr.Binary(goal_lower, TokenKind.LtEq, marker, position))
+            instance_facts.push(Ast::Expr.Binary(marker, TokenKind.Lt, goal_upper, position))
+            instance_facts.push(fact_marked)
+            return proof_symbolic_side_goal(instance_facts, goal_marked, annotations, operator_mask, depth, budget, split_depth, exhausted)
+
+        # The marker lies in `lower..<upper`, so it has the upper bound's type: each type marker
+        # over the upper bound is copied onto it, and without one the instance stays untyped.
+        def proof_symbolic_type_marker(facts: darray[Ast::Expr]&, upper: Ast::Expr, marker: Ast::Expr, instance_facts: mutable darray[Ast::Expr]&) -> void:
+            for fact in facts |fact, upper, marker, instance_facts|:
+                match fact:
+                    Ast::Expr.Call(Ast::Expr.Ident(callee, callee_position), arguments, argument_names, position):
+                        continue if callee != "__elisa_unsigned_type_bound" and callee != "__elisa_signed_type_bound" and callee != "__elisa_primitive_scalar_type"
+                        continue if arguments.count == 0 or not proof_expr_equal(arguments[0], upper)
+                        typed: mutable darray[Ast::Expr] = proof_copy_exprs(arguments)
+                        typed[0] <- marker
+                        instance_facts.push(Ast::Expr.Call(Ast::Expr.Ident(callee, callee_position), typed, argument_names, position))
+                    _:
+                        continue
