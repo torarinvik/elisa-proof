@@ -8121,6 +8121,14 @@ verifies a `_: pass` arm that keeps `depth <= 127` for the call after the match.
 `with value`, a dropped prefix form. Both are still refused, and the refusal still discards the
 state after the match.
 
+The 2026-10-01 branch-state audit checked that boundary against the saved census-baseline
+revision (`6286345`). That revision incorrectly certified the later `needs_bound(depth)` call
+after the dropped `with value` arm: 4 of 6 obligations appeared proven, with no call refusal.
+The current report correctly leaves that call unproven (`call-requires-unproven`, `no-rule`),
+while replaying every emitted certificate with zero gaps. This intentionally lowers the fixture
+to 3 of 6 proven obligations; its census entry is refreshed to record the soundness correction,
+not to waive the adversarial check. The fixture assertion in `scripts/test.sh` pins this behavior.
+
 ### Cancellation over differences of two names (2026-09-28)
 
 A counting loop's measure did not verify. `decreases x - count` needs `x - (count + 1) < x - count`
