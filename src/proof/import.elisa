@@ -299,7 +299,11 @@ extend ElisaProof:
                 captured.push(line[offset])
             return (true, captured)
 
-        def proof_expand_file(path: darray[u8]&, output: mutable darray[u8]&, seen: mutable darray[u8]&, active: mutable darray[u8]&, depth: i64, failed: mutable bool&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        # `line_files[k]` and `line_numbers[k]` give the file (its position in `seen`, which
+        # lists files in first-visit order) and the 1-based line there of expanded line k + 1.
+        # Include directives are dropped from the expansion, so without the map a line number
+        # past the first include no longer points into any one file.
+        def proof_expand_file(path: darray[u8]&, output: mutable darray[u8]&, seen: mutable darray[u8]&, active: mutable darray[u8]&, depth: i64, failed: mutable bool&, line_files: mutable darray[u32]&, line_numbers: mutable darray[u32]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
             if depth > PROOF_IMPORT_INCLUDE_DEPTH_LIMIT:
                 failed <- true
                 return
@@ -310,6 +314,9 @@ extend ElisaProof:
                 failed <- true
                 return
             return if proof_path_seen(seen, path)
+            file_index: mutable u32 = 0
+            for byte in seen |file_index|:
+                file_index <- file_index + 1 if byte == PROOF_IMPORT_BYTE_NUL
             proof_record_path(seen, path)
             proof_record_path(active, path)
             path_storage: mutable darray[u8] = []
@@ -325,20 +332,26 @@ extend ElisaProof:
             directory: darray[u8] = proof_path_directory(path)
             line: mutable darray[u8] = []
             index: mutable usize = 0
+            source_line: mutable u32 = 0
             trailing_partial: bool = contents.count > 0 and contents[contents.count - 1] != PROOF_IMPORT_BYTE_LINE_FEED
-            while index < contents.count + (1 if trailing_partial else 0) and failed == false |index, contents, line, output, seen, active, directory, path, depth, failed, trailing_partial|:
+            while index < contents.count + (1 if trailing_partial else 0) and failed == false |index, contents, line, output, seen, active, directory, path, depth, failed, trailing_partial, source_line, file_index, line_files, line_numbers|:
                 at_end: bool = index == contents.count
                 byte: u8 = PROOF_IMPORT_BYTE_LINE_FEED if at_end else contents[index]
                 if byte == PROOF_IMPORT_BYTE_LINE_FEED:
+                    source_line <- source_line + 1
                     included: (recognized: bool, path: darray[u8]) = proof_include_path(line)
                     if included.recognized:
                         if proof_import_path_has_nul(included.path):
                             failed <- true
                         else:
                             resolved: darray[u8] = proof_resolve_include(directory, included.path)
-                            proof_expand_file(resolved, output, seen, active, depth + 1, failed)
+                            proof_expand_file(resolved, output, seen, active, depth + 1, failed, line_files, line_numbers)
                     else:
-                        failed <- true if not proof_import_append_line(output, line)
+                        if proof_import_append_line(output, line):
+                            line_files.push(file_index)
+                            line_numbers.push(source_line)
+                        else:
+                            failed <- true
                     line <- line.truncate(0)
                 else:
                     line.push(byte)
@@ -347,9 +360,16 @@ extend ElisaProof:
 
         public:
             def proof_import_source(path: darray[u8]&, failed: mutable bool&) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+                files: mutable darray[u8] = []
+                line_files: mutable darray[u32] = []
+                line_numbers: mutable darray[u32] = []
+                return proof_import_source_mapped(path, failed, &files, &line_files, &line_numbers)
+
+            # As `proof_import_source`, also returning the NUL-separated file table and, per
+            # expanded line, its file index and line in that file.
+            def proof_import_source_mapped(path: darray[u8]&, failed: mutable bool&, files: mutable darray[u8]&, line_files: mutable darray[u32]&, line_numbers: mutable darray[u32]&) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
                 output: mutable darray[u8] = []
-                seen: mutable darray[u8] = []
                 active: mutable darray[u8] = []
                 normalized: darray[u8] = proof_absolute_path(path)
-                proof_expand_file(normalized, &output, &seen, &active, 0, failed)
+                proof_expand_file(normalized, &output, files, &active, 0, failed, line_files, line_numbers)
                 return output

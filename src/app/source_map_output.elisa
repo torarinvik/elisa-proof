@@ -1,0 +1,92 @@
+# Source positions and per-function status for the JSON report.
+#
+# Includes are spliced before parsing and their directive lines dropped, so every `line` in
+# the report counts lines of the expanded source. That keeps it consistent with expression
+# positions and kernel records, but past the first include it no longer names a line of any
+# one file. The importer's line map recovers it: findings, goals and repair entries also
+# carry `file` (an index into the top-level `files` list) and `file_line`.
+#
+# A finding not bound to a goal -- an unsupported contract call, say -- leaves no trace in
+# `goals`, so a client that judges functions by their goals alone counts such a function as
+# proved. The `functions` list folds both in: a function is proved only when every goal it
+# owns is proven and it has no finding.
+struct ProofSourceMap:
+    files: darray[u8]
+    line_files: darray[u32]
+    line_numbers: darray[u32]
+
+def proof_push_json_source_position(buffer: mutable darray[u8]&, source_map: ProofSourceMap&, line: u32) -> void can[Memory.Allocate, Abort.Panic]:
+    return if line == 0 or line.usize() > source_map.line_files.count or line.usize() > source_map.line_numbers.count
+    proof_push(buffer, ",\"file\":")
+    proof_push_number(buffer, source_map.line_files[line.usize() - 1])
+    proof_push(buffer, ",\"file_line\":")
+    proof_push_number(buffer, source_map.line_numbers[line.usize() - 1])
+
+def proof_push_json_source_files(buffer: mutable darray[u8]&, source_map: ProofSourceMap&) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, ",\"files\":[")
+    path: mutable darray[u8] = []
+    first: mutable bool = true
+    for byte in source_map.files |path, first, buffer|:
+        if byte == 0:
+            proof_push(buffer, ",") if not first
+            proof_push_json_bytes(buffer, path)
+            path <- path.truncate(0)
+            first <- false
+        else:
+            path.push(byte)
+    proof_push(buffer, "]")
+
+# The owning function of a goal or finding name: the text before the first `.`.
+def proof_function_status_owner(name: sview) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+    owner: mutable darray[u8] = []
+    for index in 0..<sview_len(name) |name, owner|:
+        break if sview_at(name, index) == '.'.u8()
+        owner.push(sview_at(name, index))
+    return owner
+
+def proof_function_status_same(left: darray[u8]&, right: darray[u8]&) -> bool:
+    return false if left.count != right.count
+    for index in 0..<left.count |left, right|:
+        return false if left[index] != right[index]
+    return true
+
+def proof_push_json_function_status(buffer: mutable darray[u8]&, report: ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
+    names: mutable darray[darray[u8]] = []
+    goals: mutable darray[u32] = []
+    open_goals: mutable darray[u32] = []
+    findings: mutable darray[u32] = []
+    for attempt in report.goal_attempts |names, goals, open_goals, findings|:
+        owner: darray[u8] = proof_function_status_owner(attempt.name)
+        continue if owner.count == 0
+        slot: usize = proof_function_status_slot(&names, &goals, &open_goals, &findings, &owner)
+        goals[slot] <- goals[slot] + 1
+        open_goals[slot] <- open_goals[slot] + 1 if not attempt.proven
+    for finding in report.findings |names, goals, open_goals, findings|:
+        owner: darray[u8] = proof_function_status_owner(finding.name)
+        continue if owner.count == 0
+        slot: usize = proof_function_status_slot(&names, &goals, &open_goals, &findings, &owner)
+        findings[slot] <- findings[slot] + 1
+    proof_push(buffer, ",\"functions\":[")
+    for index in 0..<names.count |index, names, goals, open_goals, findings, buffer|:
+        proof_push(buffer, ",") if index > 0
+        proof_push(buffer, "{\"name\":")
+        proof_push_json_bytes(buffer, names[index])
+        proof_push(buffer, ",\"proved\":")
+        proof_push(buffer, "true" if open_goals[index] == 0 and findings[index] == 0 else "false")
+        proof_push(buffer, ",\"goals\":")
+        proof_push_number(buffer, goals[index])
+        proof_push(buffer, ",\"open_goals\":")
+        proof_push_number(buffer, open_goals[index])
+        proof_push(buffer, ",\"findings\":")
+        proof_push_number(buffer, findings[index])
+        proof_push(buffer, "}")
+    proof_push(buffer, "]")
+
+def proof_function_status_slot(names: mutable darray[darray[u8]]&, goals: mutable darray[u32]&, open_goals: mutable darray[u32]&, findings: mutable darray[u32]&, owner: darray[u8]&) -> usize can[Memory.Allocate, Abort.Panic]:
+    for index in 0..<names.count |names, owner|:
+        return index if proof_function_status_same(names[index], owner)
+    names.push(owner)
+    goals.push(0)
+    open_goals.push(0)
+    findings.push(0)
+    return names.count - 1
