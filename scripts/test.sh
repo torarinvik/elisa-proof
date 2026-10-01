@@ -207,6 +207,7 @@ if [[ "$report_invariants_compile_status" -ne 0 ]]; then
     printf 'proof test matrix failed: report invariant boundary harness did not compile\n' >&2
     exit 1
 fi
+ELISA_COMPILER_BIN="$SELF_HOST_COMPILER" python3 "$ROOT_DIR/scripts/test_loop_invariants_compile.py" || exit 1
 kernel_runtime_inputs=()
 kernel_runtime_obj="${ELISA_RUNTIME_OBJ:-}"
 if [[ -z "$kernel_runtime_obj" ]]; then
