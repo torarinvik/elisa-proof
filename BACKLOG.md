@@ -16,7 +16,7 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 
 | ID | Task | ROI | Done when |
 | --- | --- | --- | --- |
-| W-01 (T0) | Z3 linear oracle: elisa-proof exports each unproven goal's linear rows, `scripts/smt_oracle.py` asks `z3` for Farkas multipliers, and `--linear-hints` feeds them back as C-02 certificates | First SMT reach with no growth in trust | Census with and without the oracle; forged and malformed hints are refused; replay passes without z3 installed |
+| W-01 (T0, done 2026-10-01) | Z3 linear oracle: elisa-proof exports each unproven goal's linear rows, `scripts/smt_oracle.py` asks `z3` for Farkas multipliers, and `--linear-hints` feeds them back as C-02 certificates | First SMT reach with no growth in trust | Census with and without the oracle; forged and malformed hints are refused; replay passes without z3 installed |
 | W-02 (T0) | Symbolic-range quantifier rules (cover, extend-by-one) in the checker and the kernel; triggered instances; trigger-free refusal (absorbs E-02) | Loops over unknown-length arrays become provable | Fill and prefix-sorted examples prove; adversarial off-by-one and wrong-range cases stay unproven |
 | W-03 (T0) | Indexed-write frame: keep facts whose reads of `xs` are provably at other indices, plus `xs.count`; record `xs[k] == v` | Element writes stop erasing the proof state | Stale-binding and aliasing adversarial cases stay unproven; census gain |
 | W-04 (T1) | Read-over-write for `push`/`pop`/`swap`/slices, and the remaining E-01 pieces | Collection algorithms keep invariants | Swap-based sort and partition examples prove |

@@ -10783,3 +10783,24 @@ proves `is_digit`-guarded and `twice`-bounded callers without contracts;
 opaque index call, and four exact obligation counts moved by the synthesized ensures (all proven).
 Not yet handled: a negated bool helper fact (`not is_digit(c)`) does not split the negated
 conjunction.
+
+## SMT linear oracle (BACKLOG W-01, 2026-10-01)
+
+Each unproven goal's near-miss now carries `linear_rows`: the negated goal (fact -1) and every
+certificate fact that reads as a linear constraint, as rows over at most 24 atoms and 48 rows
+(`linear/linear_hints.elisa`). `scripts/smt_oracle.py` asks `z3 -in` (QF_LIA, 2 s per goal) for
+integer Farkas multipliers -- goal multiplier at least one, inequality multipliers non-negative,
+at most fifteen premises, all within the C-02 multiplier bound -- and writes a hints file that
+`elisa-proof --linear-hints <file> <source>` reads (`app/linear_hints_input.elisa`). A hint names
+its goal by attempt id and each premise by index among that goal's certificate facts; when the
+Fourier-Motzkin search finds nothing, the checker turns the matching hint into the same
+`__elisa_linear_certificate` marker and decides the goal again, so the checker and kernel rules
+are unchanged and Z3 is never trusted. A forged, stale or mismatched hint only fails to prove;
+a malformed file (truncated record, non-number, more than fifteen premises, over-long number,
+unreadable) exits 2 before checking. Without z3 the oracle proposes nothing.
+`scripts/test_smt_oracle.py` pins these cases on `examples/smt_linear_oracle.elisa`, a goal over
+eight names that the six-atom search cannot reach. Census over `examples/`: 15465 -> 15466 proven
+with the oracle; it proposed 16 hints and only the fixture's closed a goal, so the remaining
+unproven linear goals fail before the certificate tier (gates, widths) rather than for want of
+multipliers. The plain census is unchanged: no regressions, 13093/17773. Known gap: `k * x` with a
+literal `k` is not a linear term to the shared collector, so such goals export no rows.
