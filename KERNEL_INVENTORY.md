@@ -161,6 +161,7 @@ summary trace cannot be relabelled as one.
 | `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
 | `collection-push` | `check/collection_push.elisa` | after `v.push(x)` on a mutable darray reference parameter: `v.count == T + 1`, `v[T] == x` and `v[v.count - 1] == x`, the pre-push count T an unsigned 64-bit scalar at most 2^63 - 2 |
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
+| `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
 <!-- /inventory:boundary-trace-kinds -->
 
 Derived kinds are never axioms. Their premises are themselves traced. Replay re-proves each step

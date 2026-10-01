@@ -1,0 +1,189 @@
+# The producer's search for a linear certificate. Nothing here is trusted: the search only proposes
+# multipliers, and `proof_linear_certificate_closes` (with its kernel mirror) decides. Rows are
+# constraints `sum coefficient * atom + constant <= 0` stored flat, `atoms` coefficients per row,
+# each carrying its provenance: the non-negative weight of every premise slot it combines. Slot 0
+# is the negated goal; an equality fact takes two slots, one per direction.
+extend ElisaProof:
+    public:
+        struct ProofLinearRows:
+            coefficients: mutable darray[i64]
+            constants: mutable darray[i64]
+            provenance: mutable darray[i64]
+
+        def proof_linear_gcd(left: i64, right: i64) -> i64:
+            first: mutable i64 = left if left >= 0 else 0 - left
+            second: mutable i64 = right if right >= 0 else 0 - right
+            while second != 0 |first, second|:
+                remainder: i64 = first % second
+                first <- second
+                second <- remainder
+            return first
+
+        # Read `fact` (or the goal's negation) as a row over `atoms`, declining a name outside them.
+        def proof_linear_row(fact: Ast::Expr, sign: i64, negate: bool, facts: darray[Ast::Expr]&, atoms: darray[sview]&, rows: mutable ProofLinearRows&) -> bool:
+            names: mutable darray[sview] = []
+            coefficients: mutable darray[i64] = []
+            constant: mutable i64 = 0
+            return false if not proof_linear_constraint_add(fact, sign, negate, facts, &names, &coefficients, &constant)
+            for name in names |name, atoms|:
+                return false if not any atom in atoms where atom == name
+            for atom in atoms |atom, names, coefficients, rows|:
+                value: mutable i64 = 0
+                index: mutable usize = 0
+                while index < names.count |index, names, coefficients, atom, value|:
+                    value <- coefficients[index] if names[index] == atom and index < coefficients.count
+                    index <- index + 1
+                rows.coefficients.push(value)
+            rows.constants.push(constant)
+            return true
+
+        # `left_weight * left + right_weight * right`, reduced by the gcd of every entry.
+        def proof_linear_combine(rows: ProofLinearRows&, left: usize, left_weight: i64, right: usize, right_weight: i64, atoms: usize, slots: usize, output: mutable ProofLinearRows&) -> bool:
+            entries: mutable darray[i64] = []
+            for position in 0..<(atoms + 1 + slots) |position, rows, left, left_weight, right, right_weight, atoms, slots, entries|:
+                first: mutable i64 = 0
+                second: mutable i64 = 0
+                if position < atoms:
+                    first <- rows.coefficients[left * atoms + position]
+                    second <- rows.coefficients[right * atoms + position]
+                elif position == atoms:
+                    first <- rows.constants[left]
+                    second <- rows.constants[right]
+                else:
+                    first <- rows.provenance[left * slots + position - atoms - 1]
+                    second <- rows.provenance[right * slots + position - atoms - 1]
+                scaled_first: (known: bool, value: i64) = proof_mul_safe(first, left_weight)
+                scaled_second: (known: bool, value: i64) = proof_mul_safe(second, right_weight)
+                return false if not scaled_first.known or not scaled_second.known
+                sum: (known: bool, value: i64) = proof_add_safe(scaled_first.value, scaled_second.value)
+                return false if not sum.known
+                entries.push(sum.value)
+            divisor: mutable i64 = 0
+            for entry in entries |entry, divisor|:
+                divisor <- proof_linear_gcd(divisor, entry)
+            divisor <- 1 if divisor == 0
+            for position in 0..<entries.count |position, entries, atoms, divisor, output|:
+                value: i64 = entries[position] / divisor
+                if position < atoms:
+                    output.coefficients.push(value)
+                elif position == atoms:
+                    output.constants.push(value)
+                else:
+                    output.provenance.push(value)
+            return true
+
+        def proof_linear_copy_row(rows: ProofLinearRows&, row: usize, atoms: usize, slots: usize, output: mutable ProofLinearRows&) -> void:
+            for position in 0..<atoms |position, rows, row, atoms, output|:
+                output.coefficients.push(rows.coefficients[row * atoms + position])
+            output.constants.push(rows.constants[row])
+            for position in 0..<slots |position, rows, row, slots, output|:
+                output.provenance.push(rows.provenance[row * slots + position])
+
+        # The first row whose coefficients all vanish and whose constant is positive.
+        def proof_linear_contradiction(rows: ProofLinearRows&, atoms: usize) -> (found: bool, row: usize):
+            for row in 0..<rows.constants.count |row, rows, atoms|:
+                continue if rows.constants[row] <= 0
+                zero: mutable bool = true
+                for position in 0..<atoms |position, rows, row, atoms, zero|:
+                    zero <- false if rows.coefficients[row * atoms + position] != 0
+                return (true, row) if zero
+            return (false, 0)
+
+        def proof_linear_eliminate(rows: ProofLinearRows&, atom: usize, atoms: usize, slots: usize, output: mutable ProofLinearRows&) -> bool:
+            count: usize = rows.constants.count
+            for row in 0..<count |row, rows, atom, atoms, slots, output|:
+                proof_linear_copy_row(rows, row, atoms, slots, output) if rows.coefficients[row * atoms + atom] == 0
+            for upper in 0..<count |upper, rows, atom, atoms, slots, output, count|:
+                upper_value: i64 = rows.coefficients[upper * atoms + atom]
+                continue if upper_value <= 0
+                for lower in 0..<count |lower, upper, upper_value, rows, atom, atoms, slots, output|:
+                    lower_value: i64 = rows.coefficients[lower * atoms + atom]
+                    continue if lower_value >= 0
+                    return false if lower_value == proof_i64_min()
+                    return false if output.constants.count >= ProofLinearCertificateLimit::ROWS
+                    return false if not proof_linear_combine(rows, upper, 0 - lower_value, lower, upper_value, atoms, slots, output)
+            return true
+
+        # The names a fact mentions, or false when it is not a linear constraint.
+        def proof_linear_fact_names(fact: Ast::Expr, negate: bool, facts: darray[Ast::Expr]&, names: mutable darray[sview]&) -> bool:
+            coefficients: mutable darray[i64] = []
+            constant: mutable i64 = 0
+            return proof_linear_constraint_add(fact, 1, negate, facts, names, &coefficients, &constant)
+
+        # Pick premises relevant to the goal's names: each must share a name with the atoms
+        # gathered so far and may bring new ones while the atom budget lasts.
+        def proof_linear_select_premises(facts: darray[Ast::Expr]&, atoms: mutable darray[sview]&, premises: mutable darray[Ast::Expr]&) -> void:
+            for round in 0..<2 |round, facts, atoms, premises|:
+                for fact in facts |fact, facts, atoms, premises|:
+                    return if premises.count >= ProofLinearCertificateLimit::PREMISES
+                    continue if proof_linear_certificate_marker(fact)
+                    continue if any chosen in premises where proof_expr_equal(chosen, fact)
+                    names: mutable darray[sview] = []
+                    continue if not proof_linear_fact_names(fact, false, facts, &names)
+                    continue if not any name in names where any atom in atoms where atom == name
+                    fresh: mutable usize = 0
+                    for name in names |name, atoms, fresh|:
+                        fresh <- fresh + 1 if not any atom in atoms where atom == name
+                    continue if atoms.count + fresh > ProofLinearCertificateLimit::ATOMS
+                    for name in names |name, atoms|:
+                        atoms.push(name) if not any atom in atoms where atom == name
+                    premises.push(fact)
+
+        def proof_linear_multiplier_expr(value: i64, position: Ast::Pos) -> Ast::Expr:
+            return Ast::Expr.IntLit(value, position) if value >= 0
+            return Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(0 - value, position), position)
+
+        # Search for a certificate refuting the negation of `goal`. The returned marker is only a
+        # proposal for the checker.
+        def proof_linear_certificate_search(facts: darray[Ast::Expr]&, goal: Ast::Expr, line: u32) -> (found: bool, certificate: Ast::Expr):
+            position: Ast::Pos = Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}
+            invalid: Ast::Expr = Ast::Expr.BoolLit(false, position)
+            atoms: mutable darray[sview] = []
+            return (false, invalid) if not proof_linear_fact_names(goal, true, facts, &atoms)
+            return (false, invalid) if atoms.count == 0 or atoms.count > ProofLinearCertificateLimit::ATOMS
+            premises: mutable darray[Ast::Expr] = []
+            proof_linear_select_premises(facts, &atoms, &premises)
+            return (false, invalid) if premises.count == 0
+            # Slots: the goal, then each premise, then a reverse slot for each equality.
+            slot_premise: mutable darray[usize] = [0]
+            slot_sign: mutable darray[i64] = [1]
+            rows: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
+            return (false, invalid) if not proof_linear_row(goal, 1, true, facts, atoms, &rows)
+            for index in 0..<premises.count |index, premises, facts, atoms, rows, slot_premise, slot_sign|:
+                if proof_linear_row(premises[index], 1, false, facts, atoms, &rows):
+                    slot_premise.push(index + 1)
+                    slot_sign.push(1)
+                    if proof_linear_row(premises[index], -1, false, facts, atoms, &rows):
+                        slot_premise.push(index + 1)
+                        slot_sign.push(-1)
+            slots: usize = slot_premise.count
+            return (false, invalid) if rows.constants.count != slots
+            for row in 0..<slots |row, slots, rows|:
+                for slot in 0..<slots |slot, row, rows|:
+                    rows.provenance.push(1 if slot == row else 0)
+            atom: mutable usize = 0
+            while atom < atoms.count |atom, atoms, slots, rows|:
+                break if proof_linear_contradiction(rows, atoms.count).found
+                next: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
+                return (false, invalid) if not proof_linear_eliminate(rows, atom, atoms.count, slots, &next)
+                rows <- next
+                atom <- atom + 1
+            contradiction: (found: bool, row: usize) = proof_linear_contradiction(rows, atoms.count)
+            return (false, invalid) if not contradiction.found
+            base: usize = contradiction.row * slots
+            goal_multiplier: i64 = rows.provenance[base]
+            return (false, invalid) if goal_multiplier <= 0 or goal_multiplier > ProofLinearCertificateLimit::MULTIPLIER
+            arguments: mutable darray[Ast::Expr] = [Ast::Expr.IntLit(goal_multiplier, position)]
+            for index in 0..<premises.count |index, premises, slots, slot_premise, slot_sign, rows, base, arguments, position|:
+                multiplier: mutable i64 = 0
+                for slot in 1..<slots |slot, index, slot_premise, slot_sign, rows, base, multiplier|:
+                    continue if slot_premise[slot] != index + 1
+                    weight: i64 = rows.provenance[base + slot]
+                    return (false, invalid) if weight < 0 or weight > ProofLinearCertificateLimit::MULTIPLIER
+                    multiplier <- multiplier + slot_sign[slot] * weight
+                continue if multiplier == 0
+                return (false, invalid) if multiplier > ProofLinearCertificateLimit::MULTIPLIER or multiplier < 0 - ProofLinearCertificateLimit::MULTIPLIER
+                arguments.push(premises[index])
+                arguments.push(proof_linear_multiplier_expr(multiplier, position))
+            no_names: darray[sview] = []
+            return (true, Ast::Expr.Call(Ast::Expr.Ident("__elisa_linear_certificate", position), arguments, no_names, position))

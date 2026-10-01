@@ -129,6 +129,7 @@ python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_remainder_range.py"
 python3 "$ROOT_DIR/scripts/test_loop_state_joins.py"
 python3 "$ROOT_DIR/scripts/test_portable_replay.py"
+python3 "$ROOT_DIR/scripts/test_linear_certificates.py"
 python3 "$ROOT_DIR/scripts/test_correspondence.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
@@ -415,7 +416,9 @@ fi
 # The replay checker deliberately bounds branch-state retention to keep the self-hosting corpus
 # deterministic. Keep a coverage floor, require the important summaries, and require every
 # budget exhaustion to be classified as unsupported rather than silently unknown.
-KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-1200000}"
+# The peak grows with the audited kernel: 1,177,457 KB before the linear-certificate checker
+# (C-02/C-03), 1,219,217 KB after it, from its 38 added obligations.
+KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-1300000}"
 kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
 kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
 ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \

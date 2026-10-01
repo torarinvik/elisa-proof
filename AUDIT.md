@@ -10742,3 +10742,25 @@ aggregate obligation counter. Continue by tracing which `proof_obligation` event
 between the two checker revisions, then add a focused regression or document a justified,
 semantics-preserving accounting change before updating census data. Until then the census diff
 is expected to fail on this fixture.
+
+## Linear certificates (BACKLOG C-02/C-03, 2026-10-01)
+
+A comparison goal over at most six integer names that no earlier tier closes is now searched by
+Fourier-Motzkin elimination (`linear/linear_certificate_search.elisa`) over at most fifteen
+comparison facts and unsigned width markers that share its names. The search is untrusted: a
+refutation of the negated goal becomes one traced fact of kind `linear-certificate`,
+`__elisa_linear_certificate(m_goal, premise_1, m_1, ...)`, and the goal is decided again with that
+fact present. The marker asserts nothing. The checker (`linear/linear_certificates.elisa`) and
+its kernel mirror (`kernel_replay/linear_certificates.elisa`) run after every safety gate, just
+before the bounded model, and admit the goal only when each premise is structurally a fact, each
+inequality multiplier is a literal in `[0, 2^20]` (an equality's may be negative), and the weighted
+sum of the constraints `e <= 0` -- the negated goal with a positive multiplier first, strict
+comparisons tightened by one over the integers -- cancels every name and leaves a positive
+constant. Terms are read by the same width-checked collector as normalized differences, so every
+operator they contain was decided under the goal's and facts' wrap guards. Arithmetic is checked
+i64 and refuses on overflow instead of the backlog's i128-by-parts; an overflowing combination is
+a refusal, never an acceptance. The marker name is reserved, a goal that is itself a marker is
+refused, and the kind is listed as a boundary trace in `KERNEL_INVENTORY.md`. Only rule `goal`
+attempts search; index and slice rules are unchanged. `scripts/test_linear_certificates.py`
+covers positive goals, forged multipliers, invented and dropped premises, self-reference,
+symbolic, oversized and miscounted arguments, the fifteen-premise limit and the six-name limit.

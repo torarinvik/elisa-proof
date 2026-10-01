@@ -1,0 +1,117 @@
+# Replay of the producer's linear certificates (BACKLOG C-02/C-03). The marker fact
+# `__elisa_linear_certificate(m_goal, premise_1, m_1, ...)` is untrusted: each premise must equal a
+# fact, each inequality multiplier be non-negative, and the weighted constraints `e <= 0` -- the
+# goal's negation first -- must cancel every name and leave a positive constant.
+const module ProofKernelReplayLinearLimit:
+    PREMISES: usize = 15
+    MULTIPLIER: i64 = 1048576
+
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_linear_marker(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            return false if root >= nodes.count
+            return nodes[root].kind == "call" and proof_kernel_replay_ident_matches(nodes, nodes[root].left, "__elisa_linear_certificate")
+
+        def proof_kernel_replay_linear_term(name: sview, coefficient: i64, names: mutable darray[sview]&, coefficients: mutable darray[i64]&) -> bool:
+            index: mutable usize = 0
+            while index < names.count |index, names, name|:
+                break if names[index] == name
+                index <- index + 1
+            if index == names.count:
+                names.push(name)
+                coefficients.push(0)
+            return false if index >= coefficients.count
+            sum: ProofKernelReplayInt = proof_kernel_replay_add_safe(coefficients[index], coefficient)
+            return false if not sum.known
+            coefficients[index] <- sum.value
+            return true
+
+        def proof_kernel_replay_linear_add(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, right: usize, offset: i64, multiplier: i64, names: mutable darray[sview]&, coefficients: mutable darray[i64]&, constant: mutable i64&) -> bool:
+            terms: mutable darray[ProofKernelReplayNormalTerm] = []
+            return false if not proof_kernel_replay_collect_normal_terms(nodes, children, left, 1, facts, &terms, 0)
+            return false if not proof_kernel_replay_collect_normal_terms(nodes, children, right, -1, facts, &terms, 0)
+            terms.push(ProofKernelReplayNormalTerm{name: "", coefficient: offset})
+            for term in terms |term, multiplier, names, coefficients, constant|:
+                product: ProofKernelReplayInt = proof_kernel_replay_mul_safe(term.coefficient, multiplier)
+                return false if not product.known
+                if term.name == "":
+                    sum: ProofKernelReplayInt = proof_kernel_replay_add_safe(constant, product.value)
+                    return false if not sum.known
+                    constant <- sum.value
+                else:
+                    return false if not proof_kernel_replay_linear_term(term.name, product.value, names, coefficients)
+            return true
+
+        def proof_kernel_replay_linear_constraint(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, multiplier: i64, negate: bool, names: mutable darray[sview]&, coefficients: mutable darray[i64]&, constant: mutable i64&) -> bool:
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return false if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "binary":
+                return false if not proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
+                relation: mutable sview = node.operator
+                if negate:
+                    return false if node.operator == "=="
+                    relation <- ">" if node.operator == "<="
+                    relation <- ">=" if node.operator == "<"
+                    relation <- "<" if node.operator == ">="
+                    relation <- "<=" if node.operator == ">"
+                return false if multiplier < 0 and relation != "=="
+                return proof_kernel_replay_linear_add(nodes, children, facts, node.left, node.right, 0, multiplier, names, coefficients, constant) if relation == "<=" or relation == "=="
+                return proof_kernel_replay_linear_add(nodes, children, facts, node.left, node.right, 1, multiplier, names, coefficients, constant) if relation == "<"
+                return proof_kernel_replay_linear_add(nodes, children, facts, node.right, node.left, 0, multiplier, names, coefficients, constant) if relation == ">="
+                return proof_kernel_replay_linear_add(nodes, children, facts, node.right, node.left, 1, multiplier, names, coefficients, constant) if relation == ">"
+                return false
+            # An unsigned width marker states `0 <= x`, the constraint `-x <= 0`.
+            return false if negate or multiplier < 0
+            marker: (known: bool, name_root: usize, width: i64) = proof_kernel_replay_unsigned_marker_info(nodes, children, root, 0)
+            return false if not marker.known
+            name: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, marker.name_root)
+            return false if not name.known
+            return proof_kernel_replay_linear_term(name.node.name, 0 - multiplier, names, coefficients)
+
+        def proof_kernel_replay_linear_multiplier(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> ProofKernelReplayInt:
+            value: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, root, 0)
+            return ProofKernelReplayInt{known: false, value: 0} if not value.known or value.value > ProofKernelReplayLinearLimit::MULTIPLIER or value.value < 0 - ProofKernelReplayLinearLimit::MULTIPLIER
+            return value
+
+        # The argument expression of call argument `offset`, or not known.
+        def proof_kernel_replay_linear_argument(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, call: ElisaProofKernelCore::ProofKernelNode, offset: usize) -> (known: bool, root: usize):
+            slot: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + offset)
+            return (false, 0) if not slot.known or slot.value >= nodes.count
+            argument: ElisaProofKernelCore::ProofKernelNode = nodes[slot.value]
+            return (false, 0) if argument.kind != "call_arg" or argument.name != "" or argument.secondary_name != "" or argument.left >= nodes.count
+            return (true, argument.left)
+
+        def proof_kernel_replay_linear_closes(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], certificate: usize, goal_root: usize) -> bool:
+            return false if certificate >= nodes.count
+            call: ElisaProofKernelCore::ProofKernelNode = nodes[certificate]
+            return false if call.operator != "" or call.auxiliary != 0 or call.children_count % 2 != 1
+            return false if call.children_count > 1 + 2 * ProofKernelReplayLinearLimit::PREMISES
+            return false if not proof_kernel_replay_child_range_valid(call.children_start, call.children_count, children.count)
+            names: mutable darray[sview] = []
+            coefficients: mutable darray[i64] = []
+            constant: mutable i64 = 0
+            first: (known: bool, root: usize) = proof_kernel_replay_linear_argument(nodes, children, call, 0)
+            return false if not first.known
+            goal_multiplier: ProofKernelReplayInt = proof_kernel_replay_linear_multiplier(nodes, first.root)
+            return false if not goal_multiplier.known or goal_multiplier.value <= 0
+            return false if not proof_kernel_replay_linear_constraint(nodes, children, facts, goal_root, goal_multiplier.value, true, &names, &coefficients, &constant)
+            index: mutable usize = 1
+            while index + 1 < call.children_count |index, nodes, children, facts, call, names, coefficients, constant|:
+                premise: (known: bool, root: usize) = proof_kernel_replay_linear_argument(nodes, children, call, index)
+                weight: (known: bool, root: usize) = proof_kernel_replay_linear_argument(nodes, children, call, index + 1)
+                index <- index + 2
+                return false if not premise.known or not weight.known
+                multiplier: ProofKernelReplayInt = proof_kernel_replay_linear_multiplier(nodes, weight.root)
+                return false if not multiplier.known or proof_kernel_replay_linear_marker(nodes, premise.root)
+                return false if not any fact in facts where proof_kernel_replay_expr_equal(nodes, children, fact, premise.root, 0)
+                return false if not proof_kernel_replay_linear_constraint(nodes, children, facts, premise.root, multiplier.value, false, &names, &coefficients, &constant)
+            return false if any coefficient in coefficients where coefficient != 0
+            return constant > 0
+
+        def proof_kernel_replay_linear_certificate_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+            return false if proof_kernel_replay_linear_marker(nodes, goal_root)
+            for fact in facts |fact, nodes, children, facts, goal_root|:
+                continue if not proof_kernel_replay_linear_marker(nodes, fact)
+                return true if proof_kernel_replay_linear_closes(nodes, children, facts, fact, goal_root)
+            return false
