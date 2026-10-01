@@ -10701,3 +10701,22 @@ the index prepass or branch checker runs. The regression requires both custom-op
 to remain unverified and emit no certified index bounds; replay still has zero gaps. These
 negative controls are now covered by the focused adversarial test independently of the primitive
 protocol mask.
+
+## Census obligation decrease under the pinned Stage1 build (2026-10-01, open)
+
+The census comparison now treats any per-input obligation-count decrease as a regression until
+it has been explicitly explained, and retries newly unreadable inputs even when they were not in
+the baseline file map. Focused tests cover both cases. This exposed a real, still-unresolved
+change in `kernel_resource_bootstrap_runtime.elisa`: running the saved baseline executable from
+its matching baseline checkout gives 2,226 obligations and 1,579 proven; the pinned current
+Stage1-built executable from the current checkout gives 2,206 obligations and 1,608 proven, with
+zero semantic errors. The 20-obligation decrease must not be waived by refreshing the census.
+
+Comparing structured goals by declaration and rule shows that the proposition-formation report
+goals moved from the cached-globals wrapper to its new `..._and_work` helper, and the current
+front end exposes 28 additional lower/upper index goals for `proof_kernel_replay_term_sort_remaining`;
+those added goals prove. This explains the visible goal-record gains, but not the drop in the
+aggregate obligation counter. Continue by tracing which `proof_obligation` events disappeared
+between the two checker revisions, then add a focused regression or document a justified,
+semantics-preserving accounting change before updating census data. Until then the census diff
+is expected to fail on this fixture.
