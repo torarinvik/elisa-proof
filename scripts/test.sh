@@ -27,6 +27,7 @@ python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 "$ROOT_DIR/scripts/build.sh"
 python3 "$ROOT_DIR/scripts/test_field_store_poststate.py"
+python3 "$ROOT_DIR/scripts/test_function_focus.py"
 
 # The marker-decoder regression must finish under the normal watchdog. Completion
 # is not proof: unresolved obligations remain visible in the report.

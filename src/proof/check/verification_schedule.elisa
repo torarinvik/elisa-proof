@@ -147,16 +147,86 @@ extend ElisaProof:
                     scheduled[member] <- true
                     scheduled_count <- scheduled_count + 1
 
-        def proof_compute_verified_functions(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void:
+        def proof_focus_function_dependencies(functions: ProofFunctionTable&, focus_name: sview, report: mutable ProofReport&) -> darray[bool]:
+            required: mutable darray[bool] = []
+            for _ in 0..<functions.names.count |required|:
+                required.push(focus_name == "")
+            return required if focus_name == ""
+            target: usize = proof_function_index(functions, focus_name)
+            if target >= functions.names.count:
+                proof_add_finding(report, "function-focus-not-found", 0, focus_name, "focused function name is missing or ambiguous")
+                return required
+            required[target] <- true
+            changed: mutable bool = true
+            rounds: mutable usize = 0
+            while changed and rounds < functions.names.count |changed, rounds, required, functions, focus_name|:
+                changed <- false
+                for source in 0..<functions.names.count |source, required, functions, focus_name, changed, report|:
+                    continue if not required[source]
+                    if source >= functions.call_starts.count or source >= functions.call_counts.count:
+                        proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, focus_name, "focused function dependency metadata is incomplete")
+                        return required
+                    call_start: usize = functions.call_starts[source]
+                    call_count: usize = functions.call_counts[source]
+                    if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start:
+                        proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, focus_name, "focused function dependency range is invalid")
+                        return required
+                    for offset in 0..<call_count |offset, call_start, functions, required, changed|:
+                        callee: usize = proof_function_index(functions, functions.all_calls[call_start + offset])
+                        if callee < functions.names.count and not required[callee]:
+                            required[callee] <- true
+                            changed <- true
+                rounds <- rounds + 1
+            if changed:
+                proof_add_finding(report, "function-focus-dependency-graph-invalid", 0, focus_name, "focused function dependency closure exceeded its bounded traversal")
+            return required
+
+        def proof_focus_references_function_name(functions: ProofFunctionTable&, required: darray[bool]&, wanted: sview) -> bool:
+            for source in 0..<functions.names.count |source, required, functions, wanted|:
+                continue if source >= required.count or not required[source]
+                return true if source >= functions.call_starts.count or source >= functions.call_counts.count
+                start: usize = functions.call_starts[source]
+                count: usize = functions.call_counts[source]
+                return true if start > functions.all_calls.count or count > functions.all_calls.count - start
+                for offset in 0..<count |offset, start, functions, wanted|:
+                    return true if functions.all_calls[start + offset] == wanted
+            return false
+
+        def proof_filter_unrequested_function_proposition_findings(report: mutable ProofReport&, functions: ProofFunctionTable&, required: darray[bool]&) -> void:
+            index: mutable usize = 0
+            while index < report.findings.count |index, report, functions, required|:
+                finding: ProofFinding = report.findings[index]
+                if finding.kind == "contract-proposition-type":
+                    function_index: usize = proof_function_index(functions, finding.name)
+                    selected_function: bool = function_index < functions.names.count and function_index < required.count and required[function_index]
+                    if not selected_function and not proof_focus_references_function_name(functions, required, finding.name):
+                        if report.failed > 0 and report.obligations > 0:
+                            report.focused_unrequested_findings.push(finding)
+                            report.failed <- report.failed - 1
+                            report.obligations <- report.obligations - 1
+                            move_index: mutable usize = index
+                            while move_index + 1 < report.findings.count |move_index, report|:
+                                report.findings[move_index] <- report.findings[move_index + 1]
+                                move_index <- move_index + 1
+                            report.findings <- report.findings.truncate(report.findings.count - 1)
+                            continue
+                        proof_add_finding(report, "function-focus-accounting-invalid", finding.line, finding.name, "could not safely scope an unrelated proposition-formation failure")
+                index <- index + 1
+
+        def proof_compute_verified_functions(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, focus_name: sview) -> void:
             functions.verified.clear()
             functions.verification_reasons.clear()
+            required: darray[bool] = proof_focus_function_dependencies(functions, focus_name, report)
+            proof_filter_unrequested_function_proposition_findings(report, functions, required) if focus_name != ""
+            scheduled: mutable darray[bool] = []
+            scheduled_count: mutable usize = 0
             for _ in 0..<functions.names.count |functions|:
                 functions.verified.push(false)
-                functions.verification_reasons.push("pending")
-            scheduled: mutable darray[bool] = []
-            for _ in 0..<functions.names.count |scheduled|:
-                scheduled.push(false)
-            scheduled_count: mutable usize = 0
+            for function_index in 0..<functions.names.count |function_index, functions, required, scheduled, scheduled_count|:
+                selected: bool = function_index < required.count and required[function_index]
+                functions.verification_reasons.push("pending" if selected else "not-requested")
+                scheduled.push(not selected)
+                scheduled_count <- scheduled_count + 1 if not selected
             while scheduled_count < functions.names.count |scheduled_count, scheduled, functions, file, declarations, lemmas, report|:
                 candidate: mutable usize = functions.names.count
                 for function_index in 0..<functions.names.count |function_index, functions, scheduled, candidate|:
