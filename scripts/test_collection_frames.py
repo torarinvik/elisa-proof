@@ -46,7 +46,7 @@ if positive:
 negative = report(ROOT / "examples/rejected_collection_frames.elisa")
 check(negative is not None, "adversarial fixture produced no report")
 if negative:
-    check(unproven_lines(negative) == {7, 13}, f"adversarial unproven lines: {sorted(unproven_lines(negative))}")
+    check(unproven_lines(negative) == {7, 13, 19, 27}, f"adversarial unproven lines: {sorted(unproven_lines(negative))}")
     check(negative["replay"]["gaps"] == 0, f"adversarial fixture has replay gaps: {negative['replay']}")
 
 malformed = WORK / "malformed.elisa"
