@@ -29,11 +29,12 @@ for fixture in ("global_constant_relevance.elisa", "global_constant_module.elisa
     report = run(fixture, 0)
     assert report["status"] == "proved" and not report["findings"]
     if fixture == "global_constant_relevance.elisa":
-        assert sum(f["kind"].startswith("global-constant") for f in report["trust"]["boundary_facts"]) == 2
+        assert sum(f["kind"].startswith("global-constant") for f in report["trust"]["boundary_facts"]) == 1
 for fixture in ("rejected_global_constant_collision.elisa",
                 "rejected_global_constant_usize_collision.elisa",
                 "rejected_global_constant_function_collision.elisa",
-                "rejected_module_u32_scoped_constant_branch.elisa"):
+                "rejected_module_u32_scoped_constant_branch.elisa",
+                "rejected_qualified_global_constant_boundary.elisa"):
     report = run(fixture, 1)
     assert any(f["kind"] == "ensure-unproven" for f in report["findings"]), (fixture, report["findings"])
 print("relevant module constants replay within unchanged budgets; namespace shadows still reject false claims")
