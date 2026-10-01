@@ -10384,7 +10384,7 @@ the old clear. Fixtures: `examples/can_block_frame.elisa` (proved, replayed) and
 `examples/rejected_can_block_frame.elisa` (own count, assigned local, block-local relation stay
 unproven). An explicit `modifies` clause still needs front-end syntax the compiler lacks.
 
-## Builtin push grows the count by one (BACKLOG D-02)
+## Builtin push grows the count by one and appends its value (BACKLOG D-02, E-01)
 
 `v.push(x)` on a parameter declared as a mutable reference to a builtin `darray` now records
 `v.count == T + 1`, where T is the count before the call: a ghost term already equal to the
@@ -10399,6 +10399,12 @@ a rebound name and any receiver that is not such a parameter, and every other wr
 still forgets its count. Fixtures: `examples/collection_push_count.elisa` (proved, replayed),
 `examples/rejected_collection_push_count.elisa` and
 `examples/rejected_collection_push_user_method.elisa` (all claims unproven).
+
+The same boundary also records `v[T] == x` and `v[v.count - 1] == x` for the pushed value x when
+x does not mention `v` and is built from literals, ghosts and witnessed scalar names under `+`
+and `-`: a builtin push writes only the receiver's storage, so such a value is unchanged by the
+call. A later push or write to `v` forgets both facts. Pop, resize, extend and element-wise
+contents beyond the last element are not modeled yet.
 
 ## Mutable aggregate `old(...)` snapshots and marker namespace (2026-09-30)
 

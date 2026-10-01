@@ -159,7 +159,7 @@ summary trace cannot be relabelled as one.
 | `loop-invariant` | `check/statement_checks.elisa`, `check/returns/loops.elisa` | an invariant assumed at body entry (and proved separately) |
 | `loop-range` | `check/statement_checks.elisa` | a `for` index's range bounds |
 | `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
-| `collection-push` | `check/collection_push.elisa` | after `v.push(x)` on a mutable darray reference parameter: `v.count == T + 1`, the pre-push count T an unsigned 64-bit scalar at most 2^63 - 2 |
+| `collection-push` | `check/collection_push.elisa` | after `v.push(x)` on a mutable darray reference parameter: `v.count == T + 1`, `v[T] == x` and `v[v.count - 1] == x`, the pre-push count T an unsigned 64-bit scalar at most 2^63 - 2 |
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
 <!-- /inventory:boundary-trace-kinds -->
 

@@ -49,6 +49,14 @@ extend ElisaProof:
                     pass
             return ""
 
+        def proof_push_argument(call: Ast::Expr) -> Ast::Expr:
+            match call:
+                Ast::Expr.Call(_, arguments, _, _):
+                    return arguments[0] if arguments.count == 1
+                _:
+                    pass
+            return Ast::Expr.Invalid
+
         def proof_count_place(receiver: sview, position: Ast::Pos) -> Ast::Expr:
             return Ast::Expr.Field(Ast::Expr.Ident(receiver, position), "count", position)
 
@@ -65,6 +73,21 @@ extend ElisaProof:
                     return proof_ghost_term(inner, report, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_ghost_term(left, report, depth + 1) and proof_ghost_term(right, report, depth + 1)
+                _:
+                    return false
+
+        # Literals, frame-constant ghosts and witnessed scalar names under `+` and `-`.
+        def proof_push_value_term(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return proof_ghost_term(expression, report, 0) or proof_scalar_witnessed(facts, name)
+                Ast::Expr.Paren(inner, _):
+                    return proof_push_value_term(inner, facts, report, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_push_value_term(left, facts, report, depth + 1) and proof_push_value_term(right, facts, report, depth + 1)
                 _:
                     return false
 
@@ -109,7 +132,7 @@ extend ElisaProof:
             return alias
 
         # After the call boundary has forgotten `v`, record the one thing the push did to it.
-        def proof_push_after(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, receiver: sview, before: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
+        def proof_push_after(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, receiver: sview, before: Ast::Expr, pushed: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
             match before:
                 Ast::Expr.Invalid:
                     return
@@ -130,6 +153,16 @@ extend ElisaProof:
             proof_add_fact_once(facts, report, Ast::Expr.Binary(base, TokenKind.LtEq, Ast::Expr.IntLit(PROOF_PUSH_COUNT_LIMIT - offset, position), position), "collection-push", owner, position)
             grown: Ast::Expr = Ast::Expr.Binary(base, TokenKind.Plus, Ast::Expr.IntLit(offset + 1, position), position)
             proof_add_traced_fact(facts, report, Ast::Expr.Binary(proof_count_place(receiver, position), TokenKind.EqEq, grown, position), "collection-push", position.line, owner)
+            # The new element sits at the old count (BACKLOG E-01). The pushed value was read
+            # before the call, so it is recorded only when the call could not have changed it: a
+            # builtin push writes only the receiver's storage, which the value does not read.
+            return if proof_expr_mentions_name(pushed, receiver) or not proof_push_value_term(pushed, facts, report, 0)
+            element: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(receiver, position), before, position)
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(element, TokenKind.EqEq, pushed, position), "collection-push", position.line, owner)
+            # The same element by its usual name, `v[v.count - 1]`; the count is at least one.
+            last_index: Ast::Expr = Ast::Expr.Binary(proof_count_place(receiver, position), TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
+            last: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(receiver, position), last_index, position)
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(last, TokenKind.EqEq, pushed, position), "collection-push", position.line, owner)
 
         # `old(v.count)` for a mutable darray reference parameter names a fresh symbol E fixed at
         # entry by `E == v.count`; the marker `__elisa_proof_entry_state(v, E)` carries it to the
