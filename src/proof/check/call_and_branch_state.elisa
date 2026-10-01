@@ -483,7 +483,9 @@ extend ElisaProof:
                 # As at the literal intersection, call-free arms need no call-stability for a
                 # candidate that held before the branch, `forall i in 0..<lo: xs[i] < p` among them.
                 held_before: bool = arms_call_free and (any earlier in prior_facts where proof_expr_equal(earlier, fact))
-                continue if not held_before and not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                # Call-free arms run nothing but their own statements, and each arm proves the
+                # candidate below, so neither a prior fact nor an arm's own needs call-stability.
+                continue if not held_before and not arms_call_free and not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 then_step: Ast::Expr = proof_substitute(fact, names, then_map)
                 else_step: Ast::Expr = proof_substitute(fact, names, else_map)
                 # Both arms stating the fact leave it to the literal intersection only when both
@@ -536,8 +538,31 @@ extend ElisaProof:
                         continue if not (any name in joined where proof_expr_mentions_name(left, name))
                         wider: Ast::Expr = Ast::Expr.Binary(right, TokenKind.Plus, Ast::Expr.IntLit(1, position), position)
                         candidates.push(Ast::Expr.Binary(left, TokenKind.LtEq, wider, position)) if operator == TokenKind.LtEq
+                    Ast::Expr.Block(_, body, _, _):
+                        # A range grows by one the same way: a bubble step turns the invariant
+                        # `forall i in 0..<k: xs[i] <= m` into `... 0..<k + 1 ...` before `k <- k + 1`.
+                        continue if not (any name in joined where proof_expr_mentions_name(body, name))
+                        grown: (known: bool, value: Ast::Expr) = proof_widened_forall(fact, position)
+                        candidates.push(grown.value) if grown.known
                     _:
                         continue
+
+        # `forall i in a..<b: P` as `forall i in a..<b + 1: P`, keeping the binder's declaration.
+        def proof_widened_forall(fact: Ast::Expr, position: Ast::Pos) -> (known: bool, value: Ast::Expr):
+            range: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+            return (false, Ast::Expr.Invalid) if not range.known
+            wider: Ast::Expr = Ast::Expr.Binary(range.lower, TokenKind.RangeLt, Ast::Expr.Binary(range.upper, TokenKind.Plus, Ast::Expr.IntLit(1, position), position), position)
+            match fact:
+                Ast::Expr.Block(statements, body, captures, block_position):
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, type_expression, _, statement_position):
+                            grown: mutable darray[Ast::Stmt] = []
+                            grown.push(Ast::Stmt.VarDecl(binder, type_expression, wider, statement_position))
+                            return (true, Ast::Expr.Block(grown, body, captures, block_position))
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
 
         # A binding recorded as `b == best` states the arm's other facts over `best`.
         def proof_push_equal_renamings(candidates: mutable darray[Ast::Expr]&, source: darray[Ast::Expr]&, name: sview) -> void:

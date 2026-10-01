@@ -1,8 +1,9 @@
 """Symbolic-range quantifiers (BACKLOG W-02).
 
-Positive: cover, extend, empty, weaken (also over a narrower range), a later certificate in the shared arena and a fill loop's growing
-invariant are proven and replayed by the kernel. Adversarial: an off-by-one extension, a wrong lower
-bound, another body and a captured binder, a weakening against the wrong bound and one over a wider range stay unproven. Malformed: a forall over a non-range is not
+Positive: cover, extend, empty, weaken (also over a narrower range), a later certificate in the shared arena, a fill loop's growing
+invariant, a bubble pass, index congruence and a negated chain step are proven and replayed by the kernel. Adversarial: an off-by-one extension, a wrong lower
+bound, another body and a captured binder, a weakening against the wrong bound and one over a wider range, a strict bubble invariant, congruence across another
+subscript or container, and a negated step read too strictly or backwards stay unproven. Malformed: a forall over a non-range is not
 taken by the rule. Budget: a covering fact past the 256-fact scan limit is not found, and the run
 stays fast.
 """
@@ -48,8 +49,11 @@ negative = report(ROOT / "examples/rejected_symbolic_quantifier.elisa")
 check(negative is not None, "adversarial fixture produced no report")
 if negative:
     names = {item.get("name") for item in negative["certificates"] if item.get("rule", "").startswith("quantifier")}
-    for name in ("off_by_one", "wrong_lower", "other_body", "shadow", "weaken_wrong_way", "weaken_wider"):
+    for name in ("off_by_one", "wrong_lower", "other_body", "shadow", "weaken_wrong_way", "weaken_wider", "weaken_grown_missing_point", "element_not_strict"):
         check(name not in names, f"adversarial goal {name} was proven")
+    for name in ("bubble_pass_strict", "congruence_other_index", "congruence_other_container", "negated_not_strict", "negated_wrong_direction"):
+        check(any(item.get("name") == name and not item.get("proven") for item in negative["goals"]),
+              f"adversarial function {name} has no unproven goal")
     check(negative["replay"]["gaps"] == 0, f"adversarial fixture has replay gaps: {negative['replay']}")
 
 malformed = WORK / "malformed.elisa"

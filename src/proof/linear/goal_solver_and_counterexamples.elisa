@@ -210,15 +210,19 @@ extend ElisaProof:
                 continue if not step.known
                 lower_middles.push(step.middle)
                 lower_operators.push(step.operator)
+            proof_chain_equal_hops(facts, lower, true, &lower_middles, &lower_operators)
             return false if lower_middles.count == 0
-            upper_middles: mutable darray[Ast::Expr] = []
-            upper_operators: mutable darray[TokenKind] = []
+            # The upper end is its own middle by `upper <= upper`, so one recorded step suffices:
+            # `xs[k] < m` gives `xs[k] <= m`, which no named atom can reach.
+            upper_middles: mutable darray[Ast::Expr] = [upper]
+            upper_operators: mutable darray[TokenKind] = [TokenKind.LtEq]
             for fact in facts |facts, upper, upper_middles, upper_operators|:
                 break if upper_middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
                 step: (known: bool, middle: Ast::Expr, operator: TokenKind) = proof_chain_step(fact, upper, false, facts)
                 continue if not step.known
                 upper_middles.push(step.middle)
                 upper_operators.push(step.operator)
+            proof_chain_equal_hops(facts, upper, false, &upper_middles, &upper_operators)
             return false if upper_middles.count == 0
             for first_index in 0..<lower_middles.count |facts, goal_operator, lower_middles, lower_operators, upper_middles, upper_operators|:
                 for second_index in 0..<upper_middles.count |facts, goal_operator, first_index, lower_middles, lower_operators, upper_middles, upper_operators|:
@@ -229,6 +233,60 @@ extend ElisaProof:
                     return true if proof_scalar_term_witnessed(lower_middles[first_index], facts, 0)
             return false
 
+        # An endpoint equal to a witnessed scalar `e` takes `e`'s own steps as well: `m == xs[j]`
+        # and `x <= xs[j]` give `x <= m`. Equality is non-strict both ways, so each step keeps
+        # its own operator. The hop is one deep and shares the candidate cap.
+        def proof_chain_equal_hops(facts: darray[Ast::Expr]&, anchor: Ast::Expr, from_lower: bool, middles: mutable darray[Ast::Expr]&, operators: mutable darray[TokenKind]&) -> void:
+            for equality in facts |facts, anchor, from_lower, middles, operators|:
+                break if middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
+                other: (known: bool, value: Ast::Expr) = proof_chain_equal_other(equality, anchor)
+                continue if not other.known
+                continue if not proof_scalar_term_witnessed(other.value, facts, 0)
+                for fact in facts |other, from_lower, middles, operators, facts|:
+                    break if middles.count >= PROOF_CHAIN_CANDIDATE_BUDGET
+                    step: (known: bool, middle: Ast::Expr, operator: TokenKind) = proof_chain_step(fact, other.value, from_lower, facts)
+                    continue if not step.known
+                    middles.push(step.middle)
+                    operators.push(step.operator)
+
+        # Over witnessed scalars the order is total: `not (a < b)` is `b <= a` and `not (a <= b)`
+        # is `b < a`. The caller witnesses the anchor and the middle, as for any other step.
+        def proof_negated_chain_step(operand: Ast::Expr, anchor: Ast::Expr, from_lower: bool) -> (known: bool, middle: Ast::Expr, operator: TokenKind):
+            unknown: (known: bool, middle: Ast::Expr, operator: TokenKind) = (false, Ast::Expr.Invalid, TokenKind.Lt)
+            match operand:
+                Ast::Expr.Paren(inner, _):
+                    return proof_negated_chain_step(inner, anchor, from_lower)
+                Ast::Expr.Binary(left, operator, right, _):
+                    low: mutable Ast::Expr = left
+                    high: mutable Ast::Expr = right
+                    strict: mutable bool = false
+                    if operator == TokenKind.Lt or operator == TokenKind.LtEq:
+                        low <- right
+                        high <- left
+                        strict <- operator == TokenKind.LtEq
+                    elif operator == TokenKind.Gt or operator == TokenKind.GtEq:
+                        strict <- operator == TokenKind.GtEq
+                    else:
+                        return unknown
+                    step_operator: TokenKind = TokenKind.Lt if strict else TokenKind.LtEq
+                    if from_lower:
+                        return (true, high, step_operator) if proof_expr_equal(low, anchor)
+                        return unknown
+                    return (true, low, step_operator) if proof_expr_equal(high, anchor)
+                    return unknown
+                _:
+                    return unknown
+
+        def proof_chain_equal_other(fact: Ast::Expr, anchor: Ast::Expr) -> (known: bool, value: Ast::Expr):
+            match fact:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (false, Ast::Expr.Invalid) if operator != TokenKind.EqEq
+                    return (true, right) if proof_expr_equal(left, anchor) and not proof_expr_equal(right, anchor)
+                    return (true, left) if proof_expr_equal(right, anchor) and not proof_expr_equal(left, anchor)
+                    return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
         # Read one ascending step out of a fact. With `from_lower` the fact must read
         # `anchor op middle`; otherwise it must read `middle op anchor`. A `>`/`>=` fact is the
         # same step written backwards and is accepted in its mirrored form.
@@ -237,6 +295,8 @@ extend ElisaProof:
             match fact:
                 Ast::Expr.Paren(inner, _):
                     return proof_chain_step(inner, anchor, from_lower, facts)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    return proof_negated_chain_step(operand, anchor, from_lower)
                 Ast::Expr.Binary(fact_left, fact_operator, fact_right, _):
                     # An equality is both steps at once. `b == c` gives `b <= c` and `c <= b`, so
                     # it reads as a non-strict step from either end and in either direction. It is
