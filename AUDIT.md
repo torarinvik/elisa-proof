@@ -10886,3 +10886,39 @@ aggregate obligation counter. Continue by tracing which `proof_obligation` event
 between the two checker revisions, then add a focused regression or document a justified,
 semantics-preserving accounting change before updating census data. Until then the census diff
 is expected to fail on this fixture.
+
+### Floating-point functions are checked by syntactic containment (2026-10-01)
+
+A function with a floating-point parameter used to be refused outright
+(`contract-expression-unsupported`), so no float contract could be checked, not even
+"this division only runs after a positive-length guard". Such a function now runs in float mode
+(`proof_float_mode`, set per function in `proof_check_function` and cleared after it). In float
+mode `proof_goal_with_operator_mask` proves a goal only when one fact contains it syntactically:
+exact match, conjunct projection or double negation (`proof_fact_contains`). No linear, ordering,
+congruence or case-split rule runs, equality rewriting (`rewrite`, source-bound `rewrite`) is
+refused because `+0 == -0` and NaN break substitution, and tactic JSON allows only `assumption`
+and `exact`. Each rule left is sound for any Boolean semantics, so NaN, rounding and signed zeros
+cannot make a claim true that is false at run time. `f64`/`f32` operands count as built-in operator
+receivers (no user protocol) only in float mode, and float literals only as operator operands
+there; outside float mode floats stay unmodeled. Float literals inside contracts are still
+rejected by kernel proposition formation; name them as constants.
+
+Tests: `examples/float_opaque_guard.elisa` proves 5/5: `not (length > EPSILON)` returns for NaN
+too, so the fall-through fact is the callee's `requires length > EPSILON`, and a conjunctive guard
+projects it. `examples/rejected_float_le_guard.elisa` keeps the `length <= EPSILON` guard
+`call-requires-unproven` (NaN falls through). `examples/rejected_float_nan_order.elisa` keeps
+`not (x != x)` and `x < y or y <= x` unproven. The existing reflexivity, alias, field, enum,
+expression and builtin-alias float controls stay rejected, now as unproven goals rather than
+refused functions. All are in `scripts/test.sh` and `scripts/dogfood.sh`.
+
+The census baseline was regenerated alongside this change. The four float examples now show
+`no-rule` gates because their functions are analysed instead of rejected outright.
+`rejected_no_op_statement.elisa` (proven 4 -> 3) and
+`rejected_negative_i64_module_constant_contract.elisa` (a new `ambiguous-constant-fact` gate)
+behave identically under the main-branch prover built from the merged sources. Those two changes
+were inherited from the merge, not caused by float mode, and remain open on main.
+`scripts/dogfood.sh` currently stops at two inherited probes, and the main-branch prover returns
+identical reports for both. `rejected_no_op_statement` now also reports `call-requires-unproven`.
+`rejected_short_circuit_call` produces an extra `mutable_left_fact_must_not_survive` verdict.
+With the first probe relaxed in a scratch copy, every float probe passed before the run stopped
+at the second.
