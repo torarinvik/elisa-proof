@@ -10764,3 +10764,22 @@ refused, and the kind is listed as a boundary trace in `KERNEL_INVENTORY.md`. On
 attempts search; index and slice rules are unchanged. `scripts/test_linear_certificates.py`
 covers positive goals, forged multipliers, invented and dropped premises, self-reference,
 symbolic, oversized and miscounted arguments, the fifteen-premise limit and the six-name limit.
+
+## Pure function unfolding (BACKLOG D-04, 2026-10-01)
+
+A function with no written postcondition, only by-value primitive parameters, a primitive integer
+or bool return type, and a body that is `requires` lines plus one `return value` -- where `value`
+is a call-free arithmetic or comparison term of at most 24 nodes that names something -- gets a
+synthesized ensure (`check/unfolded_summaries.elisa`): `result == (value)`, or for bool the two
+implications `not result or (value)` and `result or not (value)`. It is an ordinary ensure: the
+function's own check must prove it, and callers see it only through the existing verified-summary
+path, so no kernel rule was added. Preconditions that call a verified total-pure function with no
+`requires` now instantiate its ensures at entry as `function-summary` facts, the same facts a real
+call produces. Recursive bodies, bodies with calls, locals or fields, aggregate or reference
+parameters, and closed bodies such as `return 0` stay opaque. `examples/pure_unfolding.elisa`
+proves `is_digit`-guarded and `twice`-bounded callers without contracts;
+`scripts/test_pure_unfolding.py` pins the adversarial, malformed and budget (24 vs 25 nodes) cases.
+`examples/rejected_index_call.elisa` now uses a two-statement helper so it still exercises an
+opaque index call, and four exact obligation counts moved by the synthesized ensures (all proven).
+Not yet handled: a negated bool helper fact (`not is_digit(c)`) does not split the negated
+conjunction.

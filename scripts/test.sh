@@ -131,6 +131,7 @@ python3 "$ROOT_DIR/scripts/test_loop_state_joins.py"
 python3 "$ROOT_DIR/scripts/test_portable_replay.py"
 python3 "$ROOT_DIR/scripts/test_linear_certificates.py"
 python3 "$ROOT_DIR/scripts/test_near_miss.py"
+python3 "$ROOT_DIR/scripts/test_pure_unfolding.py"
 python3 "$ROOT_DIR/scripts/test_correspondence.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
@@ -1305,7 +1306,7 @@ if [[ "$rejected_fixed_array_fields_status" -ne 1 ]] || ! python3 -c 'import jso
     printf 'proof test matrix failed: rejected_fixed_array_fields=%s\n' "$rejected_fixed_array_fields_status" >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/nested_call_kept_values.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 28; bounds = [goal for goal in report["goals"] if goal["rule"] in ("index-lower", "index-upper") and goal["name"] != "open"]; assert len(bounds) == 20 and all(goal["proven"] for goal in bounds); assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/nested_call_kept_values.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 30; bounds = [goal for goal in report["goals"] if goal["rule"] in ("index-lower", "index-upper") and goal["name"] != "open"]; assert len(bounds) == 20 and all(goal["proven"] for goal in bounds); assert report["replay"]["gaps"] == 0'
 nested_call_kept_values_probe_status=${PIPESTATUS[1]}
 if [[ "$nested_call_kept_values_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: values a nested call cannot reach\n' >&2
@@ -2556,7 +2557,7 @@ fi
 # Expression-level type witnesses: struct fields, container counts and elements to the declared
 # depth, const-enum values, and verified total-pure call results are witnessed by exact term.
 set +e
-run_json_report "$ROOT_DIR/examples/expression_witness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 43; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"range_binder_reflexive", "element_binder_reflexive", "field_element_binder_reflexive", "element_binder_congruence", "asserted_opaque_binding", "field_reflexive", "nested_field_reflexive", "field_through_reference", "element_reflexive", "count_reflexive", "multi_index_reflexive", "nested_index_reflexive", "field_congruence", "element_equality_symmetry", "local_field_reflexive", "const_enum_reflexive", "pure_call_reflexive", "bound_opaque_call"} <= names; witnesses = [fact for certificate in report["certificates"] for fact in certificate["facts"] if fact["kind"] == "call" and fact["callee"]["name"] in ("__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element")]; assert any(fact["arguments"][0]["kind"] == "field" for fact in witnesses); assert any(fact["callee"]["name"] == "__elisa_primitive_scalar_element" for fact in witnesses)'
+run_json_report "$ROOT_DIR/examples/expression_witness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 44; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"range_binder_reflexive", "element_binder_reflexive", "field_element_binder_reflexive", "element_binder_congruence", "asserted_opaque_binding", "field_reflexive", "nested_field_reflexive", "field_through_reference", "element_reflexive", "count_reflexive", "multi_index_reflexive", "nested_index_reflexive", "field_congruence", "element_equality_symmetry", "local_field_reflexive", "const_enum_reflexive", "pure_call_reflexive", "bound_opaque_call"} <= names; witnesses = [fact for certificate in report["certificates"] for fact in certificate["facts"] if fact["kind"] == "call" and fact["callee"]["name"] in ("__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element")]; assert any(fact["arguments"][0]["kind"] == "field" for fact in witnesses); assert any(fact["callee"]["name"] == "__elisa_primitive_scalar_element" for fact in witnesses)'
 expression_witness_status=${PIPESTATUS[1]}
 set -e
 if [[ "$expression_witness_status" -ne 0 ]]; then
