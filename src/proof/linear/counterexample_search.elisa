@@ -1,0 +1,317 @@
+extend ElisaProof:
+    public:
+        def proof_small_comparison_value(left: i64, operator: TokenKind, right: i64) -> bool:
+            return left == right if operator == TokenKind.EqEq
+            return left != right if operator == TokenKind.BangEq
+            return left < right if operator == TokenKind.Lt
+            return left > right if operator == TokenKind.Gt
+            return left <= right if operator == TokenKind.LtEq
+            return left >= right if operator == TokenKind.GtEq
+            return false
+
+        # A bounded, deterministic counterexample search for the same small integer fragment
+        # used by the prover. This is a diagnostic aid, never an acceptance rule: a witness is
+        # emitted only when every fact and the failed goal evaluate exactly under the assignment.
+        # Unsupported expressions therefore produce no witness instead of a misleading guess.
+        def proof_counterexample_name_index(names: darray[sview]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < names.count |index, names, name|:
+                return index if names[index] == name
+                index <- index + 1
+            return names.count
+
+        def proof_counterexample_collect_names(expression: Ast::Expr, names: mutable darray[sview]&, facts: darray[Ast::Expr]&) -> void:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    literal: (known: bool, value: i64) = proof_counterexample_fact_literal(expression, facts)
+                    if name != "" and not literal.known and proof_counterexample_name_index(names, name) == names.count:
+                        names.push(name)
+                Ast::Expr.Paren(inner, _):
+                    proof_counterexample_collect_names(inner, names, facts)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_counterexample_collect_names(operand, names, facts)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_counterexample_collect_names(left, names, facts)
+                    proof_counterexample_collect_names(right, names, facts)
+                _:
+                    pass
+
+        # A qualified constant is evaluable only when this exact term has an equality
+        # premise to one integer literal. This also folds a local scalar constrained to an
+        # exact literal, avoiding needless Cartesian enumeration of source constant aliases.
+        # Conflicting literal premises make resolution unknown.
+        def proof_counterexample_fact_literal(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, value: i64):
+            found: mutable bool = false
+            value: mutable i64 = 0
+            for fact in facts |expression, found, value|:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        candidate: mutable Ast::Expr = Ast::Expr.Invalid
+                        if proof_expr_equal(expression, left):
+                            candidate <- right
+                        elif proof_expr_equal(expression, right):
+                            candidate <- left
+                        else:
+                            continue
+                        match proof_strip_parens(candidate):
+                            Ast::Expr.IntLit(literal, _):
+                                if found and value != literal:
+                                    return (false, 0)
+                                value <- literal
+                                found <- true
+                            _:
+                                pass
+                    _:
+                        pass
+            return (found, value)
+
+        def proof_counterexample_int(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&, facts: darray[Ast::Expr]&) -> (known: bool, value: i64):
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_int(inner, names, values, facts)
+                Ast::Expr.Ident(name, _):
+                    literal: (known: bool, value: i64) = proof_counterexample_fact_literal(expression, facts)
+                    return literal if literal.known
+                    index: usize = proof_counterexample_name_index(names, name)
+                    return (true, values[index]) if index < values.count
+                Ast::Expr.Scope(_, _, _):
+                    return proof_counterexample_fact_literal(expression, facts)
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: (known: bool, value: i64) = proof_counterexample_int(operand, names, values, facts)
+                    return (false, 0) if not inner.known
+                    return inner if operator == TokenKind.Plus
+                    if operator == TokenKind.Minus:
+                        return (false, 0) if inner.value == proof_i64_min()
+                        return (true, 0 - inner.value)
+                Ast::Expr.Binary(left, operator, right, _):
+                    a: (known: bool, value: i64) = proof_counterexample_int(left, names, values, facts)
+                    b: (known: bool, value: i64) = proof_counterexample_int(right, names, values, facts)
+                    return (false, 0) if not a.known or not b.known
+                    if operator == TokenKind.Plus:
+                        return proof_add_safe(a.value, b.value)
+                    if operator == TokenKind.Minus:
+                        return proof_sub_safe(a.value, b.value)
+                    if operator == TokenKind.Star:
+                        return proof_mul_safe(a.value, b.value)
+                    if operator == TokenKind.Slash:
+                        return proof_div_safe(a.value, b.value)
+                    if operator == TokenKind.Percent:
+                        return proof_mod_safe(a.value, b.value)
+                    if operator == TokenKind.Ampersand:
+                        return (true, a.value & b.value)
+                    if operator == TokenKind.Pipe:
+                        return (true, a.value | b.value)
+                    if operator == TokenKind.Caret:
+                        return (true, a.value ^ b.value)
+                    if operator == TokenKind.LShift:
+                        return proof_shift_safe(a.value, b.value, true)
+                    if operator == TokenKind.RShift:
+                        return proof_shift_safe(a.value, b.value, false)
+                _:
+                    pass
+            return (false, 0)
+
+        def proof_counterexample_bool(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&, facts: darray[Ast::Expr]&) -> (known: bool, value: bool):
+            # A compiler type marker states a declared type, not a constraint on the model. It
+            # holds at every point of the domain, so bounded enumeration must read it as true
+            # rather than as an unknown fact that abandons the search.
+            return (true, true) if proof_type_marker_callee(expression)
+            match expression:
+                Ast::Expr.BoolLit(value, _):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_bool(inner, names, values, facts)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    inner: (known: bool, value: bool) = proof_counterexample_bool(operand, names, values, facts)
+                    return (inner.known, not inner.value) if inner.known
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        a_bool: (known: bool, value: bool) = proof_counterexample_bool(left, names, values, facts)
+                        b_bool: (known: bool, value: bool) = proof_counterexample_bool(right, names, values, facts)
+                        return (false, false) if not a_bool.known or not b_bool.known
+                        return (true, a_bool.value and b_bool.value) if operator == TokenKind.And
+                        return (true, a_bool.value or b_bool.value)
+                    if proof_is_comparison(operator):
+                        a: (known: bool, value: i64) = proof_counterexample_int(left, names, values, facts)
+                        b: (known: bool, value: i64) = proof_counterexample_int(right, names, values, facts)
+                        if a.known and b.known:
+                            return (true, a.value == b.value) if operator == TokenKind.EqEq
+                            return (true, a.value != b.value) if operator == TokenKind.BangEq
+                            return (true, a.value < b.value) if operator == TokenKind.Lt
+                            return (true, a.value > b.value) if operator == TokenKind.Gt
+                            return (true, a.value <= b.value) if operator == TokenKind.LtEq
+                            return (true, a.value >= b.value) if operator == TokenKind.GtEq
+                        if operator == TokenKind.EqEq or operator == TokenKind.BangEq:
+                            left_bool: (known: bool, value: bool) = proof_counterexample_bool(left, names, values, facts)
+                            right_bool: (known: bool, value: bool) = proof_counterexample_bool(right, names, values, facts)
+                            if left_bool.known and right_bool.known:
+                                equal: bool = left_bool.value == right_bool.value
+                                return (true, equal) if operator == TokenKind.EqEq
+                                return (true, not equal)
+                _:
+                    pass
+            return (false, false)
+
+        def proof_counterexample_source_constant_term(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview) -> bool:
+            return false if not proof_counterexample_fact_literal(expression, facts).known
+            for fact in facts |expression, report, owner|:
+                continue if not proof_fact_is_source_global_constant(report, fact, owner)
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, TokenKind.EqEq, Ast::Expr.IntLit(_, _), _):
+                        return true if proof_expr_equal(expression, left)
+                    _:
+                        pass
+            return false
+
+        # Counterexample assignments are user-facing semantic claims, unlike heuristic proof
+        # search. Restrict them to atomic scalar comparisons: the evaluator stores every value in
+        # i64 and cannot model narrower-width wrapping or overloaded operations on computed terms.
+        # Source-constant equalities are the sole exception to requiring a primitive marker: their
+        # exact immutable declaration and integer value are independently recorded as a trace.
+        def proof_counterexample_integer_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return proof_scalar_term_witnessed(expression, facts, depth + 1) or proof_counterexample_source_constant_term(expression, facts, report, owner)
+                Ast::Expr.Scope(_, _, _):
+                    constant: (known: bool, value: i64) = proof_counterexample_fact_literal(expression, facts)
+                    return constant.known and (proof_scalar_term_witnessed(expression, facts, depth + 1) or proof_counterexample_source_constant_term(expression, facts, report, owner))
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_integer_atom(inner, facts, report, owner, depth + 1)
+                Ast::Expr.Unary(TokenKind.Plus, _, _) | Ast::Expr.Unary(TokenKind.Minus, _, _):
+                    return proof_constant_int(expression).known
+                _:
+                    return false
+
+        def proof_counterexample_boolean_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return proof_scalar_term_witnessed(expression, facts, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_boolean_atom(inner, facts, depth + 1)
+                _:
+                    return false
+
+        def proof_counterexample_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return true if proof_type_marker_callee(expression)
+            match expression:
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_fragment(inner, facts, report, owner, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    return proof_counterexample_fragment(operand, facts, report, owner, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        return proof_counterexample_fragment(left, facts, report, owner, depth + 1) and proof_counterexample_fragment(right, facts, report, owner, depth + 1)
+                    return false if not proof_is_comparison(operator)
+                    return true if proof_counterexample_integer_atom(left, facts, report, owner, depth + 1) and proof_counterexample_integer_atom(right, facts, report, owner, depth + 1)
+                    return (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and proof_counterexample_boolean_atom(left, facts, depth + 1) and proof_counterexample_boolean_atom(right, facts, depth + 1)
+                _:
+                    return false
+
+        # Only borrow constants that occur directly against this same typed identifier. 0 and 1
+        # are valid inhabitants of every primitive scalar domain used here; copied source
+        # literals have already passed the compiler's width/type checks. No affine-derived or
+        # neighboring value is invented outside an identifier's declared range.
+        def proof_counterexample_collect_candidates(expression: Ast::Expr, name: sview, facts: darray[Ast::Expr]&, start: usize, bound: ProofBound, candidates: mutable darray[i64]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_counterexample_collect_candidates(inner, name, facts, start, bound, candidates, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    proof_counterexample_collect_candidates(operand, name, facts, start, bound, candidates, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        proof_counterexample_collect_candidates(left, name, facts, start, bound, candidates, depth + 1)
+                        proof_counterexample_collect_candidates(right, name, facts, start, bound, candidates, depth + 1)
+                        return
+                    return if not proof_is_comparison(operator)
+                    match left:
+                        Ast::Expr.Ident(left_name, _):
+                            if left_name == name:
+                                constant: (known: bool, value: i64) = proof_constant_int(right)
+                                proof_counterexample_add_candidate(candidates, start, bound, constant.value) if constant.known
+                        _:
+                            pass
+                    match right:
+                        Ast::Expr.Ident(right_name, _):
+                            if right_name == name:
+                                constant: (known: bool, value: i64) = proof_constant_int(left)
+                                proof_counterexample_add_candidate(candidates, start, bound, constant.value) if constant.known
+                        _:
+                            pass
+                _:
+                    pass
+
+        def proof_counterexample_add_candidate(candidates: mutable darray[i64]&, start: usize, bound: ProofBound, value: i64) -> void:
+            return if bound.has_lower and value < bound.lower
+            return if bound.has_upper and value > bound.upper
+            for index in start..<candidates.count |index, candidates, start, value|:
+                return if candidates[index] == value
+            candidates.push(value)
+
+        def proof_counterexample_search(index: usize, names: darray[sview]&, values: mutable darray[i64]&, starts: darray[usize]&, counts: darray[usize]&, candidates: darray[i64]&, facts: darray[Ast::Expr]&, goal: Ast::Expr, budget: mutable usize&) -> bool:
+            if index == names.count:
+                return false if budget == 0
+                budget <- budget - 1
+                for fact in facts |fact, names, values|:
+                    fact_value: (known: bool, value: bool) = proof_counterexample_bool(fact, names, values, facts)
+                    return false if not fact_value.known or not fact_value.value
+                goal_value: (known: bool, value: bool) = proof_counterexample_bool(goal, names, values, facts)
+                return goal_value.known and not goal_value.value
+            start: usize = starts[index]
+            end: usize = start + counts[index]
+            candidate_index: mutable usize = start
+            while candidate_index < end |candidate_index, end, candidates, values, index, names, starts, counts, facts, goal, budget|:
+                values[index] <- candidates[candidate_index]
+                return true if proof_counterexample_search(index + 1, names, values, starts, counts, candidates, facts, goal, budget)
+                candidate_index <- candidate_index + 1
+            return false
+
+        # Populate `assignments` only after an exact falsifying state is found. The result uses
+        # ordinary equality expressions so existing JSON tooling can display/replay it directly.
+        def proof_find_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: ProofReport&, owner: sview, assignments: mutable darray[Ast::Expr]&) -> bool:
+            return false if not proof_counterexample_fragment(goal, facts, report, owner, 0)
+            for fact in facts:
+                return false if not proof_counterexample_fragment(fact, facts, report, owner, 0)
+            names: mutable darray[sview] = []
+            for fact in facts |names|:
+                proof_counterexample_collect_names(fact, &names, facts)
+            proof_counterexample_collect_names(goal, &names, facts)
+            return false if names.count > ElisaProofKernelCore::PROOF_KERNEL_FINITE_MODEL_SYMBOL_LIMIT
+            bounds: mutable darray[ProofBound] = []
+            for fact in facts |bounds|:
+                proof_collect_bounds(fact, facts, &bounds)
+            proof_close_equalities(facts, &bounds)
+            starts: mutable darray[usize] = []
+            counts: mutable darray[usize] = []
+            candidates: mutable darray[i64] = []
+            for name in names |name, starts, counts, candidates, bounds|:
+                bound: ProofBound = proof_bound_for(bounds, name)
+                start: usize = candidates.count
+                proof_counterexample_add_candidate(&candidates, start, bound, 0)
+                proof_counterexample_add_candidate(&candidates, start, bound, 1)
+                for fact in facts |name, start, bound, candidates|:
+                    proof_counterexample_collect_candidates(fact, name, facts, start, bound, &candidates, 0)
+                proof_counterexample_collect_candidates(goal, name, facts, start, bound, &candidates, 0)
+                starts.push(start)
+                counts.push(candidates.count - start)
+                return false if counts[counts.count - 1] == 0
+            values: mutable darray[i64] = []
+            values.resize(names.count)
+            budget: mutable usize = PROOF_GOAL_COUNTEREXAMPLE_BUDGET
+            found: bool = proof_counterexample_search(0, names, &values, starts, counts, candidates, facts, goal, &budget)
+            return false if not found
+            position: Ast::Pos = Ast::expr_pos(goal)
+            for index in 0..<names.count |index, names, values, assignments, position|:
+                assignments.push(Ast::Expr.Binary(Ast::Expr.Ident(names[index], position), TokenKind.EqEq, Ast::Expr.IntLit(values[index], position), position))
+            return true
