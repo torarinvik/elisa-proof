@@ -1,0 +1,78 @@
+# Adversarial source-provenance harness for the required-record-reference rule.
+include "../../Elisa-compiler/src/semantic/semantic.elisa"
+include "../src/proof/kernel_core.elisa"
+include "../src/proof/operator_impl_model.elisa"
+include "../src/proof/model/enum_index.elisa"
+include "../src/proof/model/findings.elisa"
+include "../src/proof/model.elisa"
+include "../src/proof/model/report_invariants.elisa"
+include "../src/proof/kernel.elisa"
+include "../src/proof/expr.elisa"
+include "../src/proof/linear.elisa"
+include "../src/proof/resources.elisa"
+include "../src/proof/check.elisa"
+include "../src/proof/kernel_replay.elisa"
+include "../src/proof/replay.elisa"
+
+using Ast
+using ElisaProof
+
+def parse_reference_fixture(text: sview) -> Ast::File can[Memory.Allocate, Abort.Panic]:
+    source: mutable darray[u8] = []
+    for index in 0..<sview_len(text) |text, source|:
+        source.push(sview_at(text, index))
+    source.push(0)
+    return frontend_parse(&source[0])
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    text: sview = "struct Node:\n    tag: mutable u8\nstruct Store:\n    prepared: mutable heap Node&?\ndef store_required(store: mutable Store&, node: mutable heap Node&) -> u8:\n    ensure result != 0 or store.prepared != null\n    store.prepared <- node\n    return 0\n"
+    file: Ast::File = parse_reference_fixture(text)
+    report: mutable ProofReport = proof_empty_report()
+    proof_check(file, &report)
+    proof_replay_certificates(&report)
+    return 1 if report.failed != 0 or report.replay_gaps != 0 or report.replayed == 0
+    slot: mutable usize = report.fact_traces.count
+    for index in 0..<report.fact_traces.count |report, slot|:
+        trace: ProofFactTrace = report.fact_traces[index]
+        continue if trace.kind != "required-reference-parameter" or trace.name != "store_required"
+        match trace.expression:
+            Ast::Expr.Binary(Ast::Expr.Ident(name, _), _, _, _):
+                slot <- index if name == "node"
+            _:
+                pass
+    return 2 if slot >= report.fact_traces.count
+    return 3 if not proof_replay_fact_trace_entry(&report, slot)
+    original_declarations: darray[Ast::Decl] = report.source_declarations
+
+    # Same names, layout, function line and body: only parameter nullability changes.
+    nullable: Ast::File = parse_reference_fixture("struct Node:\n    tag: mutable u8\nstruct Store:\n    prepared: mutable heap Node&?\ndef store_required(store: mutable Store&, node: mutable heap Node&?) -> u8:\n    ensure result != 0 or store.prepared != null\n    store.prepared <- node\n    return 0\n")
+    report.source_declarations <- nullable.top_decls
+    return 4 if proof_replay_fact_trace_entry(&report, slot)
+
+    value: Ast::File = parse_reference_fixture("struct Node:\n    tag: mutable u8\nstruct Store:\n    prepared: mutable heap Node&?\ndef store_required(store: mutable Store&, node: Node) -> u8:\n    return 0\n")
+    report.source_declarations <- value.top_decls
+    return 5 if proof_replay_fact_trace_entry(&report, slot)
+
+    missing: Ast::File = parse_reference_fixture("struct Node:\n    tag: mutable u8\nstruct Store:\n    prepared: mutable heap Node&?\ndef store_required(store: mutable Store&, other: mutable heap Node&) -> u8:\n    return 0\n")
+    report.source_declarations <- missing.top_decls
+    return 6 if proof_replay_fact_trace_entry(&report, slot)
+
+    wrong_line: Ast::File = parse_reference_fixture("\nstruct Node:\n    tag: mutable u8\nstruct Store:\n    prepared: mutable heap Node&?\ndef store_required(store: mutable Store&, node: mutable heap Node&) -> u8:\n    return 0\n")
+    report.source_declarations <- wrong_line.top_decls
+    return 7 if proof_replay_fact_trace_entry(&report, slot)
+
+    duplicate: Ast::File = parse_reference_fixture("struct Node:\n    tag: mutable u8\nstruct Store:\n    prepared: mutable heap Node&?\ndef store_required(store: mutable Store&, node: mutable heap Node&) -> u8:\n    return 0\ndef store_required(store: mutable Store&, node: mutable heap Node&) -> u8:\n    return 0\n")
+    report.source_declarations <- duplicate.top_decls
+    return 8 if proof_replay_fact_trace_entry(&report, slot)
+
+    duplicate_parameter: Ast::File = parse_reference_fixture("struct Node:\n    tag: mutable u8\nstruct Store:\n    prepared: mutable heap Node&?\ndef store_required(store: mutable Store&, node: mutable heap Node&, node: mutable heap Node&?) -> u8:\n    return 0\n")
+    report.source_declarations <- duplicate_parameter.top_decls
+    return 10 if proof_replay_fact_trace_entry(&report, slot)
+
+    alias_collision: Ast::File = parse_reference_fixture("struct Node:\n    tag: mutable u8\nstruct Store:\n    prepared: mutable heap Node&?\ndef store_required(store: mutable Store&, node: mutable heap Node&) -> u8:\n    return 0\ntype Node = u8\n")
+    report.source_declarations <- alias_collision.top_decls
+    return 11 if proof_replay_fact_trace_entry(&report, slot)
+
+    report.source_declarations <- original_declarations
+    return 9 if not proof_replay_fact_trace_entry(&report, slot)
+    return 0

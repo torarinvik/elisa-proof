@@ -1,0 +1,75 @@
+# Reconstruct null exclusion independently from the original parameter declaration.
+# No allocator, unsafe cast, reference alias, or local annotation is accepted here.
+extend ElisaProof:
+    private:
+        def proof_replay_required_reference_name(expression: Ast::Expr, reached_reference: bool, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name if reached_reference
+                    return ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_required_reference_name(inner, reached_reference, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    if operator == TokenKind.Mutable or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Static or operator == TokenKind.Tail:
+                        return proof_replay_required_reference_name(inner, reached_reference, depth + 1)
+                    return proof_replay_required_reference_name(inner, true, depth + 1) if operator == TokenKind.Ampersand and not reached_reference
+                    return ""
+                _:
+                    return ""
+
+        def proof_replay_required_reference_struct_count(declarations: darray[Ast::Decl]&, wanted: sview, depth: usize) -> usize:
+            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |wanted, depth, count|:
+                match declaration:
+                    Ast::Decl.Struct(name, _, _, _, _, _, _):
+                        count <- count + 1 if name == wanted
+                    Ast::Decl.Alias(name, _, _):
+                        count <- count + 2 if name == wanted
+                    Ast::Decl.Enum(name, _, _, _, _):
+                        count <- count + 2 if name == wanted
+                    Ast::Decl.Module(_, body, _):
+                        count <- count + proof_replay_required_reference_struct_count(body, wanted, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_replay_required_reference_struct_count(body, wanted, depth + 1)
+                    _:
+                        pass
+            return count
+
+        def proof_replay_required_reference_source_count(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, owner: sview, parameter_name: sview, line: u32, depth: usize) -> (owners: usize, parameters: usize):
+            return (2, 2) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            owners: mutable usize = 0
+            parameters: mutable usize = 0
+            for declaration in declarations |all_declarations, owner, parameter_name, line, depth, owners, parameters|:
+                match declaration:
+                    Ast::Decl.Func(name, source_parameters, _, _, _, _, position):
+                        if name == owner:
+                            owners <- owners + 1
+                            if position.line == line:
+                                for parameter in source_parameters |all_declarations, parameter_name, parameters|:
+                                    continue if parameter.name != parameter_name
+                                    record: sview = proof_replay_required_reference_name(parameter.type_expression, false, 0)
+                                    valid: bool = record != "" and proof_replay_required_reference_struct_count(all_declarations, record, 0) == 1
+                                    parameters <- parameters + (1 if valid else 2)
+                    Ast::Decl.Module(_, body, _):
+                        nested = proof_replay_required_reference_source_count(body, all_declarations, owner, parameter_name, line, depth + 1)
+                        owners <- owners + nested.owners
+                        parameters <- parameters + nested.parameters
+                    Ast::Decl.Scoped(body, _):
+                        nested = proof_replay_required_reference_source_count(body, all_declarations, owner, parameter_name, line, depth + 1)
+                        owners <- owners + nested.owners
+                        parameters <- parameters + nested.parameters
+                    _:
+                        pass
+            return (owners, parameters)
+
+        def proof_replay_required_reference_trace_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if not proof_replay_boundary_trace_shape_valid(report, trace)
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(parameter_name, _), TokenKind.BangEq, Ast::Expr.Ident(sentinel, _), _):
+                    return false if parameter_name == "" or sentinel != "null"
+                    source = proof_replay_required_reference_source_count(report.source_declarations, report.source_declarations, trace.name, parameter_name, trace.line, 0)
+                    return source.owners == 1 and source.parameters == 1
+                _:
+                    return false
