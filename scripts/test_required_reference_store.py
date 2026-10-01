@@ -22,13 +22,12 @@ assert any(d["verified"] and d["name"] == "required_reference_store"
            for d in positive["declaration_details"] if d["kind"] == "function")
 assert positive["replay"]["certificates"] == positive["replay"]["replayed"] > 0
 assert positive["replay"]["gaps"] == 0 and not positive["trust"]["trusted_assumptions"]
-# This valid conditional claim still needs record post-state merging. Keep its
-# current unsupported status explicit, rather than treating it as a false claim.
+# Closed record branches retain their conditional post-state and null-exclusion fact.
 code, branch = run("required_reference_store_probe.elisa", "required_reference_branch_store")
-assert code == 1 and branch["status"] == "failed", branch
+assert code == 0 and branch["status"] == "proved", branch["findings"]
 assert branch["summary"]["semantic_errors"] == 0, branch["summary"]
-assert any(f["kind"] == "ensure-unproven" and f["name"] == "required_reference_branch_store"
-           for f in branch["findings"]), branch["findings"]
+assert branch["replay"]["certificates"] == branch["replay"]["replayed"] > 0
+assert branch["replay"]["gaps"] == 0 and not branch["trust"]["trusted_assumptions"]
 code, negative = run("required_reference_store_rejected.elisa")
 assert code == 1 and negative["status"] == "failed", negative
 assert negative["summary"]["semantic_errors"] == 0, negative["summary"]
@@ -37,4 +36,4 @@ for name in ("required_reference_missing_write", "required_reference_nullable_st
     assert any(f["name"] == name and f["kind"] == "ensure-unproven"
                for f in negative["findings"]), negative["findings"]
 assert negative["replay"]["gaps"] == 0 and not negative["trust"]["trusted_assumptions"]
-print("required references replay; false stores rejected; conditional record-join gap remains explicit")
+print("required references and conditional stores replay; false stores rejected")

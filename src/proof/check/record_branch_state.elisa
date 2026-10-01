@@ -1,0 +1,89 @@
+# Merge explicit, effect-free record writes without treating a pre-state field as a post-state.
+extend ElisaProof:
+    private:
+        # Only direct record fields are modeled; no deep heap frame is inferred.
+        def proof_record_branch_expression_closed(expression: Ast::Expr, contract: bool, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Field(Ast::Expr.Ident(_, _), _, _):
+                    return true
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_record_branch_expression_closed(inner, contract, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (proof_is_comparison(operator) or operator == TokenKind.And or operator == TokenKind.Or) and proof_record_branch_expression_closed(left, contract, depth + 1) and proof_record_branch_expression_closed(right, contract, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return contract and proof_callable_name(callee) == "old" and arguments.count == 1 and proof_record_branch_expression_closed(arguments[0], false, depth + 1)
+                _:
+                    return false
+
+        def proof_record_branch_body_closed(body: darray[Ast::Stmt]&, names: darray[sview]&, parameters: darray[sview]&, functions: ProofFunctionTable&, report: ProofReport&, owner: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return false if any annotation in report.source_annotations where annotation.name == "__global_mutable"
+            for statement in body |names, parameters, functions, report, owner, depth|:
+                match statement:
+                    Ast::Stmt.Assign(Ast::Expr.Field(Ast::Expr.Ident(root, _), _, _), operator, initializer, _):
+                        return false if not proof_record_branch_parameter(root, names, parameters, functions, report, owner)
+                        return false if operator != TokenKind.LArrow and operator != TokenKind.Assign
+                        return false if not proof_record_branch_expression_closed(initializer, false, 0)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if not proof_record_branch_expression_closed(condition, false, 0)
+                        return false if not proof_record_branch_body_closed(then_body, names, parameters, functions, report, owner, depth + 1) or not proof_record_branch_body_closed(else_body, names, parameters, functions, report, owner, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_record_branch_expression_closed(expression, true, 0)
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return false if not proof_record_branch_expression_closed(returned, false, 0)
+                    _:
+                        return false
+            return true
+
+        # Each reaching arm must still be a bounded record-update history over the exact
+        # entry value. An invalid/opaque root cannot be resurrected by a later field write.
+        def proof_record_branch_has_entry(value: Ast::Expr, entry: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_expr_supported(value) or not proof_expr_supported(entry)
+            return true if proof_expr_equal(value, entry)
+            match value:
+                Ast::Expr.RecordUpdate(previous, fields, _):
+                    for field in fields |depth|:
+                        return false if field.name == "" or not proof_expr_supported(field.value)
+                    return proof_record_branch_has_entry(previous, entry, depth + 1)
+                Ast::Expr.If(_, then_value, else_value, _):
+                    return proof_record_branch_has_entry(then_value, entry, depth + 1) and proof_record_branch_has_entry(else_value, entry, depth + 1)
+                _:
+                    return false
+
+        def proof_record_branch_parameter(root: sview, names: darray[sview]&, parameters: darray[sview]&, functions: ProofFunctionTable&, report: ProofReport&, owner: sview) -> bool:
+            return false if not proof_current_parameter(names, parameters, root) or not proof_mutable_reference_parameter(owner, root, functions)
+            return false if any aliased in report.aliased_names where aliased == root or aliased == "*"
+            parameter = proof_scalar_reference_parameter_type_in_declarations(report.source_declarations, owner, root, 0)
+            return false if parameter.count != 1
+            record: sview = proof_required_record_reference_target(parameter.type_expression, 0)
+            return record != "" and proof_required_reference_record_count(report.source_declarations, record, 0) == 1
+
+        def proof_restore_record_branch_values(values: mutable darray[Ast::Expr]&, names: darray[sview]&, entry: darray[Ast::Expr]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, then_reaches: bool, else_reaches: bool, condition: Ast::Expr, parameters: darray[sview]&, functions: ProofFunctionTable&, report: ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            return if report.aliased_owner != owner or owner == "" or not proof_expr_supported(condition)
+            return if not then_reaches and not else_reaches
+            limit: mutable usize = values.count if values.count < names.count else names.count
+            limit <- entry.count if entry.count < limit
+            limit <- then_values.count if then_reaches and then_values.count < limit
+            limit <- else_values.count if else_reaches and else_values.count < limit
+            for index in 0..<limit |values, names, entry, then_values, else_values, then_reaches, else_reaches, condition, parameters, functions, report, owner, position|:
+                continue if not proof_record_branch_parameter(names[index], names, parameters, functions, report, owner)
+                continue if then_reaches and not proof_record_branch_has_entry(then_values[index], entry[index], 0)
+                continue if else_reaches and not proof_record_branch_has_entry(else_values[index], entry[index], 0)
+                if then_reaches and else_reaches:
+                    values[index] <- then_values[index] if proof_expr_equal(then_values[index], else_values[index]) else Ast::Expr.If(condition, then_values[index], else_values[index], position)
+                else:
+                    values[index] <- then_values[index] if then_reaches else else_values[index]
+
+        # The reference's address is unchanged on the closed paths admitted above. Retain
+        # only an exact declaration-derived fact still present on every reaching path; ordinary
+        # field facts and any fact lost to rebinding/shadowing do not receive this exception.
+        def proof_restore_record_branch_reference_facts(primary: darray[Ast::Expr]&, secondary: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, both_reach: bool, report: ProofReport&, owner: sview) -> void:
+            for fact in primary |primary, secondary, facts, both_reach, report, owner|:
+                continue if both_reach and not (any other in secondary where proof_expr_equal(other, fact))
+                continue if any existing in facts where proof_expr_equal(existing, fact)
+                for trace in report.fact_traces |fact, facts, owner|:
+                    if trace.name == owner and trace.kind == "required-reference-parameter" and proof_expr_equal(trace.expression, fact):
+                        facts.push(fact)
+                        break

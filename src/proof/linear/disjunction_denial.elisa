@@ -1,0 +1,57 @@
+# Classical disjunction introduction: prove B under not A, then conclude A or B.
+# These are temporary proof-path hypotheses, not source facts or trusted axioms.
+extend ElisaProof:
+    private:
+        const PROOF_DISJUNCTION_DENIAL_FACT_LIMIT: usize = 64
+
+        # Do not introduce an ordering hypothesis here: floating-point order is not total,
+        # and arithmetic/protocol-specific denial needs its own witnessed semantics.
+        def proof_disjunction_denial_value_closed(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Field(base, _, _) | Ast::Expr.Scope(base, _, _) | Ast::Expr.Paren(base, _):
+                    return proof_disjunction_denial_value_closed(base, facts, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return proof_disjunction_denial_fragment(condition, facts, depth + 1) and proof_disjunction_denial_value_closed(then_value, facts, depth + 1) and proof_disjunction_denial_value_closed(else_value, facts, depth + 1)
+                _:
+                    return false
+
+        def proof_disjunction_denial_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Field(_, _, _) | Ast::Expr.Scope(_, _, _):
+                    return proof_disjunction_denial_value_closed(expression, facts, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_disjunction_denial_fragment(inner, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_disjunction_denial_fragment(left, facts, depth + 1) and proof_disjunction_denial_fragment(right, facts, depth + 1) if operator == TokenKind.Or or operator == TokenKind.And
+                    equality: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq
+                    null_equality: bool = equality and (proof_ident_name(left) == "null" or proof_ident_name(right) == "null")
+                    return equality and (proof_primitive_comparison(left, right, facts) or null_equality) and proof_disjunction_denial_value_closed(left, facts, depth + 1) and proof_disjunction_denial_value_closed(right, facts, depth + 1)
+                _:
+                    return false
+
+        def proof_push_disjunction_denial(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, limit: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or facts.count >= limit
+            return false if not proof_disjunction_denial_fragment(expression, facts, 0)
+            stripped: Ast::Expr = proof_strip_parens(expression)
+            position: Ast::Pos = Ast::expr_pos(stripped)
+            match stripped:
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    facts.push(inner)
+                Ast::Expr.BoolLit(value, _):
+                    facts.push(Ast::Expr.BoolLit(not value, position))
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_push_disjunction_denial(left, facts, limit, depth + 1) and proof_push_disjunction_denial(right, facts, limit, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    complement: TokenKind = proof_comparison_negation(operator)
+                    null_equality: bool = (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and (proof_ident_name(left) == "null" or proof_ident_name(right) == "null")
+                    if complement != TokenKind.Eof and (proof_primitive_comparison(left, right, facts) or null_equality):
+                        facts.push(Ast::Expr.Binary(left, complement, right, position))
+                    else:
+                        facts.push(Ast::Expr.Unary(TokenKind.Not, stripped, position))
+                _:
+                    facts.push(Ast::Expr.Unary(TokenKind.Not, stripped, position))
+            return true
