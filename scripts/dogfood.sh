@@ -485,6 +485,8 @@ run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
 run_probe rejected_float_field examples/rejected_float_field.elisa 1
 run_probe rejected_float_enum examples/rejected_float_enum.elisa 1
 run_probe rejected_float_expression examples/rejected_float_expression.elisa 1
+run_probe nullable_reference_comparison examples/nullable_reference_comparison.elisa 0
+run_probe rejected_nonnullable_reference_null examples/rejected_nonnullable_reference_null.elisa 1
 run_probe integer_alias examples/integer_alias.elisa 0
 run_probe unsigned_alias examples/unsigned_alias.elisa 0
 run_probe rejected_unsigned_alias examples/rejected_unsigned_alias.elisa 1
