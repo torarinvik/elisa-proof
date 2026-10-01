@@ -56,4 +56,18 @@ for function_name in (
     assert match_goals and all(not goal["proven"] and goal["replay_status"] == "not_certified" for goal in match_goals), match_goals
 assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_shortcircuit_index" for finding in report["findings"]), report["findings"]
 
+# Custom-type operators are rejected by the type-aware statement-admission path even when there
+# is no primitive operator implementation to set the source-operator mask.
+custom_source = ROOT / "examples/rejected_custom_operator_global.elisa"
+custom_result = subprocess.run([str(BINARY), "--json", str(custom_source)], capture_output=True, text=True, timeout=120)
+assert custom_result.returncode == 1, custom_result.stderr
+custom_report = json.loads(custom_result.stdout)
+assert custom_report["summary"]["semantic_errors"] == 0, custom_report["semantic_diagnostics"]
+assert custom_report["replay"]["gaps"] == 0, custom_report["replay"]
+assert custom_report["replay"]["certificates"] == custom_report["replay"]["replayed"]
+custom_declarations = {item["name"]: item for item in custom_report["declaration_details"] if item["kind"] == "function"}
+assert custom_declarations["rejected_custom_operator_index"]["verified"] is False, custom_declarations["rejected_custom_operator_index"]
+assert not any(goal["name"] == "rejected_custom_operator_index" and goal["rule"].startswith("index-") and goal["proven"] for goal in custom_report["goals"]), custom_report["goals"]
+assert any(finding["kind"] == "expression-unsupported" and finding["name"] == "rejected_custom_operator_index" and "unmodeled user protocol" in finding["message"] for finding in custom_report["findings"]), custom_report["findings"]
+
 print("unverified calls and overloaded operators cannot carry stale index facts across branches")

@@ -10682,3 +10682,8 @@ regression, deterministic-call and guard/fact tests, refusal gate, certificate r
 inventory, portable replay, source-length check, and whitespace check passed after an O0 build
 with the current Stage1 product. The full integration script was not rerun; its most recent run
 still stopped at the known mutable-call-alias diagnostic wording mismatch documented above.
+
+A separate custom-type `Eq` probe, with no primitive operator implementation in its source, was
+also refused by the type-aware statement-admission gate before any index certificate was emitted.
+That negative control is now part of the focused adversarial test, guarding the custom-operator
+path independently of the primitive protocol mask.
