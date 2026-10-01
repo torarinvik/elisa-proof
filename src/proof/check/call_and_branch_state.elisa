@@ -89,6 +89,17 @@ extend ElisaProof:
                 retained: bool = analyzed and not (any existing in report.aliased_names where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 values[index] <- Ast::Expr.Ident(names[index], position) if not retained
 
+        # Source-overloaded operators execute user code, but this proof state has no operator
+        # effect summary. Refuse the enclosing function and havoc all mutable symbolic state
+        # before any later obligation can consume facts from before the operator.
+        def proof_invalidate_for_unmodeled_operator(expression: Ast::Expr, names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> bool:
+            return false if not proof_source_expression_has_overloaded_operator(expression, report.source_primitive_operator_mask, 0)
+            proof_forget_values(names, values, position)
+            proof_clear_facts_keep_type_bounds(facts, names, parameters, report, owner)
+            report.proof_obligation(false)
+            proof_add_finding(report, "expression-unsupported", position.line, owner, "source-overloaded operator may mutate proof-visible state without a modeled effect summary")
+            return true
+
         # The roots a body assigns, in every nested statement form. Captured blocks nested in the
         # body are walked too: their capture lists bound what they can name, but a name they do
         # assign is still assigned by this body.
@@ -162,36 +173,36 @@ extend ElisaProof:
         # *during* this body: to mutate through a reference the body must either name the binding
         # holding it -- which the aliasing walk sees -- or hand control to a callee, which this
         # sees. A body with neither cannot reach anything it does not itself name.
-        def proof_body_has_call(body: darray[Ast::Stmt]&) -> bool:
-            for statement in body:
+        def proof_body_has_call(body: darray[Ast::Stmt]&, operator_mask: usize) -> bool:
+            for statement in body |operator_mask|:
                 match statement:
                     Ast::Stmt.Assign(target, _, value, _):
-                        return true if proof_expr_has_call(target) or proof_expr_has_move(target)
-                        return true if proof_expr_has_call(value) or proof_expr_has_move(value)
+                        return true if proof_expr_has_call(target) or proof_expr_has_move(target) or proof_source_expression_has_overloaded_operator(target, operator_mask, 0)
+                        return true if proof_expr_has_call(value) or proof_expr_has_move(value) or proof_source_expression_has_overloaded_operator(value, operator_mask, 0)
                     Ast::Stmt.VarDecl(_, _, initializer, _):
-                        return true if proof_expr_has_call(initializer) or proof_expr_has_move(initializer)
+                        return true if proof_expr_has_call(initializer) or proof_expr_has_move(initializer) or proof_source_expression_has_overloaded_operator(initializer, operator_mask, 0)
                     Ast::Stmt.Expr(expression, _):
-                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression)
+                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression) or proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
                     Ast::Stmt.Block(_, _, _, block_body, _):
-                        return true if proof_body_has_call(block_body)
+                        return true if proof_body_has_call(block_body, operator_mask)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition)
-                        return true if proof_body_has_call(then_body) or proof_body_has_call(else_body)
+                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition) or proof_source_expression_has_overloaded_operator(condition, operator_mask, 0)
+                        return true if proof_body_has_call(then_body, operator_mask) or proof_body_has_call(else_body, operator_mask)
                     Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition)
-                        return true if proof_body_has_call(while_body)
+                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition) or proof_source_expression_has_overloaded_operator(condition, operator_mask, 0)
+                        return true if proof_body_has_call(while_body, operator_mask)
                     Ast::Stmt.For(bind, _, iterable, for_body, _):
                         return true if bind == "parallel"
-                        return true if proof_expr_has_call(iterable) or proof_expr_has_move(iterable)
-                        return true if proof_body_has_call(for_body)
+                        return true if proof_expr_has_call(iterable) or proof_expr_has_move(iterable) or proof_source_expression_has_overloaded_operator(iterable, operator_mask, 0)
+                        return true if proof_body_has_call(for_body, operator_mask)
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee)
+                        return true if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee) or proof_source_expression_has_overloaded_operator(scrutinee, operator_mask, 0)
                         for arm in arms:
-                            return true if proof_expr_has_call(arm.guard) or proof_body_has_call(arm.body)
+                            return true if proof_expr_has_call(arm.guard) or proof_source_expression_has_overloaded_operator(arm.guard, operator_mask, 0) or proof_body_has_call(arm.body, operator_mask)
                     Ast::Stmt.Return(value, _):
-                        return true if value is returned and (proof_expr_has_call(returned) or proof_expr_has_move(returned))
+                        return true if value is returned and (proof_expr_has_call(returned) or proof_expr_has_move(returned) or proof_source_expression_has_overloaded_operator(returned, operator_mask, 0))
                     Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression)
+                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression) or proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
                     _:
                         pass
             return false
@@ -301,7 +312,7 @@ extend ElisaProof:
             # aliased set -- or to hand control to a callee. A body that does neither, and whose
             # every write is an element write, cannot reach anything it does not itself name, so
             # the frame's set says nothing about it.
-            reaches_beyond_itself: bool = body_aliased.count > 0 or whole_roots.count > 0 or proof_body_has_call(body)
+            reaches_beyond_itself: bool = body_aliased.count > 0 or whole_roots.count > 0 or proof_body_has_call(body, report.source_primitive_operator_mask)
             extent_safe: mutable darray[sview] = []
             for candidate in element_roots |extent_safe, whole_roots, body_aliased, reaches_beyond_itself, report|:
                 continue if candidate == ""

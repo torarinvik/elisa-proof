@@ -1,0 +1,71 @@
+# External linear hints (BACKLOG W-01). An outside oracle (scripts/smt_oracle.py asks Z3) may
+# propose Farkas multipliers for a goal that the bounded Fourier-Motzkin search misses. A hint
+# names the goal by its attempt id and each premise by its index among the goal's certificate
+# facts -- the `facts` list of the JSON report. Nothing here is trusted: a hint only becomes the
+# same `__elisa_linear_certificate` marker the search would emit, and the checker and kernel
+# decide it. A stale, forged or malformed hint therefore only fails to prove.
+#
+# Hints are stored flat in `report.linear_hints` as records
+# `goal_id goal_multiplier count (fact_index multiplier){count}`.
+const module ProofLinearExportLimit:
+    ATOMS: usize = 24
+    ROWS: usize = 48
+
+extend ElisaProof:
+    public:
+        # The facts a goal attempt would capture, in report order (see `proof_add_goal_attempt`).
+        def proof_linear_hint_captured(facts: darray[Ast::Expr]&, report: ProofReport&, name: sview, captured: mutable darray[Ast::Expr]&) -> void:
+            for fact in facts |fact, report, name, captured|:
+                trace_index: usize = proof_certificate_fact_trace_index(report, fact, name)
+                captured.push(fact) if proof_kernel_expression_supported(fact) and trace_index < report.fact_traces.count
+
+        def proof_linear_hint_certificate(facts: darray[Ast::Expr]&, report: ProofReport&, line: u32, name: sview) -> (found: bool, certificate: Ast::Expr):
+            position: Ast::Pos = Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}
+            invalid: Ast::Expr = Ast::Expr.BoolLit(false, position)
+            hints: darray[i64] = report.linear_hints
+            goal_id: i64 = report.goal_attempts.count.i64()
+            index: mutable usize = 0
+            while index + 3 <= hints.count |index, hints, goal_id|:
+                break if hints[index] == goal_id
+                count: i64 = hints[index + 2]
+                return (false, invalid) if count < 0 or count > ProofLinearCertificateLimit::PREMISES.i64()
+                index <- index + 3 + 2 * count.usize()
+            return (false, invalid) if index + 3 > hints.count
+            count: i64 = hints[index + 2]
+            return (false, invalid) if count <= 0 or count > ProofLinearCertificateLimit::PREMISES.i64()
+            return (false, invalid) if index + 3 + 2 * count.usize() > hints.count
+            captured: mutable darray[Ast::Expr] = []
+            proof_linear_hint_captured(facts, report, name, &captured)
+            arguments: mutable darray[Ast::Expr] = [proof_linear_multiplier_expr(hints[index + 1], position)]
+            for premise in 0..<count.usize() |premise, hints, index, captured, arguments, position|:
+                fact_index: i64 = hints[index + 3 + 2 * premise]
+                return (false, invalid) if fact_index < 0 or fact_index >= captured.count.i64()
+                arguments.push(captured[fact_index.usize()])
+                arguments.push(proof_linear_multiplier_expr(hints[index + 4 + 2 * premise], position))
+            no_names: darray[sview] = []
+            return (true, Ast::Expr.Call(Ast::Expr.Ident("__elisa_linear_certificate", position), arguments, no_names, position))
+
+        # The oracle's problem: every certificate fact that reads as a linear constraint, as a row
+        # `sum coefficient * atom + constant <= 0`, beside the negated goal (fact -1). `equalities`
+        # marks rows whose multiplier may be negative. False when the problem exceeds its caps.
+        def proof_linear_export_rows(facts: darray[Ast::Expr]&, goal: Ast::Expr, atoms: mutable darray[sview]&, rows: mutable ProofLinearRows&, row_facts: mutable darray[i64]&, equalities: mutable darray[bool]&) -> bool:
+            return false if not proof_linear_fact_names(goal, true, facts, atoms)
+            for fact in facts |fact, facts, atoms|:
+                continue if proof_linear_certificate_marker(fact)
+                names: mutable darray[sview] = []
+                continue if not proof_linear_fact_names(fact, false, facts, &names)
+                for name in names |name, atoms|:
+                    atoms.push(name) if not any atom in atoms where atom == name
+            return false if atoms.count == 0 or atoms.count > ProofLinearExportLimit::ATOMS
+            return false if not proof_linear_row(goal, 1, true, facts, atoms, rows)
+            row_facts.push(-1)
+            equalities.push(false)
+            for fact_index in 0..<facts.count |fact_index, facts, atoms, rows, row_facts, equalities|:
+                fact: Ast::Expr = facts[fact_index]
+                continue if proof_linear_certificate_marker(fact)
+                continue if row_facts.count >= ProofLinearExportLimit::ROWS
+                if proof_linear_row(fact, 1, false, facts, atoms, rows):
+                    row_facts.push(fact_index.i64())
+                    probe: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
+                    equalities.push(proof_linear_row(fact, -1, false, facts, atoms, &probe))
+            return true

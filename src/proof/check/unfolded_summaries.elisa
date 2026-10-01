@@ -1,0 +1,144 @@
+const module ProofUnfoldLimit:
+    NODES: usize = 24
+
+extend ElisaProof:
+    private:
+        # Pure function unfolding (BACKLOG D-04). A function with no written postcondition whose
+        # body is one `return value` of a small call-free arithmetic or comparison term, and whose
+        # return type is a primitive integer or bool, gets the postcondition `result == value`.
+        # The synthesized ensure is an ordinary one: the function's own check must prove it from
+        # its body, and callers use it only through the verified-summary path, so unfolding adds
+        # no trusted step. Calls, fields, indexing and anything recursive stay opaque.
+        def proof_unfold_term_nodes(expression: Ast::Expr, depth: usize) -> usize:
+            return ProofUnfoldLimit::NODES + 1 if depth > ProofUnfoldLimit::NODES
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return 1
+                Ast::Expr.BoolLit(_, _):
+                    return 1
+                Ast::Expr.Ident(name, _):
+                    return ProofUnfoldLimit::NODES + 1 if name == "" or name == "result"
+                    return 1
+                Ast::Expr.Paren(inner, _):
+                    return proof_unfold_term_nodes(inner, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return 1 + proof_unfold_term_nodes(operand, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return ProofUnfoldLimit::NODES + 1 if operator == TokenKind.RangeLt
+                    return 1 + proof_unfold_term_nodes(left, depth + 1) + proof_unfold_term_nodes(right, depth + 1)
+                _:
+                    return ProofUnfoldLimit::NODES + 1
+
+        def proof_unfold_return_type(return_type: Ast::Expr?) -> bool:
+            if return_type is declared:
+                match declared:
+                    Ast::Expr.Ident(name, _):
+                        return name == "bool" or name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "isize" or name == "usize"
+                    _:
+                        return false
+            return false
+
+        def proof_unfold_bool_type(return_type: Ast::Expr?) -> bool:
+            if return_type is declared:
+                return proof_ident_name(declared) == "bool"
+            return false
+
+        def proof_unfolded_ensures(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, return_type: Ast::Expr?) -> darray[Ast::Expr]:
+            result: mutable darray[Ast::Expr] = []
+            return result if not proof_unfold_return_type(return_type)
+            # Only by-value primitive parameters: a reference or aggregate argument would make
+            # the summary an equation over a place rather than a value.
+            for parameter in parameters |result|:
+                return result if parameter.has_default or not proof_unfold_return_type(parameter.type_expression)
+            returns: mutable usize = 0
+            others: mutable usize = 0
+            value: mutable Ast::Expr = Ast::Expr.Invalid
+            position: mutable Ast::Pos = proof_resource_default_position()
+            for statement in body |returns, others, value, position|:
+                match statement:
+                    Ast::Stmt.Contract(kind, _, _):
+                        others <- others + 1 if kind != "requires"
+                    Ast::Stmt.Return(returned_value, return_position):
+                        if returned_value is returned:
+                            returns <- returns + 1
+                            value <- returned
+                            position <- return_position
+                        else:
+                            others <- others + 1
+                    _:
+                        others <- others + 1
+            return result if returns != 1 or others != 0
+            return result if proof_unfold_term_nodes(value, 0) > ProofUnfoldLimit::NODES
+            # A closed body such as `return 0` gains nothing a caller cannot already see.
+            names: mutable darray[sview] = []
+            proof_counterexample_collect_names(value, &names)
+            return result if names.count == 0
+            # Every name must be a parameter: a global or unresolved name has no binding in the
+            # synthesized proposition.
+            for used in names |result, parameters|:
+                bound: mutable bool = false
+                for parameter in parameters |bound, used|:
+                    bound <- true if parameter.name == used
+                return result if not bound
+            subject: Ast::Expr = Ast::Expr.Ident("result", position)
+            body_value: Ast::Expr = Ast::Expr.Paren(value, position)
+            # A bool result is summarized by the two implications rather than by `==`, because
+            # the solver resolves a disjunction against a fact but does not rewrite a bool
+            # equation: `is_digit(c)` as a fact then yields the body's condition directly.
+            if proof_unfold_bool_type(return_type):
+                result.push(Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, subject, position), TokenKind.Or, body_value, position))
+                result.push(Ast::Expr.Binary(subject, TokenKind.Or, Ast::Expr.Unary(TokenKind.Not, body_value, position), position))
+                return result
+            result.push(Ast::Expr.Binary(subject, TokenKind.EqEq, body_value, position))
+            return result
+
+        # Entry facts unfold too: a precondition such as `is_digit(c)` is opaque until the
+        # callee's summary is instantiated at its call. Only a verified, total-pure callee with
+        # no requires qualifies, so each instance is the same `function-summary` fact a real call
+        # would produce, replayed against the callee's checked ensures.
+        def proof_add_precondition_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, requirement: Ast::Expr, line: u32, name: sview, functions: ProofFunctionTable&) -> void:
+            proof_add_traced_fact(facts, report, requirement, "precondition", line, name)
+            proof_unfold_contract_calls(requirement, facts, report, line, name, functions, 0)
+
+        def proof_unfold_contract_calls(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, name: sview, functions: ProofFunctionTable&, depth: usize) -> void:
+            return if depth > ProofUnfoldLimit::NODES
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_unfold_contract_calls(inner, facts, report, line, name, functions, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_unfold_contract_calls(operand, facts, report, line, name, functions, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_unfold_contract_calls(left, facts, report, line, name, functions, depth + 1)
+                    proof_unfold_contract_calls(right, facts, report, line, name, functions, depth + 1)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return if not proof_contract_calls_are_pure(expression, functions)
+                    for argument_name in argument_names:
+                        return if argument_name != ""
+                    for argument in arguments:
+                        return if proof_expr_has_executable_call(argument)
+                    called: usize = proof_function_index(functions, proof_callable_name(callee))
+                    return if called >= functions.names.count or called >= functions.pure.count or not functions.pure[called]
+                    return if called >= functions.verified.count or not functions.verified[called]
+                    return if called >= functions.requires_counts.count or functions.requires_counts[called] != 0
+                    return if called >= functions.param_counts.count or functions.param_counts[called] != arguments.count
+                    return if called >= functions.ensure_counts.count
+                    parameter_names: mutable darray[sview] = []
+                    for parameter_index in 0..<arguments.count |parameter_names, functions, called|:
+                        parameter_names.push(functions.all_params[functions.param_starts[called] + parameter_index])
+                    argument_values: mutable darray[Ast::Expr] = []
+                    argument_values.extend(arguments)
+                    result_names: mutable darray[sview] = ["result"]
+                    result_values: mutable darray[Ast::Expr] = [expression]
+                    no_requires: mutable darray[usize] = []
+                    for ensure_index in 0..<functions.ensure_counts[called] |facts, report, line, name, functions, called, parameter_names, argument_values, result_names, result_values, no_requires, expression|:
+                        source_ensure: Ast::Expr = functions.all_ensures[functions.ensure_starts[called] + ensure_index]
+                        continue if proof_expr_has_old(source_ensure)
+                        ensured: Ast::Expr = proof_substitute(proof_substitute(source_ensure, parameter_names, argument_values), result_names, result_values)
+                        known: mutable bool = false
+                        for fact in facts |known, ensured|:
+                            known <- true if proof_expr_equal(fact, ensured)
+                        continue if known
+                        proof_add_function_summary_fact(facts, report, ensured, line, name, functions.names[called], parameter_names, argument_values, expression, no_requires, ensure_index, false, Ast::Expr.Absent, functions.lines[called] if called < functions.lines.count else 0)
+                    proof_add_pure_call_witnesses(expression, facts, functions, report, line, name, 0)
+                _:
+                    return

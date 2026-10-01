@@ -92,10 +92,13 @@ python3 "$ROOT_DIR/scripts/test_qualified_constants.py"
 python3 "$ROOT_DIR/scripts/test_variant_exclusion.py"
 python3 "$ROOT_DIR/scripts/test_signed_upper_bound.py"
 python3 "$ROOT_DIR/scripts/test_refusal_gate.py"
+python3 "$ROOT_DIR/scripts/test_report_count_semantics.py"
 python3 "$ROOT_DIR/scripts/test_deterministic_call_chain.py"
+python3 "$ROOT_DIR/scripts/test_deterministic_operator_global.py"
 python3 "$ROOT_DIR/scripts/test_tuple_field_region.py"
 python3 "$ROOT_DIR/scripts/test_enum_tag_equality.py"
 python3 "$ROOT_DIR/scripts/test_signed_local_field_bounds.py"
+python3 "$ROOT_DIR/scripts/test_signed_tuple_label_bounds.py"
 python3 "$ROOT_DIR/scripts/test_usize_increment_under_count.py"
 python3 "$ROOT_DIR/scripts/test_disequality_strictness.py"
 python3 "$ROOT_DIR/scripts/test_guard_and_flag_facts.py"
@@ -105,10 +108,14 @@ python3 "$ROOT_DIR/scripts/test_engine_state.py"
 python3 "$ROOT_DIR/scripts/test_explain.py"
 python3 "$ROOT_DIR/scripts/test_long_difference_chain.py"
 python3 "$ROOT_DIR/scripts/test_can_block_frame.py"
+python3 "$ROOT_DIR/scripts/test_collection_push_count.py"
 python3 "$ROOT_DIR/scripts/test_census_diff.py"
+python3 "$ROOT_DIR/scripts/test_refusal_census.py"
 python3 "$ROOT_DIR/scripts/test_body_ensures.py"
 python3 "$ROOT_DIR/scripts/test_contract_placement.py"
 python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
+python3 "$ROOT_DIR/scripts/test_old_mutable_reference.py"
+python3 "$ROOT_DIR/scripts/test_internal_marker_names.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_disjunction.py"
 python3 "$ROOT_DIR/scripts/test_numeric_cast_contract.py"
 python3 "$ROOT_DIR/scripts/test_source_map.py"
@@ -123,6 +130,12 @@ python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_remainder_range.py"
 python3 "$ROOT_DIR/scripts/test_loop_state_joins.py"
 python3 "$ROOT_DIR/scripts/test_portable_replay.py"
+python3 "$ROOT_DIR/scripts/test_linear_certificates.py"
+python3 "$ROOT_DIR/scripts/test_smt_oracle.py"
+python3 "$ROOT_DIR/scripts/test_symbolic_quantifiers.py"
+python3 "$ROOT_DIR/scripts/test_indexed_write_frame.py"
+python3 "$ROOT_DIR/scripts/test_near_miss.py"
+python3 "$ROOT_DIR/scripts/test_pure_unfolding.py"
 python3 "$ROOT_DIR/scripts/test_correspondence.py"
 python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
 python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
@@ -201,6 +214,7 @@ if [[ "$report_invariants_compile_status" -ne 0 ]]; then
     printf 'proof test matrix failed: report invariant boundary harness did not compile\n' >&2
     exit 1
 fi
+ELISA_COMPILER_BIN="$SELF_HOST_COMPILER" python3 "$ROOT_DIR/scripts/test_loop_invariants_compile.py" || exit 1
 kernel_runtime_inputs=()
 kernel_runtime_obj="${ELISA_RUNTIME_OBJ:-}"
 if [[ -z "$kernel_runtime_obj" ]]; then
@@ -408,6 +422,9 @@ fi
 # The replay checker deliberately bounds branch-state retention to keep the self-hosting corpus
 # deterministic. Keep a coverage floor, require the important summaries, and require every
 # budget exhaustion to be classified as unsupported rather than silently unknown.
+# The peak grows with the audited kernel: 1,177,457 KB before the linear-certificate checker
+# (C-02/C-03), 1,219,217 KB after it, from its 38 added obligations;
+# the mocap-cleaner proof tiers raise it further, so keep the branch's 3,000,000 KB ceiling.
 KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-3000000}"
 kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
 kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
@@ -1294,7 +1311,7 @@ if [[ "$rejected_fixed_array_fields_status" -ne 1 ]] || ! python3 -c 'import jso
     printf 'proof test matrix failed: rejected_fixed_array_fields=%s\n' "$rejected_fixed_array_fields_status" >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/nested_call_kept_values.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 28; bounds = [goal for goal in report["goals"] if goal["rule"] in ("index-lower", "index-upper") and goal["name"] != "open"]; assert len(bounds) == 20 and all(goal["proven"] for goal in bounds); assert report["replay"]["gaps"] == 0'
+run_json_report "$ROOT_DIR/examples/nested_call_kept_values.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 30; bounds = [goal for goal in report["goals"] if goal["rule"] in ("index-lower", "index-upper") and goal["name"] != "open"]; assert len(bounds) == 20 and all(goal["proven"] for goal in bounds); assert report["replay"]["gaps"] == 0'
 nested_call_kept_values_probe_status=${PIPESTATUS[1]}
 if [[ "$nested_call_kept_values_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: values a nested call cannot reach\n' >&2
@@ -1609,6 +1626,14 @@ if [[ "$counterexample_domain_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
+run_json_report "$ROOT_DIR/examples/counterexample_boolean_domains.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["replay"]["gaps"] == 0; findings = {finding["name"]: finding for finding in report["findings"] if finding["kind"] == "ensure-unproven"}; boolean = findings["boolean_parameter_counterexample"]; anchored_boolean = findings["boolean_equality_counterexample"]; ambiguous_boolean = findings["ambiguous_boolean_equality"]; ambiguous_character = findings["ambiguous_character_equality"]; assert boolean["status"] == "disproved" and boolean["counterexample_found"]; assert boolean["counterexample"] and boolean["counterexample"][0]["right"]["kind"] == "bool" and boolean["counterexample"][0]["right"]["value"] is True; assert anchored_boolean["status"] == "disproved" and anchored_boolean["counterexample_found"] and anchored_boolean["counterexample"][0]["right"]["kind"] == "bool"; assert ambiguous_boolean["status"] == "unknown" and not ambiguous_boolean["counterexample_found"] and ambiguous_boolean["counterexample"] == []; assert ambiguous_character["status"] == "unknown" and not ambiguous_character["counterexample_found"] and ambiguous_character["counterexample"] == []'
+counterexample_boolean_domains_status=${PIPESTATUS[1]}
+set -e
+if [[ "$counterexample_boolean_domains_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: counterexample models must preserve or refuse scalar domains\n' >&2
+    exit 1
+fi
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_inexact_overloaded_counterexample.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert any(f["name"] == "always_equal_contract" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"])'
 overloaded_counterexample_status=${PIPESTATUS[1]}
 set -e
@@ -1622,6 +1647,14 @@ signed_overflow_model_status=${PIPESTATUS[1]}
 set -e
 if [[ "$signed_overflow_model_status" -ne 0 ]]; then
     printf 'proof test matrix failed: signed machine-integer overflow was proved using mathematical arithmetic\n' >&2
+    exit 1
+fi
+set +e
+run_json_report "$ROOT_DIR/examples/signed_overflow_bounded_model.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; assert functions["signed_square_bounded_safe"]["verified"]; assert not functions["signed_square_wraps_in_model_domain"]["verified"]; assert any(f["name"] == "signed_square_wraps_in_model_domain" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"])'
+signed_overflow_bounded_model_status=${PIPESTATUS[1]}
+set -e
+if [[ "$signed_overflow_bounded_model_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: bounded models must refuse fixed-width overflow domains\n' >&2
     exit 1
 fi
 set +e
@@ -2529,7 +2562,7 @@ fi
 # Expression-level type witnesses: struct fields, container counts and elements to the declared
 # depth, const-enum values, and verified total-pure call results are witnessed by exact term.
 set +e
-run_json_report "$ROOT_DIR/examples/expression_witness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 43; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"range_binder_reflexive", "element_binder_reflexive", "field_element_binder_reflexive", "element_binder_congruence", "asserted_opaque_binding", "field_reflexive", "nested_field_reflexive", "field_through_reference", "element_reflexive", "count_reflexive", "multi_index_reflexive", "nested_index_reflexive", "field_congruence", "element_equality_symmetry", "local_field_reflexive", "const_enum_reflexive", "pure_call_reflexive", "bound_opaque_call"} <= names; witnesses = [fact for certificate in report["certificates"] for fact in certificate["facts"] if fact["kind"] == "call" and fact["callee"]["name"] in ("__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element")]; assert any(fact["arguments"][0]["kind"] == "field" for fact in witnesses); assert any(fact["callee"]["name"] == "__elisa_primitive_scalar_element" for fact in witnesses)'
+run_json_report "$ROOT_DIR/examples/expression_witness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 44; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; names = {goal["name"] for goal in report["goals"] if goal["proven"]}; assert {"range_binder_reflexive", "element_binder_reflexive", "field_element_binder_reflexive", "element_binder_congruence", "asserted_opaque_binding", "field_reflexive", "nested_field_reflexive", "field_through_reference", "element_reflexive", "count_reflexive", "multi_index_reflexive", "nested_index_reflexive", "field_congruence", "element_equality_symmetry", "local_field_reflexive", "const_enum_reflexive", "pure_call_reflexive", "bound_opaque_call"} <= names; witnesses = [fact for certificate in report["certificates"] for fact in certificate["facts"] if fact["kind"] == "call" and fact["callee"]["name"] in ("__elisa_primitive_scalar_type", "__elisa_primitive_scalar_element")]; assert any(fact["arguments"][0]["kind"] == "field" for fact in witnesses); assert any(fact["callee"]["name"] == "__elisa_primitive_scalar_element" for fact in witnesses)'
 expression_witness_status=${PIPESTATUS[1]}
 set -e
 if [[ "$expression_witness_status" -ne 0 ]]; then
@@ -3741,7 +3774,7 @@ if [[ "$no_op_statement_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_no_op_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"expression-unsupported"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_dropped_arm_is_refused"] == "body-unverified"; assert reasons["the_refusal_reaches_past_the_match"] == "body-unverified"'
+run_json_report "$ROOT_DIR/examples/rejected_no_op_statement.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"expression-unsupported", "call-requires-unproven"}; assert sum(f["kind"] == "expression-unsupported" for f in report["findings"]) == 2; assert any(f["kind"] == "call-requires-unproven" and f["name"] == "the_refusal_reaches_past_the_match" for f in report["findings"]); reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_dropped_arm_is_refused"] == "body-unverified"; assert reasons["the_refusal_reaches_past_the_match"] == "body-unverified"'
 rejected_no_op_statement_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_no_op_statement_status" -ne 0 ]]; then
@@ -4092,7 +4125,7 @@ if [[ "$short_circuit_call_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_short_circuit_call.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; kinds = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert kinds == {("skipped_call_must_not_establish_and", "ensure-unproven"), ("skipped_call_must_not_establish_or", "ensure-unproven"), ("skipped_call_must_not_establish_a_guard", "ensure-unproven"), ("pre_call_value_must_not_survive", "ensure-unproven"), ("skipped_requires_is_still_checked", "call-requires-unproven")}; assert not any(finding["kind"] == "expression-unsupported" for finding in report["findings"]); goals = {goal["name"]: goal["proven"] for goal in report["goals"] if goal["rule"] == "goal" and goal["name"] != "reset"}; assert goals and not any(goals.values())'
+run_json_report "$ROOT_DIR/examples/rejected_short_circuit_call.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; kinds = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert kinds == {("skipped_call_must_not_establish_and", "ensure-unproven"), ("skipped_call_must_not_establish_or", "ensure-unproven"), ("skipped_call_must_not_establish_a_guard", "ensure-unproven"), ("mutable_left_fact_must_not_survive", "ensure-unproven"), ("pre_call_value_must_not_survive", "ensure-unproven"), ("skipped_requires_is_still_checked", "call-requires-unproven")}; assert not any(finding["kind"] == "expression-unsupported" for finding in report["findings"]); goals = {goal["name"]: goal["proven"] for goal in report["goals"] if goal["rule"] == "goal" and goal["name"] != "reset"}; assert goals and not any(goals.values())'
 rejected_short_circuit_call_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_short_circuit_call_status" -ne 0 ]]; then

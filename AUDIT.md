@@ -8121,6 +8121,14 @@ verifies a `_: pass` arm that keeps `depth <= 127` for the call after the match.
 `with value`, a dropped prefix form. Both are still refused, and the refusal still discards the
 state after the match.
 
+The 2026-10-01 branch-state audit checked that boundary against the saved census-baseline
+revision (`6286345`). That revision incorrectly certified the later `needs_bound(depth)` call
+after the dropped `with value` arm: 4 of 6 obligations appeared proven, with no call refusal.
+The current report correctly leaves that call unproven (`call-requires-unproven`, `no-rule`),
+while replaying every emitted certificate with zero gaps. This intentionally lowers the fixture
+to 3 of 6 proven obligations; its census entry is refreshed to record the soundness correction,
+not to waive the adversarial check. The fixture assertion in `scripts/test.sh` pins this behavior.
+
 ### Cancellation over differences of two names (2026-09-28)
 
 A counting loop's measure did not verify. `decreases x - count` needs `x - (count + 1) < x - count`
@@ -10230,19 +10238,23 @@ call witnesses close it; `examples/widened_call_result.elisa` is the probe and
 ## Enum tag tests as bools (BACKLOG B-05)
 
 `name is Enum.Variant` in a goal gets a primitive scalar witness: `is` is the builtin tag test and
-is never overloaded, and a name denotes one value in a goal, so the test is one bool. A subject
-that is not a bare name gets no witness; a call subject is still refused as
-`contract-proposition-type`. Not yet closed: `ensure result == (c is E.V)` over `if c is E.V:
-return true` needs `true == P` from the fact `P`, a bool-literal equality rule that the producer
-and the kernel both lack.
+is never overloaded, and a name denotes one value in a goal, so the test is one bool. The contract
+`ensure result == (c is E.V)` closes by equality. A subject that is not a bare name gets no
+witness; a call subject is still refused as `contract-proposition-type`. Evidence:
+`scripts/test_enum_tag_equality.py` proves and replays four named-tag obligations (including a
+conjunction), refuses a wrong variant, wrong subject and call subject, and exercises a 24-tag
+conjunction. The separate shape `if c is E.V: return true` still needs a bool-literal equality
+rule (`true == P` from `P`); it is not part of B-05's direct equality contract.
 
 ## Qualified constants in more statements (BACKLOG B-06)
 
 The body rewrite of 4db58a8 now also covers assigned values, expression statements (call
 arguments), `while` conditions and loop contracts (`invariant`, `decreases`), `for` ranges, and
 the arguments of calls inside any rewritten expression. The same shadow guard applies, and a `for`
-variable named like the module counts as a shadow. A remaining, separate gap: over u8, a
-`decreases TOP - y` under `y < TOP` is refused as possibly wrapping, with a literal too.
+variable named like the module counts as a shadow. Evidence: `scripts/test_qualified_constants.py`
+checks positive assignment, call-argument, while-condition and for-range use, rejects oversized
+values in each context, and refuses a shadowed module name. One independent gap remains: over u8,
+a `decreases TOP - y` under `y < TOP` is refused as possibly wrapping, with a literal too.
 
 ## Signed type ranges for locals and fields (BACKLOG B-07)
 
@@ -10253,9 +10265,14 @@ term of a signed type narrower than 64 bits. The parameter path now wraps it. Tw
   kept the upper literal bound but dropped the unary floor, so the lower end was lost.
 - A struct field place gets the range beside its signed place marker.
 
-A reassigned local's new value carries no range and stays unproven. Tuple labels are not covered
-yet. Evidence: examples/signed_local_field_bounds.elisa proves 15/15 and replays 15/15, and
-examples/rejected_signed_local_field_bounds.elisa refuses four bounds that are one step tighter.
+A reassigned local's new value carries no range and stays unproven. Named-tuple scalar labels now
+also receive both signed endpoints when a typed tuple result is projected from a verified-pure call
+with witnessed arguments; tuple-local summary handling emits the same facts for eligible bound
+locals. The existing `type-bound` trace remains a trusted compiler-type boundary, not a
+kernel-reconstructed source-type proof. Evidence: `scripts/test_signed_local_field_bounds.py`
+proves and replays all 15 obligations and refuses four tighter claims;
+`scripts/test_signed_tuple_label_bounds.py` proves and replays both signed endpoints after halving
+and directly, while two parameterized claims one step outside the range remain unproven.
 
 ## Unsigned increment under a strict peer (BACKLOG B-08)
 
@@ -10366,3 +10383,443 @@ as they leave scope. Only a block whose body falls through is adopted; other blo
 the old clear. Fixtures: `examples/can_block_frame.elisa` (proved, replayed) and
 `examples/rejected_can_block_frame.elisa` (own count, assigned local, block-local relation stay
 unproven). An explicit `modifies` clause still needs front-end syntax the compiler lacks.
+
+## Builtin push grows the count by one and appends its value (BACKLOG D-02, E-01)
+
+`v.push(x)` on a parameter declared as a mutable reference to a builtin `darray` now records
+`v.count == T + 1`, where T is the count before the call: a ghost term already equal to the
+count, or a fresh symbol bound to it whose facts are restated by kernel-checked steps. When an
+ensure mentions such a parameter, `old(v.count)` is a fresh entry symbol E fixed by
+`E == v.count` at entry. New trusted boundary kinds, shape-checked only by replay:
+`collection-push` (T is an unsigned 64-bit scalar; T stays at most 2^63 - 2, since no darray
+buffer reaches 2^63 elements) and `entry-count` (E is an unsigned 64-bit scalar). Ghost symbols
+are registered as frame constants so their facts survive later call boundaries; no source text
+can spell them. The model declines a user function named `push`, named or computed arguments,
+a rebound name and any receiver that is not such a parameter, and every other write to `v`
+still forgets its count. Fixtures: `examples/collection_push_count.elisa` (proved, replayed),
+`examples/rejected_collection_push_count.elisa` and
+`examples/rejected_collection_push_user_method.elisa` (all claims unproven).
+
+The same boundary also records `v[T] == x` and `v[v.count - 1] == x` for the pushed value x when
+x does not mention `v` and is built from literals, ghosts and witnessed scalar names under `+`
+and `-`: a builtin push writes only the receiver's storage, so such a value is unchanged by the
+call. A later push or write to `v` forgets both facts. Pop, resize, extend and element-wise
+contents beyond the last element are not modeled yet.
+
+## Mutable aggregate `old(...)` snapshots and marker namespace (2026-09-30)
+
+An `old(field)` read through a mutable aggregate reference cannot be represented by the current
+symbolic state: the reference binding still names the same handle after a field write, while its
+pointee now has exit-state contents. Treating the handle as its own entry value could identify
+`old(cell.value)` with the changed `cell.value` and falsely prove a postcondition. The checker now
+uses an opaque entry-state marker for non-scalar aggregate parameters (including mutable
+references and owned mutable values). This intentionally refuses claims it cannot relate to a
+tracked entry snapshot; it does not invent a field value. Scalar value parameters and directly
+tracked scalar-reference snapshots retain their separate exact paths.
+`examples/rejected_old_mutable_reference.elisa` checks the changed-field case, and
+`scripts/test_old_mutable_reference.py` checks both aggregate cases, requires zero replay gaps and
+all emitted certificates replayed, and specifically forbids a return-site certificate that
+collapses a changed owned field into its entry field.
+
+The marker itself is part of the source-adapter trust boundary: because it is an AST identifier,
+a source declaration with the same name could otherwise turn an opaque marker into a resolvable
+call. The aggregate entry-state and scalar-reference-state names are reserved by
+`proof_name_is_reserved_internal`. The same gate now reserves every emitted field-place placeholder
+and the synthetic tuple-result constructor; in particular, a source `_1` field-place identifier
+could have collided with the second generated placeholder because the generalizer's quick check
+only inspected `_0`. Four adversarial fixtures declare the entry, scalar, field-place, and tuple
+names and require `unsupported` with a `proof-internal-name` finding before theorem admission.
+This is a conservative namespace restriction; it adds no inference rule.
+
+**Evidence at time of this entry.** Stage0 `e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11` is clean,
+and Stage1 `61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` passed its source-freshness assertion. The
+project build, mutable-reference regressions, four marker-collision attacks, and all twelve
+source-admission routes passed on that pair. The full suite had not yet been rerun after the
+field-place kernel fix when this paragraph was first written; see the dated follow-up below for
+newer evidence. Do not treat mutable aggregate entry snapshots as fully generalized: other
+aliasing and aggregate shapes remain unsupported unless a source-bound state model is established.
+
+## Field-place placeholders are collision-checked in replay (2026-09-30)
+
+The source generalizer and kernel replay both used `__elisa_field_place_0` as a sentinel that
+checked whether placeholders were available, then generated up to four names. A valid source name
+`__elisa_field_place_1` could therefore capture the second generated term. More importantly,
+portable replay cannot rely on source admission: an adversarial package with consistent hypotheses
+`a.x = 0`, `b.y = 1`, and `__elisa_field_place_1 = 0` replayed the false goal `a.x = b.y` before
+the fix. Generalization identified `b.y` with the preexisting marker and made the context
+contradictory. The producer now checks all four marker names in the goal and facts; the independent
+kernel performs the equivalent exact-subterm availability check before generalizing. This check
+is required at both boundaries: source collision refusal alone does not protect portable kernel
+packages.
+
+`scripts/test_portable_replay.py` carries the consistent forged package and requires kernel
+rejection. `scripts/test_internal_marker_names.py` checks source-adapter rejection of `_1`, while
+`examples/field_places.elisa` remains a positive control. The portable package suite and focused
+old-state/field-place regressions pass with the kernel fix.
+
+## Call-graph opaque-edge sentinel (2026-09-30)
+
+The call-name collector inserts `__opaque_call__` when it encounters an AST form whose executable
+edges are not modeled. Function and lemma graph consumers recognize that spelling as an opaque
+edge and, in some cases, skip normal callee dependency scheduling. Source declarations with that
+same name were previously admitted, making one symbol serve as both a real function and the graph's
+unknown-edge sentinel. The name is now reserved at source admission. The regression fixture
+`examples/rejected_opaque_call_marker_collision.elisa` previously imported as a proved function;
+`scripts/test_internal_marker_names.py` now requires a `proof-internal-name` refusal for it. The
+source-admission matrix still refuses all six malformed classes across all twelve routes.
+
+**Follow-up suite evidence.** With the field-place producer/kernel collision checks in place, the
+full `scripts/test.sh` passed against isolated Stage1
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` and Stage0
+`e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11`. Its census reported 6,061/7,782 obligations proven,
+with no regressions from the 6,061/7,778 baseline; O2/O3 replay checks and accepted/rejected exit
+behavior also passed. This complete run preceded the `__opaque_call__` reservation. After that
+reservation, the Stage1 rebuild, five marker-collision regressions, and twelve-route source-admission
+matrix passed. At that point the full suite had not yet been rerun; see the later dated follow-up
+below for the subsequent run and its timing-gate result.
+
+## Portable nested-quantifier capture regression (2026-09-30)
+
+Added a portable forged theorem for
+`forall x in [y], forall y in [0], x == y`. For a free integer `y = 1`, this proposition is false;
+naive textual substitution of the outer `x` with the range value `y` beneath the inner `forall y`
+would capture that free identifier and turn the body into `y == y`. The kernel's current
+capture-avoiding substitution refuses this nested-binder case as `kernel-rejected`. The adversarial
+package recomputes the statement and fingerprint, and retains a scalar-type witness for the free
+identifier, so refusal is at the theorem kernel rather than at package syntax. The nine existing
+positive portable rule-family packages and the prior forged-arena/schema controls still replay or
+refuse as expected. Regression is in `scripts/test_portable_replay.py`.
+
+That test also forges `forall k, v in {v: 0}, k == v` under the hypothesis `v == 1`. The dictionary
+key `v` is free in the range, while `v` in the body is the value binder. Sequential substitution
+`k -> v`, then `v -> 0` would incorrectly prove `0 == 0`; the kernel's fresh-marker substitution
+keeps the pair simultaneous and rejects the false theorem. A paired positive package with `k != v`
+under the same `v == 1` hypothesis replays, confirming the forged case reaches quantifier replay
+with a usable free scalar; the existing finite-dictionary positive package remains an additional
+control.
+
+**Full-suite follow-up.** `scripts/test.sh` was rerun after both the opaque-call reservation and this
+portable quantifier regression, using the isolated Stage1
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` and Stage0
+`e42bbdfe8a1b8123c3c4bfd096d64eb4c97c8b11`. Structural/unit tests, source-admission routes,
+portable forgery controls, the full-source replay audit, later fixture checks, and optimized O2/O3
+replay all passed. The final census exited nonzero on timing-only comparisons:
+`loop_state_joins` 11.28s -> 30.79s, `rejected_loop_state_joins` 5.88s -> 17.47s, and
+`rejected_kernel_arena_cycle` 109.66s -> 261.04s. Other proof and compiler jobs were concurrently
+CPU-active. The census reported no proof-count drop or new refusal gate; this is not a fully green
+suite because its performance gate failed. Rerun that census under lower host contention before
+claiming the complete suite passes.
+
+## Bounded-model fixed-width overflow boundary (2026-09-30)
+
+Audited the exhaustive nonlinear model rule on both sides of its trust boundary. The producer only
+reaches `proof_bounded_model_goal` after each fact and the goal pass `proof_unsigned_expression_safe`,
+which also requires signed-width range safety. Independent kernel replay applies its own unsigned
+and signed safety checks before `proof_kernel_replay_bounded_model_goal`. Therefore the i64 model
+evaluator cannot turn an overflowing i8 multiplication into a proof merely because its mathematical
+integer result has a different sign.
+
+Added `examples/signed_overflow_bounded_model.elisa` as a paired control: an i8 square over `[-2,2]`
+is verified and replayed, while the same nonnegativity property over `[0,15]` remains unknown
+because `12 * 12` wraps negative in i8. The latter emits no counterexample; it is refused because
+the arithmetic model is not exact for that domain. The focused run had zero semantic errors and
+replayed all three certificates with zero replay gaps. This adds a multiplication-specific control
+beside the existing i8 increment-overflow regression; it does not replace the previously noted
+full-suite/performance rerun requirement.
+
+## Counterexample model domains preserve Elisa scalar types (2026-09-30)
+
+The diagnostic counterexample search stored all symbols as `i64`, while its admission check treated
+any primitive-scalar witness as enough to interpret an identifier numerically. Since the primitive
+set includes `bool` and `char`, a Boolean or character equality could be reported as disproved with
+an integer assignment. Boolean identifiers used directly as propositions were also unevaluable.
+The return-contract filter then independently discarded non-integer assignments, so a valid
+Boolean model could not survive report classification.
+
+Counterexample domain inference and exact evaluation now live in separate modules. A Boolean domain
+is recorded only from proposition position or a Boolean-literal equality; an integer name requires
+an integer-literal anchor. Ambiguous identifier-only equalities (including `bool`/`char`) therefore
+remain `unknown`, rather than manufacturing an ill-typed assignment. Boolean values are serialized
+as `BoolLit`, and return-contract filtering accepts either integer or Boolean parameter assignments
+while still rejecting locals and non-parameter witnesses. The exhaustive bounded-model proof tier
+continues to use its legacy evaluator adapter; diagnostic-only type inference does not change its
+admission rule.
+
+Regressions in `examples/counterexample_boolean_domains.elisa` check Boolean `not`, equality anchored
+by a Boolean literal, unanchored Boolean equality, and character equality. Focused Stage1 checks also
+covered the existing exact integer/wrapped-width counterexample pair and `examples/bounded_model.elisa`.
+The portable replay suite, source-length gate, internal-marker collision tests, and `git diff --check`
+passed. The build used the clean compiler worktree at pinned revision
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f`; the globally installed Stage1 snapshot was older and
+did not match this proof checkout's compiler pin. The full test matrix and performance census were
+not rerun: unrelated compiler/proof jobs were actively consuming CPU. Do not call the complete suite
+green on the basis of these focused results.
+
+## Refusal census baseline and timeouts (2026-09-30)
+
+The census runner now checks the proof binary hash against its build manifest, requires the pinned
+Stage1 compiler/frontend revision, and verifies the proof source-tree digest before and after a
+run. The stable count report excludes timing data; per-input wall times and the slowest-input list
+are in the separate measurements sidecar. The dogfood inventory explicitly includes
+`src/proof/kernel_core.elisa` in addition to the examples directory. A timeout is recorded as
+unreadable/unknown, never as a failed proof obligation. Newly discovered unreadable inputs may be
+retried explicitly with `--retry-unreadable`; routine census-diff runs do not silently grant every
+new input a ten-minute timeout.
+
+On 2026-09-30, the pinned Stage1 binary (compiler/frontend revision
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f`, proof HEAD `907c18254e6e1030de66313c48423d41cf766d96`)
+produced reports for 678 of 691 examples plus the kernel-core dogfood unit: 6,104 of 7,844
+obligations proved across readable reports, with 10 actual refusal gates and 76 categories of
+non-goal diagnostics. Thirteen runtime/test harness examples exceeded the 120-second per-input
+deadline and are listed as unknown in `docs/census/census.json`; they are not included in those
+totals. A prior run against the same binary and source tree completed two more inputs and reported
+9,262/12,265 obligations, demonstrating that wall-clock timeouts make corpus coverage dependent on
+the run environment. The census is therefore an explicit partial baseline, not evidence that the
+timed-out inputs are rejected or proved, and A-01 is not fully closed. Census serializer and
+census-diff tests, Python syntax checks, the source-length check, and `git diff --check` passed. The
+full test suite was not rerun.
+
+## Report summary distinguishes open obligations from findings (2026-09-30)
+
+The machine report's legacy `summary.failed` counter is `report.findings.count`, not
+`obligations - proven`. On `examples/rejected_unsigned_local_states.elisa`, it is 17 while 16
+obligations remain unproven: an additional resource diagnostic explains a separate refusal. The
+JSON summary now exposes `unproven` and `finding_count`, retaining `failed` as a compatibility
+alias; the text CLI reports `unproven` and `findings` separately. README documents the distinction.
+The regression test asserts the differing values on that fixture and zero counts on a proved
+fixture.
+
+The full `scripts/test.sh` matrix passed under pinned Stage1 revision
+`61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f`, including the optimized O2/O3 replay checks and final
+census diff (`9,268/12,544` proven versus the committed `6,104/7,844` baseline, no regressions).
+The census totals remain run-dependent because runtime fixtures can exceed the fixed wall-time
+limit; unknown results are not proofs or counterexamples. The build manifest records the exact
+source-tree and binary hashes used for the run.
+
+## Cached-global proposition typing work accounting (2026-10-01)
+
+The source adapter was charging `global_bindings + local_bindings` times proposition node count
+times a safety factor against one cumulative per-function budget. That product remains a useful
+per-proposition admission guard, and is still enforced in both the source adapter and kernel.
+But declaration globals are snapshotted and indexed once per source check; charging their full
+cardinality again for every proposition caused false `kernel proposition typing work budget
+exceeded` refusals in the large self-hosting runtime fixture.
+
+The per-function counter now accumulates the kernel's actual bounded proposition-typing work
+across the function's contracts. The source adapter passes the same counter through the cache-aware
+replay path and resets it at the function boundary. This changes only a conservative resource
+refusal budget: every admitted proposition is still formed by the typed kernel, and every claimed
+proof still requires kernel replay. The previous public one-proposition cached-global API keeps its
+original arity and initializes a fresh counter; batching uses a separately named entry point with
+an explicit cumulative counter.
+
+The native proposition-admission harness now checks that measured work increases across two cached
+calls, the first operation beyond the budget refuses at the boundary, a later call recovers after
+the counter is reset, and the legacy entry point remains usable. Malformed local environments, cache
+mutation, recovery, and shared-DAG budget controls also pass. With pinned Stage1 compiler/frontend
+revision `61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` (product SHA-256
+`51b5a29b9cdea44cf79ca5901834233b5664b1dd5f6dc4cce939f697e0a76aeb`), the large runtime fixture
+reported 1,608/2,206 obligations proven, all 1,608 certificates replayed, zero replay gaps, and
+zero typing-work-budget refusals. The prior committed census had 1,579 proofs for this fixture;
+the refreshed full census gained 29 with no per-input proof-count regression or new refusal gate.
+
+One full `scripts/test.sh` run reached and passed the native harness, all functional/adversarial
+groups, and O2/O3 replay, but the final timing gate sampled `kernel_intern_runtime.elisa` at 28.26s
+against a 10.23s baseline while a separate proof process was saturating a core. A direct rerun on
+the same binary took 7.65s. To avoid turning one scheduling outlier into a false regression, the
+census diff now reruns only measurements beyond its existing slowdown threshold and compares the
+median of three completed runs; persistent slowdowns still fail, and incomplete rechecks preserve
+the original failure. Unit tests cover noisy, persistent, and timed-out rechecks. The full census
+diff subsequently passed at 10,972/14,684 proven versus the partial 6,104/7,844 baseline, with no
+proof-count drops or new gates. The whole `scripts/test.sh` command was not repeated from its first
+step after this measurement-only harness adjustment.
+
+## Effectful branch-condition stale facts (2026-10-01)
+
+An adversarial operator-dispatch fixture exposed a source-adapter state bug: a branch condition
+could read a global bound, then call a helper whose overloaded operator writes that global, and
+still publish the entire pre-call condition as a branch fact. The checker cleared unstable facts
+after condition evaluation but then re-added the condition, allowing one replayed index-bound
+certificate to rely on a stale global value even though the containing function was refused.
+
+Branch facts are now admitted only for call-stable conditions, and the branch-fact helper refuses
+source-overloaded operators because replay interprets only builtin operator semantics. An
+effectful condition also clears symbolic values and facts before either branch is checked. The
+short-circuit index walker checks an overloaded left guard with an empty fact set, preventing a
+mutation hidden in that guard from carrying earlier bounds into the right operand. Purity used for
+state preservation now additionally requires a completed verified callee summary; syntactic
+purity alone is insufficient when an unsupported operator can hide effects.
+
+The regression in `examples/rejected_deterministic_operator_global.elisa` covers an unverified
+helper call, a direct overloaded operator in an `if` condition, and a direct overloaded operator
+inside a short-circuit index guard. Every affected lower/upper index obligation remains open and
+uncertified; all produced certificates replay with zero gaps. The focused regression, deterministic
+call-chain tests, guard/flag facts, refusal-gate tests, source-length check, and `git diff --check`
+passed after an O0 build using the current Stage1 wrapper. Its Stage1 product hash was
+`4b36ce5a7dcf4c448ee037dce4ec393b603ed90d15aa534a90ee3888be8e83fe`; the compiler source checkout
+was dirty, so this identifies the exact tested product but is not a claim that the compiler tree
+was clean or pinned to a committed Stage1 revision.
+
+The full `scripts/test.sh` run reached the compiler integration matrix and stopped on the existing
+mutable-call-alias diagnostic assertion. The current dirty compiler source changes that diagnostic
+to call the source place `x` a “mutable reference parameter,” while the proof repository's test
+expects the formal parameter names `left`/`right`. The compiler still rejected the alias; this is
+a cross-repository diagnostic/test mismatch, not a proof regression. No compiler files were
+modified. Because the script stops there, its later optimized replay and census gates were not
+completed in this run.
+
+The same evaluation-boundary rule was then applied to statement-match scrutinees and guards,
+value-match scrutinees and guards, `while` conditions, runtime `assert` propositions, and
+`assert ... by` runtime guards. An unmodeled operator in any of these expressions clears facts and
+symbolic values before subsequent proof-state use; match/loop/assert conditions are not
+republished as logical facts unless their evaluation is stable. Ordinary verified pure-call guards
+retain their supported path. The adversarial fixture exercises an assertion between a valid bound
+check and the access, overloaded statement- and value-match guards with result contracts that would
+otherwise be provable from stale facts, an overloaded value-match scrutinee, and an overloaded
+loop condition; the committed regression also retains the earlier short-circuit cases. Each tested
+index obligation remains open and uncertified, each match result contract remains open and
+uncertified, replay reports zero gaps, and the match/value-match functions remain unverified. The
+focused regression, positive deterministic-call and guard/fact tests, refusal gate, certificate
+reuse, kernel inventory, portable replay, source-length check, and whitespace check all passed on
+the Stage1-built O0 proof binary. The complete suite was not rerun after this follow-on change.
+
+## Overloaded-operator effects before index certification (2026-10-01)
+
+The follow-on audit found a more direct unsoundness in three evaluation positions. After a valid
+range guard, a source-overloaded `==` can write `guard_index = 100`; when that operator appeared
+in a local initializer, assignment RHS, or return expression, the statement checker eventually
+invalidated state, but only after the separate index-safety prepass had already certified the
+subsequent `guard_index < values.count` goal. Those three certificates replayed successfully, so
+the defect was in source-state construction, not kernel replay. The expression-statement shape
+already refused the same stale upper-bound claim.
+
+The statement index-safety pass now detects source-overloaded operators and drops mutable symbolic
+values plus non-type facts before it walks any index access in that statement. It does this across
+returns, expression statements, declarations, assignments, branch/loop conditions, iterables,
+match scrutinees/guards, and runtime assertions. This deliberately treats the entire containing
+expression as effectful rather than assuming an evaluation order for its nested subexpressions.
+The ordinary statement checker independently marks expression statements, declarations,
+assignments, returns, and iterable expressions unsupported, and havocs state again after
+evaluation; the branch/loop/match/assert handlers also suppress or invalidate facts at their own
+boundaries. Thus later postconditions cannot regain pre-operator facts from a call summary or
+symbolic RHS. Branch, match, block, and captured-block effect scans now also count overloaded
+operators as writes when deciding whether a join may retain facts.
+
+The adversarial fixture reproduces each former false certificate, checks the expression-statement
+case, and checks a branch-body effect at a join. Every affected index lower/upper goal remains
+open and uncertified; all certificates that are emitted replay with zero gaps. The focused
+regression, deterministic-call and guard/fact tests, refusal gate, certificate reuse, kernel
+inventory, portable replay, source-length check, and whitespace check passed after an O0 build
+with the current Stage1 product. The full integration script was not rerun; its most recent run
+still stopped at the known mutable-call-alias diagnostic wording mismatch documented above.
+
+A direct custom-type `Eq` probe, with no primitive operator implementation in its source, was
+refused by the type-aware statement-admission gate. Extending it from an `if` condition to a
+statement-match guard exposed one more unsound path: statement admission checked the match
+scrutinee but skipped its arm guards, so the match checker treated custom `Eq` as a stable guard
+and replayed an `index-upper` certificate after the operator changed the global index. The
+statement admission walk now checks every match guard with the type-aware operator test before
+the index prepass or branch checker runs. The regression requires both custom-operator examples
+to remain unverified and emit no certified index bounds; replay still has zero gaps. These
+negative controls are now covered by the focused adversarial test independently of the primitive
+protocol mask.
+
+## Census obligation decrease under the pinned Stage1 build (2026-10-01, open)
+
+The census comparison now treats any per-input obligation-count decrease as a regression until
+it has been explicitly explained, and retries newly unreadable inputs even when they were not in
+the baseline file map. Focused tests cover both cases. This exposed a real, still-unresolved
+change in `kernel_resource_bootstrap_runtime.elisa`: running the saved baseline executable from
+its matching baseline checkout gives 2,226 obligations and 1,579 proven; the pinned current
+Stage1-built executable from the current checkout gives 2,206 obligations and 1,608 proven, with
+zero semantic errors. The 20-obligation decrease must not be waived by refreshing the census.
+
+Comparing structured goals by declaration and rule shows that the proposition-formation report
+goals moved from the cached-globals wrapper to its new `..._and_work` helper, and the current
+front end exposes 28 additional lower/upper index goals for `proof_kernel_replay_term_sort_remaining`;
+those added goals prove. This explains the visible goal-record gains, but not the drop in the
+aggregate obligation counter. Continue by tracing which `proof_obligation` events disappeared
+between the two checker revisions, then add a focused regression or document a justified,
+semantics-preserving accounting change before updating census data. Until then the census diff
+is expected to fail on this fixture.
+
+## Linear certificates (BACKLOG C-02/C-03, 2026-10-01)
+
+A comparison goal over at most six integer names that no earlier tier closes is now searched by
+Fourier-Motzkin elimination (`linear/linear_certificate_search.elisa`) over at most fifteen
+comparison facts and unsigned width markers that share its names. The search is untrusted: a
+refutation of the negated goal becomes one traced fact of kind `linear-certificate`,
+`__elisa_linear_certificate(m_goal, premise_1, m_1, ...)`, and the goal is decided again with that
+fact present. The marker asserts nothing. The checker (`linear/linear_certificates.elisa`) and
+its kernel mirror (`kernel_replay/linear_certificates.elisa`) run after every safety gate, just
+before the bounded model, and admit the goal only when each premise is structurally a fact, each
+inequality multiplier is a literal in `[0, 2^20]` (an equality's may be negative), and the weighted
+sum of the constraints `e <= 0` -- the negated goal with a positive multiplier first, strict
+comparisons tightened by one over the integers -- cancels every name and leaves a positive
+constant. Terms are read by the same width-checked collector as normalized differences, so every
+operator they contain was decided under the goal's and facts' wrap guards. Arithmetic is checked
+i64 and refuses on overflow instead of the backlog's i128-by-parts; an overflowing combination is
+a refusal, never an acceptance. The marker name is reserved, a goal that is itself a marker is
+refused, and the kind is listed as a boundary trace in `KERNEL_INVENTORY.md`. Only rule `goal`
+attempts search; index and slice rules are unchanged. `scripts/test_linear_certificates.py`
+covers positive goals, forged multipliers, invented and dropped premises, self-reference,
+symbolic, oversized and miscounted arguments, the fifteen-premise limit and the six-name limit.
+
+## Pure function unfolding (BACKLOG D-04, 2026-10-01)
+
+A function with no written postcondition, only by-value primitive parameters, a primitive integer
+or bool return type, and a body that is `requires` lines plus one `return value` -- where `value`
+is a call-free arithmetic or comparison term of at most 24 nodes that names something -- gets a
+synthesized ensure (`check/unfolded_summaries.elisa`): `result == (value)`, or for bool the two
+implications `not result or (value)` and `result or not (value)`. It is an ordinary ensure: the
+function's own check must prove it, and callers see it only through the existing verified-summary
+path, so no kernel rule was added. Preconditions that call a verified total-pure function with no
+`requires` now instantiate its ensures at entry as `function-summary` facts, the same facts a real
+call produces. Recursive bodies, bodies with calls, locals or fields, aggregate or reference
+parameters, and closed bodies such as `return 0` stay opaque. `examples/pure_unfolding.elisa`
+proves `is_digit`-guarded and `twice`-bounded callers without contracts;
+`scripts/test_pure_unfolding.py` pins the adversarial, malformed and budget (24 vs 25 nodes) cases.
+`examples/rejected_index_call.elisa` now uses a two-statement helper so it still exercises an
+opaque index call, and four exact obligation counts moved by the synthesized ensures (all proven).
+Not yet handled: a negated bool helper fact (`not is_digit(c)`) does not split the negated
+conjunction.
+
+## SMT linear oracle (BACKLOG W-01, 2026-10-01)
+
+Each unproven goal's near-miss now carries `linear_rows`: the negated goal (fact -1) and every
+certificate fact that reads as a linear constraint, as rows over at most 24 atoms and 48 rows
+(`linear/linear_hints.elisa`). `scripts/smt_oracle.py` asks `z3 -in` (QF_LIA, 2 s per goal) for
+integer Farkas multipliers -- goal multiplier at least one, inequality multipliers non-negative,
+at most fifteen premises, all within the C-02 multiplier bound -- and writes a hints file that
+`elisa-proof --linear-hints <file> <source>` reads (`app/linear_hints_input.elisa`). A hint names
+its goal by attempt id and each premise by index among that goal's certificate facts; when the
+Fourier-Motzkin search finds nothing, the checker turns the matching hint into the same
+`__elisa_linear_certificate` marker and decides the goal again, so the checker and kernel rules
+are unchanged and Z3 is never trusted. A forged, stale or mismatched hint only fails to prove;
+a malformed file (truncated record, non-number, more than fifteen premises, over-long number,
+unreadable) exits 2 before checking. Without z3 the oracle proposes nothing.
+`scripts/test_smt_oracle.py` pins these cases on `examples/smt_linear_oracle.elisa`, a goal over
+eight names that the six-atom search cannot reach. Census over `examples/`: 15465 -> 15466 proven
+with the oracle; it proposed 16 hints and only the fixture's closed a goal, so the remaining
+unproven linear goals fail before the certificate tier (gates, widths) rather than for want of
+multipliers. The plain census is unchanged: no regressions, 13093/17773. Known gap: `k * x` with a
+literal `k` is not a linear term to the shared collector, so such goals export no rows.
+
+## Symbolic-range quantifiers (BACKLOG W-02, 2026-10-01)
+
+A `forall i in a..<b: P(i)` goal whose bounds are not literals no longer fails outright. The
+checker (`linear/symbolic_quantifiers.elisa`) and the kernel
+(`kernel_replay/symbolic_quantifiers.elisa`) each accept three rules: empty (`b <= a`), cover by a
+fact `forall j in c..<d: Q(j)` whose body equals the goal's once both binders become a fresh
+marker, with `c <= a` and `b <= d`, and extend by one (`b <= d + 1` and `P(d)`). Every side goal is
+proven by the ordinary search, so the kernel trusts nothing new. Only `..<` ranges are read, at
+most 256 facts are scanned, and a binder captured by the other body is rejected when the
+proposition is formed. The kernel arena is shared by all certificates, so the marker and every
+failed side search are rolled back; before that, the first certificate's marker made the rule
+refuse every later certificate (found by noticing that only non-first functions failed).
+`examples/symbolic_quantifier.elisa` proves and replays cover, extend, empty, a later certificate
+and a fill loop whose invariant forall grows with the counter; `rejected_symbolic_quantifier.elisa`
+keeps off-by-one, wrong lower bound, other body and captured binder unproven.
+`scripts/test_symbolic_quantifiers.py` adds a non-range malformed case and a budget case (cover
+fact past the scan limit). Open: prefix-sorted examples need two-binder bodies, and triggered
+instances for reads `xs[k]` inside a covered range.

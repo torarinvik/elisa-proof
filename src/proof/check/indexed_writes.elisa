@@ -1,0 +1,137 @@
+extend ElisaProof:
+    private:
+        # Only a mutable binding's count gets the explicit `0 <= xs.count` fact, which an
+        # element-write loop needs to establish `k <= xs.count` at `k == 0`. As a premise over an
+        # unbounded unsigned place it sends every goal of the function through place
+        # generalization, where the renamed count then keeps congruence from running.
+        def proof_count_fact_wanted(root: Ast::Expr, type_expression: Ast::Expr) -> bool:
+            return false if not proof_parameter_type_is_mutable(type_expression)
+            match root:
+                Ast::Expr.Ident(_, _):
+                    return true
+                _:
+                    return false
+
+        # An element write `xs[k] <- v` changes exactly one cell of `xs` and leaves its extent
+        # alone. The generic write path drops every fact that is not call-stable; this module
+        # returns the facts the write cannot have changed and records the written cell.
+        #
+        # A fact survives only when every mention of `xs` is `xs.count`, a traced type marker
+        # over `xs`, or a read `xs[e]` whose index is proved distinct from `k` -- below or above
+        # it. Inside a range quantifier `forall i in c..<d`, the read must be exactly `xs[i]`
+        # and the whole range must lie on one side of `k`. Any other shape (a call, a read of
+        # another collection that might alias `xs`, a bare `xs`) drops the fact.
+        def proof_indexed_write_root(target: Ast::Expr) -> (known: bool, root: sview, index: Ast::Expr):
+            match target:
+                Ast::Expr.Index(Ast::Expr.Ident(root, _), index, _):
+                    return (known: true, root: root, index: index)
+                _:
+                    return (known: false, root: "", index: Ast::Expr.Invalid)
+
+        def proof_index_distinct(index: Ast::Expr, written: Ast::Expr, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> bool:
+            return true if proof_goal(facts, Ast::Expr.Binary(index, TokenKind.Lt, written, position), annotations)
+            return proof_goal(facts, Ast::Expr.Binary(written, TokenKind.Lt, index, position), annotations)
+
+        def proof_write_preserves(expression: Ast::Expr, root: sview, written: Ast::Expr, binder: sview, low: Ast::Expr, high: Ast::Expr, inclusive: bool, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
+            return false if depth > 32
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return name != root
+                Ast::Expr.Paren(inner, _):
+                    return proof_write_preserves(inner, root, written, binder, low, high, inclusive, facts, annotations, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_write_preserves(operand, root, written, binder, low, high, inclusive, facts, annotations, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_write_preserves(left, root, written, binder, low, high, inclusive, facts, annotations, depth + 1) and proof_write_preserves(right, root, written, binder, low, high, inclusive, facts, annotations, depth + 1)
+                Ast::Expr.Field(Ast::Expr.Ident(object, _), field, _):
+                    return object != root or field == "count"
+                Ast::Expr.Field(object, _, _):
+                    return proof_write_preserves(object, root, written, binder, low, high, inclusive, facts, annotations, depth + 1)
+                Ast::Expr.Call(Ast::Expr.Ident(callee, _), _, _, _):
+                    # Only the traced type markers; their arguments are terms, not reads.
+                    return callee == "__elisa_primitive_scalar_type" or callee == "__elisa_primitive_scalar_element" or callee == "__elisa_unsigned_type_bound" or callee == "__elisa_signed_type_bound" or callee == "__elisa_signed_place_type_bound" or callee == "__elisa_builtin_index_type" or callee == "__elisa_builtin_operator_type" or callee == "__elisa_untrusted_operator_type"
+                Ast::Expr.Index(Ast::Expr.Ident(object, _), index, position):
+                    return false if object != root
+                    return false if not proof_write_preserves(index, root, written, binder, low, high, inclusive, facts, annotations, depth + 1)
+                    if binder != "" and proof_expr_mentions_name(index, binder):
+                        match index:
+                            Ast::Expr.Ident(name, _):
+                                return false if name != binder
+                            _:
+                                return false
+                        below_operator: TokenKind = TokenKind.Lt if inclusive else TokenKind.LtEq
+                        return true if proof_goal(facts, Ast::Expr.Binary(high, below_operator, written, position), annotations)
+                        return proof_goal(facts, Ast::Expr.Binary(written, TokenKind.Lt, low, position), annotations)
+                    return proof_index_distinct(index, written, facts, annotations, position)
+                Ast::Expr.Block(statements, body, _, _):
+                    return false if binder != "" or statements.count != 1
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(name, _, Ast::Expr.Binary(range_low, range_operator, range_high, _), _):
+                            return false if name == root or (range_operator != TokenKind.RangeLt and range_operator != TokenKind.RangeLe)
+                            return false if proof_expr_mentions_name(written, name)
+                            return false if not proof_write_preserves(range_low, root, written, "", low, high, inclusive, facts, annotations, depth + 1)
+                            return false if not proof_write_preserves(range_high, root, written, "", low, high, inclusive, facts, annotations, depth + 1)
+                            return proof_write_preserves(body, root, written, name, range_low, range_high, range_operator == TokenKind.RangeLe, facts, annotations, depth + 1)
+                        _:
+                            return false
+                _:
+                    return false
+
+        # A conjunction is restored conjunct by conjunct, so `k < xs.count and xs[k] == 3` keeps
+        # its bound when the write lands on `xs[k]`. A split conjunct is derived from the whole
+        # fact so replay re-checks the elimination instead of taking the conjunct as an axiom.
+        def proof_restore_conjuncts(fact: Ast::Expr, whole: darray[Ast::Expr]&, root: sview, written: Ast::Expr, before: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, depth: usize) -> void:
+            return if depth > 16
+            return if any existing in facts where proof_expr_equal(existing, fact)
+            if proof_write_preserves(fact, root, written, "", Ast::Expr.Invalid, Ast::Expr.Invalid, false, before, annotations, 0):
+                if depth == 0:
+                    facts.push(fact)
+                else:
+                    proof_add_derived_fact_from(facts, report, fact, whole, "branch-conjunct", line, name)
+                return
+            match fact:
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    proof_restore_conjuncts(left, whole, root, written, before, facts, report, annotations, name, line, depth + 1)
+                    proof_restore_conjuncts(right, whole, root, written, before, facts, report, annotations, name, line, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    proof_restore_conjuncts(inner, whole, root, written, before, facts, report, annotations, name, line, depth + 1)
+                _:
+                    return
+
+        # Returns false when the write is not of the modeled shape; the caller then takes the
+        # generic invalidation path. On true the caller has already cleared the generic way, and
+        # this restores the provably untouched facts and adds `xs[k] == v`.
+        def proof_apply_indexed_write(target: Ast::Expr, operator: TokenKind, initializer: Ast::Expr, before: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: mutable darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> void:
+            return if operator != TokenKind.LArrow and operator != TokenKind.Assign
+            shape: (known: bool, root: sview, index: Ast::Expr) = proof_indexed_write_root(target)
+            return if not shape.known
+            return if proof_expr_has_call(shape.index) or proof_expr_has_call(initializer)
+            # A local collection bound to a known value would keep that stale value.
+            for slot in 0..<names.count |slot, names, values, shape|:
+                if names[slot] == shape.root and slot < values.count:
+                    match values[slot]:
+                        Ast::Expr.Ident(current, _):
+                            return if current != shape.root
+                        _:
+                            return
+            written: Ast::Expr = proof_substitute(shape.index, names, values)
+            stored: Ast::Expr = proof_substitute(initializer, names, values)
+            return if proof_expr_mentions_name(written, shape.root)
+            # A binding whose symbolic value reads the collection no longer denotes it.
+            stale: mutable darray[sview] = []
+            for slot in 0..<names.count |slot, names, values, stale, shape|:
+                stale.push(names[slot]) if slot < values.count and names[slot] != shape.root and proof_expr_mentions_name(values[slot], shape.root)
+            for stale_name in stale |stale_name, names, values, facts, report, name, position|:
+                proof_resymbolize_binding(names, values, facts, report, name, stale_name, position)
+            for fact in before |fact, facts, shape, written, annotations, before, stale, report, name, position|:
+                continue if any stale_name in stale where proof_expr_mentions_name(fact, stale_name)
+                whole: darray[Ast::Expr] = [fact]
+                proof_restore_conjuncts(fact, whole, shape.root, written, before, facts, report, annotations, name, position.line, 0)
+            return if proof_expr_mentions_name(stored, shape.root)
+            return if proof_scalar_element_remaining(Ast::Expr.Ident(shape.root, position), facts, 0) != 1
+            cell: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(shape.root, position), written, position)
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(cell, TokenKind.EqEq, stored, position), "indexed-write", position.line, name)

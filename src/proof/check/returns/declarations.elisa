@@ -32,6 +32,7 @@ extend ElisaProof:
         def proof_check_return_declarations(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
             match statement:
                 Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                    initializer_has_unmodeled_operator: bool = proof_invalidate_for_unmodeled_operator(initializer, names, values, facts, frame_parameters, report, name, position)
                     value: mutable Ast::Expr = proof_substitute(initializer, names, values)
                     prior_value_count: usize = values.count
                     shadowed: mutable bool = false
@@ -51,6 +52,13 @@ extend ElisaProof:
                         _:
                             proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(initializer)
                             value <- proof_substitute(initializer, names, values) if proof_expr_has_call(initializer)
+                    if initializer_has_unmodeled_operator:
+                        # Nested calls may have added summaries while walking the expression;
+                        # the unsupported operator invalidates those post-state claims too.
+                        proof_forget_values(names, values, position)
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                        value <- Ast::Expr.Ident(local_name, position)
+                        call_applied <- false
                     # A declaration's initializer is evaluated before its binding enters
                     # scope. Commit the new local only after nested calls have seen the
                     # pre-declaration environment; otherwise `x: T = f(x)` would pass the
@@ -126,6 +134,7 @@ extend ElisaProof:
                     report.local_extent_names.push(local_name) if local_value or plain_value
                     report.value_binding_names.push(local_name) if plain_value
                 Ast::Stmt.Assign(target, operator, initializer, position):
+                    initializer_has_unmodeled_operator: bool = proof_invalidate_for_unmodeled_operator(initializer, names, values, facts, frame_parameters, report, name, position)
                     target_name: sview = proof_ident_name(target)
                     if target_name != "":
                         proof_check_direct_frame_write(proof_substitute(target, names, values), names, frame_parameters, changes, preserves, report, name, position.line)
@@ -197,7 +206,14 @@ extend ElisaProof:
                                     break
                         else:
                             proof_resolve_disjunctive_facts(facts, report, position.line, name)
+                            before_write: darray[Ast::Expr] = proof_copy_exprs(facts)
                             proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
+                            proof_apply_indexed_write(target, operator, initializer, before_write, facts, names, values, report, name, annotations, position) if not initializer_has_unmodeled_operator
+                    if initializer_has_unmodeled_operator:
+                        # Assignment summaries and symbolic RHS values are not reusable after
+                        # an operator with arbitrary source effects has executed.
+                        proof_forget_values(names, values, position)
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                 _:
                     return false
             return true

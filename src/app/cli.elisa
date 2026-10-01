@@ -1,37 +1,5 @@
 const PROOF_CLI_SCRATCH_SLOT_COUNT: usize = PROOF_JSON_BRANCH_DEPTH_LIMIT
 
-# The compiler AST keeps an integer literal's payload but drops its type suffix. Recover the
-# type of every `u64`/`usize`-suffixed literal from the lexer tokens, keyed by the token's exact
-# line and byte offset (the same offset the parser stores in the literal's `Pos`). Only these
-# two widths can produce a payload whose i64 reading differs from the value the source wrote.
-def proof_int_suffix_is(source: darray[u8]&, start: usize, length: usize, expected: sview) -> bool:
-    return false if length != sview_len(expected)
-    index: mutable usize = 0
-    while index < length:
-        return false if source[start + index] != sview_at(expected, index)
-        index <- index + 1
-    return true
-
-def proof_push_int_type_annotations(annotations: mutable darray[Ast::EnumAnnotation]&, tokens: darray[Token]&, source: darray[u8]&, source_bytes: usize) -> void:
-    for token in tokens |annotations, source, source_bytes|:
-        continue if token.kind != TokenKind.IntLit and token.kind != TokenKind.HexLit
-        continue if not token.flags.has_suffix
-        start: usize = token.start.usize() + token.length.usize()
-        length: usize = token.suffix_length.usize()
-        continue if start > source_bytes or length > source_bytes - start
-        if proof_int_suffix_is(source, start, length, "u64"):
-            annotations.push(Ast::EnumAnnotation{owner: PROOF_INT_TYPE_ANNOTATION_OWNER, name: "u64", line: token.line, offset: token.start})
-        elif proof_int_suffix_is(source, start, length, "usize"):
-            annotations.push(Ast::EnumAnnotation{owner: PROOF_INT_TYPE_ANNOTATION_OWNER, name: "usize", line: token.line, offset: token.start})
-
-# Exit status 0 is the one verdict a caller can act on without reading the output, so every
-# route reserves it for a result that stands on an admissible source. A found goal in a source
-# that failed to parse, import, type-check, or form its propositions exits 1, whatever the
-# route's own status field says about that goal; a missing goal exits 2.
-def proof_route_exit(found: bool, source_admissible: bool) -> i64:
-    return 2 if not found
-    return 0 if source_admissible else 1
-
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
@@ -73,6 +41,11 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             proof_write(usage)
             return 2
         path_slot <- 2
+    elif proof_cstr_equals(first_argument, "--linear-hints"):
+        return proof_usage_exit("usage: elisa-proof --linear-hints <hints.txt> <file.elisa>\n") if argc < 4
+        json_output <- true
+        script_slot <- 2
+        path_slot <- 3
     elif proof_cstr_equals(first_argument, "--goal"):
         goal_json_output <- true
         if argc < 4:
@@ -256,6 +229,10 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     arena_free(&token_arena)
     report: mutable ProofReport = proof_empty_report()
     report.pass_statement_offsets <- pass_offsets
+    if json_output and script_slot > 0:
+        hints: (ok: bool, values: darray[i64]) = proof_read_linear_hints(slots[script_slot].cast[cstr])
+        return proof_usage_exit("elisa-proof: linear hints could not be read or are malformed\n") if not hints.ok
+        report.linear_hints <- hints.values
     semantic_diagnostics: mutable darray[Semantic::Diagnostic] = []
     parse_failed: bool = file.errors.count > 0 or stray_nul_line > 0
     if parse_failed:
@@ -558,7 +535,12 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     proof_push_number(&output, report.obligations)
     proof_push(&output, "\n  proven: ")
     proof_push_number(&output, report.proven)
-    proof_push(&output, "\n  failed: ")
+    proof_push(&output, "\n  unproven: ")
+    if report.proven <= report.obligations:
+        proof_push_number(&output, report.obligations - report.proven)
+    else:
+        proof_push(&output, "unknown (inconsistent obligation counters)")
+    proof_push(&output, "\n  findings: ")
     proof_push_number(&output, report.failed)
     proof_push(&output, "\n")
     for finding in report.findings |output|:

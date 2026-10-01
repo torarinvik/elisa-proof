@@ -12,6 +12,20 @@ Columns: **ID**, **Task** (the smallest coherent deliverable), **ROI** (why it p
 
 Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 
+## W. Weakness program (do first; see plan §0)
+
+| ID | Task | ROI | Done when |
+| --- | --- | --- | --- |
+| W-01 (T0, done 2026-10-01) | Z3 linear oracle: elisa-proof exports each unproven goal's linear rows, `scripts/smt_oracle.py` asks `z3` for Farkas multipliers, and `--linear-hints` feeds them back as C-02 certificates | First SMT reach with no growth in trust | Census with and without the oracle; forged and malformed hints are refused; replay passes without z3 installed |
+| W-02 (T0, rules done 2026-10-01; prefix-sorted and triggered instances open) | Symbolic-range quantifier rules (cover, extend-by-one) in the checker and the kernel; triggered instances; trigger-free refusal (absorbs E-02) | Loops over unknown-length arrays become provable | Fill and prefix-sorted examples prove; adversarial off-by-one and wrong-range cases stay unproven |
+| W-03 (T0, done 2026-10-01: frame by index distinctness and range sides, conjunct-wise restore, `xs[k] == v`) | Indexed-write frame: keep facts whose reads of `xs` are provably at other indices, plus `xs.count`; record `xs[k] == v` | Element writes stop erasing the proof state | Stale-binding and aliasing adversarial cases stay unproven; census gain |
+| W-04 (T1) | Read-over-write for `push`/`pop`/`swap`/slices, and the remaining E-01 pieces | Collection algorithms keep invariants | Swap-based sort and partition examples prove |
+| W-05 (T1) | Z3 quantifier and array oracle: answers come back as instantiation lists that the checker re-derives through W-02 rules | Automation for the hard goals W-02 alone cannot find | Hints replay without z3; a bogus instantiation is refused |
+| W-06 (T1) | Invariant suggestion: generate candidate invariants (bounds, prefix quantifiers), prune Houdini-style with the checker, emit source text | Removes the biggest manual burden | 50% of A-05 corpus loops get a suggested invariant that checks |
+| W-07 (T1) | Real-code corpus census per commit (A-05 made mandatory) | Coverage on real code becomes the score | `docs/census/corpus.md` updated by every W commit |
+| W-08 (T2) | Scale: per-function budgets plus incremental reuse of unchanged functions' certificates | Large modules finish | A 5k-line module verifies in under 60 s |
+| W-09 (T2) | cvc5 as a second oracle behind the same hint format | Portfolio robustness | Same hint replay; disagreements are logged, never trusted |
+
 ## A. Measurement first (T0; do before any tier-1 work)
 
 | ID | Task | ROI | Done when |
@@ -30,10 +44,10 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 | B-02 (T0) | Determinism witness for effect-free callees: a callee with `requires` but no effects and scalar by-value arguments gets a `__elisa_deterministic_call` marker, retained by `proof_expr_call_stable` | Fixes `returned_chain` and likely `parse_twice_agrees`; a common idiom (call, call, compare) | Soundness argument in DESIGN.md; kernel replay checks the callee's effect set from `source_declarations`; adversarial: a callee with `can[...]`, a global read, or a mutable borrow argument is not retained |
 | B-03 (T0) | Tuple-field `@r` for package_reader: resolve `result.field` for named-tuple returns into per-field summary facts | Named-tuple returns are the house style for multi-value parsers | package_reader example proves; wrong-label and positional-mismatch variants refused |
 | B-04 (T0) | Define and close the "c4 scalar witness" item, or strike it: locate the original probe, write it as an example, then decide | An undefined item cannot be tracked | Either a landed fix with tests, or an AUDIT.md entry saying what it was and why it is dropped |
-| B-05 (T0) | `is` between enum values in contracts (`ensure result == (a is E.V)`), reported as `contract-proposition-type` today | Bool-valued predicates over enums are everywhere in parsers | Replay typer admits `is` as a bool sort; malformed subject refused |
-| B-06 (T0) | Qualified constants in `while` conditions, `for` ranges, assignments and call arguments (currently only Return, VarDecl and If) | Finishes the body rewrite started in 4db58a8 with the same shadow guard | Each statement form has positive and shadow-refusal examples |
-| B-07 (T0) | Signed type bounds for locals, fields and tuple elements, not only parameters | Same fact, many more places; the parameter path already works | Local `x: i16 = f()` gets both bounds; field of a by-value struct gets them too |
-| B-08 (T0) | Unsigned `u64`/`usize` upper bound through the relational path, since there is no i64 interval for it | Removes a whole class of "`index + 1` may overflow" refusals on usize | `usize` increment under `< count` proves in both producer and replay |
+| B-05 (DONE) | `is` between enum values in contracts (`ensure result == (a is E.V)`) | Bool-valued predicates over enums are everywhere in parsers | `scripts/test_enum_tag_equality.py`: named tag equalities/conjunctions replay; wrong variant, wrong subject and call subject are refused. Conditional `if c is E.V: return true` is a distinct bool-literal-equality gap, not this item. |
+| B-06 (DONE) | Qualified constants in `while` conditions, `for` ranges, assignments and call arguments | Finishes the body rewrite started in 4db58a8 with the same shadow guard | `scripts/test_qualified_constants.py`: all four contexts exercised, oversized values refused, and a shadowing `for` binder is refused. The u8 loop-decreases refusal is tracked separately. |
+| B-07 (DONE) | Signed type bounds for locals, fields and tuple elements, not only parameters | Same fact, many more places; the parameter path already works | `scripts/test_signed_local_field_bounds.py` plus `scripts/test_signed_tuple_label_bounds.py`: both signed endpoints replay for locals, fields and named-tuple call projections; tighter tuple claims stay unproven. |
+| B-08 (DONE) | Unsigned `u64`/`usize` upper bound through the relational path, since there is no i64 interval for it | Removes a whole class of "`index + 1` may overflow" refusals on usize | `scripts/test_usize_increment_under_count.py`: strict `usize`/`u64` peers prove in producer and replay; non-strict, absent and overshooting cases remain unproven. |
 
 ## C. Arithmetic and decision procedures (T1)
 

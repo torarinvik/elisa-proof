@@ -1,0 +1,116 @@
+# Linear certificates (BACKLOG C-02/C-03). A comparison goal over at most six integer names that
+# no cheaper tier closes is searched by Fourier-Motzkin elimination over the comparison facts
+# that mention its names. A refutation of the negated goal is emitted as one traced fact,
+#
+#     __elisa_linear_certificate(m_goal, premise_1, m_1, ..., premise_k, m_k)
+#
+# which names each premise structurally beside its multiplier. The checker below -- and its
+# kernel mirror -- never trusts the certificate: every premise must be a fact, every inequality
+# multiplier non-negative, and the weighted sum of the constraints `e <= 0` must cancel every
+# name and leave a positive constant, `0 < c <= 0`. A forged or stale certificate only fails.
+const module ProofLinearCertificateLimit:
+    ATOMS: usize = 6
+    PREMISES: usize = 15
+    ROWS: usize = 96
+    MULTIPLIER: i64 = 1048576
+
+extend ElisaProof:
+    public:
+        def proof_linear_certificate_marker(expression: Ast::Expr) -> bool:
+            return proof_marker_has_callee(expression, "__elisa_linear_certificate")
+
+        def proof_linear_sum_term(name: sview, coefficient: i64, names: mutable darray[sview]&, coefficients: mutable darray[i64]&) -> bool:
+            index: mutable usize = 0
+            while index < names.count |index, names, name|:
+                break if names[index] == name
+                index <- index + 1
+            if index == names.count:
+                names.push(name)
+                coefficients.push(0)
+            return false if index >= coefficients.count
+            sum: (known: bool, value: i64) = proof_add_safe(coefficients[index], coefficient)
+            return false if not sum.known
+            coefficients[index] <- sum.value
+            return true
+
+        # Add `multiplier * (left - right + offset)` to the sum.
+        def proof_linear_sum_add(left: Ast::Expr, right: Ast::Expr, offset: i64, multiplier: i64, facts: darray[Ast::Expr]&, names: mutable darray[sview]&, coefficients: mutable darray[i64]&, constant: mutable i64&) -> bool:
+            terms: mutable darray[ProofNormalTerm] = []
+            signed: bool = proof_normal_comparison_signed(left, right, facts)
+            return false if not proof_collect_normal_terms(left, 1, signed, facts, &terms, 0)
+            return false if not proof_collect_normal_terms(right, -1, signed, facts, &terms, 0)
+            terms.push(ProofNormalTerm{name: "", coefficient: offset})
+            for term in terms |term, multiplier, names, coefficients, constant|:
+                product: (known: bool, value: i64) = proof_mul_safe(term.coefficient, multiplier)
+                return false if not product.known
+                if term.name == "":
+                    sum: (known: bool, value: i64) = proof_add_safe(constant, product.value)
+                    return false if not sum.known
+                    constant <- sum.value
+                else:
+                    return false if not proof_linear_sum_term(term.name, product.value, names, coefficients)
+            return true
+
+        # Add `multiplier` times the constraint `e <= 0` that `fact` states, or that its negation
+        # states when `negate`. Integers make a strict `<` the same as `<=` with one added.
+        def proof_linear_constraint_add(fact: Ast::Expr, multiplier: i64, negate: bool, facts: darray[Ast::Expr]&, names: mutable darray[sview]&, coefficients: mutable darray[i64]&, constant: mutable i64&) -> bool:
+            match fact:
+                Ast::Expr.Paren(inner, _):
+                    return proof_linear_constraint_add(inner, multiplier, negate, facts, names, coefficients, constant)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_primitive_comparison(left, right, facts)
+                    relation: mutable TokenKind = operator
+                    if negate:
+                        return false if operator == TokenKind.EqEq
+                        relation <- TokenKind.Gt if operator == TokenKind.LtEq
+                        relation <- TokenKind.GtEq if operator == TokenKind.Lt
+                        relation <- TokenKind.Lt if operator == TokenKind.GtEq
+                        relation <- TokenKind.LtEq if operator == TokenKind.Gt
+                    return false if multiplier < 0 and relation != TokenKind.EqEq
+                    return proof_linear_sum_add(left, right, 0, multiplier, facts, names, coefficients, constant) if relation == TokenKind.LtEq or relation == TokenKind.EqEq
+                    return proof_linear_sum_add(left, right, 1, multiplier, facts, names, coefficients, constant) if relation == TokenKind.Lt
+                    return proof_linear_sum_add(right, left, 0, multiplier, facts, names, coefficients, constant) if relation == TokenKind.GtEq
+                    return proof_linear_sum_add(right, left, 1, multiplier, facts, names, coefficients, constant) if relation == TokenKind.Gt
+                    return false
+                _:
+                    # An unsigned width marker states `0 <= x`, the constraint `-x <= 0`.
+                    return false if negate or multiplier < 0
+                    marker: (known: bool, name: sview, width: i64) = proof_unsigned_marker_info(fact)
+                    return false if not marker.known
+                    return proof_linear_sum_term(marker.name, 0 - multiplier, names, coefficients)
+
+        def proof_linear_multiplier(expression: Ast::Expr) -> (known: bool, value: i64):
+            value: (known: bool, value: i64) = proof_constant_int(expression)
+            return (false, 0) if not value.known or value.value > ProofLinearCertificateLimit::MULTIPLIER or value.value < 0 - ProofLinearCertificateLimit::MULTIPLIER
+            return value
+
+        def proof_linear_certificate_closes(certificate: Ast::Expr, facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            match certificate:
+                Ast::Expr.Call(_, arguments, argument_names, _):
+                    return false if argument_names.count != 0 or arguments.count % 2 != 1
+                    return false if arguments.count > 1 + 2 * ProofLinearCertificateLimit::PREMISES
+                    names: mutable darray[sview] = []
+                    coefficients: mutable darray[i64] = []
+                    constant: mutable i64 = 0
+                    goal_multiplier: (known: bool, value: i64) = proof_linear_multiplier(arguments[0])
+                    return false if not goal_multiplier.known or goal_multiplier.value <= 0
+                    return false if not proof_linear_constraint_add(goal, goal_multiplier.value, true, facts, &names, &coefficients, &constant)
+                    index: mutable usize = 1
+                    while index + 1 < arguments.count |index, arguments, facts, names, coefficients, constant|:
+                        premise: Ast::Expr = arguments[index]
+                        multiplier: (known: bool, value: i64) = proof_linear_multiplier(arguments[index + 1])
+                        index <- index + 2
+                        return false if not multiplier.known or proof_linear_certificate_marker(premise)
+                        return false if not any fact in facts where proof_expr_equal(fact, premise)
+                        return false if not proof_linear_constraint_add(premise, multiplier.value, false, facts, &names, &coefficients, &constant)
+                    return false if any coefficient in coefficients where coefficient != 0
+                    return constant > 0
+                _:
+                    return false
+
+        def proof_linear_certificate_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            return false if proof_linear_certificate_marker(goal)
+            for fact in facts |fact, facts, goal|:
+                continue if not proof_linear_certificate_marker(fact)
+                return true if proof_linear_certificate_closes(fact, facts, goal)
+            return false
