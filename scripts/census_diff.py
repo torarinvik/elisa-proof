@@ -27,8 +27,9 @@ def attach_measurements(census, path):
 
 
 def retry_newly_unreadable(baseline, current, retry=run_census):
-    """Retry only baseline-readable inputs lost to a transient census timeout."""
-    retry_names = [name for name in current.get("unreadable", []) if name in baseline.get("files", {})]
+    """Retry inputs that became unreadable after the baseline, including newly added inputs."""
+    previously_unreadable = set(baseline.get("unreadable", []))
+    retry_names = [name for name in current.get("unreadable", []) if name not in previously_unreadable]
     for name in retry_names:
         source = ROOT / name if name.startswith("src/") else ROOT / "examples" / name
         _, data, seconds, _ = retry(source, RETRY_TIMEOUT_SECONDS)
@@ -98,6 +99,10 @@ def main():
             retry_newly_unreadable(baseline, current)
             retry_timing_outliers(baseline, current)
     regressions, gains = [], []
+    baseline_unreadable = set(baseline.get("unreadable", []))
+    for name in current.get("unreadable", []):
+        if name not in baseline_unreadable:
+            regressions.append(f"{name}: newly unreadable input")
     for name, old in baseline["files"].items():
         new = current["files"].get(name)
         if new is None:
@@ -110,6 +115,11 @@ def main():
             regressions.append(f"{name}: proven {old['proven']} -> {new['proven']}")
         elif new["proven"] > old["proven"]:
             gains.append(f"{name}: proven {old['proven']} -> {new['proven']}")
+        if new["obligations"] < old["obligations"]:
+            regressions.append(f"{name}: obligations {old['obligations']} -> {new['obligations']}")
+        elif new["obligations"] > old["obligations"]:
+            print(f"census coverage change: {name}: obligations {old['obligations']} -> "
+                  f"{new['obligations']}")
         # Timing is noisy under parallel load: only a doubling on an example that already takes
         # seconds, beyond a fixed slack, counts as a replay blowup.
         if old.get("seconds", 0) >= 2 and new.get("seconds", 0) > 2 * old["seconds"] + 5:

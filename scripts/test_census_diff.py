@@ -35,6 +35,10 @@ gain = diff(variant(lambda c: c["files"]["b.elisa"].update(proven=3, gates=[])))
 assert gain.returncode == 0 and "census gain: b.elisa" in gain.stdout, gain.stdout
 drop = diff(variant(lambda c: c["files"]["a.elisa"].update(proven=2)))
 assert drop.returncode == 1 and "a.elisa: proven 3 -> 2" in drop.stderr, drop.stderr
+obligation_drop = diff(variant(lambda c: c["files"]["a.elisa"].update(obligations=2)))
+assert obligation_drop.returncode == 1 and "a.elisa: obligations 3 -> 2" in obligation_drop.stderr, obligation_drop.stderr
+obligation_growth = diff(variant(lambda c: c["files"]["a.elisa"].update(obligations=4)))
+assert obligation_growth.returncode == 0 and "census coverage change: a.elisa: obligations 3 -> 4" in obligation_growth.stdout
 gate = diff(variant(lambda c: c["files"]["b.elisa"].update(gates=["no-rule", "budget"])))
 assert gate.returncode == 1 and "new refusal gates ['budget']" in gate.stderr, gate.stderr
 
@@ -111,4 +115,11 @@ retry_newly_unreadable(BASE, still_unreadable,
                        lambda path, timeout: ("a.elisa", None, timeout, "timeout"))
 assert still_unreadable["unreadable"] == ["a.elisa"]
 assert "a.elisa" not in still_unreadable["files"]
-print("census diff: drops, new gates, persistent 2x slowdowns, unreadable/missing inputs fail; gains pass")
+
+new_input_unreadable = variant(lambda c: c["unreadable"].append("new.elisa"))
+retry_newly_unreadable(BASE, new_input_unreadable,
+                       lambda path, timeout: ("new.elisa", None, timeout, "timeout"))
+new_unreadable_result = diff(new_input_unreadable)
+assert new_unreadable_result.returncode == 1
+assert "new.elisa: newly unreadable input" in new_unreadable_result.stderr
+print("census diff: proof/obligation drops, new gates, new unreadables, persistent 2x slowdowns fail; gains pass")
