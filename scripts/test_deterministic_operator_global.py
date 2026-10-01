@@ -66,8 +66,9 @@ assert custom_report["summary"]["semantic_errors"] == 0, custom_report["semantic
 assert custom_report["replay"]["gaps"] == 0, custom_report["replay"]
 assert custom_report["replay"]["certificates"] == custom_report["replay"]["replayed"]
 custom_declarations = {item["name"]: item for item in custom_report["declaration_details"] if item["kind"] == "function"}
-assert custom_declarations["rejected_custom_operator_index"]["verified"] is False, custom_declarations["rejected_custom_operator_index"]
-assert not any(goal["name"] == "rejected_custom_operator_index" and goal["rule"].startswith("index-") and goal["proven"] for goal in custom_report["goals"]), custom_report["goals"]
-assert any(finding["kind"] == "expression-unsupported" and finding["name"] == "rejected_custom_operator_index" and "unmodeled user protocol" in finding["message"] for finding in custom_report["findings"]), custom_report["findings"]
+for function_name in ("rejected_custom_operator_index", "rejected_custom_match_guard_index"):
+    assert custom_declarations[function_name]["verified"] is False, custom_declarations[function_name]
+    assert not any(goal["name"] == function_name and goal["rule"].startswith("index-") and goal["proven"] for goal in custom_report["goals"]), custom_report["goals"]
+    assert any(finding["kind"] == "expression-unsupported" and finding["name"] == function_name and "unmodeled user protocol" in finding["message"] for finding in custom_report["findings"]), custom_report["findings"]
 
 print("unverified calls and overloaded operators cannot carry stale index facts across branches")

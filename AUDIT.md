@@ -10683,7 +10683,13 @@ inventory, portable replay, source-length check, and whitespace check passed aft
 with the current Stage1 product. The full integration script was not rerun; its most recent run
 still stopped at the known mutable-call-alias diagnostic wording mismatch documented above.
 
-A separate custom-type `Eq` probe, with no primitive operator implementation in its source, was
-also refused by the type-aware statement-admission gate before any index certificate was emitted.
-That negative control is now part of the focused adversarial test, guarding the custom-operator
-path independently of the primitive protocol mask.
+A direct custom-type `Eq` probe, with no primitive operator implementation in its source, was
+refused by the type-aware statement-admission gate. Extending it from an `if` condition to a
+statement-match guard exposed one more unsound path: statement admission checked the match
+scrutinee but skipped its arm guards, so the match checker treated custom `Eq` as a stable guard
+and replayed an `index-upper` certificate after the operator changed the global index. The
+statement admission walk now checks every match guard with the type-aware operator test before
+the index prepass or branch checker runs. The regression requires both custom-operator examples
+to remain unverified and emit no certified index bounds; replay still has zero gaps. These
+negative controls are now covered by the focused adversarial test independently of the primitive
+protocol mask.
