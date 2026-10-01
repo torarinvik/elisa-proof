@@ -1,5 +1,41 @@
 extend ElisaProof:
     private:
+        # An effectful right operand of `and`/`or` does not erase every consequence of
+        # short-circuit evaluation. For `A and B` on the true edge, and for `A or B` on
+        # the false edge, `A`'s value is necessary. Preserve that consequence only when
+        # it is itself call-stable, and record it as a kernel-checked consequence of the
+        # actual branch observation (which may contain the effectful call).
+        def proof_short_circuit_branch_consequence(condition: Ast::Expr, branch_taken: bool, position: Ast::Pos, depth: usize) -> (known: bool, consequence: Ast::Expr):
+            empty: Ast::Expr = Ast::Expr.Invalid
+            return (false, empty) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_short_circuit_branch_consequence(inner, branch_taken, position, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    return proof_short_circuit_branch_consequence(operand, not branch_taken, position, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.And, _, _):
+                    return (true, left) if branch_taken
+                Ast::Expr.Binary(left, TokenKind.Or, _, _):
+                    return (true, Ast::Expr.Unary(TokenKind.Not, left, position)) if not branch_taken
+                _:
+                    pass
+            return (false, empty)
+
+        def proof_add_effect_stable_short_circuit_branch_fact(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, condition: Ast::Expr, branch_taken: bool, line: u32) -> void:
+            return if proof_source_expression_has_overloaded_operator(condition, report.source_primitive_operator_mask, 0)
+            consequence: (known: bool, consequence: Ast::Expr) = proof_short_circuit_branch_consequence(condition, branch_taken, Ast::pos_at_line(line), 0)
+            return if not consequence.known or proof_expr_has_call(consequence.consequence)
+            return if proof_source_expression_has_overloaded_operator(consequence.consequence, report.source_primitive_operator_mask, 0)
+            return if not proof_kernel_expression_supported(consequence.consequence)
+            return if any existing in facts where proof_expr_equal(existing, consequence.consequence)
+            stable: bool = proof_expr_call_stable(consequence.consequence, facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+            return if not stable
+            branch_observation: Ast::Expr = condition if branch_taken else proof_branch_negation(condition, Ast::pos_at_line(line))
+            return if not proof_kernel_expression_supported(branch_observation)
+            return if not proof_trace_fact(report, branch_observation, "branch-condition", line, owner)
+            premises: darray[Ast::Expr] = [branch_observation]
+            proof_add_derived_fact_from(facts, report, consequence.consequence, premises, "branch-conjunct", line, owner)
+
         # A short-circuit guard runs before its right operand, so every call the guard always
         # evaluates has returned by the time the operand runs. `live(t, s) and t.flags[s]` needs
         # the callee's summary `not live(t, s) or s < CAP` beside the guard itself; the statement
