@@ -38,7 +38,14 @@ extend ElisaProof:
                 values[index] <- Ast::Expr.Invalid if index >= names.count
                 continue if index >= names.count
                 retained: bool = not (any name in blocked where name == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, blocked, report.shared_extent_names, report.local_extent_names, report, owner, 0)
-                values[index] <- Ast::Expr.Ident(names[index], position) if not retained
+                if not retained:
+                    match values[index]:
+                        Ast::Expr.Invalid:
+                            pass
+                        Ast::Expr.RecordUpdate(_, _, _):
+                            values[index] <- Ast::Expr.Invalid
+                        _:
+                            values[index] <- Ast::Expr.Ident(names[index], position)
 
         # Give a fresh opaque symbol, at a call boundary, only to the bindings the callee can
         # reach. A callee reaches the caller's state through references and globals alone, so a
@@ -58,7 +65,14 @@ extend ElisaProof:
                 values[index] <- Ast::Expr.Invalid if index >= names.count
                 continue if index >= names.count
                 retained: bool = analyzed and not (any existing in report.aliased_names where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, report, owner, 0)
-                values[index] <- Ast::Expr.Ident(names[index], position) if not retained
+                if not retained:
+                    match values[index]:
+                        Ast::Expr.Invalid:
+                            pass
+                        Ast::Expr.RecordUpdate(_, _, _):
+                            values[index] <- Ast::Expr.Invalid
+                        _:
+                            values[index] <- Ast::Expr.Ident(names[index], position)
 
         # The roots a body assigns, in every nested statement form. Captured blocks nested in the
         # body are walked too: their capture lists bound what they can name, but a name they do
@@ -300,6 +314,21 @@ extend ElisaProof:
             proof_restore_type_bound_facts(entry_facts, facts, names, report, owner)
             proof_restore_extent_facts(entry_facts, facts, written, extent_safe)
 
+        # The body is checked against a separate one-iteration state, so its changed roots do
+        # not appear as RecordUpdates in the outer post-loop state. Invalidate every mutable
+        # reference parameter the body can reach before reusing that state after the loop.
+        def proof_forget_loop_mutated_reference_parameters(names: darray[sview]&, values: mutable darray[Ast::Expr]&, body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, parameters: darray[sview]&, owner: sview) -> void:
+            written: mutable darray[sview] = []
+            proof_collect_aliased_names(body, functions, &written, false)
+            proof_collect_assignment_roots(body, &written)
+            return if written.count == 0
+            for index in 0..<values.count |index, names, values, body, functions, parameters, owner, written|:
+                continue if index >= names.count
+                root: sview = names[index]
+                continue if not proof_current_parameter(names, parameters, root)
+                continue if not proof_mutable_reference_parameter(owner, root, functions)
+                values[index] <- Ast::Expr.Invalid if any target in written where target == "*" or target == root
+
         # The wrapper direction of the same shape: a captured block whose body is exactly one loop
         # statement. The source forms `for x in xs |captures|:` and `while c |captures|:` parse as
         # a block that carries the captures around the loop, so this is what a loop with a capture
@@ -377,7 +406,13 @@ extend ElisaProof:
             capped <- else_values.count if else_reaches and else_values.count < capped
             for index in 0..<capped |index, values, names, then_values, else_values, then_reaches, else_reaches, facts, parameters, report|:
                 candidate: Ast::Expr = then_values[index] if then_reaches else else_values[index]
-                continue if then_reaches and else_reaches and not proof_expr_equal(then_values[index], else_values[index])
+                if then_reaches and else_reaches and not proof_expr_equal(then_values[index], else_values[index]):
+                    # A parameter root is the same source-level place before and after a
+                    # mutation. Keeping its old identifier when the arms disagree would make
+                    # `field == old(field)` reflexive even when one arm wrote that field.
+                    # Lose the root's post-state at the join; only equal branch states survive.
+                    values[index] <- Ast::Expr.Invalid if index < names.count and (any parameter in parameters where parameter == names[index])
+                    continue
                 continue if not proof_expr_call_stable(candidate, facts, names, parameters, report.aliased_names, report.shared_extent_names, report.local_extent_names, report, owner, 0)
                 values[index] <- candidate
 
