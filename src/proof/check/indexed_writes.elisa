@@ -102,6 +102,92 @@ extend ElisaProof:
                 _:
                     return
 
+        # The stored value is read before the write. `xs[k] == stored` still holds afterwards
+        # when every read of `xs` in it is at an index provably distinct from `k`, or when it is
+        # exactly one read `xs[e]`: for `e != k` that cell is untouched, and for `e == k` the
+        # fact is `xs[k] == xs[k]`.
+        def proof_stored_reads_survive(stored: Ast::Expr, root: sview, written: Ast::Expr, before: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return true if not proof_expr_mentions_name(stored, root)
+            match stored:
+                Ast::Expr.Index(Ast::Expr.Ident(object, _), index, _):
+                    return true if object == root and not proof_expr_mentions_name(index, root)
+                _:
+                    pass
+            return proof_write_preserves(stored, root, written, "", Ast::Expr.Invalid, Ast::Expr.Invalid, false, before, annotations, 0)
+
+        # A local `t` bound to a value `v` that reads `xs` goes stale at the write, but what the
+        # facts said about `v` still holds of `t`: `xs[i] == a` gives `t == a`. The binding
+        # `t == v` is traced at the boundary and each carried fact is a proof step over it and
+        # the facts before the write, so replay re-proves it. Carried facts must survive the
+        # write themselves; at most PROOF_ALIAS_TRANSFER_BUDGET are carried per write.
+        def proof_carry_stale_bindings(stale: darray[sview]&, root: sview, written: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, before: darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos, carried: mutable darray[Ast::Expr]&, premises: mutable darray[Ast::Expr]&) -> void:
+            budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
+            for stale_name in stale |stale_name, root, written, names, values, before, report, owner, annotations, position, carried, premises, budget|:
+                for slot in 0..<names.count |slot, stale_name, root, written, names, values, before, report, owner, annotations, position, carried, premises, budget|:
+                    continue if names[slot] != stale_name or slot >= values.count
+                    value: Ast::Expr = values[slot]
+                    alias: Ast::Expr = Ast::Expr.Ident(stale_name, position)
+                    binding: Ast::Expr = Ast::Expr.Binary(alias, TokenKind.EqEq, value, position)
+                    continue if not proof_trace_fact(report, binding, "local-binding", position.line, owner)
+                    for original in before |original, binding, value, alias, root, annotations, carried, premises, budget|:
+                        pieces: mutable darray[Ast::Expr] = []
+                        proof_conjunct_components(original, pieces)
+                        for fact in pieces |fact, original, binding, value, alias, root, annotations, carried, premises, budget|:
+                            continue if budget == 0
+                            replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(fact, value, alias, 0)
+                            continue if not replaced.changed or proof_expr_mentions_name(replaced.value, root)
+                            continue if any existing in carried where proof_expr_equal(existing, replaced.value)
+                            step: mutable darray[Ast::Expr] = proof_marker_facts(before)
+                            step.push(binding)
+                            step.push(original)
+                            continue if not proof_goal(step, replaced.value, annotations)
+                            budget <- budget - 1
+                            carried.push(replaced.value)
+                            premises.push(binding)
+                            premises.push(original)
+
+        # A comparison step needs the scalar witnesses of its operands; those are the traced
+        # type-marker facts, which every step takes along with its two real premises.
+        def proof_marker_facts(facts: darray[Ast::Expr]&) -> darray[Ast::Expr]:
+            markers: mutable darray[Ast::Expr] = []
+            for fact in facts |fact, markers|:
+                match fact:
+                    Ast::Expr.Call(Ast::Expr.Ident(_, _), _, _, _):
+                        markers.push(fact)
+                    _:
+                        continue
+            return markers
+
+        # `xs[k] == xs[j]` dies at the next write to `xs[j]`; when a fact names the stored read's
+        # value, `xs[j] == b`, the cell is also recorded as `xs[k] == b` -- a proof step over the
+        # cell fact and that fact alone -- so a swap keeps both values.
+        def proof_close_written_cell(cell: Ast::Expr, stored: Ast::Expr, root: sview, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, annotations: darray[Ast::EnumAnnotation]&, owner: sview, position: Ast::Pos) -> void:
+            return if not proof_expr_mentions_name(stored, root)
+            cell_fact: Ast::Expr = Ast::Expr.Binary(cell, TokenKind.EqEq, stored, position)
+            originals: darray[Ast::Expr] = proof_copy_exprs(facts)
+            budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
+            for original in originals |original, cell_fact, cell, stored, root, facts, report, annotations, owner, position, budget|:
+                pieces: mutable darray[Ast::Expr] = []
+                proof_conjunct_components(original, pieces)
+                for piece in pieces |piece, original, cell_fact, cell, stored, root, facts, report, annotations, owner, position, budget|:
+                    continue if budget == 0
+                    other: mutable Ast::Expr = Ast::Expr.Invalid
+                    match piece:
+                        Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                            other <- right if proof_expr_equal(left, stored)
+                            other <- left if proof_expr_equal(right, stored)
+                        _:
+                            continue
+                    continue if not proof_kernel_expression_supported(other) or proof_expr_mentions_name(other, root)
+                    closed: Ast::Expr = Ast::Expr.Binary(cell, TokenKind.EqEq, other, position)
+                    continue if any existing in facts where proof_expr_equal(existing, closed)
+                    premises: mutable darray[Ast::Expr] = proof_marker_facts(facts)
+                    premises.push(cell_fact)
+                    premises.push(original)
+                    continue if not proof_goal(premises, closed, annotations)
+                    budget <- budget - 1
+                    proof_add_derived_fact_from(facts, report, closed, premises, "proof-step", position.line, owner)
+
         # Returns false when the write is not of the modeled shape; the caller then takes the
         # generic invalidation path. On true the caller has already cleared the generic way, and
         # this restores the provably untouched facts and adds `xs[k] == v`.
@@ -125,13 +211,23 @@ extend ElisaProof:
             stale: mutable darray[sview] = []
             for slot in 0..<names.count |slot, names, values, stale, shape|:
                 stale.push(names[slot]) if slot < values.count and names[slot] != shape.root and proof_expr_mentions_name(values[slot], shape.root)
+            carried: mutable darray[Ast::Expr] = []
+            carried_premises: mutable darray[Ast::Expr] = []
+            proof_carry_stale_bindings(stale, shape.root, written, names, values, before, report, name, annotations, position, carried, carried_premises)
             for stale_name in stale |stale_name, names, values, facts, report, name, position|:
                 proof_resymbolize_binding(names, values, facts, report, name, stale_name, position)
             for fact in before |fact, facts, shape, written, annotations, before, stale, report, name, position|:
                 continue if any stale_name in stale where proof_expr_mentions_name(fact, stale_name)
                 whole: darray[Ast::Expr] = [fact]
                 proof_restore_conjuncts(fact, whole, shape.root, written, before, facts, report, annotations, name, position.line, 0)
-            return if proof_expr_mentions_name(stored, shape.root)
+            for carried_index in 0..<carried.count |carried_index, carried, facts, report, name, carried_premises, position, before|:
+                continue if any existing in facts where proof_expr_equal(existing, carried[carried_index])
+                step: mutable darray[Ast::Expr] = proof_marker_facts(before)
+                step.push(carried_premises[2 * carried_index])
+                step.push(carried_premises[2 * carried_index + 1])
+                proof_add_derived_fact_from(facts, report, carried[carried_index], step, "proof-step", position.line, name)
+            return if not proof_stored_reads_survive(stored, shape.root, written, before, annotations)
             return if proof_scalar_element_remaining(Ast::Expr.Ident(shape.root, position), facts, 0) != 1
             cell: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(shape.root, position), written, position)
             proof_add_traced_fact(facts, report, Ast::Expr.Binary(cell, TokenKind.EqEq, stored, position), "indexed-write", position.line, name)
+            proof_close_written_cell(cell, stored, shape.root, facts, report, annotations, name, position)
