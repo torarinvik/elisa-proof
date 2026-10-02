@@ -1,0 +1,98 @@
+# The `--linear-hints` input and the oracle's view of an unproven goal (BACKLOG W-01). The hints
+# file is whitespace-separated signed integers, `#` starting a comment, in the flat record layout
+# of `report.linear_hints`. Parsing only shapes untrusted numbers; `proof_linear_hint_certificate`
+# turns them into a certificate that the checker and kernel still decide.
+const module ProofLinearHintInput:
+    MAX_DIGITS: usize = 18
+    MAX_VALUES: usize = 65536
+
+def proof_usage_exit(text: sview) -> i32 can[Console, Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    message: mutable darray[u8] = []
+    proof_push(&message, text)
+    proof_write(message)
+    return 2
+
+def proof_parse_linear_hints(text: darray[u8]&) -> (ok: bool, values: darray[i64]):
+    values: mutable darray[i64] = []
+    index: mutable usize = 0
+    while index < text.count |index, text, values|:
+        byte: u8 = text[index]
+        if byte == ' '.u8() or byte == '\n'.u8() or byte == '\t'.u8() or byte == '\r'.u8():
+            index <- index + 1
+            continue
+        if byte == '#'.u8():
+            while index < text.count and text[index] != '\n'.u8() |index, text|:
+                index <- index + 1
+            continue
+        negative: bool = byte == '-'.u8()
+        index <- index + 1 if negative
+        value: mutable i64 = 0
+        digits: mutable usize = 0
+        while index < text.count and text[index] >= PROOF_ASCII_DIGIT_ZERO and text[index] <= PROOF_ASCII_DIGIT_NINE |index, text, value, digits|:
+            return (false, []) if digits >= ProofLinearHintInput::MAX_DIGITS
+            value <- value * 10 + (text[index] - PROOF_ASCII_DIGIT_ZERO).i64()
+            digits <- digits + 1
+            index <- index + 1
+        return (false, []) if digits == 0 or values.count >= ProofLinearHintInput::MAX_VALUES
+        values.push(0 - value if negative else value)
+    # Each record must be complete: `goal multiplier count` and `count` premise pairs.
+    record: mutable usize = 0
+    while record < values.count |record, values|:
+        return (false, []) if record + 3 > values.count or values[record] < 0 or values[record + 2] < 0
+        return (false, []) if values[record + 2] > ProofLinearCertificateLimit::PREMISES.i64()
+        record <- record + 3 + 2 * values[record + 2].usize()
+    return (false, []) if record != values.count
+    return (true, values)
+
+def proof_read_linear_hints(path: cstr) -> (ok: bool, values: darray[i64]) can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    read: (ok: bool, contents: darray[u8]) = proof_read_file_checked(path)
+    return (false, []) if not read.ok
+    return proof_parse_linear_hints(read.contents)
+
+def proof_push_i64(buffer: mutable darray[u8]&, value: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "-") if value < 0
+    digits: mutable darray[u8] = []
+    rest: mutable i64 = value
+    while true |rest, digits|:
+        digit: i64 = rest % 10
+        digits.push(PROOF_ASCII_DIGIT_ZERO + (digit if digit >= 0 else 0 - digit).u8())
+        rest <- rest / 10
+        break if rest == 0
+    position: mutable usize = digits.count
+    while position > 0 |position, digits, buffer|:
+        position <- position - 1
+        buffer.push(digits[position])
+
+# `"linear_rows":{"atoms":[...],"rows":[{"fact":i,"equality":b,"coefficients":[...],"constant":c}]}`,
+# or `null` when the goal has no linear reading within the export caps.
+def proof_push_json_linear_rows(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt) -> void can[Memory.Allocate, Abort.Panic]:
+    facts: mutable darray[Ast::Expr] = []
+    for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, facts|:
+        facts.push(report.certificate_facts[attempt.facts_start + fact_index])
+    atoms: mutable darray[sview] = []
+    rows: mutable ProofLinearRows = ProofLinearRows{coefficients: [], constants: [], provenance: []}
+    row_facts: mutable darray[i64] = []
+    equalities: mutable darray[bool] = []
+    if not proof_linear_export_rows(facts, attempt.goal, &atoms, &rows, &row_facts, &equalities) or rows.constants.count != row_facts.count:
+        proof_push(buffer, "null")
+        return
+    proof_push(buffer, "{\"atoms\":[")
+    for atom_index in 0..<atoms.count |atom_index, atoms, buffer|:
+        proof_push(buffer, ",") if atom_index > 0
+        proof_push_json_string(buffer, atoms[atom_index])
+    proof_push(buffer, "],\"rows\":[")
+    for row in 0..<row_facts.count |row, row_facts, equalities, rows, atoms, buffer|:
+        proof_push(buffer, ",") if row > 0
+        proof_push(buffer, "{\"fact\":")
+        proof_push_i64(buffer, row_facts[row])
+        proof_push(buffer, ",\"equality\":")
+        proof_push(buffer, "true") if equalities[row]
+        proof_push(buffer, "false") if not equalities[row]
+        proof_push(buffer, ",\"coefficients\":[")
+        for atom_index in 0..<atoms.count |atom_index, row, atoms, rows, buffer|:
+            proof_push(buffer, ",") if atom_index > 0
+            proof_push_i64(buffer, rows.coefficients[row * atoms.count + atom_index])
+        proof_push(buffer, "],\"constant\":")
+        proof_push_i64(buffer, rows.constants[row])
+        proof_push(buffer, "}")
+    proof_push(buffer, "]}")

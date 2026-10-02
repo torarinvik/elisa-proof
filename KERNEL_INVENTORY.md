@@ -159,6 +159,10 @@ summary trace cannot be relabelled as one.
 | `loop-invariant` | `check/statement_checks.elisa`, `check/returns/loops.elisa` | an invariant assumed at body entry (and proved separately) |
 | `loop-range` | `check/loop_range_facts.elisa` | a `for` index's range bounds |
 | `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
+| `collection-push` | `check/collection_push.elisa` | after `v.push(x)` on a mutable darray reference parameter: `v.count == T + 1`, `v[T] == x` and `v[v.count - 1] == x`, the pre-push count T an unsigned 64-bit scalar at most 2^63 - 2 |
+| `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
+| `indexed-write` | `check/indexed_writes.elisa` | after `a[i] <- x` on a scalar element whose stored value's reads survive the write: `a[i] == x` |
+| `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
 <!-- /inventory:boundary-trace-kinds -->
 
 Derived kinds are never axioms. Their premises are themselves traced. Replay re-proves each step

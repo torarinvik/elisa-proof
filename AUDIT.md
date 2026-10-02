@@ -10550,6 +10550,28 @@ proves 9/17); `examples/rejected_typed_return_constants.elisa` keeps each wrong 
 (`-6` against `>= -5`, `0 - 6`, `-4` against `<= -5`, `-50001` against `result + 50000 >= 0`)
 ensure-unproven while the correct returns beside them prove. Both are in `scripts/test.sh` and
 `scripts/dogfood.sh`.
+## Builtin push grows the count by one and appends its value (BACKLOG D-02, E-01)
+
+`v.push(x)` on a parameter declared as a mutable reference to a builtin `darray` now records
+`v.count == T + 1`, where T is the count before the call: a ghost term already equal to the
+count, or a fresh symbol bound to it whose facts are restated by kernel-checked steps. When an
+ensure mentions such a parameter, `old(v.count)` is a fresh entry symbol E fixed by
+`E == v.count` at entry. New trusted boundary kinds, shape-checked only by replay:
+`collection-push` (T is an unsigned 64-bit scalar; T stays at most 2^63 - 2, since no darray
+buffer reaches 2^63 elements) and `entry-count` (E is an unsigned 64-bit scalar). Ghost symbols
+are registered as frame constants so their facts survive later call boundaries; no source text
+can spell them. The model declines a user function named `push`, named or computed arguments,
+a rebound name and any receiver that is not such a parameter, and every other write to `v`
+still forgets its count. Fixtures: `examples/collection_push_count.elisa` (proved, replayed),
+`examples/rejected_collection_push_count.elisa` and
+`examples/rejected_collection_push_user_method.elisa` (all claims unproven).
+
+The same boundary also records `v[T] == x` and `v[v.count - 1] == x` for the pushed value x when
+x does not mention `v` and is built from literals, ghosts and witnessed scalar names under `+`
+and `-`: a builtin push writes only the receiver's storage, so such a value is unchanged by the
+call. A later push or write to `v` forgets both facts. Pop, resize, extend and element-wise
+contents beyond the last element are not modeled yet.
+
 ## Mutable aggregate `old(...)` snapshots and marker namespace (2026-09-30)
 
 An `old(field)` read through a mutable aggregate reference cannot be represented by the current
@@ -10922,3 +10944,83 @@ identical reports for both. `rejected_no_op_statement` now also reports `call-re
 `rejected_short_circuit_call` produces an extra `mutable_left_fact_must_not_survive` verdict.
 With the first probe relaxed in a scratch copy, every float probe passed before the run stopped
 at the second.
+## Linear certificates (BACKLOG C-02/C-03, 2026-10-01)
+
+A comparison goal over at most six integer names that no earlier tier closes is now searched by
+Fourier-Motzkin elimination (`linear/linear_certificate_search.elisa`) over at most fifteen
+comparison facts and unsigned width markers that share its names. The search is untrusted: a
+refutation of the negated goal becomes one traced fact of kind `linear-certificate`,
+`__elisa_linear_certificate(m_goal, premise_1, m_1, ...)`, and the goal is decided again with that
+fact present. The marker asserts nothing. The checker (`linear/linear_certificates.elisa`) and
+its kernel mirror (`kernel_replay/linear_certificates.elisa`) run after every safety gate, just
+before the bounded model, and admit the goal only when each premise is structurally a fact, each
+inequality multiplier is a literal in `[0, 2^20]` (an equality's may be negative), and the weighted
+sum of the constraints `e <= 0` -- the negated goal with a positive multiplier first, strict
+comparisons tightened by one over the integers -- cancels every name and leaves a positive
+constant. Terms are read by the same width-checked collector as normalized differences, so every
+operator they contain was decided under the goal's and facts' wrap guards. Arithmetic is checked
+i64 and refuses on overflow instead of the backlog's i128-by-parts; an overflowing combination is
+a refusal, never an acceptance. The marker name is reserved, a goal that is itself a marker is
+refused, and the kind is listed as a boundary trace in `KERNEL_INVENTORY.md`. Only rule `goal`
+attempts search; index and slice rules are unchanged. `scripts/test_linear_certificates.py`
+covers positive goals, forged multipliers, invented and dropped premises, self-reference,
+symbolic, oversized and miscounted arguments, the fifteen-premise limit and the six-name limit.
+
+## Pure function unfolding (BACKLOG D-04, 2026-10-01)
+
+A function with no written postcondition, only by-value primitive parameters, a primitive integer
+or bool return type, and a body that is `requires` lines plus one `return value` -- where `value`
+is a call-free arithmetic or comparison term of at most 24 nodes that names something -- gets a
+synthesized ensure (`check/unfolded_summaries.elisa`): `result == (value)`, or for bool the two
+implications `not result or (value)` and `result or not (value)`. It is an ordinary ensure: the
+function's own check must prove it, and callers see it only through the existing verified-summary
+path, so no kernel rule was added. Preconditions that call a verified total-pure function with no
+`requires` now instantiate its ensures at entry as `function-summary` facts, the same facts a real
+call produces. Recursive bodies, bodies with calls, locals or fields, aggregate or reference
+parameters, and closed bodies such as `return 0` stay opaque. `examples/pure_unfolding.elisa`
+proves `is_digit`-guarded and `twice`-bounded callers without contracts;
+`scripts/test_pure_unfolding.py` pins the adversarial, malformed and budget (24 vs 25 nodes) cases.
+`examples/rejected_index_call.elisa` now uses a two-statement helper so it still exercises an
+opaque index call, and four exact obligation counts moved by the synthesized ensures (all proven).
+Not yet handled: a negated bool helper fact (`not is_digit(c)`) does not split the negated
+conjunction.
+
+## SMT linear oracle (BACKLOG W-01, 2026-10-01)
+
+Each unproven goal's near-miss now carries `linear_rows`: the negated goal (fact -1) and every
+certificate fact that reads as a linear constraint, as rows over at most 24 atoms and 48 rows
+(`linear/linear_hints.elisa`). `scripts/smt_oracle.py` asks `z3 -in` (QF_LIA, 2 s per goal) for
+integer Farkas multipliers -- goal multiplier at least one, inequality multipliers non-negative,
+at most fifteen premises, all within the C-02 multiplier bound -- and writes a hints file that
+`elisa-proof --linear-hints <file> <source>` reads (`app/linear_hints_input.elisa`). A hint names
+its goal by attempt id and each premise by index among that goal's certificate facts; when the
+Fourier-Motzkin search finds nothing, the checker turns the matching hint into the same
+`__elisa_linear_certificate` marker and decides the goal again, so the checker and kernel rules
+are unchanged and Z3 is never trusted. A forged, stale or mismatched hint only fails to prove;
+a malformed file (truncated record, non-number, more than fifteen premises, over-long number,
+unreadable) exits 2 before checking. Without z3 the oracle proposes nothing.
+`scripts/test_smt_oracle.py` pins these cases on `examples/smt_linear_oracle.elisa`, a goal over
+eight names that the six-atom search cannot reach. Census over `examples/`: 15465 -> 15466 proven
+with the oracle; it proposed 16 hints and only the fixture's closed a goal, so the remaining
+unproven linear goals fail before the certificate tier (gates, widths) rather than for want of
+multipliers. The plain census is unchanged: no regressions, 13093/17773. Known gap: `k * x` with a
+literal `k` is not a linear term to the shared collector, so such goals export no rows.
+
+## Symbolic-range quantifiers (BACKLOG W-02, 2026-10-01)
+
+A `forall i in a..<b: P(i)` goal whose bounds are not literals no longer fails outright. The
+checker (`linear/symbolic_quantifiers.elisa`) and the kernel
+(`kernel_replay/symbolic_quantifiers.elisa`) each accept three rules: empty (`b <= a`), cover by a
+fact `forall j in c..<d: Q(j)` whose body equals the goal's once both binders become a fresh
+marker, with `c <= a` and `b <= d`, and extend by one (`b <= d + 1` and `P(d)`). Every side goal is
+proven by the ordinary search, so the kernel trusts nothing new. Only `..<` ranges are read, at
+most 256 facts are scanned, and a binder captured by the other body is rejected when the
+proposition is formed. The kernel arena is shared by all certificates, so the marker and every
+failed side search are rolled back; before that, the first certificate's marker made the rule
+refuse every later certificate (found by noticing that only non-first functions failed).
+`examples/symbolic_quantifier.elisa` proves and replays cover, extend, empty, a later certificate
+and a fill loop whose invariant forall grows with the counter; `rejected_symbolic_quantifier.elisa`
+keeps off-by-one, wrong lower bound, other body and captured binder unproven.
+`scripts/test_symbolic_quantifiers.py` adds a non-range malformed case and a budget case (cover
+fact past the scan limit). Open: prefix-sorted examples need two-binder bodies, and triggered
+instances for reads `xs[k]` inside a covered range.

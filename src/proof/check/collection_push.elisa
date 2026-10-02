@@ -1,0 +1,260 @@
+# `v.push(x)` on a mutable `darray` reference parameter adds exactly one element (BACKLOG D-02,
+# E-01). The count before the push gets a fresh symbol S; facts over `v.count` are restated over
+# S by kernel-checked steps before the call boundary forgets `v`, and the boundary fact
+# `v.count == S + 1` records the push itself. Anything else about `v` is still forgotten.
+extend ElisaProof:
+    private:
+        const PROOF_PUSH_COUNT_LIMIT: i64 = 9223372036854775806
+        const PROOF_PUSH_OFFSET_LIMIT: i64 = 1024
+        def proof_darray_reference_type(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_darray_reference_type(inner, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_darray_reference_type(inner, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    return false
+                Ast::Expr.Index(head, _, _):
+                    return proof_ident_name(head) == "darray"
+                _:
+                    return false
+
+        # The parameter `v` a statement `v.push(x)` grows, or "" when the statement is anything
+        # else: another method, a user function named `push`, a named or computed argument, a
+        # shadowed or rebound name, or a receiver whose declared type is not a mutable reference
+        # to a built-in darray.
+        def proof_push_receiver(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, frame_parameters: darray[sview]&, functions: ProofFunctionTable&, report: ProofReport&, owner: sview) -> sview:
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return "" if arguments.count != 1 or argument_names.count > 1 or (argument_names.count == 1 and argument_names[0] != "") or proof_expr_has_call(arguments[0])
+                    match callee:
+                        Ast::Expr.Field(object, method, _):
+                            return "" if method != "push" or proof_resource_function_name_count(functions, method) != 0
+                            receiver: sview = proof_ident_name(object)
+                            return "" if receiver == ""
+                            slot: mutable usize = names.count
+                            found: mutable bool = false
+                            while slot > 0 and not found |slot, found, names, receiver|:
+                                slot <- slot - 1
+                                found <- names[slot] == receiver
+                            return "" if not found or slot >= frame_parameters.count or frame_parameters[slot] != receiver or slot >= values.count
+                            return "" if proof_ident_name(values[slot]) != receiver
+                            declared: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations(report.source_declarations, owner, receiver, 0)
+                            return "" if declared.count != 1
+                            return "" if not proof_resource_is_reference_type(declared.type_expression) or not proof_resource_is_mutable_reference_type(declared.type_expression)
+                            return receiver if proof_darray_reference_type(declared.type_expression, 0)
+                        _:
+                            pass
+                _:
+                    pass
+            return ""
+
+        def proof_push_argument(call: Ast::Expr) -> Ast::Expr:
+            match call:
+                Ast::Expr.Call(_, arguments, _, _):
+                    return arguments[0] if arguments.count == 1
+                _:
+                    pass
+            return Ast::Expr.Invalid
+
+        def proof_count_place(receiver: sview, position: Ast::Pos) -> Ast::Expr:
+            return Ast::Expr.Field(Ast::Expr.Ident(receiver, position), "count", position)
+
+        # A term over frame-constant ghosts and literals only: no source text can spell or assign
+        # any of its names, so it denotes one value for the rest of the frame.
+        def proof_ghost_term(expression: Ast::Expr, report: ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return proof_name_is_reserved_internal(name) and (any owned in report.local_extent_names where owned == name)
+                Ast::Expr.Paren(inner, _):
+                    return proof_ghost_term(inner, report, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_ghost_term(left, report, depth + 1) and proof_ghost_term(right, report, depth + 1)
+                _:
+                    return false
+
+        # Literals, frame-constant ghosts and witnessed scalar names under `+` and `-`.
+        def proof_push_value_term(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return proof_ghost_term(expression, report, 0) or proof_scalar_witnessed(facts, name)
+                Ast::Expr.Paren(inner, _):
+                    return proof_push_value_term(inner, facts, report, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_push_value_term(left, facts, report, depth + 1) and proof_push_value_term(right, facts, report, depth + 1)
+                _:
+                    return false
+
+        def proof_add_fact_once(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, fact: Ast::Expr, kind: sview, owner: sview, position: Ast::Pos) -> void:
+            return if any existing in facts where proof_expr_equal(existing, fact)
+            proof_add_traced_fact(facts, report, fact, kind, position.line, owner)
+
+        # The count before the push as a ghost term. A fact already equating the count with a
+        # ghost term (an entry count, or an earlier push) supplies it; otherwise a fresh symbol S
+        # is bound to the count and facts over `v.count` are restated over S by kernel-checked
+        # steps before the call boundary forgets `v`.
+        def proof_push_before(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, receiver: sview, owner: sview, position: Ast::Pos) -> Ast::Expr:
+            place: Ast::Expr = proof_count_place(receiver, position)
+            for fact in facts |place, report|:
+                match fact:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        return right if proof_expr_equal(left, place) and proof_ghost_term(right, report, 0)
+                        return left if proof_expr_equal(right, place) and proof_ghost_term(left, report, 0)
+                    _:
+                        pass
+            symbol: sview = proof_rebind_symbol(report)
+            return Ast::Expr.Invalid if symbol == ""
+            report.local_extent_names.push(symbol)
+            alias: Ast::Expr = Ast::Expr.Ident(symbol, position)
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(alias, TokenKind.EqEq, place, position), "local-binding", position.line, owner)
+            # A count is a usize, so S is an unsigned 64-bit scalar.
+            bound_arguments: darray[Ast::Expr] = [alias, Ast::Expr.IntLit(64, position)]
+            no_names: darray[sview] = []
+            proof_add_traced_fact(facts, report, Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), bound_arguments, no_names, position), "collection-push", position.line, owner)
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, alias, position), "collection-push", position.line, owner)
+            original: darray[Ast::Expr] = proof_copy_exprs(facts)
+            annotations: darray[Ast::EnumAnnotation] = []
+            budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
+            for fact in original |original, facts, report, owner, receiver, place, alias, annotations, budget, position|:
+                break if budget == 0
+                renamed: (changed: bool, value: Ast::Expr) = proof_replace_place(fact, place, alias, 0)
+                continue if not renamed.changed or proof_expr_mentions_name(renamed.value, receiver)
+                continue if any existing in facts where proof_expr_equal(existing, renamed.value)
+                continue if not proof_goal(original, renamed.value, annotations)
+                budget <- budget - 1
+                proof_add_derived_fact_from(facts, report, renamed.value, original, "proof-step", position.line, owner)
+            return alias
+
+        # A push writes only `v[S]`, where S is the count before it, so an element fact whose
+        # reads of `v` are all provably below S still holds after the call boundary forgets `v`.
+        # Facts over `v.count` are proof_push_before's job; this keeps the element facts, each
+        # with the fact it came from (and the type markers) as the premises its step re-checks.
+        def proof_push_kept_elements(facts: darray[Ast::Expr]&, receiver: sview, before: Ast::Expr, kept: mutable darray[Ast::Expr]&, premises: mutable darray[Ast::Expr]&) -> void:
+            match before:
+                Ast::Expr.Invalid:
+                    return
+                _:
+                    pass
+            place: Ast::Expr = proof_count_place(receiver, Ast::expr_pos(before))
+            annotations: darray[Ast::EnumAnnotation] = []
+            for original in facts |original, facts, receiver, place, annotations, kept, premises|:
+                pieces: mutable darray[Ast::Expr] = []
+                proof_conjunct_components(original, pieces)
+                for piece in pieces |piece, original, facts, receiver, place, annotations, kept, premises|:
+                    continue if kept.count >= PROOF_ALIAS_TRANSFER_BUDGET or not proof_expr_mentions_name(piece, receiver)
+                    # Type markers survive the call boundary on their own; count facts are
+                    # restated over S before the call.
+                    match piece:
+                        Ast::Expr.Call(_, _, _, _):
+                            continue
+                        _:
+                            pass
+                    continue if proof_expr_reads(piece, place, 0) and not proof_push_count_upper_bound(piece, place)
+                    continue if any existing in kept where proof_expr_equal(existing, piece)
+                    # Distinctness is checked against `v.count`, which equals S here and carries
+                    # the scalar witnesses a comparison with S lacks.
+                    continue if not proof_write_preserves(piece, receiver, place, "", Ast::Expr.Invalid, Ast::Expr.Invalid, false, facts, annotations, 0)
+                    kept.push(piece)
+                    premises.push(original)
+
+        # Whether `expression` contains `target` as a subterm; past the depth limit, or under a
+        # form not listed here, assume it does.
+        def proof_expr_reads(expression: Ast::Expr, target: Ast::Expr, depth: usize) -> bool:
+            return true if depth >= 64 or proof_expr_equal(expression, target)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_reads(inner, target, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_reads(operand, target, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_reads(left, target, depth + 1) or proof_expr_reads(right, target, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_reads(object, target, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_reads(object, target, depth + 1) or proof_expr_reads(index, target, depth + 1)
+                Ast::Expr.Ident(_, _):
+                    return false
+                Ast::Expr.IntLit(_, _):
+                    return false
+                _:
+                    return true
+
+        # `e < v.count` and `e <= v.count` stay true when a push grows the count.
+        def proof_push_count_upper_bound(piece: Ast::Expr, place: Ast::Expr) -> bool:
+            match piece:
+                Ast::Expr.Binary(left, TokenKind.Lt, right, _):
+                    return proof_expr_equal(right, place) and not proof_expr_reads(left, place, 0)
+                Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
+                    return proof_expr_equal(right, place) and not proof_expr_reads(left, place, 0)
+                _:
+                    return false
+
+        def proof_push_restore_elements(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, kept: darray[Ast::Expr]&, premises: darray[Ast::Expr]&, owner: sview, position: Ast::Pos) -> void:
+            for index in 0..<kept.count |index, facts, report, kept, premises, owner, position|:
+                continue if index >= premises.count or any existing in facts where proof_expr_equal(existing, kept[index])
+                step: mutable darray[Ast::Expr] = proof_marker_facts(facts)
+                step.push(premises[index])
+                proof_add_derived_fact_from(facts, report, kept[index], step, "proof-step", position.line, owner)
+
+        # After the call boundary has forgotten `v`, record the one thing the push did to it.
+        def proof_push_after(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, receiver: sview, before: Ast::Expr, pushed: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
+            match before:
+                Ast::Expr.Invalid:
+                    return
+                _:
+                    pass
+            # Fold an earlier push's `T + k` so the new count is `T + (k + 1)`, one sum deep.
+            base: mutable Ast::Expr = before
+            offset: mutable i64 = 0
+            match before:
+                Ast::Expr.Binary(left, TokenKind.Plus, Ast::Expr.IntLit(added, _), _):
+                    if added > 0 and added < PROOF_PUSH_OFFSET_LIMIT:
+                        base <- left
+                        offset <- added
+                _:
+                    pass
+            # Trusted: no darray reaches 2^63 elements, since its buffer would exceed any address
+            # space, so the count before a push that returned leaves room for the new element.
+            proof_add_fact_once(facts, report, Ast::Expr.Binary(base, TokenKind.LtEq, Ast::Expr.IntLit(PROOF_PUSH_COUNT_LIMIT - offset, position), position), "collection-push", owner, position)
+            grown: Ast::Expr = Ast::Expr.Binary(base, TokenKind.Plus, Ast::Expr.IntLit(offset + 1, position), position)
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(proof_count_place(receiver, position), TokenKind.EqEq, grown, position), "collection-push", position.line, owner)
+            # The new element sits at the old count (BACKLOG E-01). The pushed value was read
+            # before the call, so it is recorded only when the call could not have changed it: a
+            # builtin push writes only the receiver's storage, which the value does not read.
+            return if proof_expr_mentions_name(pushed, receiver) or not proof_push_value_term(pushed, facts, report, 0)
+            element: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(receiver, position), before, position)
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(element, TokenKind.EqEq, pushed, position), "collection-push", position.line, owner)
+            # The same element by its usual name, `v[v.count - 1]`; the count is at least one.
+            last_index: Ast::Expr = Ast::Expr.Binary(proof_count_place(receiver, position), TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
+            last: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(receiver, position), last_index, position)
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(last, TokenKind.EqEq, pushed, position), "collection-push", position.line, owner)
+
+        # `old(v.count)` for a mutable darray reference parameter names a fresh symbol E fixed at
+        # entry by `E == v.count`; the marker `__elisa_proof_entry_state(v, E)` carries it to the
+        # contract substitution. Only parameters an ensure mentions get one, so other functions
+        # spend nothing. Every later write to `v` forgets the equation and leaves E unconstrained.
+        def proof_seed_entry_counts(parameters: darray[Ast::ParamDecl]&, postconditions: darray[Ast::Expr]&, old_values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            parameter_index: mutable usize = 0
+            for parameter in parameters |parameter_index, postconditions, old_values, facts, report, owner, position|:
+                index: usize = parameter_index
+                parameter_index <- parameter_index + 1
+                continue if index >= old_values.count
+                continue if not proof_resource_is_mutable_reference_type(parameter.type_expression) or not proof_darray_reference_type(parameter.type_expression, 0)
+                continue if not any ensure in postconditions where proof_expr_mentions_name(ensure, parameter.name)
+                symbol: sview = proof_rebind_symbol(report)
+                return if symbol == ""
+                report.local_extent_names.push(symbol)
+                entry: Ast::Expr = Ast::Expr.Ident(symbol, position)
+                bound_arguments: darray[Ast::Expr] = [entry, Ast::Expr.IntLit(64, position)]
+                no_names: darray[sview] = []
+                proof_add_traced_fact(facts, report, Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), bound_arguments, no_names, position), "entry-count", position.line, owner)
+                proof_add_traced_fact(facts, report, Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, entry, position), "entry-count", position.line, owner)
+                proof_add_traced_fact(facts, report, Ast::Expr.Binary(entry, TokenKind.EqEq, proof_count_place(parameter.name, position), position), "local-binding", position.line, owner)
+                marker_arguments: darray[Ast::Expr] = [Ast::Expr.Ident(parameter.name, position), entry]
+                old_values[index] <- Ast::Expr.Call(Ast::Expr.Ident("__elisa_proof_entry_state", position), marker_arguments, no_names, position)

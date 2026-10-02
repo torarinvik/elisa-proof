@@ -16,8 +16,8 @@ def run(path):
 
 
 data = run(ROOT / "examples/usize_increment_under_count.elisa")
-assert data["summary"]["proven"] == 10 and data["summary"]["failed"] == 0 and data["findings"] == [], data["summary"]
-assert data["replay"]["gaps"] == 0 and data["replay"]["replayed"] == 10
+assert data["summary"]["proven"] == data["summary"]["obligations"] == 11 and data["summary"]["failed"] == 0 and data["findings"] == [], data["summary"]
+assert data["replay"]["gaps"] == 0 and data["replay"]["replayed"] == 11
 
 data = run(ROOT / "examples/rejected_usize_increment_under_count.elisa")
 assert data["replay"]["gaps"] == 0

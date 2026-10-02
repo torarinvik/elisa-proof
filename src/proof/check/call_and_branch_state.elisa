@@ -400,12 +400,17 @@ extend ElisaProof:
         # true at the join. Only call-stable facts are imported, so an arm-local binding can
         # never escape with them, and an arm that assigns to a scalar has already purged the
         # facts over it, so a direct write inside the branch cannot survive here either.
-        def proof_restore_branch_stable_facts(primary: darray[Ast::Expr]&, secondary: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+        # When neither arm makes a call, nothing outside the arms' own statements ran, so a fact
+        # that held before the branch and still stands at both exits needs no call-stability:
+        # `k < xs.count` over a mutable reference survives `if xs[k] < p: lo <- lo + 1`. Being a
+        # prior fact, it cannot read an arm-local binding.
+        def proof_restore_branch_stable_facts(primary: darray[Ast::Expr]&, secondary: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview, prior: darray[Ast::Expr]&, arms_call_free: bool) -> void:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
             return if not analyzed
-            for fact in primary |primary, secondary, facts, names, parameters, report|:
+            for fact in primary |primary, secondary, facts, names, parameters, report, prior, arms_call_free|:
                 continue if not (any other in secondary where proof_expr_equal(other, fact))
-                continue if not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                held_before: bool = arms_call_free and (any earlier in prior where proof_expr_equal(earlier, fact))
+                continue if not held_before and not proof_expr_call_stable(fact, primary, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -432,7 +437,7 @@ extend ElisaProof:
         # joined atom is that arm's value. A name the join kept keeps its atom and is not replaced.
         # A fact both arms state and read unchanged is left to the literal intersection, which bounds the search. `if flag: best <- slot` thus keeps `best <= CAP`: the
         # untouched arm states it and the other derives it from `best == slot` and `slot < CAP`.
-        def proof_restore_branch_implied_facts(then_facts: mutable darray[Ast::Expr]&, else_facts: mutable darray[Ast::Expr]&, prior_facts: darray[Ast::Expr]&, then_names: darray[sview]&, else_names: darray[sview]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, values: darray[Ast::Expr]&, names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> void:
+        def proof_restore_branch_implied_facts(then_facts: mutable darray[Ast::Expr]&, else_facts: mutable darray[Ast::Expr]&, prior_facts: darray[Ast::Expr]&, then_names: darray[sview]&, else_names: darray[sview]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, values: darray[Ast::Expr]&, names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos, arms_call_free: bool) -> void:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
             return if not analyzed
             capped: mutable usize = limit if limit < values.count else values.count
@@ -454,6 +459,10 @@ extend ElisaProof:
             # A fact that held before the branch, a loop invariant such as `cursor <= stop`
             # among them, is a candidate too, when both arms rebound a name it reads.
             candidates.extend(prior_facts)
+            # An arm that steps a joined name by one leaves `L <= R` true only one step wider:
+            # `if take: lo <- lo + 1` turns the invariant `lo <= k` into `lo <= k + 1`, which the
+            # loop's later `k <- k + 1` closes. Each widening is still proved in both arms below.
+            proof_push_widened_facts(&candidates, prior_facts, joined, position)
             # An arm that records a joined name as some other expression, `b: usize = best`,
             # states its facts over that expression; read them back over the name as well.
             for index in 0..<then_map.count |index, names, then_map, else_map, joined, then_facts, else_facts, candidates|:
@@ -465,19 +474,26 @@ extend ElisaProof:
             accepted: mutable darray[Ast::Expr] = []
             then_steps: mutable darray[Ast::Expr] = []
             else_steps: mutable darray[Ast::Expr] = []
-            for fact in candidates |candidates, then_facts, else_facts, facts, names, parameters, report, annotations, then_map, else_map, joined, accepted, then_steps, else_steps|:
+            for fact in candidates |candidates, then_facts, else_facts, facts, names, parameters, report, annotations, then_map, else_map, joined, accepted, then_steps, else_steps, prior_facts, arms_call_free|:
                 continue if not (any name in joined where proof_expr_mentions_name(fact, name))
                 # A local an arm declared ends with the arm, so only its steps may read one.
                 continue if proof_expr_mentions_arm_local(fact, then_names, names.count) or proof_expr_mentions_arm_local(fact, else_names, names.count)
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 continue if any existing in accepted where proof_expr_equal(existing, fact)
-                continue if not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                # As at the literal intersection, call-free arms need no call-stability for a
+                # candidate that held before the branch, `forall i in 0..<lo: xs[i] < p` among them.
+                held_before: bool = arms_call_free and (any earlier in prior_facts where proof_expr_equal(earlier, fact))
+                # Call-free arms run nothing but their own statements, and each arm proves the
+                # candidate below, so neither a prior fact nor an arm's own needs call-stability.
+                continue if not held_before and not arms_call_free and not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 then_step: Ast::Expr = proof_substitute(fact, names, then_map)
                 else_step: Ast::Expr = proof_substitute(fact, names, else_map)
                 # Both arms stating the fact leave it to the literal intersection only when both
                 # read it unchanged. An arm that rebound a name, `cursor <- cursor + 1`, states it
                 # over the old value; the intersection drops that reading, so it is decided here.
-                continue if proof_expr_equal(then_step, fact) and proof_expr_equal(else_step, fact) and (any other in then_facts where proof_expr_equal(other, fact)) and (any other in else_facts where proof_expr_equal(other, fact))
+                # The intersection takes only a prior or call-stable fact; any other is decided here.
+                intersected: bool = held_before or proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                continue if intersected and proof_expr_equal(then_step, fact) and proof_expr_equal(else_step, fact) and (any other in then_facts where proof_expr_equal(other, fact)) and (any other in else_facts where proof_expr_equal(other, fact))
                 # The joined fact is recorded through an arm whose own reading is the fact itself,
                 # so its trace is that arm's kernel-checked step.
                 continue if not proof_expr_equal(then_step, fact) and not proof_expr_equal(else_step, fact)
@@ -515,6 +531,42 @@ extend ElisaProof:
             for fact in source |candidates, value, alias|:
                 renamed: (changed: bool, value: Ast::Expr) = proof_replace_place(fact, value, alias, 0)
                 candidates.push(renamed.value) if renamed.changed
+
+        def proof_push_widened_facts(candidates: mutable darray[Ast::Expr]&, source: darray[Ast::Expr]&, joined: darray[sview]&, position: Ast::Pos) -> void:
+            for fact in source |candidates, joined, position|:
+                match fact:
+                    Ast::Expr.Binary(left, operator, right, _):
+                        continue if operator != TokenKind.LtEq and operator != TokenKind.Lt
+                        continue if not (any name in joined where proof_expr_mentions_name(left, name))
+                        wider: Ast::Expr = Ast::Expr.Binary(right, TokenKind.Plus, Ast::Expr.IntLit(1, position), position)
+                        candidates.push(Ast::Expr.Binary(left, TokenKind.LtEq, wider, position)) if operator == TokenKind.LtEq
+                    Ast::Expr.Block(_, body, _, _):
+                        # A range grows by one the same way: a bubble step turns the invariant
+                        # `forall i in 0..<k: xs[i] <= m` into `... 0..<k + 1 ...` before `k <- k + 1`.
+                        range: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+                        continue if not range.known
+                        continue if not (any name in joined where proof_expr_mentions_name(body, name) or proof_expr_mentions_name(range.lower, name) or proof_expr_mentions_name(range.upper, name))
+                        grown: (known: bool, value: Ast::Expr) = proof_widened_forall(fact, position)
+                        candidates.push(grown.value) if grown.known
+                    _:
+                        continue
+
+        # `forall i in a..<b: P` as `forall i in a..<b + 1: P`, keeping the binder's declaration.
+        def proof_widened_forall(fact: Ast::Expr, position: Ast::Pos) -> (known: bool, value: Ast::Expr):
+            range: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+            return (false, Ast::Expr.Invalid) if not range.known
+            wider: Ast::Expr = Ast::Expr.Binary(range.lower, TokenKind.RangeLt, Ast::Expr.Binary(range.upper, TokenKind.Plus, Ast::Expr.IntLit(1, position), position), position)
+            match fact:
+                Ast::Expr.Block(statements, body, captures, block_position):
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, type_expression, _, statement_position):
+                            grown: mutable darray[Ast::Stmt] = []
+                            grown.push(Ast::Stmt.VarDecl(binder, type_expression, wider, statement_position))
+                            return (true, Ast::Expr.Block(grown, body, captures, block_position))
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
 
         # A binding recorded as `b == best` states the arm's other facts over `best`.
         def proof_push_equal_renamings(candidates: mutable darray[Ast::Expr]&, source: darray[Ast::Expr]&, name: sview) -> void:
