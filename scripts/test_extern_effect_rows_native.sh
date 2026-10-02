@@ -13,7 +13,9 @@ cleanup_rows() {
     rmdir -- "$ROW_SCRATCH"
 }
 trap cleanup_rows EXIT
-"$ROW_COMPILER" -emit obj -O0 -o "$ROW_SCRATCH/row.o" "$ROW_ROOT/examples/extern_effect_rows_runtime.elisa"
-"${CLANG:-clang}" -Wl,-dead_strip -o "$ROW_SCRATCH/probe" "$ROW_SCRATCH/row.o" "$ROW_ROOT/build/profile_hooks.o"
-"$ROW_SCRATCH/probe"
-printf 'strict native extern-row decoder controls pass; signature-index integration remains pending\n'
+for ROW_FIXTURE in extern_effect_rows_runtime extern_effect_rows_parser_runtime; do
+    "$ROW_COMPILER" -emit obj -O0 -o "$ROW_SCRATCH/row.o" "$ROW_ROOT/examples/$ROW_FIXTURE.elisa"
+    "${CLANG:-clang}" -Wl,-dead_strip -o "$ROW_SCRATCH/probe" "$ROW_SCRATCH/row.o" "$ROW_ROOT/build/profile_hooks.o"
+    "$ROW_SCRATCH/probe"
+done
+printf 'strict native extern-row decoder and pinned-parser correspondence controls pass; signature-index integration remains pending\n'

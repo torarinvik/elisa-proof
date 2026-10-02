@@ -14,7 +14,9 @@ report = json.loads(run.stdout)
 # Do not permit any other semantic error or treat the refusal as a proof.
 assert report["summary"]["semantic_errors"] == 1
 assert [(d["kind_code"], d["name"]) for d in report["semantic_diagnostics"] if d["severity"] == 1] == [
-    (310, "rejected_unsigned_other_term")]
+    (311, "rejected_unsigned_other_term")]
+assert [d["message"] for d in report["semantic_diagnostics"] if d["severity"] == 1] == [
+    'ensure postcondition of "rejected_unsigned_other_term" could not be proven statically at this point']
 assert report["replay"]["gaps"] == 0
 assert report["replay"]["replayed"] == report["replay"]["certificates"]
 assert not report["trust"]["trusted_assumptions"]
