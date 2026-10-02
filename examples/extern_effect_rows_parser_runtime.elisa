@@ -9,6 +9,7 @@ include "../src/proof/check/extern_effect_rows.elisa"
 include "../src/proof/model/extern_signatures.elisa"
 include "../src/proof/check/extern_signatures.elisa"
 include "../src/proof/replay/extern_effect_metadata.elisa"
+include "../src/proof/replay/extern_declaration_identity.elisa"
 
 extend ElisaProof:
     public:
@@ -34,6 +35,30 @@ extend ElisaProof:
                     proof_collect_extern_signature(file, name, start, arity, variadic, callable, return_type, position, &signatures)
                     return false if signatures.count != 1
                     signature: ProofExternSignature = signatures[0]
+                    identity: (matches: usize, valid: bool) = proof_replay_extern_declaration_identity(&file.top_decls, &file.extern_params, &file.enum_annotations, &signature, 0)
+                    return false if identity.matches != 1 or not identity.valid
+                    too_deep: (matches: usize, valid: bool) = proof_replay_extern_declaration_identity(&file.top_decls, &file.extern_params, &file.enum_annotations, &signature, 96)
+                    return false if too_deep.valid
+                    wrong_sources: darray[sview] = [
+                        "extern audit(context: mutable void&?, stage: u8) -> u64 can[Unsafe.RawExtern, Abort.Panic]\n",
+                        "extern audit(context: void&?, stage: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\n",
+                        "extern audit(context: mutable void&?, stage: u8) -> u8 can[Unsafe.RawExtern]\n",
+                        "extern audit(context: mutable void&?, stage: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\nextern audit(context: mutable void&?, stage: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\n",
+                        "extern audit(context: mutable void&?, stage: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\ndef audit(context: mutable void&?, stage: u8) -> u8:\n    return 0\n",
+                        "extern audit(context: mutable void&?, stage: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\nconst audit: u8 = 0\n",
+                        "extern audit(context: mutable void&?, stage: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\nstruct audit:\n    stage: u8\n",
+                        "def audit(context: mutable void&?, stage: u8) -> u8:\n    return 0\n"]
+                    for wrong in wrong_sources:
+                        # Parser source storage remains live for this complete comparison.
+                        source_bytes: mutable darray[u8] = []
+                        for byte in 0..<sview_len(wrong) |byte, wrong, source_bytes|:
+                            source_bytes.push(sview_at(wrong, byte))
+                        source_bytes.push(0)
+                        wrong_tokens: darray[Token] = frontend_tokenize(&source_bytes[0], &source_bytes[0])
+                        wrong_file: Ast::File = frontend_parser_parse_file(&source_bytes[0], wrong_tokens)
+                        return false if wrong_file.errors.count != 0
+                        compared: (matches: usize, valid: bool) = proof_replay_extern_declaration_identity(&wrong_file.top_decls, &wrong_file.extern_params, &wrong_file.enum_annotations, &signature, 0)
+                        return false if compared.valid
                     return false if signature.name != "audit" or signature.line != 1 or not signature.callable or signature.variadic
                     return false if signature.return_type_name != "u8" or signature.declared_arity != 2 or not signature.parameters_valid or signature.parameters.count != 2
                     context: Ast::ExternParam = signature.parameters[0]
@@ -59,7 +84,29 @@ extend ElisaProof:
                     return false if signatures.count != 3
                     invalid: ProofExternSignature = signatures[2]
                     return false if invalid.parameters_valid or invalid.parameters.count != 0
+                    invalid_identity: (matches: usize, valid: bool) = proof_replay_extern_declaration_identity(&file.top_decls, &file.extern_params, &file.enum_annotations, &invalid, 0)
+                    return false if invalid_identity.valid
                     return true
+                _:
+                    return false
+
+        def test_nested_extern_identity() -> bool can[Memory.Allocate, Abort.Panic]:
+            source: u8& = "module Box:\n    extern audit(stage: u8) -> u8 can[Unsafe.RawExtern]\n"
+            tokens: darray[Token] = frontend_tokenize(source, source)
+            file: Ast::File = frontend_parser_parse_file(source, tokens)
+            return false if file.errors.count != 0 or file.top_decls.count != 1
+            match file.top_decls[0]:
+                Ast::Decl.Module(_, body, _):
+                    return false if body.count != 1
+                    match body[0]:
+                        Ast::Decl.Extern(name, start, arity, variadic, callable, return_type, _, position):
+                            signatures: mutable darray[ProofExternSignature] = []
+                            proof_collect_extern_signature(file, name, start, arity, variadic, callable, return_type, position, &signatures)
+                            return false if signatures.count != 1
+                            identity: (matches: usize, valid: bool) = proof_replay_extern_declaration_identity(&file.top_decls, &file.extern_params, &file.enum_annotations, &signatures[0], 0)
+                            return identity.matches == 1 and identity.valid
+                        _:
+                            return false
                 _:
                     return false
 
@@ -69,4 +116,5 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 3 if not ElisaProof::test_parser_extern_row("extern audit(x: u8) -> u8\n", false, 0)
     return 4 if not ElisaProof::test_parser_extern_row("extern audit(x: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic\n", false, 0)
     return 5 if not ElisaProof::test_parser_extern_signature()
+    return 6 if not ElisaProof::test_nested_extern_identity()
     return 0
