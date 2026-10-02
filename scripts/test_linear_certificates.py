@@ -300,7 +300,10 @@ source += "    ensure result <= 10\n    return a\n"
 seven = WORK / "seven.elisa"
 seven.write_text(source)
 report = json.loads(subprocess.run([str(BINARY), "--json", str(seven)], capture_output=True, text=True, timeout=300).stdout)
-assert report["summary"]["unproven"] == 1, report["summary"]
+# The certificate search gives up past its atom limit; the mocap branch's own in-kernel
+# Fourier-Motzkin tier may still close the goal, but then it must replay without gaps.
+assert report["summary"]["unproven"] == 1 or (
+    report["summary"]["unproven"] == 0 and report["replay"]["gaps"] == 0), report["summary"]
 six = WORK / "six.elisa"
 six.write_text(source.replace("g: i64", "").replace(", )", ")").replace(" + g", "").replace("    requires g >= -100\n    requires g <= 100\n", ""))
 report = json.loads(subprocess.run([str(BINARY), "--json", str(six)], capture_output=True, text=True, timeout=300).stdout)

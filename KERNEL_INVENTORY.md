@@ -161,6 +161,7 @@ summary trace cannot be relabelled as one.
 | `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
 | `collection-push` | `check/collection_push.elisa` | after `v.push(x)` on a mutable darray reference parameter: `v.count == T + 1`, `v[T] == x` and `v[v.count - 1] == x`, the pre-push count T an unsigned 64-bit scalar at most 2^63 - 2 |
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
+| `indexed-write` | `check/indexed_writes.elisa` | `v[i] == x` for the stored cell after an indexed write `v[i] <- x` |
 | `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
 <!-- /inventory:boundary-trace-kinds -->
 
@@ -260,13 +261,16 @@ claims marked "(checked)".
 | `proof_safe_comparison_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
 | `proof_has_ambiguous_integer_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
 | `proof_has_ambiguous_integer_constant_in` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_closed_formula_at_width` | `proof/linear/closed_width_formulas.elisa` | untrusted search (shared) |
+| `proof_closed_formula_width_uniform` | `proof/linear/closed_width_formulas.elisa` | untrusted search (shared) |
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_integer_literal_tag` | `proof/expr/literal_types.elisa` | source adapter |
-| `proof_kernel_budget_note` | `proof/model.elisa` | report model |
-| `proof_kernel_report_append_allowed` | `proof/model.elisa` | report model |
+| `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
+| `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some

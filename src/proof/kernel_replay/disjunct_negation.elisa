@@ -1,0 +1,228 @@
+extend ElisaProofKernelReplay:
+    private:
+        # Mirror of `proof_disjunct_prune`.
+        def proof_kernel_replay_disjunct_prune(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, depth: usize) -> (truth: i64, changed: bool, root: usize):
+            return (0, false, root) if depth >= 32 or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return proof_kernel_replay_disjunct_prune(nodes, children, facts, node.left, depth + 1) if node.kind == "paren"
+            if node.kind == "binary" and node.operator == "or":
+                left_result: (truth: i64, changed: bool, root: usize) = proof_kernel_replay_disjunct_prune(nodes, children, facts, node.left, depth + 1)
+                right_result: (truth: i64, changed: bool, root: usize) = proof_kernel_replay_disjunct_prune(nodes, children, facts, node.right, depth + 1)
+                return (1, true, root) if left_result.truth == 1 or right_result.truth == 1
+                return (right_result.truth, true, right_result.root) if left_result.truth == 2
+                return (left_result.truth, true, left_result.root) if right_result.truth == 2
+                return (0, false, root) if not left_result.changed and not right_result.changed
+                joined: usize = ElisaProofKernelCore::add_node(nodes, "binary", "or", left_result.root, right_result.root, 0, 0, 0, 0, "", "")
+                return (0, joined < nodes.count, joined if joined < nodes.count else root)
+            if node.kind == "bool":
+                return (1 if node.value != 0 else 2, false, root)
+            if node.kind == "unary" and node.operator == "not" and proof_kernel_replay_valid(nodes, node.left) and nodes[node.left].kind == "bool":
+                return (2 if nodes[node.left].value != 0 else 1, false, root)
+            return (0, false, root) if node.kind != "binary"
+            reflexive_true: bool = node.operator == "==" or node.operator == "<=" or node.operator == ">="
+            reflexive_false: bool = node.operator == "!=" or node.operator == "<" or node.operator == ">"
+            return (0, false, root) if not reflexive_true and not reflexive_false
+            return (0, false, root) if not proof_kernel_replay_definitionally_equal(nodes, children, node.left, node.right, 0) or not proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
+            return (1 if reflexive_true else 2, false, root)
+
+        # Mirror of `proof_disjunct_prune_facts`.
+        def proof_kernel_replay_disjunct_prune_facts(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], pruned: mutable darray[usize]&) -> bool:
+            changed: mutable bool = false
+            for fact in facts |fact, nodes, children, facts, pruned, changed|:
+                result: (truth: i64, changed: bool, root: usize) = proof_kernel_replay_disjunct_prune(nodes, children, facts, fact, 0)
+                if result.changed:
+                    changed <- true
+                    pruned.push(result.root) if result.truth != 1
+                else:
+                    pruned.push(fact)
+            return changed
+
+        # Mirror of the producer's `proof_disjunct_negation`: the premise `not A` used to prove
+        # `A or B` from B. A witnessed primitive comparison is replaced by its complement; any
+        # other alternative is wrapped in `not`. Unknown when the node budget is exhausted.
+        def proof_kernel_replay_disjunct_negation(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> (known: bool, root: usize):
+            return (false, 0) if root >= nodes.count
+            stripped: mutable usize = root
+            for step in 0..<8 |step, stripped, nodes|:
+                break if nodes[stripped].kind != "paren" or nodes[stripped].left >= nodes.count
+                stripped <- nodes[stripped].left
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[stripped]
+            if node.kind == "unary" and node.operator == "not" and node.left < nodes.count:
+                return (true, node.left)
+            created: mutable usize = nodes.count
+            if node.kind == "binary" and proof_kernel_replay_negation_supported(node.operator) and proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right):
+                created <- ElisaProofKernelCore::add_node(nodes, "binary", proof_kernel_replay_negation(node.operator), node.left, node.right, 0, 0, 0, 0, "", "")
+            else:
+                created <- ElisaProofKernelCore::add_node(nodes, "unary", "not", root, 0, 0, 0, 0, 0, "", "")
+            return (created < nodes.count, created)
+
+        # Mirror of `proof_disjunct_arithmetic_free`: a comparison of names and integer literals.
+        def proof_kernel_replay_disjunct_arithmetic_free(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> bool:
+            return false if root >= nodes.count or depth >= 8
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return proof_kernel_replay_disjunct_arithmetic_free(nodes, node.left, depth + 1) if node.kind == "paren"
+            return false if node.kind != "binary" or not proof_kernel_replay_negation_supported(node.operator)
+            return proof_kernel_replay_disjunct_atom(nodes, node.left) and proof_kernel_replay_disjunct_atom(nodes, node.right)
+
+        def proof_kernel_replay_disjunct_atom(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            return false if root >= nodes.count
+            return nodes[root].kind == "ident" or nodes[root].kind == "int"
+
+        # Mirror of `proof_disjunct_premises`: the facts, the negation, and -- for a name
+        # equality `x == y` or `x == 5` -- each binder-free linear fact with `x` replaced.
+        def proof_kernel_replay_disjunct_premises(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], negation: usize) -> darray[usize]:
+            premises: mutable darray[usize] = []
+            premises.extend(facts)
+            premises.push(negation)
+            rewrite: (known: bool, name: sview, value: usize) = proof_kernel_replay_disjunct_equality(nodes, negation)
+            return premises if not rewrite.known
+            for fact in facts |premises, nodes, children, rewrite|:
+                if proof_kernel_replay_disjunct_linear(nodes, children, fact):
+                    copy: usize = proof_kernel_replay_disjunct_replace(nodes, fact, rewrite.name, rewrite.value, 0)
+                    if copy < nodes.count:
+                        premises.push(copy)
+                        normal: (known: bool, root: usize) = proof_kernel_replay_disjunct_normalized(nodes, children, copy, facts)
+                        premises.push(normal.root) if normal.known
+            return premises
+
+        # Mirror of `proof_disjunct_normalized`: a signed rewritten copy with cancelled names
+        # folded, as at most two atoms (names or call terms) and one nonnegative literal.
+        def proof_kernel_replay_disjunct_normalized(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize]) -> (known: bool, root: usize):
+            stripped: mutable usize = root
+            for step in 0..<8 |step, stripped, nodes|:
+                break if stripped >= nodes.count or nodes[stripped].kind != "paren"
+                stripped <- nodes[stripped].left
+            return (false, 0) if stripped >= nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[stripped]
+            return (false, 0) if node.kind != "binary" or not proof_kernel_replay_negation_supported(node.operator)
+            return (false, 0) if proof_kernel_replay_unsigned_width_in_expression(nodes, children, stripped, facts, 0) != 0
+            atoms: mutable darray[usize] = []
+            coefficients: mutable darray[i64] = []
+            constant: mutable i64 = 0
+            return (false, 0) if not proof_kernel_replay_disjunct_collect(nodes, node.left, 1, &atoms, &coefficients, &constant, 0)
+            return (false, 0) if not proof_kernel_replay_disjunct_collect(nodes, node.right, -1, &atoms, &coefficients, &constant, 0)
+            positive: mutable usize = nodes.count
+            negative: mutable usize = nodes.count
+            positives: mutable usize = 0
+            negatives: mutable usize = 0
+            for index in 0..<atoms.count |index, atoms, coefficients, positive, negative, positives, negatives, nodes, children|:
+                seen: mutable bool = false
+                for earlier in 0..<index |earlier, index, atoms, seen, nodes, children|:
+                    seen <- true if proof_kernel_replay_definitionally_equal(nodes, children, atoms[earlier], atoms[index], 0)
+                continue if seen
+                total: mutable i64 = 0
+                for later in index..<atoms.count |later, index, atoms, coefficients, total, nodes, children|:
+                    total <- total + coefficients[later] if proof_kernel_replay_definitionally_equal(nodes, children, atoms[later], atoms[index], 0)
+                continue if total == 0
+                if total == 1:
+                    positive <- atoms[index]
+                    positives <- positives + 1
+                elif total == -1:
+                    negative <- atoms[index]
+                    negatives <- negatives + 1
+                else:
+                    positives <- 2
+            return (false, 0) if positives > 1 or negatives > 1
+            left: mutable usize = nodes.count
+            right: mutable usize = nodes.count
+            if positives == 1 and negatives == 1:
+                return (false, 0) if constant != 0
+                left <- positive
+                right <- negative
+            elif positives == 1:
+                return (false, 0) if constant > 0
+                left <- positive
+                right <- ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, 0 - constant, "", "")
+            elif negatives == 1:
+                return (false, 0) if constant < 0
+                left <- ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, constant, "", "")
+                right <- negative
+            else:
+                return (false, 0)
+            return (false, 0) if left >= nodes.count or right >= nodes.count
+            created: usize = ElisaProofKernelCore::add_node(nodes, "binary", node.operator, left, right, 0, 0, 0, 0, "", "")
+            return (created < nodes.count, created)
+
+        # Mirror of `proof_disjunct_rewritten_goal`.
+        def proof_kernel_replay_disjunct_rewritten_goal(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, goal: usize, negation: usize) -> (known: bool, root: usize):
+            rewrite: (known: bool, name: sview, value: usize) = proof_kernel_replay_disjunct_equality(nodes, negation)
+            return (false, goal) if not rewrite.known or not proof_kernel_replay_disjunct_linear(nodes, children, goal)
+            rewritten: usize = proof_kernel_replay_disjunct_replace(nodes, goal, rewrite.name, rewrite.value, 0)
+            return (rewritten < nodes.count, rewritten)
+
+        # Mirror of `proof_disjunct_replace`: call terms are opaque atoms.
+        def proof_kernel_replay_disjunct_replace(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, name: sview, value: usize, depth: usize) -> usize:
+            return nodes.count if root >= nodes.count or depth >= 16
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return value if node.kind == "ident" and node.name == name
+            if node.kind == "paren":
+                inner: usize = proof_kernel_replay_disjunct_replace(nodes, node.left, name, value, depth + 1)
+                return nodes.count if inner >= nodes.count
+                return ElisaProofKernelCore::add_node(nodes, "paren", node.operator, inner, 0, 0, 0, 0, 0, "", "")
+            if node.kind == "binary":
+                left: usize = proof_kernel_replay_disjunct_replace(nodes, node.left, name, value, depth + 1)
+                right: usize = proof_kernel_replay_disjunct_replace(nodes, node.right, name, value, depth + 1)
+                return nodes.count if left >= nodes.count or right >= nodes.count
+                return ElisaProofKernelCore::add_node(nodes, "binary", node.operator, left, right, node.auxiliary, 0, 0, node.value, node.name, node.secondary_name)
+            return root
+
+        def proof_kernel_replay_disjunct_equality(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, name: sview, value: usize):
+            stripped: mutable usize = root
+            for step in 0..<8 |step, stripped, nodes|:
+                break if stripped >= nodes.count or nodes[stripped].kind != "paren"
+                stripped <- nodes[stripped].left
+            return (false, "", 0) if stripped >= nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[stripped]
+            return (false, "", 0) if node.kind != "binary" or node.operator != "==" or node.left >= nodes.count or node.right >= nodes.count
+            subject: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
+            value: ElisaProofKernelCore::ProofKernelNode = nodes[node.right]
+            return (false, "", 0) if subject.kind != "ident" or subject.name == ""
+            return (true, subject.name, node.right) if value.kind == "ident" and value.name != "" and value.name != subject.name
+            return (true, subject.name, node.right) if value.kind == "int" and value.value >= 0
+            return (false, "", 0)
+
+        # Mirror of `proof_disjunct_linear`: a comparison of names, nonnegative literals, `+`,
+        # `-` and `*`.
+        def proof_kernel_replay_disjunct_linear(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize) -> bool:
+            stripped: mutable usize = root
+            for step in 0..<8 |step, stripped, nodes|:
+                break if stripped >= nodes.count or nodes[stripped].kind != "paren"
+                stripped <- nodes[stripped].left
+            return false if stripped >= nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[stripped]
+            return node.kind == "binary" and proof_kernel_replay_negation_supported(node.operator) and proof_kernel_replay_disjunct_term(nodes, children, node.left, 1) and proof_kernel_replay_disjunct_term(nodes, children, node.right, 1)
+
+        def proof_kernel_replay_disjunct_term(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> bool:
+            return false if root >= nodes.count or depth >= 16
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return node.name != "" if node.kind == "ident"
+            return node.value >= 0 if node.kind == "int"
+            return proof_kernel_replay_disjunct_term(nodes, children, node.left, depth + 1) if node.kind == "paren"
+            if node.kind == "call":
+                # Mirror: a call summary term with an identifier callee and positional arguments.
+                return false if node.left >= nodes.count or nodes[node.left].kind != "ident" or (node.auxiliary != 0 and node.auxiliary != node.children_count)
+                return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                for index in 0..<node.children_count |index, node, children, nodes, depth|:
+                    argument: usize = children[node.children_start + index]
+                    return false if argument >= nodes.count or nodes[argument].kind != "call_arg" or nodes[argument].name != ""
+                    return false if not proof_kernel_replay_disjunct_term(nodes, children, nodes[argument].left, depth + 1)
+                return true
+            return false if node.kind != "binary" or (node.operator != "+" and node.operator != "-" and node.operator != "*")
+            return proof_kernel_replay_disjunct_term(nodes, children, node.left, depth + 1) and proof_kernel_replay_disjunct_term(nodes, children, node.right, depth + 1)
+
+        # Mirror of `proof_disjunct_collect`.
+        def proof_kernel_replay_disjunct_collect(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, sign: i64, atoms: mutable darray[usize]&, coefficients: mutable darray[i64]&, constant: mutable i64&, depth: usize) -> bool:
+            return false if root >= nodes.count or depth >= 16 or atoms.count >= 16
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return proof_kernel_replay_disjunct_collect(nodes, node.left, sign, atoms, coefficients, constant, depth + 1) if node.kind == "paren"
+            if node.kind == "int":
+                return false if node.value < 0 or node.value > 1000000000000
+                constant <- constant + (node.value if sign > 0 else 0 - node.value)
+                return constant >= -1000000000000000 and constant <= 1000000000000000
+            if node.kind == "ident" or node.kind == "call":
+                atoms.push(root)
+                coefficients.push(sign)
+                return true
+            return false if node.kind != "binary" or (node.operator != "+" and node.operator != "-")
+            return false if not proof_kernel_replay_disjunct_collect(nodes, node.left, sign, atoms, coefficients, constant, depth + 1)
+            return proof_kernel_replay_disjunct_collect(nodes, node.right, sign if node.operator == "+" else 0 - sign, atoms, coefficients, constant, depth + 1)

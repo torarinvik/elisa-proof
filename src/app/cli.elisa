@@ -1,37 +1,5 @@
 const PROOF_CLI_SCRATCH_SLOT_COUNT: usize = PROOF_JSON_BRANCH_DEPTH_LIMIT
 
-# The compiler AST keeps an integer literal's payload but drops its type suffix. Recover the
-# type of every `u64`/`usize`-suffixed literal from the lexer tokens, keyed by the token's exact
-# line and byte offset (the same offset the parser stores in the literal's `Pos`). Only these
-# two widths can produce a payload whose i64 reading differs from the value the source wrote.
-def proof_int_suffix_is(source: darray[u8]&, start: usize, length: usize, expected: sview) -> bool:
-    return false if length != sview_len(expected)
-    index: mutable usize = 0
-    while index < length:
-        return false if source[start + index] != sview_at(expected, index)
-        index <- index + 1
-    return true
-
-def proof_push_int_type_annotations(annotations: mutable darray[Ast::EnumAnnotation]&, tokens: darray[Token]&, source: darray[u8]&, source_bytes: usize) -> void:
-    for token in tokens |annotations, source, source_bytes|:
-        continue if token.kind != TokenKind.IntLit and token.kind != TokenKind.HexLit
-        continue if not token.flags.has_suffix
-        start: usize = token.start.usize() + token.length.usize()
-        length: usize = token.suffix_length.usize()
-        continue if start > source_bytes or length > source_bytes - start
-        if proof_int_suffix_is(source, start, length, "u64"):
-            annotations.push(Ast::EnumAnnotation{owner: PROOF_INT_TYPE_ANNOTATION_OWNER, name: "u64", line: token.line, offset: token.start})
-        elif proof_int_suffix_is(source, start, length, "usize"):
-            annotations.push(Ast::EnumAnnotation{owner: PROOF_INT_TYPE_ANNOTATION_OWNER, name: "usize", line: token.line, offset: token.start})
-
-# Exit status 0 is the one verdict a caller can act on without reading the output, so every
-# route reserves it for a result that stands on an admissible source. A found goal in a source
-# that failed to parse, import, type-check, or form its propositions exits 1, whatever the
-# route's own status field says about that goal; a missing goal exits 2.
-def proof_route_exit(found: bool, source_admissible: bool) -> i64:
-    return 2 if not found
-    return 0 if source_admissible else 1
-
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
     if argc < 2:
         usage: mutable darray[u8] = []
@@ -230,7 +198,8 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         proof_write(message)
         return 2
     import_failed: mutable bool = false
-    imported_source: mutable darray[u8] = proof_import_source(root_path, &import_failed)
+    source_map: mutable ProofSourceMap = ProofSourceMap{files: [], line_files: [], line_numbers: []}
+    imported_source: mutable darray[u8] = proof_import_source_mapped(root_path, &import_failed, &source_map.files, &source_map.line_files, &source_map.line_numbers)
     # An include graph can validly expand to zero bytes (for example a root that includes an
     # empty file). The importer has still replaced the source in that case; using the original
     # bytes only when the replacement is non-empty would feed the include directive back to the
@@ -271,8 +240,25 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             proof_add_finding(&report, "parse-error", parse_error.line, "", "source could not be parsed; verification was not attempted")
         proof_add_finding(&report, "parse-error", stray_nul_line, "", "source has a NUL byte outside a comment; verification was not attempted") if stray_nul_line > 0
     else:
+        # Refinement refusals are recorded apart and re-added after checking, which starts
+        # from a fresh report.
+        refinement_refusals: mutable ProofReport = proof_empty_report()
+        refined_functions: mutable darray[sview] = []
+        proof_add_refinement_signature_contracts(&file, &refinement_refusals, &refined_functions)
         proof_check_with_semantic_diagnostics(file, &report, &semantic_diagnostics)
+        for refusal in refinement_refusals.findings |report|:
+            report.proof_obligation(false)
+            proof_add_finding(&report, refusal.kind, refusal.line, refusal.name, refusal.message)
         proof_replay_certificates(&report)
+        # The compiler's ensure check does not read signature contracts, so a refinement-typed
+        # parameter's predicate is invisible to it. In a function that has one, an "unproven"
+        # (never "violated") ensure at a return the engine discharged with kernel-replayed goals
+        # and no finding is superseded. Every other function keeps the diagnostic.
+        kept: mutable darray[Semantic::Diagnostic] = []
+        for diagnostic in semantic_diagnostics |kept, refined_functions, report|:
+            superseded: bool = diagnostic.kind == Semantic::DiagnosticKind.EnsureNotProven and diagnostic.detail != "violated" and (any refined_name in refined_functions where refined_name == diagnostic.name) and proof_report_discharges_return(report, diagnostic.name, diagnostic.line)
+            kept.push(diagnostic) if not superseded
+        semantic_diagnostics <- kept
     proof_add_finding(&report, "import-error", 0, "", "one or more Elisa include files could not be read") if import_failed
     # The compiler's strongest built-in semantic mode is shared with proof checking above. The
     # custom proof kernel remains the verdict for proof obligations; this flag only enables
@@ -533,7 +519,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         return tactic_exit_status
     if json_output:
         json: mutable darray[u8] = []
-        proof_push_json_report(&json, report, semantic_diagnostics, semantic_visible, import_failed, semantic_errors, source_bytes, source_fingerprint)
+        proof_push_json_report(&json, report, semantic_diagnostics, semantic_visible, import_failed, semantic_errors, source_bytes, source_fingerprint, source_map)
         proof_write(json)
         return 1 if not proof_report_source_complete(report, import_failed, semantic_errors) else 0
     output: mutable darray[u8] = []
@@ -580,8 +566,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     proof_push_number(&output, report.kernel_nodes.count.u32())
     proof_push(&output, " nodes, format elisa-proof-kernel-v1\n")
     for diagnostic in semantic_diagnostics |output, report|:
-        continue if diagnostic.kind == Semantic::DiagnosticKind.AssertByUnproven
-        continue if diagnostic.kind == Semantic::DiagnosticKind.MutualDecreasesCycle and any verified_name in report.structural_verified_names where verified_name == diagnostic.name
+        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
         proof_push(&output, "  semantic line ")
         proof_push_number(&output, diagnostic.line)
         proof_push(&output, ": ")

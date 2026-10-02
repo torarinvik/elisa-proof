@@ -359,12 +359,37 @@ extend ElisaProof:
                 _:
                     return true
 
+        # A signed name equal to a signed term, `p == v - g`, takes the term's interval when
+        # every subterm of it is itself range-safe under the bounds so far: the machine value
+        # is then the integer one, so the name lies in it. Kernel mirror:
+        # `proof_kernel_replay_close_term_equalities`.
+        def proof_close_term_equalities(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            for fact in facts |fact, facts, bounds|:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        for side in 0..<2 |side, left, right, facts, bounds|:
+                            name_side: Ast::Expr = left if side == 0 else right
+                            term_side: Ast::Expr = right if side == 0 else left
+                            name: sview = proof_ident_name(name_side)
+                            continue if name == "" or proof_ident_name(term_side) != ""
+                            width: i64 = proof_signed_width_in_expression(name_side, facts)
+                            continue if width <= 0 or proof_signed_width_in_expression(term_side, facts) != width
+                            continue if not proof_signed_expression_safe_with_bounds(term_side, facts, bounds, 0)
+                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(term_side, bounds)
+                            continue if not interval.has_lower or not interval.has_upper
+                            continue if interval.lower < ElisaProofKernelCore::proof_kernel_signed_width_min(width) or interval.upper > ElisaProofKernelCore::proof_kernel_signed_width_max(width)
+                            proof_add_lower(bounds, name, interval.lower)
+                            proof_add_upper(bounds, name, interval.upper)
+                    _:
+                        pass
+
         def proof_signed_expression_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             bounds: mutable darray[ProofBound] = []
             for fact in facts |bounds|:
                 proof_collect_bounds(fact, facts, &bounds)
             proof_close_equalities(facts, &bounds)
             proof_signed_add_type_bounds(facts, &bounds)
+            proof_close_term_equalities(facts, &bounds)
             constraints: mutable darray[ProofDifference] = []
             for fact in facts |fact, bounds, constraints|:
                 proof_collect_difference_constraints(fact, bounds, facts, &constraints)
@@ -499,35 +524,6 @@ extend ElisaProof:
                 Ast::Expr.If(condition, then_expression, else_expression, _):
                     return true if proof_has_ambiguous_integer_constant_in(condition, facts, depth + 1)
                     return proof_ambiguous_constant_at_width(then_expression, facts, width, depth + 1) or proof_ambiguous_constant_at_width(else_expression, facts, width, depth + 1)
-                _:
-                    pass
-            return proof_has_ambiguous_integer_constant(expression, depth)
-
-        # The ambiguity guard with typing evidence. A primitive comparison forces both
-        # operands to one type, so when one side is a witnessed signed term of width w and
-        # the other is too or is closed, each constant is read at w and admitted only if its
-        # exact value fits there. Anything else falls back to the untyped guard.
-        def proof_has_ambiguous_integer_constant_in(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
-            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_has_ambiguous_integer_constant_in(inner, facts, depth + 1)
-                Ast::Expr.Unary(TokenKind.Not, operand, _):
-                    return proof_has_ambiguous_integer_constant_in(operand, facts, depth + 1)
-                Ast::Expr.Binary(left, operator, right, _):
-                    if operator == TokenKind.And or operator == TokenKind.Or or operator == TokenKind.FatArrow:
-                        return proof_has_ambiguous_integer_constant_in(left, facts, depth + 1) or proof_has_ambiguous_integer_constant_in(right, facts, depth + 1)
-                    if proof_is_comparison(operator):
-                        left_closed: bool = proof_closed_integer_arithmetic(left, depth + 1)
-                        right_closed: bool = proof_closed_integer_arithmetic(right, depth + 1)
-                        left_width: mutable i64 = 0
-                        left_width <- proof_strict_signed_width(left, facts, depth + 1) if not left_closed
-                        right_width: mutable i64 = 0
-                        right_width <- proof_strict_signed_width(right, facts, depth + 1) if not right_closed
-                        typed: mutable bool = (left_closed or left_width != 0) and (right_closed or right_width != 0) and not (left_closed and right_closed)
-                        typed <- false if left_width != 0 and right_width != 0 and left_width != right_width
-                        width: i64 = left_width if left_width != 0 else right_width
-                        return proof_ambiguous_constant_at_width(left, facts, width, depth + 1) or proof_ambiguous_constant_at_width(right, facts, width, depth + 1) if typed
                 _:
                     pass
             return proof_has_ambiguous_integer_constant(expression, depth)

@@ -1,0 +1,105 @@
+# Refinement types as signature contracts.
+#
+# A parameter declared with a refinement type, directly (`w: i64 where self >= 0`) or through a
+# refinement alias (`type Permille = i64 where self >= 0 and self <= 1000`), means exactly what
+# a `requires` with `self` replaced by the parameter name means: callers must establish it and
+# the body may assume it. A refined return type is the matching `ensure` over `result`. Nested
+# aliases compose: every predicate on the chain is contributed.
+#
+# The predicates are appended to the file's signature-contract side table before semantic and
+# proof checking, so every consumer (body assumptions, call-site obligations, verified summaries,
+# kernel proposition formation and certificate replay) treats them as ordinary contracts and no
+# separate reasoning or kernel rule exists for refinements.
+#
+# Resolution is fail-closed. An ambiguous or too-deep alias chain, a qualified name that could
+# be an alias, or a predicate that mentions a parameter name or `result` (which the substitution
+# would capture) contributes no fact and is reported as unsupported instead.
+extend ElisaProof:
+    public:
+        # `refined` receives the name of every function given a parameter contract here: the
+        # compiler's own ensure check cannot see those assumptions.
+        def proof_add_refinement_signature_contracts(file: mutable Ast::File&, report: mutable ProofReport&, refined: mutable darray[sview]&) -> void:
+            declarations: darray[Ast::Decl] = file.top_decls
+            proof_refinement_contracts_in(file, report, declarations, refined, 0)
+
+    private:
+        def proof_refinement_contracts_in(file: mutable Ast::File&, report: mutable ProofReport&, declarations: darray[Ast::Decl]&, refined: mutable darray[sview]&, depth: usize) -> void:
+            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |file, report, refined, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, return_type, _, _, _, position):
+                        proof_refinement_function_contracts(file, report, name, parameters, return_type, position.line)
+                        refined.push(name) if any parameter in parameters where not proof_refinement_plain(parameter.type_expression, file.top_decls)
+                    Ast::Decl.Module(_, body, _):
+                        proof_refinement_contracts_in(file, report, body, refined, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_refinement_contracts_in(file, report, body, refined, depth + 1)
+                    _:
+                        pass
+
+        def proof_refinement_function_contracts(file: mutable Ast::File&, report: mutable ProofReport&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, line: u32) -> void:
+            for parameter in parameters |file, report, name, parameters, line|:
+                predicates: mutable darray[Ast::Expr] = []
+                resolved: bool = proof_refinement_predicates(parameter.type_expression, file.top_decls, &predicates, 0)
+                if not resolved:
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", line, name, "parameter refinement type alias cannot be resolved uniquely")
+                else:
+                    for predicate in predicates |file, report, name, parameters, line, parameter|:
+                        proof_refinement_push_contract(file, report, name, parameters, line, "requires", predicate, parameter.name)
+            if return_type is declared_return_type:
+                predicates: mutable darray[Ast::Expr] = []
+                resolved: bool = proof_refinement_predicates(declared_return_type, file.top_decls, &predicates, 0)
+                if not resolved:
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", line, name, "return refinement type alias cannot be resolved uniquely")
+                else:
+                    for predicate in predicates |file, report, name, parameters, line|:
+                        proof_refinement_push_contract(file, report, name, parameters, line, "ensure", predicate, "result")
+
+        def proof_refinement_push_contract(file: mutable Ast::File&, report: mutable ProofReport&, name: sview, parameters: darray[Ast::ParamDecl]&, line: u32, kind: sview, predicate: Ast::Expr, subject: sview) -> void:
+            if proof_refinement_predicate_captures(predicate, parameters):
+                report.proof_obligation(false)
+                proof_add_finding(report, "contract-expression-unsupported", line, name, "refinement predicate mentions a name the signature binds")
+                return
+            position: Ast::Pos = Ast::expr_pos(predicate)
+            names: darray[sview] = ["self"]
+            values: darray[Ast::Expr] = [Ast::Expr.Ident(subject, position)]
+            file.signature_contract_lines.push(line)
+            file.signature_contract_kinds.push(kind)
+            file.signature_contract_exprs.push(proof_substitute(predicate, names, values))
+
+        def proof_refinement_plain(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&) -> bool:
+            predicates: mutable darray[Ast::Expr] = []
+            return proof_refinement_predicates(type_expression, declarations, &predicates, 0) and predicates.count == 0
+
+        # A predicate names its subject only through `self`. Any other mention of a parameter or
+        # of `result` would be captured by the signature scope and change the predicate's meaning.
+        def proof_refinement_predicate_captures(predicate: Ast::Expr, parameters: darray[Ast::ParamDecl]&) -> bool:
+            return true if proof_expr_mentions_name(predicate, "result")
+            for parameter in parameters |predicate|:
+                return true if parameter.name != "self" and proof_expr_mentions_name(predicate, parameter.name)
+            return false
+
+        # Collect every predicate on a type's refinement chain, outermost first. Returns false
+        # when the chain cannot be resolved uniquely; the collected predicates are then unused.
+        def proof_refinement_predicates(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, predicates: mutable darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match type_expression:
+                Ast::Expr.Refinement(base, predicate, _):
+                    predicates.push(predicate)
+                    return proof_refinement_predicates(base, declarations, predicates, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_refinement_predicates(inner, declarations, predicates, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return false if alias.count > 1
+                    return proof_refinement_predicates(alias.target, declarations, predicates, depth + 1) if alias.count == 1
+                    return true
+                Ast::Expr.Scope(_, name, _):
+                    # A bare-name search cannot establish a qualified alias's owner.
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return alias.count == 0
+                _:
+                    return true
+            return true
