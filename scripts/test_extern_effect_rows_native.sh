@@ -13,7 +13,7 @@ cleanup_rows() {
     rmdir -- "$ROW_SCRATCH"
 }
 trap cleanup_rows EXIT
-for ROW_FIXTURE in extern_effect_rows_runtime extern_effect_rows_parser_runtime source_call_coverage_parser_runtime effect_source_validation_parser_runtime extern_return_text_runtime numeric_literal_sort_runtime; do
+for ROW_FIXTURE in extern_effect_rows_runtime extern_effect_rows_parser_runtime source_call_coverage_parser_runtime effect_source_validation_parser_runtime extern_return_text_runtime numeric_literal_sort_runtime kernel_typed_literals_runtime; do
     "$ROW_COMPILER" -emit obj -O0 -o "$ROW_SCRATCH/row.o" "$ROW_ROOT/examples/$ROW_FIXTURE.elisa"
     "${CLANG:-clang}" -Wl,-dead_strip -o "$ROW_SCRATCH/probe" "$ROW_SCRATCH/row.o" "$ROW_ROOT/build/profile_hooks.o"
     "$ROW_SCRATCH/probe"
