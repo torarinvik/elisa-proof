@@ -51,7 +51,7 @@ if negative:
     names = {item.get("name") for item in negative["certificates"] if item.get("rule", "").startswith("quantifier")}
     for name in ("off_by_one", "wrong_lower", "other_body", "shadow", "weaken_wrong_way", "weaken_wider", "weaken_grown_missing_point", "element_not_strict"):
         check(name not in names, f"adversarial goal {name} was proven")
-    for name in ("bubble_pass_strict", "congruence_other_index", "congruence_other_container", "negated_not_strict", "negated_wrong_direction"):
+    for name in ("bubble_pass_strict", "congruence_other_index", "congruence_other_container", "negated_not_strict", "negated_wrong_direction", "guard_not_refuted", "guard_mentions_binder", "guard_not_negated"):
         check(any(item.get("name") == name and not item.get("proven") for item in negative["goals"]),
               f"adversarial function {name} has no unproven goal")
     check(negative["replay"]["gaps"] == 0, f"adversarial fixture has replay gaps: {negative['replay']}")

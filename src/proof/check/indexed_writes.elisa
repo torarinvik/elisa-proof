@@ -18,9 +18,10 @@ extend ElisaProof:
         #
         # A fact survives only when every mention of `xs` is `xs.count`, a traced type marker
         # over `xs`, or a read `xs[e]` whose index is proved distinct from `k` -- below or above
-        # it. Inside a range quantifier `forall i in c..<d`, the read must be exactly `xs[i]`
-        # and the whole range must lie on one side of `k`. Any other shape (a call, a read of
-        # another collection that might alias `xs`, a bare `xs`) drops the fact.
+        # it. Inside a range quantifier `forall i in c..<d`, the read must be `xs[i]` or
+        # `xs[i + e]` for a literal e, and the range shifted by e must lie on one side of `k`. Any
+        # other shape (a call, a read of another collection that might alias `xs`, a bare `xs`)
+        # drops the fact.
         def proof_indexed_write_root(target: Ast::Expr) -> (known: bool, root: sview, index: Ast::Expr):
             match target:
                 Ast::Expr.Index(Ast::Expr.Ident(root, _), index, _):
@@ -58,14 +59,15 @@ extend ElisaProof:
                     return false if object != root
                     return false if not proof_write_preserves(index, root, written, binder, low, high, inclusive, facts, annotations, depth + 1)
                     if binder != "" and proof_expr_mentions_name(index, binder):
-                        match index:
-                            Ast::Expr.Ident(name, _):
-                                return false if name != binder
-                            _:
-                                return false
+                        shift: (known: bool, offset: i64) = proof_binder_offset(index, binder)
+                        return false if not shift.known
+                        reach_high: Ast::Expr = high if shift.offset == 0 else Ast::Expr.Binary(high, TokenKind.Plus, Ast::Expr.IntLit(shift.offset, position), position)
+                        reach_low: Ast::Expr = low if shift.offset == 0 else Ast::Expr.Binary(low, TokenKind.Plus, Ast::Expr.IntLit(shift.offset, position), position)
                         below_operator: TokenKind = TokenKind.Lt if inclusive else TokenKind.LtEq
-                        return true if proof_goal(facts, Ast::Expr.Binary(high, below_operator, written, position), annotations)
-                        return proof_goal(facts, Ast::Expr.Binary(written, TokenKind.Lt, low, position), annotations)
+                        return true if proof_goal(facts, Ast::Expr.Binary(reach_high, below_operator, written, position), annotations)
+                        # A shift is non-negative, so a write below the range start is below every read.
+                        return true if proof_goal(facts, Ast::Expr.Binary(written, TokenKind.Lt, low, position), annotations)
+                        return shift.offset != 0 and proof_goal(facts, Ast::Expr.Binary(written, TokenKind.Lt, reach_low, position), annotations)
                     return proof_index_distinct(index, written, facts, annotations, position)
                 Ast::Expr.Block(statements, body, _, _):
                     return false if binder != "" or statements.count != 1
@@ -80,6 +82,28 @@ extend ElisaProof:
                             return false
                 _:
                     return false
+
+        # A read inside the range is `xs[i]` or `xs[i + e]` for a small literal e, reaching the
+        # range's cells shifted by e; any other index over the binder is refused.
+        def proof_binder_offset(index: Ast::Expr, binder: sview) -> (known: bool, offset: i64):
+            match index:
+                Ast::Expr.Ident(name, _):
+                    return (name == binder, 0)
+                Ast::Expr.Paren(inner, _):
+                    return proof_binder_offset(inner, binder)
+                Ast::Expr.Binary(left, TokenKind.Plus, right, _):
+                    base: (known: bool, offset: i64) = proof_binder_offset(left, binder)
+                    return (false, 0) if not base.known or base.offset != 0
+                    return proof_binder_literal_offset(right)
+                _:
+                    return (false, 0)
+
+        def proof_binder_literal_offset(expression: Ast::Expr) -> (known: bool, offset: i64):
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (value >= 0 and value <= 64, value)
+                _:
+                    return (false, 0)
 
         # A conjunction is restored conjunct by conjunct, so `k < xs.count and xs[k] == 3` keeps
         # its bound when the write lands on `xs[k]`. A split conjunct is derived from the whole
