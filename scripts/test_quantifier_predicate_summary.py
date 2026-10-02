@@ -25,7 +25,8 @@ code, positive = run("quantifier_predicate_summary.elisa")
 assert code == 0 and positive["status"] == "proved", positive["findings"]
 assert positive["summary"]["proven"] == positive["summary"]["obligations"] > 0
 for target in ("quantified_summary", "quantified_inclusive_summary", "quantified_default_summary",
-               "quantified_conjunction_summary", "quantified_existential_summary"):
+               "quantified_conjunction_summary", "quantified_existential_summary",
+               "signed_quantified_witness", "signed_quantified_all"):
     goals = [g for g in positive["goals"] if g["name"] == target and g["proven"]]
     assert any(any(origin and origin["kind"] == "function-summary"
                    for origin in goal["fact_origins"]) for goal in goals), target
@@ -33,7 +34,7 @@ for target in ("quantified_summary", "quantified_inclusive_summary", "quantified
 code, negative = run("rejected_quantifier_predicate_summary.elisa")
 assert code == 1 and negative["status"] == "failed", negative["findings"]
 for target in ("rejected_false_summary", "rejected_missing_precondition", "rejected_negative_instance",
-               "rejected_over_budget_summary", "open_signed_quantified_witness"):
+               "rejected_over_budget_summary"):
     assert any(f["name"] == target and f["kind"] == "ensure-unproven"
                for f in negative["findings"]), (target, negative["findings"])
     assert not any(d.get("name") == target and d.get("verified")
