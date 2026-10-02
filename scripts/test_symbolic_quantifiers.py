@@ -60,7 +60,7 @@ if negative:
         check(name not in names, f"adversarial goal {name} was proven")
     for name in ("bubble_pass_strict", "congruence_other_index", "congruence_other_container", "negated_not_strict", "negated_wrong_direction", "guard_not_refuted", "guard_mentions_binder", "guard_not_negated",
                  "instance_outside", "lower_missing_point", "lower_two_short", "narrow_keeps_write", "binding_other_value",
-                 "subscript_unequal", "subscript_other_container"):
+                 "subscript_unequal", "subscript_other_container", "alias_outside", "alias_other_container", "alias_carried_outside"):
         check(any(item.get("name") == name and not item.get("proven") for item in negative["goals"]),
               f"adversarial function {name} has no unproven goal")
     check(not any(origin.get("kind") == "proof-step" and fact.get("operator") in ("<", "<=") and fact["left"].get("name", "").startswith("__elisa_rebind")
@@ -77,6 +77,16 @@ if unsorted:
     for name in ("strict_order", "forgets_suffix", "one_pass_short"):
         check(any(item.get("name") == name and not item.get("proven") for item in unsorted["goals"]), f"rejected sort {name} fully proven")
     check(unsorted["replay"]["gaps"] == 0, f"rejected sort has replay gaps: {unsorted['replay']}")
+
+split = report(ROOT / "examples/partition.elisa")
+check(split is not None and split["summary"]["proven"] == split["summary"]["obligations"] and split["replay"]["gaps"] == 0,
+      f"partition not fully proven and replayed: {split and split['summary']}")
+unsplit = report(ROOT / "examples/rejected_partition.elisa")
+check(unsplit is not None, "rejected partition produced no report")
+if unsplit:
+    for name in ("strict_upper", "forgets_upper", "swap_after_step"):
+        check(any(item.get("name") == name and not item.get("proven") for item in unsplit["goals"]), f"rejected partition {name} fully proven")
+    check(unsplit["replay"]["gaps"] == 0, f"rejected partition has replay gaps: {unsplit['replay']}")
 
 malformed = WORK / "malformed.elisa"
 malformed.write_text("""def not_range(values: darray[i64]&, n: usize) -> usize:
@@ -109,4 +119,4 @@ if failures:
     for failure in failures:
         print("FAIL:", failure)
     raise SystemExit(1)
-print("symbolic quantifiers: cover, extend, empty, fill loop, bubble sort replayed; adversarial, malformed and budget refused")
+print("symbolic quantifiers: cover, extend, empty, fill loop, bubble sort and partition replayed; adversarial, malformed and budget refused")
