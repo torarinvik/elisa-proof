@@ -198,7 +198,45 @@ extend ElisaProof:
                 _:
                     return expression
 
-        def proof_check_logical_contract_calls(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview) -> void:
+        # Only parser-identified integer quantifiers may contain predicate calls.
+        # This is syntax admission, not purity or truth: the verified-function
+        # gate below and independent quantifier replay still check both.
+        def proof_logical_contract_supported(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> bool:
+            return proof_logical_contract_supported_depth(expression, annotations, functions, 0)
+
+        def proof_logical_contract_supported_depth(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            # Preserve the existing call-free collection/block fragment. The
+            # annotation-aware extension is needed only for rejected syntax.
+            return true if proof_expr_supported(expression)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_logical_contract_supported_depth(inner, annotations, functions, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_logical_contract_supported_depth(operand, annotations, functions, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_logical_contract_supported_depth(left, annotations, functions, depth + 1) and proof_logical_contract_supported_depth(right, annotations, functions, depth + 1)
+                Ast::Expr.Block(statements, value, captures, _):
+                    return proof_expr_supported(expression) if proof_quantifier_kind(expression, annotations) == ""
+                    return false if captures.count != 0 or statements.count != 1
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, binder_type, iterable, _):
+                            return false if binder == "" or proof_ident_name(binder_type) != "i64"
+                            # A quantified variable must not shadow a resolved callable.
+                            return false if proof_function_index(functions, binder) < functions.names.count
+                            match iterable:
+                                Ast::Expr.Binary(_, operator, _, _):
+                                    return false if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe and operator != TokenKind.RangeGt
+                                _:
+                                    return false
+                            return false if proof_expr_has_call(iterable) or not proof_expr_supported(iterable)
+                            return proof_logical_contract_supported_depth(value, annotations, functions, depth + 1)
+                        _:
+                            return false
+                _:
+                    return proof_expr_supported(expression)
+
+        def proof_check_logical_contract_calls(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void:
             for statement in body |functions, report, name|:
                 match statement:
                     Ast::Stmt.Contract(kind, expression, position):
@@ -207,7 +245,7 @@ extend ElisaProof:
                             if proof_expr_has_move(expression):
                                 report.proof_obligation(false)
                                 proof_add_finding(report, "contract-resource-unsupported", position.line, name, "logical contracts may not perform ownership transfers")
-                            elif not proof_expr_supported(expression):
+                            elif not proof_logical_contract_supported(expression, annotations, functions):
                                 report.proof_obligation(false)
                                 proof_add_finding(report, "contract-expression-unsupported", position.line, name, "logical contract uses an unsupported expression form")
                             else:
@@ -215,17 +253,17 @@ extend ElisaProof:
                                     report.proof_obligation(false)
                                     proof_add_finding(report, "contract-call-unsupported", position.line, name, "logical contracts may use old(...) or calls to verified total pure functions")
                     Ast::Stmt.If(_, then_body, else_body, _):
-                        proof_check_logical_contract_calls(then_body, functions, report, name)
-                        proof_check_logical_contract_calls(else_body, functions, report, name)
+                        proof_check_logical_contract_calls(then_body, functions, report, name, annotations)
+                        proof_check_logical_contract_calls(else_body, functions, report, name, annotations)
                     Ast::Stmt.While(_, while_body, _):
-                        proof_check_logical_contract_calls(while_body, functions, report, name)
+                        proof_check_logical_contract_calls(while_body, functions, report, name, annotations)
                     Ast::Stmt.For(_, _, _, for_body, _):
-                        proof_check_logical_contract_calls(for_body, functions, report, name)
+                        proof_check_logical_contract_calls(for_body, functions, report, name, annotations)
                     Ast::Stmt.Match(_, arms, _):
                         for arm in arms |functions, report, name|:
-                            proof_check_logical_contract_calls(arm.body, functions, report, name)
+                            proof_check_logical_contract_calls(arm.body, functions, report, name, annotations)
                     Ast::Stmt.Block(_, _, _, block_body, _):
-                        proof_check_logical_contract_calls(block_body, functions, report, name)
+                        proof_check_logical_contract_calls(block_body, functions, report, name, annotations)
                     _:
                         pass
 
