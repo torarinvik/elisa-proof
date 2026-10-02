@@ -28,7 +28,8 @@ assert positive["summary"]["proven"] == positive["summary"]["obligations"] > 0
 code, negative = run("rejected_finite_predicate_context.elisa")
 assert code == 1 and negative["status"] == "failed", negative["findings"]
 for name in ("rejected_future_predicate_context", "rejected_other_array_predicate_context",
-             "rejected_existential_predicate_context"):
+             "rejected_existential_predicate_context", "rejected_exclusive_upper_predicate_context",
+             "rejected_below_lower_predicate_context"):
     assert any(f["name"] == name and f["kind"] == "ensure-unproven"
                for f in negative["findings"]), negative["findings"]
     assert not any(d.get("name") == name and d.get("verified")
