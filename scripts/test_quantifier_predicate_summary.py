@@ -26,15 +26,22 @@ assert code == 0 and positive["status"] == "proved", positive["findings"]
 assert positive["summary"]["proven"] == positive["summary"]["obligations"] > 0
 for target in ("quantified_summary", "quantified_inclusive_summary", "quantified_default_summary",
                "quantified_conjunction_summary", "quantified_existential_summary",
-               "signed_quantified_witness", "signed_quantified_all"):
+               "signed_quantified_witness", "signed_quantified_all",
+               "quantified_mixed_disjunction_summary", "quantified_right_required_summary"):
     goals = [g for g in positive["goals"] if g["name"] == target and g["proven"]]
     assert any(any(origin and origin["kind"] == "function-summary"
                    for origin in goal["fact_origins"]) for goal in goals), target
 
+left_goals = [g for g in positive["goals"]
+              if g["name"] == "quantified_left_discharged_summary" and g["proven"]]
+assert left_goals
+assert all(not any(origin and origin["kind"] == "function-summary"
+                   for origin in goal["fact_origins"]) for goal in left_goals), left_goals
+
 code, negative = run("rejected_quantifier_predicate_summary.elisa")
 assert code == 1 and negative["status"] == "failed", negative["findings"]
 for target in ("rejected_false_summary", "rejected_missing_precondition", "rejected_negative_instance",
-               "rejected_over_budget_summary"):
+               "rejected_over_budget_summary", "rejected_false_disjunction_summary"):
     assert any(f["name"] == target and f["kind"] == "ensure-unproven"
                for f in negative["findings"]), (target, negative["findings"])
     assert not any(d.get("name") == target and d.get("verified")
