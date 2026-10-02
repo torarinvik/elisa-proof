@@ -1,5 +1,22 @@
 extend ElisaProof:
     private:
+        # OR introduction from an already known subtree needs no case search.
+        # The caller checks source operator dispatch for the entire goal first.
+        def proof_disjunction_direct_branch(goal: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            for fact in facts:
+                return true if proof_fact_contains(fact, goal)
+            match proof_strip_parens(goal):
+                Ast::Expr.BoolLit(value, _):
+                    return value
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_disjunction_direct_branch(left, facts, depth + 1) or proof_disjunction_direct_branch(right, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_comparison_from_equality_literal(left, operator, right, facts) if proof_is_comparison(operator)
+                _:
+                    pass
+            return false
+
         # Eliminate an explicitly refuted alternative without branching. Ordering
         # complements require integer witnesses; never assume float totality.
         def proof_disjunct_refuted(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
@@ -11,9 +28,24 @@ extend ElisaProof:
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
                     return proof_disjunct_refuted(left, facts, depth + 1) and proof_disjunct_refuted(right, facts, depth + 1)
                 Ast::Expr.Binary(left, operator, right, position):
-                    return false if not proof_disjunction_denial_fragment(expression, facts, 0)
                     complement: TokenKind = proof_comparison_negation(operator)
                     return false if complement == TokenKind.Eof
+                    # A literal equality fixes this exact primitive term. This
+                    # also handles witnessed pure call results, without treating
+                    # arbitrary calls or wrapping arithmetic as integer bounds.
+                    return true if proof_comparison_from_equality_literal(left, complement, right, facts)
+                    equality: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq
+                    primitive: bool = proof_primitive_comparison(left, right, facts)
+                    integer_order: bool = not equality and primitive and proof_disjunction_denial_integer_term(left, facts, 0) and proof_disjunction_denial_integer_term(right, facts, 0)
+                    for fact in facts |left, right, complement, equality, primitive, integer_order, facts|:
+                        match proof_strip_parens(fact):
+                            Ast::Expr.Binary(a, fact_operator, b, _):
+                                continue if fact_operator != complement or not primitive or not proof_primitive_comparison(a, b, facts)
+                                integers: bool = integer_order and proof_disjunction_denial_integer_term(a, facts, 0) and proof_disjunction_denial_integer_term(b, facts, 0)
+                                return true if (equality or integers) and proof_disjunct_terms_equivalent(left, a, facts) and proof_disjunct_terms_equivalent(right, b, facts)
+                            _:
+                                pass
+                    return false if not proof_disjunction_denial_fragment(expression, facts, 0)
                     denied: Ast::Expr = Ast::Expr.Binary(left, complement, right, position)
                     for fact in facts:
                         return true if proof_fact_contains(fact, denied)

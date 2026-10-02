@@ -30,12 +30,13 @@ assert not report["trust"]["trusted_assumptions"]
 assert summary["obligations"] == 74
 if args.expect_open:
     assert result.returncode == 1 and report["status"] == "failed"
-    assert summary["proven"] == 69 and summary["failed"] == 5
-    assert len(report["findings"]) == 5
+    assert summary["proven"] == 73 and summary["failed"] == 1
+    assert len(report["findings"]) == 1
+    assert report["findings"][0]["goal_id"] == 73
     assert all(f["name"] == "capture_composition"
                and f["kind"] == "ensure-unproven" and f["status"] == "timeout"
                for f in report["findings"])
-    print("known open capture composition reproduced: 69/74 replayed, five timeouts")
+    print("known open capture composition reproduced: 73/74 replayed, one timeout")
 else:
     assert result.returncode == 0 and report["status"] == "proved", report["findings"]
     assert summary["proven"] == 74 and summary["failed"] == 0
