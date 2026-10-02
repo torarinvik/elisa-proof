@@ -5,6 +5,7 @@ extend ElisaProof:
         const PROOF_FRAME_PLACE_SECOND_FIELD_DEPTH: usize = 2
         const PROOF_FRAME_PLACE_MAX_DEPTH: usize = 3
         const PROOF_PURE_CALL_REWRITE_DEPTH_LIMIT: usize = 8
+        const PROOF_TERM_OCCURS_DEPTH_LIMIT: usize = 32
 
         # Elisa represents numeric conversions as zero-argument method-shaped calls such as
         # `status.usize()`. The compiler reserves these primitive selectors, so unlike an
@@ -184,6 +185,28 @@ extend ElisaProof:
                         pass
             return (false, Ast::Expr.Invalid)
 
+        def proof_term_occurs_in(term: Ast::Expr, expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth > PROOF_TERM_OCCURS_DEPTH_LIMIT
+            return true if proof_expr_equal(term, expression)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_term_occurs_in(term, inner, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_term_occurs_in(term, operand, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_term_occurs_in(term, left, depth + 1) or proof_term_occurs_in(term, right, depth + 1)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |term, depth|:
+                        return true if proof_term_occurs_in(term, argument, depth + 1)
+                    return false
+                _:
+                    return false
+
+        def proof_term_occurs_in_facts(term: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts |term|:
+                return true if proof_term_occurs_in(term, fact, 0)
+            return false
+
         def proof_rewrite_pure_call_summaries(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, depth: usize) -> Ast::Expr:
             return expression if depth >= PROOF_PURE_CALL_REWRITE_DEPTH_LIMIT
             direct: (known: bool, value: Ast::Expr) = proof_pure_call_summary_replacement(expression, facts, functions)
@@ -211,6 +234,12 @@ extend ElisaProof:
                     rewritten_call: Ast::Expr = Ast::Expr.Call(proof_rewrite_pure_call_summaries(callee, facts, functions, depth + 1), rewritten_arguments, argument_names, position)
                     rewritten_direct: (known: bool, value: Ast::Expr) = proof_pure_call_summary_replacement(rewritten_call, facts, functions)
                     return proof_rewrite_pure_call_summaries(rewritten_direct.value, facts, functions, depth + 1) if rewritten_direct.known and not proof_expr_equal(rewritten_direct.value, rewritten_call)
+                    # Rewriting only the arguments of a call that has no replacement of its own
+                    # would rename a term the facts already describe: `land(advance(t, d), e)`
+                    # becomes `land(t + d, e)`, and the summaries of `land` no longer match.
+                    # Keep the written call when the facts mention it and not the rewritten one.
+                    if not proof_expr_equal(rewritten_call, expression) and proof_term_occurs_in_facts(expression, facts) and not proof_term_occurs_in_facts(rewritten_call, facts):
+                        return expression
                     return rewritten_call
                 _:
                     return expression
