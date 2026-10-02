@@ -18,4 +18,4 @@ for ROW_FIXTURE in extern_effect_rows_runtime extern_effect_rows_parser_runtime;
     "${CLANG:-clang}" -Wl,-dead_strip -o "$ROW_SCRATCH/probe" "$ROW_SCRATCH/row.o" "$ROW_ROOT/build/profile_hooks.o"
     "$ROW_SCRATCH/probe"
 done
-printf 'strict native extern-row decoder, parser correspondence and signature metadata controls pass; proof-admission consumption remains pending\n'
+printf 'strict native extern-row decoder, parser/signature and independent reconstruction controls pass; source-call binding and proof-admission consumption remain pending\n'
