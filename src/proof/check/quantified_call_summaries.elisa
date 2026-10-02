@@ -1,0 +1,67 @@
+extend ElisaProof:
+    private:
+        const PROOF_QUANTIFIED_CALL_INSTANCE_LIMIT: i64 = 1024
+        const PROOF_QUANTIFIED_CALL_WORK_LIMIT: usize = 8192
+
+        # Expand bounded predicate calls only to ordinary checked summary facts.
+        # Each fact retains callee identity, simultaneous argument substitution,
+        # precondition goal IDs and ensure index for independent source replay.
+        # No quantified fact is assumed and the original goal stays unchanged.
+        def proof_add_quantified_call_summaries(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, report: mutable ProofReport&, owner: sview) -> void:
+            budget: mutable usize = PROOF_QUANTIFIED_CALL_WORK_LIMIT
+            proof_add_quantified_call_summaries_depth(expression, facts, functions, annotations, report, owner, false, 0, &budget)
+
+        def proof_add_quantified_call_summaries_depth(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, report: mutable ProofReport&, owner: sview, instantiated: bool, depth: usize, budget: mutable usize&) -> void:
+            return if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or budget == 0
+            budget <- budget - 1
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_add_quantified_call_summaries_depth(inner, facts, functions, annotations, report, owner, instantiated, depth + 1, budget)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_add_quantified_call_summaries_depth(operand, facts, functions, annotations, report, owner, instantiated, depth + 1, budget)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_add_quantified_call_summaries_depth(left, facts, functions, annotations, report, owner, instantiated, depth + 1, budget)
+                    proof_add_quantified_call_summaries_depth(right, facts, functions, annotations, report, owner, instantiated, depth + 1, budget)
+                Ast::Expr.Block(statements, predicate, captures, _):
+                    return if proof_quantifier_kind(expression, annotations) == "" or captures.count != 0 or statements.count != 1
+                    return if not proof_logical_contract_supported(expression, annotations, functions) or not proof_contract_calls_are_pure(expression, functions)
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, _, Ast::Expr.Binary(low, operator, high, _), _):
+                            return if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe
+                            lower: (known: bool, value: i64) = proof_constant_int(low)
+                            upper: (known: bool, value: i64) = proof_constant_int(high)
+                            return if not lower.known or not upper.known
+                            width: mutable (known: bool, value: i64) = proof_sub_safe(upper.value, lower.value)
+                            return if not width.known
+                            width <- proof_add_safe(width.value, 1) if operator == TokenKind.RangeLe
+                            return if not width.known or width.value <= 0 or width.value > PROOF_QUANTIFIED_CALL_INSTANCE_LIMIT
+                            binder_names: mutable darray[sview] = [binder]
+                            quantifier_kind: sview = proof_quantifier_kind(expression, annotations)
+                            for offset in 0..<width.value |offset, lower, predicate, binder_names, facts, functions, annotations, report, owner, depth, budget, quantifier_kind|:
+                                return if budget == 0
+                                candidate: (known: bool, value: i64) = proof_add_safe(lower.value, offset)
+                                return if not candidate.known
+                                binder_values: mutable darray[Ast::Expr] = [Ast::Expr.IntLit(candidate.value, Ast::pos_at_line(0))]
+                                instance: Ast::Expr = proof_substitute(predicate, &binder_names, &binder_values)
+                                return if proof_expr_is_invalid(instance)
+                                proof_add_quantified_call_summaries_depth(instance, facts, functions, annotations, report, owner, true, depth + 1, budget)
+                                # Match the kernel's lazy finite instantiation: a
+                                # forall cannot close while this instance is open;
+                                # an exists already has enough facts at a witness.
+                                # This is only a search cutoff. The unchanged full
+                                # goal still needs an independently replayed proof.
+                                probe_exhausted: mutable bool = false
+                                instance_proven: bool = proof_goal_with_operator_mask(facts, instance, annotations, report.source_primitive_operator_mask, &probe_exhausted)
+                                return if quantifier_kind == "forall" and not instance_proven
+                                return if quantifier_kind == "exists" and instance_proven
+                        _:
+                            pass
+                Ast::Expr.Call(_, arguments, _, position):
+                    return if not instantiated or not proof_contract_calls_are_pure(expression, functions)
+                    for argument in arguments |facts, functions, annotations, report, owner, depth, budget|:
+                        proof_add_quantified_call_summaries_depth(argument, facts, functions, annotations, report, owner, true, depth + 1, budget)
+                    before: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                    resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(expression, &before, functions, annotations, facts, report, owner)
+                    proof_add_pure_call_witnesses(expression, facts, functions, report, position.line, owner, 0) if resolved.known
+                _:
+                    pass
