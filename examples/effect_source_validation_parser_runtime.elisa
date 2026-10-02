@@ -1,0 +1,75 @@
+# Certificates that pass set containment must still match the actual parsed source.
+include "../build/snapshot/Elisa-compiler/elisacore_std/elisacore_runtime.elisa"
+include "../build/snapshot/Elisa-compiler/src/parser/parser.elisa"
+include "../src/proof/kernel_core.elisa"
+include "../src/proof/kernel_replay.elisa"
+using Ast
+using ElisaProofKernelCore
+module ElisaProof:
+    public:
+        const EFFECT_SOURCE_TEST_MARKER: u8 = 0
+include "../src/proof/replay/extern_effect_metadata.elisa"
+include "../src/proof/replay/source_call_coverage.elisa"
+include "../src/proof/replay/effect_source_validation.elisa"
+
+def source_effect_row(nodes: mutable darray[ProofKernelNode]&, children: mutable darray[usize]&, names: darray[sview]&) -> usize can[Memory.Allocate, Abort.Panic]:
+    roots: mutable darray[usize] = []
+    for name in names |nodes, roots|:
+        roots.push(add_node(nodes, "effect", "", 0, 0, 0, 0, 0, 0, name, ""))
+    start: usize = children.count
+    children.extend(&roots)
+    return add_node(nodes, "effect-row", "", 0, 0, 0, start, roots.count, 0, "", "")
+
+extend ElisaProof:
+    public:
+        def test_effect_source_control(source: u8&, control: u8) -> bool can[Memory.Allocate, Abort.Panic]:
+            tokens: darray[Token] = frontend_tokenize(source, source)
+            file: Ast::File = frontend_parser_parse_file(source, tokens)
+            return false if file.errors.count != 0
+            nodes: mutable darray[ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            declared: mutable darray[sview] = ["Unsafe.RawExtern", "Abort.Panic", "Memory.Allocate"]
+            native: mutable darray[sview] = ["Unsafe.RawExtern", "Abort.Panic"]
+            ordinary: mutable darray[sview] = ["Memory.Allocate"]
+            declared.push("Console.Write") if control == 4
+            if control == 2:
+                native.resize(1)
+            if control == 3:
+                native[1] <- "Memory.Allocate"
+            if control == 9:
+                native[0] <- "Abort.Panic"
+                native[1] <- "Unsafe.RawExtern"
+            ordinary.clear() if control == 10
+            caller_row: usize = source_effect_row(&nodes, &children, &declared)
+            native_row: usize = source_effect_row(&nodes, &children, &native)
+            ordinary_row: usize = source_effect_row(&nodes, &children, &ordinary)
+            native_name: sview = "unknown" if control == 8 else "audit"
+            first: usize = add_node(&nodes, "effect-call", "", native_row, 0, 0, 0, 0, 0, native_name, "")
+            second: usize = add_node(&nodes, "effect-call", "", ordinary_row, 0, 0, 0, 0, 0, "other", "")
+            calls: mutable darray[usize] = [first]
+            calls.push(second) if control != 1
+            calls.push(first) if control == 5
+            start: usize = children.count
+            children.extend(&calls)
+            owner: sview = "other" if control == 6 else "run"
+            root: usize = add_node(&nodes, "effect-containment", "", caller_row, 0, 0, start, calls.count, 0, owner, "")
+            # These forgeries all satisfy the old source-neutral containment rule.
+            return false if not ElisaProofKernelReplay::proof_kernel_replay_effect_report(&nodes, &children, [], root)
+            annotations: mutable darray[Ast::EnumAnnotation] = []
+            for annotation in file.enum_annotations |annotations, control|:
+                continue if control == 12 and annotation.name == "__extern_effect_row_complete"
+                annotations.push(annotation)
+            line: u32 = 5 if control == 7 else 4
+            valid: bool = proof_replay_effect_source_valid(&file.top_decls, &annotations, &file.extern_params, &nodes, &children, root, "run", line)
+            return valid == (control == 0 or control == 9)
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    source: u8& = "extern audit(value: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\ndef other(value: u8) -> u8 can[Memory.Allocate]:\n    return value\ndef run(value: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic, Memory.Allocate]:\n    first: u8 = audit(value)\n    second: u8 = other(value)\n    return audit(second)\n"
+    for control in 0..<11 |control, source|:
+        return control.i64() + 1 if not ElisaProof::test_effect_source_control(source, control.u8())
+    return 12 if not ElisaProof::test_effect_source_control(source, 12)
+    collision: u8& = "extern audit(value: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\ndef other(value: u8) -> u8 can[Memory.Allocate]:\n    return value\ndef run(value: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic, Memory.Allocate]:\n    first: u8 = audit(value)\n    second: u8 = other(value)\n    return audit(second)\nconst audit: u8 = 0\n"
+    return 13 if not ElisaProof::test_effect_source_control(collision, 11)
+    shadow: u8& = "extern audit(value: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic]\ndef other(value: u8) -> u8 can[Memory.Allocate]:\n    return value\ndef run(audit: u8) -> u8 can[Unsafe.RawExtern, Abort.Panic, Memory.Allocate]:\n    first: u8 = audit(0)\n    second: u8 = other(first)\n    return audit(second)\n"
+    return 14 if not ElisaProof::test_effect_source_control(shadow, 11)
+    return 0

@@ -1,0 +1,113 @@
+# Source binding for the declared-row containment rule. The source-neutral kernel
+# still checks set containment; this layer independently checks what those sets
+# and executable edges describe. It never supplies a native body/resource summary.
+extend ElisaProof:
+    private:
+        def proof_replay_effect_member_concrete(name: sview) -> bool:
+            for offset in 0..<sview_len(name) |offset, name|:
+                return true if sview_at(name, offset) == 46
+            return false
+
+        def proof_replay_effect_named_declaration(declarations: darray[Ast::Decl]&, wanted: sview, depth: usize) -> (matches: usize, declaration: Ast::Decl):
+            return (2, Ast::Decl.Invalid) if depth >= 96 or wanted == ""
+            matches: mutable usize = 0
+            selected: mutable Ast::Decl = Ast::Decl.Invalid
+            for declaration in declarations |wanted, depth, matches, selected|:
+                name: mutable sview = ""
+                match declaration:
+                    Ast::Decl.Func(found, _, _, _, _, _, _):
+                        name <- found
+                    Ast::Decl.Extern(found, _, _, _, _, _, _, _):
+                        name <- found
+                    Ast::Decl.Const(found, _, _, _, _):
+                        name <- found
+                    Ast::Decl.Struct(found, _, _, _, _, _, _):
+                        name <- found
+                    Ast::Decl.Enum(found, _, _, _, _):
+                        name <- found
+                    Ast::Decl.Alias(found, _, _):
+                        name <- found
+                    Ast::Decl.Law(found, _, _):
+                        name <- found
+                    Ast::Decl.Import(found, _):
+                        name <- found
+                    Ast::Decl.Module(found, body, _):
+                        name <- found
+                        nested = proof_replay_effect_named_declaration(&body, wanted, depth + 1)
+                        matches <- matches + nested.matches
+                        selected <- nested.declaration if nested.matches != 0
+                    Ast::Decl.Scoped(body, _):
+                        nested = proof_replay_effect_named_declaration(&body, wanted, depth + 1)
+                        matches <- matches + nested.matches
+                        selected <- nested.declaration if nested.matches != 0
+                    Ast::Decl.Invalid:
+                        return (2, Ast::Decl.Invalid)
+                if name == wanted:
+                    matches <- matches + 1
+                    selected <- declaration
+                return (2, Ast::Decl.Invalid) if matches > 1
+            return (matches, selected)
+
+        def proof_replay_effect_kernel_row(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, members: mutable darray[sview]&) -> bool:
+            members.clear()
+            return false if root >= nodes.count or nodes[root].kind != "effect-row"
+            row: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if row.children_start > children.count or row.children_count > children.count - row.children_start
+            for offset in 0..<row.children_count |offset, row, children, nodes, members|:
+                member: usize = children[row.children_start + offset]
+                return false if member >= nodes.count or nodes[member].kind != "effect" or nodes[member].name == ""
+                name: sview = nodes[member].name
+                return false if not proof_replay_effect_member_concrete(name)
+                return false if any previous in members where previous == name
+                members.push(name)
+            return true
+
+        def proof_replay_effect_function_row_matches(source: darray[sview]&, members: darray[sview]&) -> bool:
+            unique: mutable darray[sview] = []
+            for name in source |unique|:
+                return false if name == "" or not proof_replay_effect_member_concrete(name)
+                unique.push(name) if not (any previous in unique where previous == name)
+            return false if unique.count != members.count
+            for member in members |unique|:
+                return false if not (any declared in unique where declared == member)
+            return true
+
+        def proof_replay_effect_callee_source_matches(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, parameters: darray[Ast::ExternParam]&, name: sview, members: darray[sview]&) -> bool:
+            source = proof_replay_effect_named_declaration(declarations, name, 0)
+            return false if source.matches != 1
+            return false if any annotation in annotations where annotation.owner == "__lemma" and annotation.name == name
+            match source.declaration:
+                Ast::Decl.Func(_, _, _, _, effects, _, _):
+                    return proof_replay_effect_function_row_matches(&effects, members)
+                Ast::Decl.Extern(_, first, arity, _, callable, _, _, position):
+                    start: usize = first.usize()
+                    count: usize = arity.usize()
+                    return false if not callable or start > parameters.count or count > parameters.count - start
+                    return proof_replay_extern_effect_row_matches(annotations, name, position.line, members)
+                _:
+                    return false
+
+        def proof_replay_effect_source_valid(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, parameters: darray[Ast::ExternParam]&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, owner: sview, line: u32) -> bool:
+            return false if root >= nodes.count or nodes[root].kind != "effect-containment" or nodes[root].name != owner
+            source = proof_replay_effect_named_declaration(declarations, owner, 0)
+            return false if source.matches != 1
+            return false if any annotation in annotations where annotation.owner == "__lemma" and annotation.name == owner
+            containment: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if containment.children_start > children.count or containment.children_count > children.count - containment.children_start
+            declared: mutable darray[sview] = []
+            return false if not proof_replay_effect_kernel_row(nodes, children, containment.left, &declared)
+            expected_calls: mutable darray[sview] = []
+            for offset in 0..<containment.children_count |offset, containment, nodes, children, declarations, annotations, parameters, expected_calls|:
+                call: usize = children[containment.children_start + offset]
+                return false if call >= nodes.count or nodes[call].kind != "effect-call"
+                name: sview = nodes[call].name
+                return false if name == "" or any previous in expected_calls where previous == name
+                members: mutable darray[sview] = []
+                return false if not proof_replay_effect_kernel_row(nodes, children, nodes[call].left, &members)
+                return false if not proof_replay_effect_callee_source_matches(declarations, annotations, parameters, name, &members)
+                expected_calls.push(name)
+            match source.declaration:
+                Ast::Decl.Func(_, source_parameters, _, body, effects, _, position):
+                    return position.line == line and proof_replay_effect_function_row_matches(&effects, &declared) and proof_replay_source_call_set_matches(&source_parameters, &body, &expected_calls)
+                _:
+                    return false

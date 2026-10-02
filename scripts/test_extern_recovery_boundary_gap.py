@@ -1,4 +1,4 @@
-"""Lock down the OPEN extern boundary baseline; not feature admission."""
+"""Extern effects replay; primitive-return and resource boundaries remain OPEN."""
 import json
 import os
 from pathlib import Path
@@ -20,9 +20,13 @@ for name in ("rejected_unknown_extern_result_is_zero", "rejected_null_context_su
 # Keep unproved retention/resource properties distinct from the type/effect-row
 # importer defects; resolving one must not silently admit the other.
 expected_open = {
-    "bounded_scalar_extern_result": {"effect-call-opaque", "ensure-unproven"},
-    "nullable_context_after_call": {"effect-call-opaque", "borrow-call-opaque", "ensure-unproven"},
+    "bounded_scalar_extern_result": {"ensure-unproven"},
+    "nullable_context_after_call": {"borrow-call-opaque", "ensure-unproven"},
 }
 for name, kinds in expected_open.items():
     assert {f["kind"] for f in report["findings"] if f["name"] == name} == kinds
-print("OPEN extern baseline reproduced; unknown return, nullable and retained-resource claims remain unadmitted")
+effect_goals = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"
+                and g["proven"] and g["replay_status"] == "replayed"}
+assert set(expected_open) | {"rejected_unknown_extern_result_is_zero", "rejected_null_context_succeeds"} <= effect_goals
+assert not any(f["kind"] == "effect-call-opaque" for f in report["findings"])
+print("Extern effects independently replay; unknown return, nullable and retained-resource claims remain unadmitted")

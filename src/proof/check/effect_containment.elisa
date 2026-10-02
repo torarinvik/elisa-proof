@@ -4,48 +4,81 @@ extend ElisaProof:
             caller: usize = proof_function_index(functions, function_name)
             return if caller >= functions.names.count
             return if caller >= functions.effects_declared.count or not functions.effects_declared[caller]
+            return if caller >= functions.effect_starts.count or caller >= functions.effect_counts.count
             declared_start: usize = functions.effect_starts[caller]
             declared_count: usize = functions.effect_counts[caller]
             return if declared_start > functions.all_effects.count or declared_count > functions.all_effects.count - declared_start
             declared: mutable darray[sview] = []
             for offset in 0..<declared_count |offset, functions, declared, declared_start|:
-                declared.push(functions.all_effects[declared_start + offset])
+                effect: sview = functions.all_effects[declared_start + offset]
+                declared.push(effect) if not (any existing in declared where existing == effect)
             if proof_effect_row_is_abstract(declared):
                 proof_add_finding(report, "effect-row-abstract", line, function_name, "an abstract effect row has no comparable members")
                 return
+            return if caller >= functions.call_starts.count or caller >= functions.call_counts.count
             call_start: usize = functions.call_starts[caller]
             call_count: usize = functions.call_counts[caller]
             return if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start
-            callee_indexes: mutable darray[usize] = []
-            for offset in 0..<call_count |offset, functions, call_start, callee_indexes, report, function_name, line|:
-                callee_name: sview = functions.all_calls[call_start + offset]
-                callee: usize = proof_function_index(functions, callee_name)
-                if callee >= functions.names.count:
-                    proof_add_finding(report, "effect-call-opaque", line, function_name, "a called function has no imported effect row")
-                    callee_indexes.clear()
-                    callee_indexes.push(functions.names.count)
+            callee_names: mutable darray[sview] = []
+            callee_starts: mutable darray[usize] = []
+            callee_counts: mutable darray[usize] = []
+            callee_effects: mutable darray[sview] = []
+            for offset in 0..<call_count |offset, functions, call_start, callee_names, callee_starts, callee_counts, callee_effects, report, function_name, line, declared|:
+                name: sview = functions.all_calls[call_start + offset]
+                continue if any existing in callee_names where existing == name
+                row: mutable darray[sview] = []
+                callee: usize = proof_function_index(functions, name)
+                if callee < functions.names.count:
+                    if callee >= functions.effect_starts.count or callee >= functions.effect_counts.count:
+                        proof_add_finding(report, "effect-call-opaque", line, function_name, "a called function has incomplete effect metadata")
+                        return
+                    start: usize = functions.effect_starts[callee]
+                    count: usize = functions.effect_counts[callee]
+                    if start > functions.all_effects.count or count > functions.all_effects.count - start:
+                        proof_add_finding(report, "effect-call-opaque", line, function_name, "a called function has an invalid effect metadata range")
+                        return
+                    for member in 0..<count |member, start, functions, row|:
+                        effect: sview = functions.all_effects[start + member]
+                        row.push(effect) if not (any existing in row where existing == effect)
+                else:
+                    imported: usize = proof_extern_signature_index(&functions.extern_signatures, name)
+                    if imported >= functions.extern_signatures.count:
+                        proof_add_finding(report, "effect-call-opaque", line, function_name, "a called function has no unambiguous imported effect row")
+                        return
+                    signature: ProofExternSignature = functions.extern_signatures[imported]
+                    identity = proof_replay_extern_declaration_identity(&report.source_declarations, &report.source_extern_parameters, &report.source_annotations, &signature, 0)
+                    if not signature.callable or not signature.parameters_valid or not signature.effects_complete or not identity.valid:
+                        proof_add_finding(report, "effect-call-opaque", line, function_name, "an extern effect row lacks complete source-bound declaration metadata")
+                        return
+                    row.extend(&signature.effects)
+                if proof_effect_row_is_abstract(&row):
+                    proof_add_finding(report, "effect-row-abstract", line, function_name, "a called function has an abstract effect row")
                     return
-                already: bool = any existing in callee_indexes where existing == callee
-                callee_indexes.push(callee) if not already
-            # Compare the rows before emitting anything: a certificate is only produced for a
-            # containment that holds, so a failing function has a diagnostic and no evidence.
-                for callee in callee_indexes |callee, functions, declared, report, function_name, line|:
-                    continue if callee >= functions.effect_counts.count
-                callee_start: usize = functions.effect_starts[callee]
-                callee_count: usize = functions.effect_counts[callee]
-                continue if callee_start > functions.all_effects.count or callee_count > functions.all_effects.count - callee_start
-                for offset in 0..<callee_count |offset, functions, declared, callee_start, report, function_name, line|:
-                    effect: sview = functions.all_effects[callee_start + offset]
-                    covered: bool = any member in declared where member == effect
-                    if not covered:
+                # An extern row grants no return fact, purity or no-retention guarantee.
+                if not proof_replay_effect_callee_source_matches(&report.source_declarations, &report.source_annotations, &report.source_extern_parameters, name, &row):
+                    proof_add_finding(report, "effect-call-opaque", line, function_name, "a called effect row does not match one executable source declaration")
+                    return
+                for effect in row |effect, declared, report, function_name, line|:
+                    if not (any member in declared where member == effect):
                         proof_add_finding(report, "effect-row-exceeded", line, function_name, "a called function declares an effect outside this function's row")
                         return
-            callee_effect_nodes: mutable usize = 0
-            for callee in callee_indexes |callee, functions, callee_effect_nodes|:
-                continue if callee >= functions.effect_counts.count
-                callee_effect_nodes <- callee_effect_nodes + functions.effect_counts[callee] + 2
-            needed_nodes: usize = declared.count + callee_effect_nodes + 2
-            needed_children: usize = declared.count + callee_effect_nodes - callee_indexes.count
+                callee_names.push(name)
+                callee_starts.push(callee_effects.count)
+                callee_counts.push(row.count)
+                callee_effects.extend(&row)
+            source = proof_replay_effect_named_declaration(&report.source_declarations, function_name, 0)
+            covered: mutable bool = false
+            if source.matches == 1:
+                match source.declaration:
+                    Ast::Decl.Func(_, parameters, _, body, effects, _, position):
+                        covered <- position.line == line and proof_replay_effect_function_row_matches(&effects, &declared) and proof_replay_source_call_set_matches(&parameters, &body, &callee_names)
+                    _:
+                        pass
+            if not covered:
+                proof_add_finding(report, "effect-call-opaque", line, function_name, "complete executable source-call coverage or lexical dispatch could not be reconstructed")
+                return
+            needed_nodes: usize = declared.count + callee_effects.count + 2 * callee_names.count + 2
+            needed_children: usize = declared.count + callee_effects.count + callee_names.count
             if not proof_resource_kernel_capacity(report, needed_nodes, needed_children, function_name):
                 proof_kernel_budget_note(report, function_name)
                 proof_add_effect_goal_attempt(report, report.kernel_nodes.count, line, function_name)
@@ -57,19 +90,18 @@ extend ElisaProof:
             report.kernel_children.extend(declared_roots)
             declared_row: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-row", "", 0, 0, 0, declared_children_start, declared_roots.count, 0, "", "")
             call_roots: mutable darray[usize] = []
-            for callee in callee_indexes |callee, functions, report, call_roots|:
-                continue if callee >= functions.effect_counts.count
-                callee_start: usize = functions.effect_starts[callee]
-                callee_count: usize = functions.effect_counts[callee]
-                continue if callee_start > functions.all_effects.count or callee_count > functions.all_effects.count - callee_start
+            for callee in 0..<callee_names.count |callee, callee_names, callee_starts, callee_counts, callee_effects, report, call_roots|:
                 callee_effect_roots: mutable darray[usize] = []
-                for offset in 0..<callee_count |offset, functions, callee_start, report, callee_effect_roots|:
-                    callee_effect_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect", "", 0, 0, 0, 0, 0, 0, functions.all_effects[callee_start + offset], ""))
+                for member in 0..<callee_counts[callee] |member, callee, callee_starts, callee_effects, report, callee_effect_roots|:
+                    callee_effect_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect", "", 0, 0, 0, 0, 0, 0, callee_effects[callee_starts[callee] + member], ""))
                 callee_children_start: usize = report.kernel_children.count
                 report.kernel_children.extend(callee_effect_roots)
                 callee_row: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-row", "", 0, 0, 0, callee_children_start, callee_effect_roots.count, 0, "", "")
-                call_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect-call", "", callee_row, 0, 0, 0, 0, 0, functions.names[callee], ""))
+                call_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect-call", "", callee_row, 0, 0, 0, 0, 0, callee_names[callee], ""))
             containment_children_start: usize = report.kernel_children.count
             report.kernel_children.extend(call_roots)
             containment: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-containment", "", declared_row, 0, 0, containment_children_start, call_roots.count, 0, function_name, "")
+            if not proof_replay_effect_source_valid(&report.source_declarations, &report.source_annotations, &report.source_extern_parameters, &report.kernel_nodes, &report.kernel_children, containment, function_name, line):
+                proof_add_finding(report, "effect-call-opaque", line, function_name, "the emitted effect trace failed independent source binding")
+                return
             proof_add_effect_goal_attempt(report, containment, line, function_name)

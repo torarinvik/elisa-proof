@@ -13,9 +13,9 @@ cleanup_rows() {
     rmdir -- "$ROW_SCRATCH"
 }
 trap cleanup_rows EXIT
-for ROW_FIXTURE in extern_effect_rows_runtime extern_effect_rows_parser_runtime source_call_coverage_parser_runtime; do
+for ROW_FIXTURE in extern_effect_rows_runtime extern_effect_rows_parser_runtime source_call_coverage_parser_runtime effect_source_validation_parser_runtime; do
     "$ROW_COMPILER" -emit obj -O0 -o "$ROW_SCRATCH/row.o" "$ROW_ROOT/examples/$ROW_FIXTURE.elisa"
     "${CLANG:-clang}" -Wl,-dead_strip -o "$ROW_SCRATCH/probe" "$ROW_SCRATCH/row.o" "$ROW_ROOT/build/profile_hooks.o"
     "$ROW_SCRATCH/probe"
 done
-printf 'strict native extern-row, parser/signature, declaration identity and direct source-call coverage controls pass; qualified dispatch and proof-admission consumption remain pending\n'
+printf 'strict native extern-row, declaration identity, direct call coverage and source-bound effect replay controls pass; qualified dispatch and native resource summaries remain pending\n'
