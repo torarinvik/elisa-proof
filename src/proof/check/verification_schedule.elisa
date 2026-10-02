@@ -14,20 +14,30 @@ extend ElisaProof:
                 return false if finding.name == lemma_name
             return true
 
-        def proof_report_function_is_clean(report: ProofReport&, function_name: sview) -> bool:
-            for finding in report.findings:
-                continue if finding.name != function_name
-                return false if not proof_finding_only_widens_state(finding.kind)
-            return true
-
-        def proof_report_function_has_widened_finding(report: ProofReport&, function_name: sview) -> bool:
-            for finding in report.findings:
-                return true if finding.name == function_name and proof_finding_only_widens_state(finding.kind)
-            return false
-
         def proof_report_function_has_finding(report: ProofReport&, function_name: sview, kind: sview) -> bool:
             for finding in report.findings:
                 return true if finding.name == function_name and finding.kind == kind
+            return false
+
+        # Same-named functions of different modules share `name`; a finding stamped with
+        # another module's owner is about that other function.
+        def proof_finding_is_about(finding: ProofFinding, function_name: sview, owner: sview) -> bool:
+            return finding.name == function_name and (finding.owner == "" or finding.owner == owner)
+
+        def proof_report_row_is_clean(report: ProofReport&, functions: ProofFunctionTable&, row: usize) -> bool:
+            for finding in report.findings |functions, row|:
+                continue if not proof_finding_is_about(finding, functions.names[row], functions.owner_modules[row])
+                return false if not proof_finding_only_widens_state(finding.kind)
+            return true
+
+        def proof_report_row_has_widened_finding(report: ProofReport&, functions: ProofFunctionTable&, row: usize) -> bool:
+            for finding in report.findings |functions, row|:
+                return true if proof_finding_is_about(finding, functions.names[row], functions.owner_modules[row]) and proof_finding_only_widens_state(finding.kind)
+            return false
+
+        def proof_report_row_has_finding(report: ProofReport&, functions: ProofFunctionTable&, row: usize, kind: sview) -> bool:
+            for finding in report.findings |functions, row, kind|:
+                return true if finding.kind == kind and proof_finding_is_about(finding, functions.names[row], functions.owner_modules[row])
             return false
 
         def proof_function_component_ready(functions: ProofFunctionTable&, scheduled: darray[bool]&, source: usize) -> bool:
@@ -38,7 +48,7 @@ extend ElisaProof:
             for offset in 0..<count |offset, start, functions, scheduled, source|:
                 called: sview = functions.all_calls[start + offset]
                 continue if called == "__opaque_call__"
-                next: usize = proof_function_index(functions, called)
+                next: usize = proof_function_call_target(functions, start + offset)
                 continue if next >= functions.names.count
                 continue if proof_functions_same_recursive_component(functions, source, next)
                 return false if next >= scheduled.count or not scheduled[next]
@@ -68,8 +78,18 @@ extend ElisaProof:
         def proof_check_scheduled_function(file: Ast::File&, declarations: darray[Ast::Decl]&, target: usize, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> bool:
             return false if target >= functions.names.count
             return false if target >= functions.declaration_path_starts.count or target >= functions.declaration_path_counts.count
-            return true if proof_report_function_has_finding(report, functions.names[target], "contract-proposition-type")
-            return proof_check_function_path(file, declarations, functions.all_declaration_path, functions.declaration_path_starts[target], functions.declaration_path_counts[target], 0, lemmas, functions, report)
+            return false if target >= functions.owner_modules.count
+            return true if proof_report_row_has_finding(report, functions, target, "contract-proposition-type")
+            # Unqualified calls in this body resolve from its own module.
+            saved_caller: usize = functions.current_caller
+            functions.current_caller <- target
+            report.finding_function <- functions.names[target]
+            report.finding_owner <- functions.owner_modules[target]
+            found: bool = proof_check_function_path(file, declarations, functions.all_declaration_path, functions.declaration_path_starts[target], functions.declaration_path_counts[target], 0, lemmas, functions, report)
+            report.finding_function <- ""
+            report.finding_owner <- ""
+            functions.current_caller <- saved_caller
+            return found
 
         def proof_lemma_component_ready(lemmas: ProofLemmaTable&, scheduled: darray[bool]&, source: usize) -> bool:
             return false if source >= lemmas.names.count or source >= lemmas.call_starts.count or source >= lemmas.call_counts.count
@@ -184,21 +204,21 @@ extend ElisaProof:
                     functions.verification_reasons[member] <- "body-missing" if not found
                 component_ok: mutable bool = true
                 for member in component |member, component, functions, report, component_ok|:
-                    component_ok <- false if not proof_report_function_is_clean(report, functions.names[member])
+                    component_ok <- false if not proof_report_row_is_clean(report, functions, member)
                 # A caller whose proof rests on a widened-state summary is in the same position as
                 # the callee, so the marking travels the call graph. Components are scheduled in
                 # dependency order, so every callee outside this component already carries its
                 # final reason by the time it is read here.
                 component_widened: mutable bool = false
                 for member in component |member, component, functions, report, component_widened|:
-                    component_widened <- true if proof_report_function_has_widened_finding(report, functions.names[member])
+                    component_widened <- true if proof_report_row_has_widened_finding(report, functions, member)
                     call_start: usize = functions.call_starts[member]
                     call_count: usize = functions.call_counts[member]
                     continue if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start
                     for offset in 0..<call_count |offset, call_start, functions, member, component_widened|:
                         called: sview = functions.all_calls[call_start + offset]
                         continue if called == "__opaque_call__"
-                        called_index: usize = proof_function_index(functions, called)
+                        called_index: usize = proof_function_call_target(functions, call_start + offset)
                         continue if called_index >= functions.verification_reasons.count
                         continue if proof_functions_same_recursive_component(functions, member, called_index)
                         component_widened <- true if functions.verification_reasons[called_index] == "contract-verified-widened-state"
@@ -212,6 +232,6 @@ extend ElisaProof:
                     functions.verification_reasons[member] <- "contract-verified-widened-state" if component_ok and component_widened
                     functions.verification_reasons[member] <- "recursive-component-unverified" if not component_ok and functions.verification_reasons[member] == "pending"
                     functions.verification_reasons[member] <- "body-unverified" if not component_ok and not functions.recursive[member]
-                    functions.verification_reasons[member] <- "dependency-unverified" if not component_ok and (proof_report_function_has_finding(report, functions.names[member], "function-summary-unverified") or proof_report_function_has_finding(report, functions.names[member], "lemma-summary-unverified"))
+                    functions.verification_reasons[member] <- "dependency-unverified" if not component_ok and (proof_report_row_has_finding(report, functions, member, "function-summary-unverified") or proof_report_row_has_finding(report, functions, member, "lemma-summary-unverified"))
                     scheduled[member] <- true
                     scheduled_count <- scheduled_count + 1
