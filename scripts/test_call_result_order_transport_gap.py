@@ -15,7 +15,9 @@ assert report["replay"]["gaps"] == 0
 assert report["replay"]["replayed"] == report["replay"]["certificates"]
 assert not report["trust"]["trusted_assumptions"]
 assert {f["name"] for f in report["findings"]} == {
-    "rejected_nonstrict_nonzero_call_result", "automatic_conditional_nonzero_result"}
+    "rejected_nonstrict_nonzero_call_result", "automatic_conditional_nonzero_result",
+    "automatic_fixed_valid_nonzero_result", "rejected_invalid_conditional_nonzero_result",
+    "rejected_true_guard_nonzero_result"}
 for name in ("automatic_nonzero_call_result", "checked_nonzero_call_result"):
     assert any(d.get("name") == name and d.get("verified") for d in report["declaration_details"])
-print("Direct call equality transports order; conditional summary staging remains OPEN; nonstrict claim rejects")
+print("Direct equality transports order; fixed-valid conditional summary remains OPEN; nonstrict, invalid and vacuous true guards reject")
