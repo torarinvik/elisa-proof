@@ -123,8 +123,45 @@ extend ElisaProof:
                     proof_restore_conjuncts(right, whole, root, written, before, facts, report, annotations, name, line, depth + 1)
                 Ast::Expr.Paren(inner, _):
                     proof_restore_conjuncts(inner, whole, root, written, before, facts, report, annotations, name, line, depth + 1)
+                Ast::Expr.Block(_, _, _, _):
+                    proof_restore_narrowed(fact, root, written, before, facts, report, annotations, name, line)
                 _:
                     return
+
+        # A range fact the write lands in may still hold on the range less its first or last
+        # cell: `forall i in c..<d: P` with `c < d` gives `forall i in c + 1..<d: P` (and
+        # `c..<d - 1`), a cover step replay re-proves from the fact and the pre-write facts. It is
+        # kept only when the narrower range itself survives the write.
+        def proof_restore_narrowed(fact: Ast::Expr, root: sview, written: Ast::Expr, before: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32) -> void:
+            range: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+            return if not range.known
+            position: Ast::Pos = Ast::pos_at_line(line)
+            return if not proof_goal(before, Ast::Expr.Binary(range.lower, TokenKind.Lt, range.upper, position), annotations)
+            one: Ast::Expr = Ast::Expr.IntLit(1, position)
+            raised: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Binary(range.lower, TokenKind.Plus, one, position), TokenKind.RangeLt, range.upper, position)
+            lowered: Ast::Expr = Ast::Expr.Binary(range.lower, TokenKind.RangeLt, Ast::Expr.Binary(range.upper, TokenKind.Minus, one, position), position)
+            narrowings: darray[Ast::Expr] = [raised, lowered]
+            for narrowing in narrowings |narrowing, fact, root, written, before, facts, report, annotations, name, line|:
+                narrowed: (known: bool, value: Ast::Expr) = proof_forall_with_range(fact, narrowing)
+                continue if not narrowed.known
+                continue if any existing in facts where proof_expr_equal(existing, narrowed.value)
+                continue if not proof_write_preserves(narrowed.value, root, written, "", Ast::Expr.Invalid, Ast::Expr.Invalid, false, before, annotations, 0)
+                proof_add_derived_fact_from(facts, report, narrowed.value, before, "proof-step", line, name)
+
+        # `forall i in a..<b: P` with its range replaced, keeping the binder's declaration.
+        def proof_forall_with_range(fact: Ast::Expr, range: Ast::Expr) -> (known: bool, value: Ast::Expr):
+            match fact:
+                Ast::Expr.Block(statements, body, captures, block_position):
+                    return (false, Ast::Expr.Invalid) if statements.count != 1
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, type_expression, _, statement_position):
+                            narrowed: mutable darray[Ast::Stmt] = []
+                            narrowed.push(Ast::Stmt.VarDecl(binder, type_expression, range, statement_position))
+                            return (true, Ast::Expr.Block(narrowed, body, captures, block_position))
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
 
         # The stored value is read before the write. `xs[k] == stored` still holds afterwards
         # when every read of `xs` in it is at an index provably distinct from `k`, or when it is

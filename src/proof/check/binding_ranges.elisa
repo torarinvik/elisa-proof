@@ -6,13 +6,13 @@ extend ElisaProof:
         # `value * 10 + digit` stayed unguarded. Each arm's upper end is taken under its own side
         # of the condition, the larger one is proved over the binding as an ordinary goal, and
         # the result enters the facts as a proof step, which replay re-proves from its premises.
-        def proof_add_binding_range(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, symbol: sview, value: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
+        def proof_add_binding_range(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, symbol: sview, value: Ast::Expr, owner: sview, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            proof_add_binding_symbolic_bounds(facts, report, symbol, value, owner, position, annotations)
             return if not proof_binding_range_candidate(value)
             upper: (known: bool, value: i64) = proof_binding_upper_bound(value, facts, position)
             return if not upper.known or upper.value < 0
             goal: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.LtEq, Ast::Expr.IntLit(upper.value, position), position)
             return if any existing in facts where proof_expr_equal(existing, goal)
-            annotations: darray[Ast::EnumAnnotation] = []
             return if not proof_goal(facts, goal, annotations)
             proof_add_derived_fact(facts, report, goal, "proof-step", position.line, owner)
 
@@ -56,3 +56,36 @@ extend ElisaProof:
             proof_close_plain_bounds(facts, &bounds)
             closed: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(arm, bounds)
             return (closed.has_upper, closed.upper)
+
+        # `k <- k + 1` under `k + 1 < hi` binds a symbol whose only bound is a fact over the
+        # bound value, and the wrap guard reads plain bounds on the symbol, so `k + 1` after the
+        # step stayed unguarded. Each strict or non-strict upper bound on the value is restated
+        # over the symbol, proved as an ordinary goal and replayed from its premises.
+        def proof_add_binding_symbolic_bounds(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, symbol: sview, value: Ast::Expr, owner: sview, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            restated: mutable darray[Ast::Expr] = []
+            match proof_strip_parens(value):
+                Ast::Expr.Binary(minuend, operator, _, _):
+                    return if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    # `r <- hi - 1` is below its minuend when the subtraction cannot wrap; the
+                    # candidate is proved like any other, so a wrapping step adds nothing.
+                    if operator == TokenKind.Minus and not proof_expr_mentions_name(minuend, symbol):
+                        restated.push(Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.Lt, minuend, position))
+                _:
+                    return
+            scanned: mutable usize = 0
+            for fact in facts |fact, value, symbol, position, restated, scanned|:
+                break if scanned >= PROOF_BINDING_SYMBOLIC_SCAN
+                scanned <- scanned + 1
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, operator, right, _):
+                        continue if operator != TokenKind.Lt and operator != TokenKind.LtEq
+                        continue if not proof_expr_equal(proof_strip_parens(left), proof_strip_parens(value)) or proof_expr_mentions_name(right, symbol)
+                        restated.push(Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), operator, right, position)) if restated.count < 5
+                    _:
+                        continue
+            for goal in restated |goal, facts, report, annotations, owner, position|:
+                continue if any existing in facts where proof_expr_equal(existing, goal)
+                continue if not proof_goal(facts, goal, annotations)
+                proof_add_derived_fact(facts, report, goal, "proof-step", position.line, owner)
+
+        const PROOF_BINDING_SYMBOLIC_SCAN: usize = 256

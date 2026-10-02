@@ -1,16 +1,22 @@
 # Symbolic-range quantifiers (BACKLOG W-02). A `forall i in a..<b: P(i)` whose bounds are not
-# constants cannot be enumerated, but it follows from five sound rules:
+# constants cannot be enumerated, but it follows from seven sound rules:
 #   empty   b <= a;
 #   cover   a fact `forall j in c..<d: Q(j)` with Q alpha-equal to P, c <= a and b <= d;
 #   extend  the same fact with c <= a, b <= d + 1 and P(d) -- the range grew by one element;
 #   weaken  a fact over a covering range whose body Q, at a binder absent from every fact,
 #           proves P there: `forall i in 0..<k: xs[i] <= m` with `m <= w` gives `... <= w`;
-#   weaken and extend  weaken over c..<d, with b <= d + 1 and P(d).
+#   weaken and extend  weaken over c..<d, with b <= d + 1 and P(d);
+#   lower   the same fact with c <= a + 1, b <= d and P(a) -- the range starts one earlier;
+#   vacuous a body `(not g) or q` with g free of the binder and refuted by the facts.
+# A fact `forall i in c..<d: Q(i)` also proves a non-quantified goal Q(t) for a subscript t
+# of the goal with c <= t < d (the instance rule).
 # Bodies are compared after both binders become one reserved marker, so a free variable of
 # either body can never be confused with a binder. Every side condition is an ordinary goal,
-# and the kernel replays the same five rules (kernel_replay/symbolic_quantifiers.elisa).
+# and the kernel replays the same rules (kernel_replay/symbolic_quantifiers.elisa).
 const PROOF_SYMBOLIC_QUANTIFIER_MARKER: sview = "__elisa_symbolic_quantifier_binder"
 const PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS: usize = 256
+const PROOF_SYMBOLIC_INSTANCE_CANDIDATES: usize = 8
+const PROOF_SYMBOLIC_RENAME_PAIRS: usize = 8
 
 extend ElisaProof:
     public:
@@ -76,7 +82,19 @@ extend ElisaProof:
                                 upper_values: darray[Ast::Expr] = [known.upper]
                                 goal_binder: darray[sview] = [goal.binder]
                                 return true if proof_symbolic_side_goal(facts, proof_substitute(goal.body, goal_binder, upper_values), annotations, operator_mask, depth, budget, split_depth, exhausted)
+                        else:
+                            return true if proof_symbolic_lowered(facts, known.lower, known.upper, goal.lower, goal.upper, goal.binder, goal.body, annotations, operator_mask, depth, budget, split_depth, exhausted)
             return false
+
+        # The lower rule: the fact covers `a + 1..<b`, so the goal over `a..<b` needs only P(a).
+        def proof_symbolic_lowered(facts: darray[Ast::Expr]&, fact_lower: Ast::Expr, fact_upper: Ast::Expr, goal_lower: Ast::Expr, goal_upper: Ast::Expr, goal_binder: sview, goal_body: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            position: Ast::Pos = Ast::pos_at_line(0)
+            return false if not proof_symbolic_side_goal(facts, Ast::Expr.Binary(goal_upper, TokenKind.LtEq, fact_upper, position), annotations, operator_mask, depth, budget, split_depth, exhausted)
+            next: Ast::Expr = Ast::Expr.Binary(goal_lower, TokenKind.Plus, Ast::Expr.IntLit(1, position), position)
+            return false if not proof_symbolic_side_goal(facts, Ast::Expr.Binary(fact_lower, TokenKind.LtEq, next, position), annotations, operator_mask, depth, budget, split_depth, exhausted)
+            binder: darray[sview] = [goal_binder]
+            lower_values: darray[Ast::Expr] = [goal_lower]
+            return proof_symbolic_side_goal(facts, proof_substitute(goal_body, binder, lower_values), annotations, operator_mask, depth, budget, split_depth, exhausted)
 
         # The vacuous rule: a body `(not g) or q` whose guard g is a comparison free of the binder
         # holds at every index once the facts prove g false, read as the flipped comparison.
@@ -154,3 +172,96 @@ extend ElisaProof:
                         instance_facts.push(Ast::Expr.Call(Ast::Expr.Ident(callee, callee_position), typed, argument_names, position))
                     _:
                         continue
+
+        # The instance rule: a fact `forall i in c..<d: B` proves B[t/i] for a subscript t of the
+        # goal with `c <= t` and `t < d`. Only the goal's own subscripts are tried, at most
+        # PROOF_SYMBOLIC_INSTANCE_CANDIDATES of them, against at most
+        # PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS facts.
+        def proof_symbolic_instance_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if proof_quantifier_kind(goal, annotations) != ""
+            candidates: mutable darray[Ast::Expr] = []
+            proof_symbolic_subscripts(goal, &candidates, 0)
+            return false if candidates.count == 0
+            position: Ast::Pos = Ast::pos_at_line(0)
+            scanned: mutable usize = 0
+            for fact in facts |fact, facts, goal, candidates, annotations, operator_mask, depth, budget, split_depth, exhausted, scanned, position|:
+                return false if scanned >= PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS
+                scanned <- scanned + 1
+                continue if proof_quantifier_kind(fact, annotations) != "forall"
+                known: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+                continue if not known.known
+                names: darray[sview] = [known.binder]
+                for candidate in candidates |candidate, names, known, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted, position|:
+                    values: darray[Ast::Expr] = [candidate]
+                    continue if not proof_expr_equal(proof_substitute(known.body, names, values), goal)
+                    starts: Ast::Expr = Ast::Expr.Binary(known.lower, TokenKind.LtEq, candidate, position)
+                    continue if not proof_symbolic_side_goal(facts, starts, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                    return true if proof_symbolic_side_goal(facts, Ast::Expr.Binary(candidate, TokenKind.Lt, known.upper, position), annotations, operator_mask, depth, budget, split_depth, exhausted)
+            return false
+
+        def proof_symbolic_subscripts(expression: Ast::Expr, candidates: mutable darray[Ast::Expr]&, depth: usize) -> void:
+            return if depth > 16 or candidates.count >= PROOF_SYMBOLIC_INSTANCE_CANDIDATES
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_symbolic_subscripts(inner, candidates, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_symbolic_subscripts(operand, candidates, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_symbolic_subscripts(left, candidates, depth + 1)
+                    proof_symbolic_subscripts(right, candidates, depth + 1)
+                Ast::Expr.Index(_, index, _):
+                    candidates.push(index) if not (any existing in candidates where proof_expr_equal(existing, index))
+                _:
+                    return
+
+        # The subscript rule: reading one container is a function of the subscript, so a goal over
+        # `xs[e]` with `e == f` provable holds iff it holds with every `e` read as `f`. Only a
+        # subscript of the goal that no fact subscripts is replaced, by a subscript of some fact,
+        # so the rewrite never runs back; at most PROOF_SYMBOLIC_RENAME_PAIRS pairs are tried.
+        def proof_symbolic_renamed_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if proof_quantifier_kind(goal, annotations) != ""
+            goal_subscripts: mutable darray[Ast::Expr] = []
+            proof_symbolic_subscripts(goal, &goal_subscripts, 0)
+            return false if goal_subscripts.count == 0
+            fact_subscripts: mutable darray[Ast::Expr] = []
+            scanned: mutable usize = 0
+            for fact in facts |fact, annotations, fact_subscripts, scanned|:
+                break if scanned >= PROOF_SYMBOLIC_QUANTIFIER_MAX_FACTS or fact_subscripts.count >= PROOF_SYMBOLIC_INSTANCE_CANDIDATES
+                scanned <- scanned + 1
+                continue if proof_quantifier_kind(fact, annotations) != ""
+                proof_symbolic_subscripts(fact, &fact_subscripts, 0)
+            position: Ast::Pos = Ast::pos_at_line(0)
+            tried: mutable usize = 0
+            for source in goal_subscripts |source, fact_subscripts, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted, position, tried|:
+                continue if any existing in fact_subscripts where proof_expr_equal(existing, source)
+                # Both sides must be witnessed scalars: `==` on anything else may be a user `__eq__`.
+                continue if not proof_scalar_term_witnessed(source, facts, 0)
+                for target in fact_subscripts |target, source, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted, position, tried|:
+                    return false if tried >= PROOF_SYMBOLIC_RENAME_PAIRS
+                    tried <- tried + 1
+                    continue if not proof_scalar_term_witnessed(target, facts, 0)
+                    continue if not proof_symbolic_side_goal(facts, Ast::Expr.Binary(source, TokenKind.EqEq, target, position), annotations, operator_mask, depth, budget, split_depth, exhausted)
+                    replaced: (changed: bool, value: Ast::Expr) = proof_symbolic_replace(goal, source, target, 0)
+                    return true if replaced.changed and proof_symbolic_side_goal(facts, replaced.value, annotations, operator_mask, depth, budget, split_depth, exhausted)
+            return false
+
+        def proof_symbolic_replace(expression: Ast::Expr, source: Ast::Expr, target: Ast::Expr, depth: usize) -> (changed: bool, value: Ast::Expr):
+            return (false, expression) if depth > 16
+            return (true, target) if proof_expr_equal(expression, source)
+            match expression:
+                Ast::Expr.Paren(inner, position):
+                    replaced: (changed: bool, value: Ast::Expr) = proof_symbolic_replace(inner, source, target, depth + 1)
+                    return (replaced.changed, Ast::Expr.Paren(replaced.value, position))
+                Ast::Expr.Unary(operator, operand, position):
+                    replaced: (changed: bool, value: Ast::Expr) = proof_symbolic_replace(operand, source, target, depth + 1)
+                    return (replaced.changed, Ast::Expr.Unary(operator, replaced.value, position))
+                Ast::Expr.Binary(left, operator, right, position):
+                    left_replaced: (changed: bool, value: Ast::Expr) = proof_symbolic_replace(left, source, target, depth + 1)
+                    right_replaced: (changed: bool, value: Ast::Expr) = proof_symbolic_replace(right, source, target, depth + 1)
+                    return (left_replaced.changed or right_replaced.changed, Ast::Expr.Binary(left_replaced.value, operator, right_replaced.value, position))
+                Ast::Expr.Index(object, index, position):
+                    object_replaced: (changed: bool, value: Ast::Expr) = proof_symbolic_replace(object, source, target, depth + 1)
+                    index_replaced: (changed: bool, value: Ast::Expr) = proof_symbolic_replace(index, source, target, depth + 1)
+                    return (object_replaced.changed or index_replaced.changed, Ast::Expr.Index(object_replaced.value, index_replaced.value, position))
+                _:
+                    return (false, expression)
