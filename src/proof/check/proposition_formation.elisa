@@ -272,13 +272,14 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_validate_function_propositions[@r](file: Ast::File&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], kernel_workspace: mutable ProofSourceKernelFormationWorkspace& @r, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace& @r, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
+        def proof_validate_function_propositions[@r](file: Ast::File&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, module_path: darray[sview]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], kernel_workspace: mutable ProofSourceKernelFormationWorkspace& @r, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace& @r, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
             # Type formation is bounded per declaration: exhausting one function's allowance
             # must not make later, independent functions uncheckable.
             kernel_workspace.typing_work_used <- 0
             names: mutable darray[sview] = []
             types: mutable darray[sview] = []
             source_types: mutable darray[Ast::Expr] = []
+            proof_source_collect_scope_constants(file.top_decls, module_path, 0, &names, &types, &source_types, 0) if module_path.count != 0
             for parameter in parameters |names, types, source_types|:
                 names.push(parameter.name)
                 types.push(proof_source_type_spelling(parameter.type_expression, 0))
@@ -323,13 +324,45 @@ extend ElisaProof:
             proof_source_validate_statement_propositions(file, name, body, &body_names, &body_types, &body_source_types, global_kernel_bindings, kernel_workspace, validation_workspace, table, report, 0)
 
         def proof_validate_propositions_in_declarations[@r](file: Ast::File&, declarations: darray[Ast::Decl]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], kernel_workspace: mutable ProofSourceKernelFormationWorkspace& @r, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
-            for declaration in declarations |file, declarations, global_kernel_bindings, kernel_workspace, table, report|:
+            module_path: mutable darray[sview] = []
+            proof_validate_propositions_in_scope(file, declarations, &module_path, global_kernel_bindings, kernel_workspace, table, report)
+
+        # G68: kernel typing owns module constants by module, so an unqualified constant in a
+        # contract resolves only through this lexical context. Every block of the enclosing
+        # module path (module and extend alike) contributes its typed constants, outermost
+        # first, so parameters and locals pushed afterwards still shadow them.
+        def proof_source_collect_scope_constants(declarations: darray[Ast::Decl]&, module_path: darray[sview]&, level: usize, names: mutable darray[sview]&, types: mutable darray[sview]&, source_types: mutable darray[Ast::Expr]&, depth: usize) -> void can[Memory.Allocate, Abort.Panic]:
+            return if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            for declaration in declarations |module_path, level, names, types, source_types, depth|:
+                match declaration:
+                    Ast::Decl.Const(constant_name, constant_type, _, _, _):
+                        if level == module_path.count:
+                            has_type: bool = match constant_type:
+                                Ast::Expr.Absent: false
+                                _: true
+                            if has_type:
+                                names.push(constant_name)
+                                types.push(proof_source_type_spelling(constant_type, 0))
+                                source_types.push(constant_type)
+                    Ast::Decl.Module(module_name, body, _):
+                        if level < module_path.count and module_name == module_path[level]:
+                            proof_source_collect_scope_constants(body, module_path, level + 1, names, types, source_types, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_source_collect_scope_constants(body, module_path, level, names, types, source_types, depth + 1)
+                    _:
+                        pass
+
+        def proof_validate_propositions_in_scope[@r](file: Ast::File&, declarations: darray[Ast::Decl]&, module_path: darray[sview]&, global_kernel_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], kernel_workspace: mutable ProofSourceKernelFormationWorkspace& @r, table: Semantic::SymbolTable&, report: mutable ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
+            for declaration in declarations |file, declarations, module_path, global_kernel_bindings, kernel_workspace, table, report|:
                 match declaration:
                     Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
-                        proof_validate_function_propositions(file, name, parameters, return_type, body, position, global_kernel_bindings, kernel_workspace, &kernel_workspace.validation_workspace, table, report)
-                    Ast::Decl.Module(_, body, _):
-                        proof_validate_propositions_in_declarations(file, body, global_kernel_bindings, kernel_workspace, table, report)
+                        proof_validate_function_propositions(file, name, parameters, return_type, body, position, module_path, global_kernel_bindings, kernel_workspace, &kernel_workspace.validation_workspace, table, report)
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: mutable darray[sview] = []
+                        next_scope.extend(module_path)
+                        next_scope.push(module_name)
+                        proof_validate_propositions_in_scope(file, body, &next_scope, global_kernel_bindings, kernel_workspace, table, report)
                     Ast::Decl.Scoped(body, _):
-                        proof_validate_propositions_in_declarations(file, body, global_kernel_bindings, kernel_workspace, table, report)
+                        proof_validate_propositions_in_scope(file, body, module_path, global_kernel_bindings, kernel_workspace, table, report)
                     _:
                         pass
