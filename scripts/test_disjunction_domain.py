@@ -27,8 +27,24 @@ for fixture, expected in (("disjunction_domain_probe", 0),
 open_run = subprocess.run([str(BINARY), "--function-json", "open_pure_call_domain",
     str(ROOT / "examples/open_disjunction_call_domain_probe.elisa")],
     capture_output=True, text=True, timeout=120)
-assert open_run.returncode == 1, (open_run.returncode, open_run.stdout, open_run.stderr)
+assert open_run.returncode == 0, (open_run.returncode, open_run.stdout, open_run.stderr)
 opened = json.loads(open_run.stdout)
 assert opened["summary"]["semantic_errors"] == 0 and opened["replay"]["gaps"] == 0
-assert len(opened["findings"]) == 1 and opened["findings"][0]["name"] == "open_pure_call_domain"
-print("conditional domains replay; false alternatives reject; pure-call integer witness gap remains open")
+assert opened["findings"] == [] and opened["status"] == "proved"
+assert opened["replay"]["replayed"] == opened["summary"]["proven"]
+repeated_run = subprocess.run([str(BINARY), "--function-json", "repeated_pure_call_domain",
+    str(ROOT / "examples/open_disjunction_call_domain_probe.elisa")],
+    capture_output=True, text=True, timeout=120)
+assert repeated_run.returncode == 0, (repeated_run.returncode, repeated_run.stdout, repeated_run.stderr)
+repeated = json.loads(repeated_run.stdout)
+assert repeated["summary"]["semantic_errors"] == 0 and repeated["replay"]["gaps"] == 0
+assert repeated["status"] == "proved" and repeated["findings"] == []
+float_run = subprocess.run([str(BINARY), "--json",
+    str(ROOT / "examples/rejected_float_call_integer_domain.elisa")],
+    capture_output=True, text=True, timeout=120)
+assert float_run.returncode == 1, (float_run.returncode, float_run.stdout, float_run.stderr)
+float_report = json.loads(float_run.stdout)
+assert float_report["summary"]["semantic_errors"] == 0 and float_report["replay"]["gaps"] == 0
+assert not float_report["trust"]["trusted_assumptions"]
+assert any(f["name"] == "rejected_float_call_totality" for f in float_report["findings"])
+print("conditional domains and pure-call integer bounds replay; false alternatives reject")
