@@ -38,6 +38,7 @@ assert any(d.get("name") == "scalar_with_quantified_prefix" and d.get("verified"
            for d in report["declaration_details"]), report["findings"]
 # The real loop-prefix induction requirement is retained, not inferred from
 # success on scalar arithmetic and not replaced with an alternate scanner.
-assert any(f["name"] == "history_length_prefix" and f["kind"] == "ensure-unproven"
-           for f in report["findings"]), report["findings"]
-print("scalar arithmetic independently replays after quantified-premise weakening; false conclusions reject; loop exit remains open")
+assert probe.returncode == 0 and report["status"] == "proved" and not report["findings"]
+assert any(d.get("name") == "history_length_prefix" and d.get("verified")
+           for d in report["declaration_details"])
+print("scalar arithmetic and complete prefix loop independently replay; false quantified-premise conclusions reject")

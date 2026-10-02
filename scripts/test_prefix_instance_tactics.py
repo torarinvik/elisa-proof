@@ -37,9 +37,9 @@ report = json.loads(result.stdout)
 assert result.returncode == 0 and report["status"] == "proved"
 assert report["source_goal_binding"]["bound"] and report["source_goal_binding"]["fingerprint_match"]
 assert report["tactic"]["valid"] and report["tactic"]["solved"]
-assert report["admission_scope"] == "target" and not report["source"]["complete"]
+assert report["admission_scope"] == "target" and report["source"]["complete"]
 assert report["source_goal_binding"]["previously_proven"]
 assert report["tactic"]["action_count"] == 9 and report["tactic"]["accepted_count"] == 9
 assert report["tactic"]["trace_replayed"] and report["tactic"]["kernel_trace_replayed"]
 assert report["tactic"]["kernel_replayed"] and report["tactic"]["certificate_replayed"]
-print("row-instance and explicit prefix-preservation proofs replay; false controls reject; automatic whole-loop admission remains open")
+print("row-instance and explicit prefix-preservation proofs replay; false controls reject; complete length-prefix loop proves automatically")

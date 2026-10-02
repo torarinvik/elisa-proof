@@ -28,8 +28,8 @@ for fixture, positive in (("universal_premise_auto.elisa", True),
 probe = subprocess.run([BIN, "--json", str(ROOT / "examples/open_history_length_prefix.elisa")],
                        capture_output=True, text=True, timeout=60)
 r = json.loads(probe.stdout)
-assert probe.returncode == 1 and r["summary"]["proven"] == 16 and r["summary"]["obligations"] == 17
-assert r["replay"]["certificates"] == r["replay"]["replayed"] == 16 and r["replay"]["gaps"] == 0
+assert probe.returncode == 0 and r["summary"]["proven"] == r["summary"]["obligations"] == 17
+assert r["replay"]["certificates"] == r["replay"]["replayed"] == 17 and r["replay"]["gaps"] == 0
 assert not r["trust"]["trusted_assumptions"]
-assert len(r["findings"]) == 1 and r["findings"][0]["kind"] == "ensure-unproven"
-print("automatic finite universal instances and loop preservation replay; existential, empty, future and wrapping controls reject; exit remains open")
+assert not r["findings"]
+print("automatic finite universal instances and complete prefix loop replay; existential, empty, future and wrapping controls reject")
