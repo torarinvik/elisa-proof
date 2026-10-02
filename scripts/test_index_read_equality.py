@@ -10,6 +10,7 @@ if not __debug__:
     raise SystemExit("run without Python -O")
 for fixture, expected in (("index_read_equality.elisa", "proved"),
                           ("open_indexed_prefix_reasoning.elisa", "proved"),
+                          ("open_index_window_disjunctions.elisa", "proved"),
                           ("rejected_index_read_equality.elisa", "failed")):
     result = subprocess.run([BIN, "--json", str(ROOT / "examples" / fixture)],
                             capture_output=True, text=True, timeout=60)
