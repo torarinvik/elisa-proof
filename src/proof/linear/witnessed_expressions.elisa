@@ -293,35 +293,20 @@ extend ElisaProof:
                 _:
                     return proof_expr_equal(marked_term, term)
 
-        # The witness judgements below read only the four type-witness markers, each a call of a
-        # bare `__elisa_*` identifier. They recurse over every subterm and rescanned the whole fact
-        # list at each node, which made them the prover's hottest loop. Every public entry now
-        # selects those markers once and recurses over them alone; no other fact can match any
-        # of the scans, so each judgement is unchanged.
-        def proof_scalar_witness_marker(fact: Ast::Expr) -> bool:
-            name: sview = proof_marker_callee_name(fact)
-            return name == "__elisa_untrusted_operator_type" or name == "__elisa_primitive_scalar_type" or name == "__elisa_primitive_scalar_element" or name == "__elisa_unsigned_type_bound"
-
-        def proof_scalar_witness_markers(facts: darray[Ast::Expr]&) -> darray[Ast::Expr]:
-            markers: mutable darray[Ast::Expr] = []
-            for fact in facts |markers|:
-                markers.push(fact) if proof_scalar_witness_marker(fact)
-            return markers
-
         def proof_scalar_term_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
-            markers: darray[Ast::Expr] = proof_scalar_witness_markers(facts)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
             return proof_scalar_term_witnessed_in(expression, markers, depth)
 
         def proof_scalar_element_remaining(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> i64:
-            markers: darray[Ast::Expr] = proof_scalar_witness_markers(facts)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
             return proof_scalar_element_remaining_in(expression, markers, depth)
 
-        def proof_scalar_element_remaining_in(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> i64:
+        def proof_scalar_element_remaining_in(expression: Ast::Expr, facts: ProofScalarWitnesses&, depth: usize) -> i64:
             return -1 if depth > PROOF_CONGRUENCE_SCAN_DEPTH
-            for fact in facts |expression|:
-                continue if not proof_marker_has_callee(fact, "__elisa_primitive_scalar_element")
-                marker: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(fact)
-                return marker.depth if marker.known and proof_expr_equal(marker.term, expression)
+            element: mutable usize = 0
+            while element < facts.element_terms.count |element, facts, expression|:
+                return facts.element_depths[element] if proof_expr_equal(facts.element_terms[element], expression)
+                element <- element + 1
             match expression:
                 Ast::Expr.Paren(inner, _):
                     return proof_scalar_element_remaining_in(inner, facts, depth + 1)
@@ -329,14 +314,15 @@ extend ElisaProof:
                     container: mutable Ast::Expr = object
                     indexes: mutable darray[Ast::Expr] = []
                     return -1 if not proof_indexed_container_path(object, &container, &indexes, depth + 1) or indexes.count == 0
-                    for fact in facts |container, field_name, indexes, facts, depth|:
-                        continue if not proof_marker_has_callee(fact, "__elisa_primitive_scalar_element")
-                        marker: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(fact)
-                        if marker.known and proof_expr_equal_field(marker.term, container, field_name):
-                            return -1 if marker.depth < indexes.count.i64()
+                    element: mutable usize = 0
+                    while element < facts.element_terms.count |element, container, field_name, indexes, facts, depth|:
+                        if proof_expr_equal_field(facts.element_terms[element], container, field_name):
+                            marker_depth: i64 = facts.element_depths[element]
+                            return -1 if marker_depth < indexes.count.i64()
                             for index in indexes |facts, depth|:
                                 return -1 if not proof_scalar_term_witnessed_in(index, facts, depth + 1)
-                            return marker.depth - indexes.count.i64()
+                            return marker_depth - indexes.count.i64()
+                        element <- element + 1
                     return -1
                 Ast::Expr.Index(object, index, _):
                     remaining: i64 = proof_scalar_element_remaining_in(object, facts, depth + 1)
@@ -361,12 +347,10 @@ extend ElisaProof:
         # operands. A call result is deliberately not witnessed: its return type is not resolved
         # here, and a function need not be deterministic, so two occurrences of the same call text
         # need not denote one value.
-        def proof_scalar_term_witnessed_in(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+        def proof_scalar_term_witnessed_in(expression: Ast::Expr, facts: ProofScalarWitnesses&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            for fact in facts |expression|:
-                continue if not proof_marker_has_callee(fact, "__elisa_untrusted_operator_type")
-                untrusted: (known: bool, term: Ast::Expr, protocol: sview) = proof_untrusted_operator_marker_info(fact)
-                return false if untrusted.known and proof_scalar_untrusted_operator_applies(expression, untrusted.term, depth + 1)
+            for untrusted_term in facts.untrusted_terms |expression|:
+                return false if proof_scalar_untrusted_operator_applies(expression, untrusted_term, depth + 1)
             match expression:
                 Ast::Expr.IntLit(_, _):
                     return true
@@ -379,15 +363,13 @@ extend ElisaProof:
                     return parts.count == 1 and parts[0] != ""
                 _:
                     pass
-            for fact in facts |expression|:
-                continue if not proof_marker_has_callee(fact, "__elisa_primitive_scalar_type")
-                argument: (known: bool, term: Ast::Expr) = proof_marker_argument(fact, "__elisa_primitive_scalar_type")
-                return true if argument.known and proof_expr_equal(argument.term, expression)
+            for scalar_term in facts.scalar_terms |expression|:
+                return true if proof_expr_equal(scalar_term, expression)
             match expression:
                 Ast::Expr.Paren(inner, _):
                     return proof_scalar_term_witnessed_in(inner, facts, depth + 1)
                 Ast::Expr.Ident(name, _):
-                    return proof_scalar_witnessed(facts, name)
+                    return proof_scalar_witnesses_name(facts, name)
                 Ast::Expr.Index(_, _, _):
                     return proof_scalar_element_remaining_in(expression, facts, depth + 1) == 0
                 Ast::Expr.IndexN(_, _, _):
@@ -427,11 +409,11 @@ extend ElisaProof:
                     return false
 
         def proof_primitive_comparison(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            markers: darray[Ast::Expr] = proof_scalar_witness_markers(facts)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
             return proof_primitive_comparison_marked(left, right, markers)
 
         # `markers` must be exactly `proof_scalar_witness_markers` of the fact list.
-        def proof_primitive_comparison_marked(left: Ast::Expr, right: Ast::Expr, markers: darray[Ast::Expr]&) -> bool:
+        def proof_primitive_comparison_marked(left: Ast::Expr, right: Ast::Expr, markers: ProofScalarWitnesses&) -> bool:
             return proof_scalar_term_witnessed_in(left, markers, 0) and proof_scalar_term_witnessed_in(right, markers, 0)
 
         def proof_unsigned_goal_identity(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
