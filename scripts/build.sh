@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OPT_LEVEL="${ELISA_OPT_LEVEL:-O0}"
+# O2 by default: the checker spends its time in tight term-comparison loops, and on the
+# mocap-cleaner corpus the O2 build gives identical reports in a fraction of the O0 time.
+# ELISA_OPT_LEVEL=O0 still gives a debug build.
+OPT_LEVEL="${ELISA_OPT_LEVEL:-O2}"
 COMPILE_MODE="${ELISA_PROOF_COMPILE_MODE:-strict}"
 CONTRACT_FLAG=""
 case "$COMPILE_MODE" in
