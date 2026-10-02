@@ -33,10 +33,12 @@ result = subprocess.run([BIN, "--tactics", str(ROOT / "examples/tactic_script_op
                          str(ROOT / "examples/open_history_length_prefix.elisa")],
                         capture_output=True, text=True, timeout=60)
 report = json.loads(result.stdout)
-assert result.returncode == 1 and report["status"] == "failed"
+assert result.returncode == 0 and report["status"] == "proved"
 assert report["source_goal_binding"]["bound"] and report["source_goal_binding"]["fingerprint_match"]
-assert report["tactic"]["valid"] and not report["tactic"]["solved"]
-assert report["tactic"]["action_count"] == 9 and report["tactic"]["accepted_count"] == 8
+assert report["tactic"]["valid"] and report["tactic"]["solved"]
+assert report["admission_scope"] == "target" and not report["source"]["complete"]
+assert not report["source_goal_binding"]["previously_proven"]
+assert report["tactic"]["action_count"] == 9 and report["tactic"]["accepted_count"] == 9
 assert report["tactic"]["trace_replayed"] and report["tactic"]["kernel_trace_replayed"]
-assert not report["tactic"]["certificate_replayed"]
-print("two row-instance proofs replay; false controls reject; all eight prefix instances replay but induction remains open")
+assert report["tactic"]["kernel_replayed"] and report["tactic"]["certificate_replayed"]
+print("row-instance and explicit prefix-preservation proofs replay; false controls reject; automatic whole-loop admission remains open")
