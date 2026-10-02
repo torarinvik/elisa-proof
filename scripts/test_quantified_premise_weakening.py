@@ -40,4 +40,4 @@ assert any(d.get("name") == "scalar_with_quantified_prefix" and d.get("verified"
 # success on scalar arithmetic and not replaced with an alternate scanner.
 assert any(f["name"] == "history_length_prefix" and f["kind"] == "ensure-unproven"
            for f in report["findings"]), report["findings"]
-print("scalar arithmetic independently replays after quantified-premise weakening; false conclusions reject; prefix induction remains open")
+print("scalar arithmetic independently replays after quantified-premise weakening; false conclusions reject; loop exit remains open")

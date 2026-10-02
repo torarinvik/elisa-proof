@@ -19,14 +19,15 @@ for script in ("whole_row_instance", "prefix_row_instance", "rejected_future_row
     assert report["source_goal_binding"]["bound"]
     assert report["source_goal_binding"]["fingerprint_match"]
     assert report["source"]["admissible"] and report["source"]["fingerprint_match"]
-    assert report["source"]["status"] == "failed" and not report["source"]["complete"]
     if negative:
+        assert report["source"]["status"] == "failed" and not report["source"]["complete"]
         assert result.returncode == 1 and report["status"] == "failed", report
         assert not report["tactic"]["valid"] or not report["tactic"]["solved"], report
     else:
         assert result.returncode == 0 and report["status"] == "proved", report
         assert report["admission_scope"] == "target"
-        assert not report["source_goal_binding"]["previously_proven"]
+        assert report["source"]["status"] == "proved" and report["source"]["complete"]
+        assert report["source_goal_binding"]["previously_proven"]
         for key in ("valid", "solved", "trace_replayed", "kernel_trace_replayed", "kernel_replayed", "certificate_replayed"):
             assert report["tactic"][key], (key, report)
 result = subprocess.run([BIN, "--tactics", str(ROOT / "examples/tactic_script_open_history_prefix_step.json"),
@@ -37,7 +38,7 @@ assert result.returncode == 0 and report["status"] == "proved"
 assert report["source_goal_binding"]["bound"] and report["source_goal_binding"]["fingerprint_match"]
 assert report["tactic"]["valid"] and report["tactic"]["solved"]
 assert report["admission_scope"] == "target" and not report["source"]["complete"]
-assert not report["source_goal_binding"]["previously_proven"]
+assert report["source_goal_binding"]["previously_proven"]
 assert report["tactic"]["action_count"] == 9 and report["tactic"]["accepted_count"] == 9
 assert report["tactic"]["trace_replayed"] and report["tactic"]["kernel_trace_replayed"]
 assert report["tactic"]["kernel_replayed"] and report["tactic"]["certificate_replayed"]
