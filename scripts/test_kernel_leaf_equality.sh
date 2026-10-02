@@ -19,7 +19,7 @@ if [[ -z "$LEAF_REV" || ! -f "$LEAF_RUNTIME_SOURCE" || ! -f "$LEAF_ROOT/build/sn
 fi
 LEAF_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/elisa-kernel-leaf.XXXXXX")"
 cleanup_leaf() {
-    rm -f -- "$LEAF_SCRATCH/runtime.o" "$LEAF_SCRATCH/probe.o" "$LEAF_SCRATCH/probe"
+    rm -f -- "$LEAF_SCRATCH/runtime.o" "$LEAF_SCRATCH/probe.o" "$LEAF_SCRATCH/probe" "$LEAF_SCRATCH/congruence.o" "$LEAF_SCRATCH/congruence"
     rmdir -- "$LEAF_SCRATCH"
 }
 trap cleanup_leaf EXIT
@@ -27,4 +27,7 @@ trap cleanup_leaf EXIT
 "$LEAF_COMPILER" -emit obj -O0 -o "$LEAF_SCRATCH/probe.o" "$LEAF_ROOT/examples/kernel_interval_contradiction_runtime.elisa"
 "${CLANG:-clang}" -Wl,-dead_strip -o "$LEAF_SCRATCH/probe" "$LEAF_SCRATCH/probe.o" "$LEAF_SCRATCH/runtime.o" "$LEAF_ROOT/build/profile_hooks.o"
 "$LEAF_SCRATCH/probe"
-printf 'strict native kernel leaf, malformed graph and contradiction controls pass\n'
+"$LEAF_COMPILER" -emit obj -O0 -o "$LEAF_SCRATCH/congruence.o" "$LEAF_ROOT/examples/kernel_congruence_runtime.elisa"
+"${CLANG:-clang}" -Wl,-dead_strip -o "$LEAF_SCRATCH/congruence" "$LEAF_SCRATCH/congruence.o" "$LEAF_SCRATCH/runtime.o" "$LEAF_ROOT/build/profile_hooks.o"
+"$LEAF_SCRATCH/congruence"
+printf 'strict native kernel leaf, malformed graph, contradiction and congruence controls pass\n'
