@@ -24,6 +24,7 @@ assert positive["replay"]["gaps"] == 0 and positive["trust"]["trusted_assumption
 assert {goal["name"] for goal in positive["goals"]} == {
     "strict_less_excludes_equality", "strict_greater_excludes_reversed_equality",
     "equality_with_zero_excludes_u64_max", "equality_with_zero_excludes_parenthesized_u64_max",
+    "later_strict_order_excludes_equality", "later_reversed_strict_order_excludes_equality",
 }, positive["goals"]
 
 negative = report("rejected_nonstrict_order_disequality", 1)
@@ -31,6 +32,14 @@ assert negative["status"] == "failed" and negative["verification_state"] == "dis
 assert negative["summary"]["semantic_errors"] == 0 and negative["replay"]["gaps"] == 0, negative
 assert any(finding["kind"] == "ensure-unproven" and finding["status"] == "disproved"
            and finding["counterexample_found"] for finding in negative["findings"]), negative
+
+unrelated = report("rejected_unrelated_strict_order_disequality", 1)
+assert unrelated["status"] == "failed", unrelated
+assert unrelated["summary"]["semantic_errors"] == 0 and unrelated["replay"]["gaps"] == 0, unrelated
+assert unrelated["trust"]["trusted_assumptions"] == [], unrelated
+assert any(finding["kind"] == "ensure-unproven" and
+           finding["name"] == "unrelated_order_does_not_exclude_equality"
+           for finding in unrelated["findings"]), unrelated
 
 same_high_bit = report("rejected_u64_max_same_value_disequality", 1)
 assert same_high_bit["status"] == "failed" and same_high_bit["verification_state"] in {"disproved", "unknown"}, same_high_bit
