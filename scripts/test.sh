@@ -148,6 +148,7 @@ python3 "$ROOT_DIR/scripts/test_nested_conditional_split.py"
 python3 "$ROOT_DIR/scripts/test_goal_disjunct_split.py"
 python3 "$ROOT_DIR/scripts/test_include_constant_scope.py"
 python3 "$ROOT_DIR/scripts/test_include_function_scope.py"
+python3 "$ROOT_DIR/scripts/test_replay_dependency_row.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
