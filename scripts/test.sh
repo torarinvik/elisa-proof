@@ -44,6 +44,7 @@ python3 "$ROOT_DIR/scripts/test_capture_result_alias.py"
 python3 "$ROOT_DIR/scripts/test_integer_unit_refutation.py"
 python3 "$ROOT_DIR/scripts/test_null_store_identity.py"
 python3 "$ROOT_DIR/scripts/test_global_constant_relevance.py"
+bash "$ROOT_DIR/scripts/test_predicate_summary_matrix.sh"
 
 # The marker-decoder regression must finish under the normal watchdog. Completion
 # is not proof: unresolved obligations remain visible in the report.
