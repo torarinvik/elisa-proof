@@ -10878,3 +10878,18 @@ no code changed. `check_source_length.py` now bounds `examples/**/*.elisa`, `scr
 `scripts/**/*.py` and `test/**/*.py` as well as `src/`, and passes on the whole tree.
 `CLAUDE.md` records the rule and how to split when a file nears it. Not run beyond
 `check_source_length.py` and `bash -n`, for the same toolchain reason as the entry above.
+
+## W-05 oracle half (2026-10-03)
+
+`scripts/quantifier_oracle.py` implements the Z3 side of the W-05 design: it translates a
+`quantifier_problem` (the s-expression grammar in docs/w05-quantifier-oracle.md) to SMT-LIB with
+MBQI off, names each quantified fact's binder `elisa_q<index>`, and on `unsat` expands the
+proof's `let` abbreviations to collect `quant-inst` steps. An instance is kept only if its term
+uses source names and grammar operators (skolems and `div` are dropped), depth at most 6, at most
+eight per goal, records at most 4096 bytes. `scripts/test_quantifier_oracle.py` runs without the
+proof binary and passed here with z3 4.8.12: two unseen instances `k` and `(+ -1 k)` of one
+bounded fact; record fact indices follow the problem, not list position; a false goal (k may
+equal n) and a quantifier-free goal yield nothing; seven malformed and two budget problems are
+refused; a missing z3 proposes nothing and exits 0. The elisa-proof side (export, tagged hint
+records, checker path) is not written, because no compiler could be built in this session to
+test it.

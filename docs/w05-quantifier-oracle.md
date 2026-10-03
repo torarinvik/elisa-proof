@@ -1,6 +1,7 @@
 # W-05: Z3 quantifier and array oracle (design)
 
-Status: design, 2026-10-03. Not yet implemented. Recorded under IMPLEMENTATION_PLAN §21
+Status: design, 2026-10-03. Oracle half implemented and tested (`scripts/quantifier_oracle.py`,
+`scripts/test_quantifier_oracle.py`); export, hint input and checker path not yet implemented. Recorded under IMPLEMENTATION_PLAN §21
 ("Solver certificates") because it adds a new hint format and a new checker entry point.
 
 ## Problem
@@ -68,9 +69,10 @@ when at least one captured fact or the goal is a symbolic-range forall, or reads
 
 ## Oracle: how Z3 is asked
 
-`scripts/smt_oracle.py --quantifiers` asserts the facts and the negated goal with
+`scripts/quantifier_oracle.py` (kept apart from `smt_oracle.py` so each stays small) asserts the facts and the negated goal with
 `(set-option :smt.mbqi false)` and E-matching on default patterns, plus `:produce-proofs true`.
-On `unsat` it walks the proof for `quant-inst` steps and collects, for each, the quantified
+Each quantified fact gets the binder `elisa_q<fact index>`, so an instance names its fact by
+the binder in the instantiated lemma, after Z3's `let` abbreviations are expanded. On `unsat` it walks the proof for `quant-inst` steps and collects, for each, the quantified
 fact (traced back to its fact index through named assertions `(! ... :named f3)`) and the
 ground term substituted for the binder. Terms Z3 introduced itself (skolems, `k!N`) are
 dropped; if a needed instance mentions only such terms the goal is skipped. With MBQI off the
@@ -154,7 +156,8 @@ suggestion), which attacks the same goals from the source side.
    `linear/quantifier_hints.elisa`, with its own budget test.
 3. Tagged hint records in `app/linear_hints_input.elisa` (malformed-file tests).
 4. Checker path (steps 1–3 above) in `linear/symbolic_quantifiers.elisa`.
-5. `smt_oracle.py --quantifiers`, then census with and without it, then AUDIT.md.
+5. ~~Oracle script~~ (done: `quantifier_oracle.py`, its problem grammar is the one above with
+   `(forall j lo hi body)`, `(select xs i)` and `(count xs)`), then census with and without it, then AUDIT.md.
 
 ## Open questions
 
