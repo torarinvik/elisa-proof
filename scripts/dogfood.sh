@@ -712,6 +712,8 @@ run_probe rebind_join examples/rebind_join.elisa 0
 run_probe rejected_rebind_join examples/rejected_rebind_join.elisa 1
 run_probe conditional_conversions examples/conditional_conversions.elisa 0
 run_probe rejected_conditional_conversions examples/rejected_conditional_conversions.elisa 1
+run_probe conditional_call_arms examples/conditional_call_arms.elisa 0
+run_probe rejected_conditional_call_arms examples/rejected_conditional_call_arms.elisa 1
 run_probe guarded_conditional_arms examples/guarded_conditional_arms.elisa 0
 run_probe rejected_guarded_conditional_arms examples/rejected_guarded_conditional_arms.elisa 1
 run_probe captured_block_exit examples/captured_block_exit.elisa 0
@@ -1625,7 +1627,8 @@ cases = (
     ("value_call_arguments", {('container', 'ensure-unproven'), ('view', 'ensure-unproven'), ('hierarchy', 'ensure-unproven'), ('common_fields', 'ensure-unproven'), ('lent', 'ensure-unproven')}),
     ("call_result_places", {('wraps', 'ensure-unproven'), ('other_argument', 'ensure-unproven'), ('stale_argument', 'ensure-unproven')}),
     ("rebind_join", {('overshoot', 'ensure-unproven'), ('overshoot', 'invariant-not-preserved')}),
-    ("conditional_conversions", {('counted', 'expression-unsupported'), ('widened_bound', 'ensure-unproven')}),
+    ("conditional_conversions", {('widened_bound', 'ensure-unproven')}),
+    ("conditional_call_arms", {('wrong_guard', 'call-requires-unproven'), ('skipped_arm', 'ensure-unproven'), ('nested_arm', 'expression-unsupported')}),
     ("guarded_conditional_arms", {('wrong_arm', 'ensure-unproven'), ('weak_guard', 'ensure-unproven')}),
     ("captured_block_exit", {('unchecked', 'ensure-unproven'), ('broken', 'invariant-not-preserved'), ('broken', 'ensure-unproven')}),
     ("global_constant_loop_exit", {('last_slot', 'ensure-unproven')}),
