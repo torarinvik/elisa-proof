@@ -74,24 +74,27 @@ This is a deliberate soundness boundary (mocap G9, "design choice"), **not** fix
 float parameters needs an IEEE model in the kernel, or a proof that no fact or goal mentions the
 float term. Neither is a small change.
 
-**B. Calls inside an if-expression (certain; fixed on this branch for whole-statement values).**
+**B. Calls inside an if-expression (certain; fixed on this branch).**
 `proof_expr_supported` admits `A if c else B` only when every call in `c`, `A` and `B` is an
 integer conversion (`pattern_support.elisa`, `Ast::Expr.If` arm). Any other call makes the statement
 fail `proof_statement_expressions_supported`, which raises `expression-unsupported` at
-`statement_checks.elisa:530`. Occurrences in the listed files:
+`statement_checks.elisa:530`. Sites in the listed files whose if-expression itself contains a call:
 
-| File | Lines | Covered by the fix? |
-| --- | --- | --- |
-| `src/tools/track.elisa` | 34, 97, 98 | yes (declarations) |
-| `src/ops/stack.elisa` | 65, 70, 74 | yes (declarations, rebind) |
-| `src/ops/stack.elisa` | 76 | **no**: nested in a `push(...)` argument |
-| `src/ops/rig_stack.elisa` | 200, 202, 204, 566, 589, 591, 603, 606 | yes (declarations) |
-| `src/ops/rig_stack.elisa` | 206, 387, 419 | **no**: nested in a call argument |
-| `src/physics/rig_physics.elisa` | 290, 398, 460 | yes |
-| `src/physics/rig_physics.elisa` | 150, 151, 173, 388, 423 | **no**: nested in a call argument |
-| `src/io/rig.elisa` | 139, 267 | yes (the call is in the condition) |
-| `src/tools/limb.elisa` | 68 | yes |
-| `src/cli/main.elisa` | 319 | yes |
+| File | Lines | Form | Covered by the fix? |
+| --- | --- | --- | --- |
+| `src/tools/track.elisa` | 34, 97, 98 | declaration | yes |
+| `src/ops/stack.elisa` | 65, 70, 74 | declaration, rebind | yes |
+| `src/ops/stack.elisa` | 76 | nested in `out.push(...)`, call-free condition | yes (nested split) |
+| `src/ops/rig_stack.elisa` | 200, 202, 204, 566, 589, 591, 603, 606 | declaration | yes |
+| `src/physics/rig_physics.elisa` | 290, 398, 460 | declaration, return | yes |
+| `src/physics/rig_physics.elisa` | 423 | nested in `out.push(...)`, call-free condition | yes (nested split) |
+| `src/io/rig.elisa` | 139, 267 | declaration, call in the condition | yes |
+| `src/tools/limb.elisa` | 68 | declaration | yes |
+| `src/cli/main.elisa` | 319 | declaration, call in the condition | yes |
+
+The first version of this census also listed `rig_stack` 206/387/419 and `rig_physics`
+150/151/173/388. Those if-expressions hold no call (`Roles::LEFT_FOOT if side == 0 else
+Roles::RIGHT_FOOT` is constants; the call wraps the if-expression), so they were never refused.
 
 `presets`, `ops_file` and `main` also inherit these through `stack`/`rig_stack`.
 
@@ -123,9 +126,9 @@ fail `proof_statement_expressions_supported`, which raises `expression-unsupport
 | `src/io/rig_map.elisa` | unsupported | via A only (`glb_document.elisa`, through `GlbDocument` parameters); no float of its own | `declaration_checks.elisa:205` | certain |
 | `src/ops/corrections.elisa` | unsupported | via A (glb_tracks, glb_document); own: `catch` forms (10), float locals and struct fields, a lambda | `declaration_checks.elisa:205`; `statement_checks.elisa:173,178,530` | A certain |
 | `src/ops/presets.elisa` | unsupported | via A and B (rig_stack, stack); own code is enum `match` plus `push` (supported) | as above | certain via includes |
-| `src/ops/rig_stack.elisa` | unsupported | own A (MotionQuat/f64 parameters); via A (limb, motion_quat, ik); own B (eleven sites, see §2) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
-| `src/ops/stack.elisa` | unsupported | own B (65, 70, 74 fixed; 76 not); `cache: mutable Cache&` field and index writes (`cache.results[at] <- ...`); via `track.elisa` | `statement_checks.elisa:530`; possibly `borrow-source-opaque` in `src/proof/resources/` | B certain; borrow likely |
-| `src/physics/rig_physics.elisa` | unsupported | own A (f64 / `MotionQuat::V` parameters, `.sqrt()`); via A; own B (eight sites) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
+| `src/ops/rig_stack.elisa` | unsupported | own A (MotionQuat/f64 parameters); via A (limb, motion_quat, ik); own B (eight sites, all fixed) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
+| `src/ops/stack.elisa` | unsupported | own B (65, 70, 74, 76, all fixed); `cache: mutable Cache&` field and index writes (`cache.results[at] <- ...`); via `track.elisa` | `statement_checks.elisa:530`; possibly `borrow-source-opaque` in `src/proof/resources/` | B certain; borrow likely |
+| `src/physics/rig_physics.elisa` | unsupported | own A (f64 / `MotionQuat::V` parameters, `.sqrt()`); via A; own B (four sites, all fixed) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
 | `src/tools/limb.elisa` | unsupported | own A; via A (ik, motion_quat, rig); own B (68); `catch` (3) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
 | `src/tools/track.elisa` | unsupported | own B: 34, 97, 98, all fixed. Remaining candidates: indexed writes through a mutable local (`window[j] <- ...`, `out[i] <- ...`); `current <- next` whole-container rebind inside a captured `while` | `statement_checks.elisa:530` (B); resource and borrow checks in `src/proof/resources/` | B certain; the rest open |
 | `src/core/key_weight.elisa` | unknown | no unsupported construct. Most likely an unproven goal in `ramp`: the wrap guard on `part * FULL` needs `part <= whole <= 2 * MAX_FRAMES` through a module constant, and `v: i64 = part * FULL / whole` is a division local (mocap G25). Could also be `requires frame >= -MAX_FRAMES` (a negated constant, mocap G19/G21 family) | goal failures (`*-unproven`, status unknown) via `report_recording.elisa:67` | open |
@@ -140,26 +143,55 @@ them once they are pushed.
 
 ## 4. What this branch changes
 
-Construct B is fixed for whole-statement values: `x: T = A if c else B`, `t <- A if c else B`
-(where `t` is a bare name) and `return A if c else B`, which includes a tail expression because
-the parser lowers it to `return`. Such a statement is rewritten to the control flow it denotes:
-
-    S[A if c else B]; rest   ==>   if c: S[A]; rest   else: S[B]; rest
-
-Code: `proof_split_conditional_value` in `src/proof/check/returns/contracts.elisa`, called from
+Construct B is fixed. Code: `src/proof/check/returns/conditional_values.elisa`, called from
 `proof_check_returns` in `src/proof/check/statement_checks.elisa`.
+
+1. **Whole-statement value.** `x: T = A if c else B`, `t <- A if c else B` (with `t` a bare name),
+   `return A if c else B` (which includes a tail expression, because the parser lowers it to
+   `return`) and an expression statement are rewritten to the control flow they denote:
+
+       S[A if c else B]; rest   ==>   if c: S[A]; rest   else: S[B]; rest
+
+2. **Nested value.** `S[C[A if c else B]]` becomes `if c: S[C[A]]; rest else: S[C[B]]; rest` when
+   all of the following hold:
+   - `c` is call-free (integer conversions aside);
+   - every subterm evaluated before the if-expression is call-free;
+   - the path to it passes only through strict nodes: calls, parentheses, fields, indexes,
+     tuples, unary operators and arithmetic, comparison or bitwise binary operators.
+
+   `c` is then evaluated on exactly the paths that evaluated it before, and nothing that could
+   change what `c` reads runs before it. Under `and`, `or` or `|>`, inside another
+   if-expression, a match, a block or a lambda, the if-expression is not split, and the
+   statement still meets the gate.
 
 Fixtures:
 
 - `examples/conditional_call_arms.elisa` must prove.
-- `examples/rejected_conditional_call_arms.elisa` must fail with `call-requires-unproven`
-  (`wrong_guard`), `ensure-unproven` (`skipped_arm`) and `expression-unsupported`
-  (`nested_arm`, the uncovered nested form).
+- `examples/rejected_conditional_call_arms.elisa` must still fail with:
+  - `call-requires-unproven` for `wrong_guard` and `nested_wrong_guard`;
+  - `ensure-unproven` for `skipped_arm`;
+  - `expression-unsupported` for the three forms that are not split: `called_nested_condition`,
+    `call_before_arm` and `short_circuit_path`.
+- `rejected_conditional_conversions` `counted` (a tail `return`) is now checked as an `if`.
+- `rejected_nested_call_value` keeps its refusal with a call evaluated before the conditional.
 
-`examples/rejected_conditional_conversions.elisa` `counted` is a tail `return` with a
-state-writing call in one arm. It is now checked as an `if` and no longer produces
-`expression-unsupported`. Its expectation was updated in `scripts/test.sh` and `scripts/dogfood.sh`.
+## 5. Other findings, and why they are not changed
 
-Fixing B alone does not flip any of the 21 files to `proved`. Most also hit A, and `track` and
-`stack` have the open items listed in §3. What it does remove is the most frequent refusal that
-has a sound fix.
+- **A, float parameters:** kept on purpose. Admitting them soundly needs IEEE semantics (NaN,
+  rounding) in the kernel, or a proof that no fact or goal mentions a float term. Weakening the
+  gate would make `x == x` provable for a NaN `x`. This keeps the float-reaching files
+  `unsupported`, which matches mocap's own design choice (G9: proof-critical logic is fixed
+  point).
+- **Extern effect rows:** not a hit. `effect-call-opaque` only fires for a function that declares
+  `can[...]` and calls something with no row. The only such function, `main`, calls no extern
+  directly, and the extern AST node carries no effect row to import anyway.
+- **C, I/O buffers (`sview`/`cstr` iteration, `cache` field writes through `mutable Cache&`):**
+  the findings could not be determined without running the prover, and guessing a relaxation of
+  the region or borrow rules is exactly what must not be done. Settle them from a real
+  `--json` report first.
+- **`key_weight` / `key_weight_laws` (unknown):** an unproven goal, not an unsupported
+  construct. The goal could not be identified statically; get it from the report's
+  `goal_attempts`.
+- **Missing engine checkout:** the `../../../elisa-engine-mocap` includes only resolve with that
+  sibling worktree. Without it every including file also gets `import-error`. This is an
+  environment issue, not a prover issue.
