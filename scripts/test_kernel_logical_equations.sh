@@ -19,4 +19,4 @@ trap cleanup EXIT
 "$COMPILER" -emit obj -O0 -o "$WORK/probe.o" "$ROOT/examples/kernel_logical_equations_runtime.elisa"
 "${CLANG:-clang}" -Wl,-dead_strip -o "$WORK/probe" "$WORK/probe.o" "$WORK/runtime.o" "$ROOT/build/profile_hooks.o"
 "$WORK/probe"
-echo 'logical Boolean equation kernel controls pass: constant absorption, join identities, polarity, mixed operators, dropped/unwitnessed atoms, fuel exhaustion, malformed nodes and cycles'
+echo 'logical Boolean equation kernel controls pass: witnessed comparison context, absorption, join identities, polarity, missing premises/witnesses, fuel exhaustion, malformed nodes and cycles'

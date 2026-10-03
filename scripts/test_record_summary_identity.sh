@@ -19,4 +19,4 @@ trap cleanup EXIT
 }
 "${CLANG:-clang}" -Wl,-dead_strip -o "$WORK/probe" "$WORK/probe.o" "$ROOT/build/profile_hooks.o"
 "$WORK/probe"
-echo 'Exact record summary identity controls pass: nominal type, field names/order/count, nested values, existing field differential controls'
+echo 'Exact record summary identity controls pass: nominal type, field names/order/count, nested values, capture-free constructor/update substitution, existing field differential controls'
