@@ -3,8 +3,7 @@ extend ElisaProof:
         # Replay is fed compiler-owned ASTs and report records, but those values can still be
         # malformed at a public revalidation boundary. Keep the native call stack well below the
         # host guard page: each validator frame contains a large record mirror, so the logical
-        # arena depth of 127 is not a safe native recursion budget. Exhaustion is a gap, never a
-        # proof.
+        # arena depth of 127 is not a safe native recursion budget. Exhaustion is a gap, not a proof.
         const PROOF_REPLAY_TRACE_DEPTH_LIMIT: usize = 16
         const PROOF_REPLAY_AST_DEPTH_LIMIT: usize = 96
         const PROOF_REPLAY_RESOURCE_FACT_DEPTH_LIMIT: usize = 127
@@ -74,12 +73,26 @@ extend ElisaProof:
         # that fixed-point boundary instead of recursing forever. Acyclic summary chains therefore
         # receive full replay, and cyclic summaries remain visibly tied to the main termination
         # checker rather than being mistaken for ordinary facts.
-        def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
+        # Whether a record at `line` belongs to the declaration row of `dependency` at
+        # `owner_line`. An unattributable record matches only when `unknown_matches` (findings
+        # fail closed by vetoing; goals and certificates fail closed by not vouching).
+        def proof_replay_dependency_row_matches(report: ProofReport&, dependency: sview, line: u32, owner_line: u32, unknown_matches: bool) -> bool:
+            return true if owner_line == 0
+            row: mutable u32 = 0
+            proof_replay_owner_function_line(report.source_declarations, dependency, line, &row, 0)
+            return unknown_matches if row == 0
+            return row == owner_line
+
+        def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, owner_line: u32, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
             return false if dependency == ""
             found_goal: mutable bool = false
             all_goals_proven: mutable bool = true
-            for attempt in report.goal_attempts |found_goal, all_goals_proven, dependency|:
-                if attempt.name == dependency:
+            # A function-summary dependency names one declaration row (`owner_line`, the callee's
+            # declaration line). Same-named functions of other modules are different rows: their
+            # goals, findings, and certificates neither vouch for nor veto this callee. 0 keeps
+            # the name-wide check (lemma summaries, whose names are unique).
+            for attempt in report.goal_attempts |found_goal, all_goals_proven, dependency, owner_line|:
+                if attempt.name == dependency and proof_replay_dependency_row_matches(report, dependency, attempt.line, owner_line, false):
                     found_goal <- true
                     all_goals_proven <- false if not attempt.proven
             # Same filter the scheduler applies: a finding that only records a construct whose
@@ -87,7 +100,7 @@ extend ElisaProof:
             # and the two conditions that carry the weight here are untouched -- every goal the
             # dependency recorded must be proven, and every certificate it owns must replay.
             for finding in report.findings:
-                continue if finding.name != dependency
+                continue if finding.name != dependency or not proof_replay_dependency_row_matches(report, dependency, finding.line, owner_line, true)
                 return false if not proof_replay_finding_only_widens_state(finding.kind)
             return false if not found_goal or not all_goals_proven
             return true if proof_replay_dependency_in_stack(dependency_stack, dependency)
@@ -98,7 +111,7 @@ extend ElisaProof:
             found_certificate: mutable bool = false
             for certificate_index in 0..<report.certificates.count |certificate_index, report, next_stack, dependency_depth, found_certificate, active_certificates, dependency, validation_workspace|:
                 certificate: ProofGoalCertificate = report.certificates[certificate_index]
-                if certificate.name == dependency:
+                if certificate.name == dependency and proof_replay_dependency_row_matches(report, dependency, certificate.line, owner_line, false):
                     found_certificate <- true
                     return false if not proof_replay_certificate_with_stack(report, certificate, certificate_index, next_stack, dependency_depth + 1, active_certificates, validation_workspace)
             return found_certificate
@@ -178,6 +191,22 @@ extend ElisaProof:
                     _:
                         pass
 
+        # Module enclosing the function declared at `line`, whatever its name.
+        def proof_replay_module_at_function_line(declarations: darray[Ast::Decl]&, line: u32, current: sview, owner: mutable sview&, count: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            for declaration in declarations |line, current, owner, count, depth|:
+                match declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, candidate_position):
+                        if candidate_position.line == line:
+                            owner <- current
+                            count <- count + 1
+                    Ast::Decl.Module(module_name, body, _):
+                        proof_replay_module_at_function_line(body, line, module_name, owner, count, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_module_at_function_line(body, line, current, owner, count, depth + 1)
+                    _:
+                        pass
+
         # When several executable summaries share the dependency's bare name, the recorded
         # result must be a call qualified by the module that declares the chosen summary.
         def proof_replay_summary_owner_matches_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> bool:
@@ -197,6 +226,15 @@ extend ElisaProof:
                     match callee:
                         Ast::Expr.Scope(base, member, _):
                             return member == trace.dependency and proof_replay_module_leaf_matches(owner, proof_callable_name(base))
+                        Ast::Expr.Ident(callee_name, _):
+                            # A bare call resolves to the caller's own module first, so it names
+                            # this summary only when the certificate being replayed is declared
+                            # in exactly the callee's module.
+                            return false if callee_name != trace.dependency or report.replay_owner_line == 0
+                            caller_owner: mutable sview = ""
+                            callers: mutable usize = 0
+                            proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &caller_owner, &callers, 0)
+                            return callers == 1 and caller_owner == owner
                         _:
                             return false
                 _:
@@ -472,9 +510,9 @@ extend ElisaProof:
             if proof_replay_boundary_trace_kind(trace.kind):
                 return proof_replay_boundary_trace_shape_valid(report, trace)
             if trace.kind == "lemma-summary":
-                return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth, active_certificates, validation_workspace) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth, active_certificates, validation_workspace)
+                return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth, active_certificates, validation_workspace) and proof_replay_dependency_is_checked(report, trace.dependency, 0, dependency_stack, depth, active_certificates, validation_workspace)
             if trace.kind == "function-summary":
-                return proof_replay_function_summary_is_valid(report, trace, dependency_stack, depth, active_certificates, validation_workspace) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth, active_certificates, validation_workspace)
+                return proof_replay_function_summary_is_valid(report, trace, dependency_stack, depth, active_certificates, validation_workspace) and proof_replay_dependency_is_checked(report, trace.dependency, trace.owner_line, dependency_stack, depth, active_certificates, validation_workspace)
             return false if trace.kind != "proof-step" and trace.kind != "lemma-step" and trace.kind != "loop-invariant-step" and trace.kind != "branch-conjunct" and trace.kind != "unit-resolution" and trace.kind != "branch-join"
             return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
             for premise in kernel_premises |premise, report, owner, depth, dependency_stack, revalidate_arena, active_certificates, validation_workspace|:
@@ -541,9 +579,9 @@ extend ElisaProof:
             if proof_replay_boundary_trace_kind(trace.kind):
                 return proof_replay_boundary_trace_shape_valid(report, trace)
             if trace.kind == "lemma-summary":
-                return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth, active_certificates, validation_workspace) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth, active_certificates, validation_workspace)
+                return proof_replay_lemma_summary_is_valid(report, trace, dependency_stack, depth, active_certificates, validation_workspace) and proof_replay_dependency_is_checked(report, trace.dependency, 0, dependency_stack, depth, active_certificates, validation_workspace)
             if trace.kind == "function-summary":
-                return proof_replay_function_summary_is_valid(report, trace, dependency_stack, depth, active_certificates, validation_workspace) and proof_replay_dependency_is_checked(report, trace.dependency, dependency_stack, depth, active_certificates, validation_workspace)
+                return proof_replay_function_summary_is_valid(report, trace, dependency_stack, depth, active_certificates, validation_workspace) and proof_replay_dependency_is_checked(report, trace.dependency, trace.owner_line, dependency_stack, depth, active_certificates, validation_workspace)
             return false if trace.kind != "proof-step" and trace.kind != "lemma-step" and trace.kind != "loop-invariant-step" and trace.kind != "branch-conjunct" and trace.kind != "unit-resolution" and trace.kind != "branch-join"
             return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
             premises: mutable darray[Ast::Expr] = []

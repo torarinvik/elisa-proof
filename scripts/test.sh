@@ -1,6 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# KEEP_GOING=1 runs every step and reports all failures instead of stopping at the first.
+# A failing step is one that would have stopped the run: a command failing under `set -e`
+# or an `exit` with a nonzero status. The run still exits 1 if any step failed; only
+# the stopping changes, never what a step checks.
+KEEP_GOING="${KEEP_GOING:-0}"
+keep_going_failures=0
+if [[ "$KEEP_GOING" == 1 && "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+    # bash 3.2 (macOS /bin/bash) overwrites PIPESTATUS when the ERR trap below runs,
+    # so rerun under a newer bash.
+    for keep_going_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        [[ -x "$keep_going_bash" ]] && exec "$keep_going_bash" "$0" "$@"
+    done
+    printf 'KEEP_GOING=1 needs bash 4 or newer\n' >&2
+    exit 2
+fi
+if [[ "$KEEP_GOING" == 1 ]]; then
+    # Counts a failing command only while `set -e` is wanted. bash 4+ keeps PIPESTATUS intact
+    # across the trap, so a `set +e` block still reads the statuses of an expected failure.
+    keep_going_errexit=1
+    set() {
+        local arg
+        local args=()
+        for arg in "$@"; do
+            case "$arg" in
+                -e) keep_going_errexit=1 ;;
+                +e) keep_going_errexit=0 ;;
+                *) args+=("$arg") ;;
+            esac
+        done
+        if [[ ${#args[@]} -gt 0 ]]; then builtin set "${args[@]}"; fi
+        return 0
+    }
+    exit() {
+        local status="${1:-$?}"
+        if [[ "$status" -eq 0 ]]; then builtin exit 0; fi
+        keep_going_failures=$((keep_going_failures + 1))
+        printf 'KEEP_GOING: step failed (status %s) at line %s\n' "$status" "${BASH_LINENO[0]}" >&2
+        return 0
+    }
+    builtin set +e
+    trap 'if [[ "$keep_going_errexit" -eq 1 ]]; then keep_going_failures=$((keep_going_failures + 1)); printf "KEEP_GOING: command failed at line %s\n" "$LINENO" >&2; fi' ERR
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
@@ -205,8 +248,10 @@ run_py_test test_vector_index_arithmetic.py
 run_py_test test_adt_recursive_payload.py
 run_py_test test_call_sum_premise.py
 run_py_test test_nested_conditional_split.py
+run_py_test test_goal_disjunct_split.py
 run_py_test test_include_constant_scope.py
 run_py_test test_include_function_scope.py
+run_py_test test_replay_dependency_row.py
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -954,7 +999,8 @@ if [[ "$rejected_sview_call_provenance_status" -ne 1 ]]; then
     printf '%s\n' 'proof test matrix failed: a write to the sview backing argument was accepted' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+# Compiler 2678ff10 itself rejects the read of `view` after `second.push` (semantic error 341).
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; semantic=[(d["kind_code"], d["line"], d["name"], d["expected"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(341, 18, "view", "second")], semantic; assert report["summary"]["semantic_errors"] == 1; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
     printf '%s\n' 'proof test matrix failed: call-return provenance was not replayed to the actual backing argument' >&2
     exit 1
 fi
@@ -972,11 +1018,14 @@ run_json_report "$ROOT_DIR/examples/regionless_reference_call_return_provenance.
 for rejected_call_return in rejected_regionless_reference_return_mutability_upgrade:region-return-witness-unsupported rejected_reference_call_return_region_mismatch:region-return-escape rejected_reference_call_return_mutability_upgrade:region-return-witness-unsupported rejected_nested_reference_return_provenance:region-return-witness-unsupported rejected_nested_sview_return_provenance:region-return-witness-unsupported; do
     rejected_call_return_example="${rejected_call_return%%:*}"
     rejected_call_return_kind="${rejected_call_return##*:}"
+    # Compiler 2678ff10 itself rejects the read of `view` after `a.push` (semantic error 341).
+    rejected_call_return_semantic=""
+    [[ "$rejected_call_return_example" == rejected_nested_sview_return_provenance ]] && rejected_call_return_semantic="341:19:view:a"
     set +e
     run_json_report "$ROOT_DIR/examples/$rejected_call_return_example.elisa" >/tmp/elisa-proof-rejected-call-return.json
     rejected_call_return_status=$?
     set -e
-    if [[ "$rejected_call_return_status" -ne 1 ]] || ! REJECTED_KIND="$rejected_call_return_kind" python3 -c 'import json, os; report=json.load(open("/tmp/elisa-proof-rejected-call-return.json")); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == os.environ["REJECTED_KIND"] for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+    if [[ "$rejected_call_return_status" -ne 1 ]] || ! REJECTED_KIND="$rejected_call_return_kind" REJECTED_SEMANTIC="$rejected_call_return_semantic" python3 -c 'import json, os; report=json.load(open("/tmp/elisa-proof-rejected-call-return.json")); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; semantic=[":".join(map(str, (d["kind_code"], d["line"], d["name"], d["expected"]))) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [d for d in [os.environ["REJECTED_SEMANTIC"]] if d], semantic; assert report["summary"]["semantic_errors"] == len(semantic); assert any(f["kind"] == os.environ["REJECTED_KIND"] for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
         printf 'proof test matrix failed: %s was not refused with %s\n' "$rejected_call_return_example" "$rejected_call_return_kind" >&2
         exit 1
     fi
@@ -4706,7 +4755,8 @@ if [[ "$collection_builtin_extent_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_collection_builtin_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"borrow-call-summary-unsupported", "ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lend_still_escapes"] == "body-unverified"; assert reasons["a_push_in_the_body_still_writes"] == "body-unverified"; assert reasons["a_push_still_changes_the_count"] == "body-unverified"; assert reasons["a_pushed_lend_still_escapes"] == "body-unverified"'
+# Compiler 2678ff10 itself rejects grow(&items, sink) as storing a local reference (semantic error 609).
+run_json_report "$ROOT_DIR/examples/rejected_collection_builtin_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; semantic = [(d["kind_code"], d["line"], d["name"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(609, 15, "grow")], semantic; assert report["summary"]["semantic_errors"] == 1; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"borrow-call-summary-unsupported", "ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lend_still_escapes"] == "body-unverified"; assert reasons["a_push_in_the_body_still_writes"] == "body-unverified"; assert reasons["a_push_still_changes_the_count"] == "body-unverified"; assert reasons["a_pushed_lend_still_escapes"] == "body-unverified"'
 rejected_collection_builtin_extent_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_collection_builtin_extent_status" -ne 0 ]]; then
@@ -4787,4 +4837,8 @@ fi
 
 "$ROOT_DIR/scripts/test_optimized_replay.sh"
 python3 "$ROOT_DIR/scripts/census_diff.py"
+if [[ "$keep_going_failures" -gt 0 ]]; then
+    printf 'proof test matrix failed: %s step(s) failed (KEEP_GOING)\n' "$keep_going_failures" >&2
+    builtin exit 1
+fi
 printf 'proof test matrix passed: accepted examples exit 0; rejected example exits 1\n'

@@ -145,8 +145,7 @@ extend ElisaProof:
             guarded.extend(facts)
             guarded.push(condition)
             bounds: mutable darray[ProofBound] = []
-            for fact in guarded |bounds|:
-                proof_collect_bounds(fact, guarded, &bounds)
+            proof_collect_fact_bounds(guarded, &bounds)
             proof_close_equalities(guarded, &bounds)
             return true if proof_unsigned_expression_safe_with_bounds(arm, guarded, bounds)
             proof_close_plain_bounds(guarded, &bounds)
@@ -155,8 +154,7 @@ extend ElisaProof:
         # The else arm runs only when the condition fails; its complement enters the bounds alone.
         def proof_unsigned_arm_safe_unless(arm: Ast::Expr, condition: Ast::Expr, facts: darray[Ast::Expr]&, position: Ast::Pos) -> bool:
             bounds: mutable darray[ProofBound] = []
-            for fact in facts |bounds|:
-                proof_collect_bounds(fact, facts, &bounds)
+            proof_collect_fact_bounds(facts, &bounds)
             proof_collect_bounds(Ast::Expr.Unary(TokenKind.Not, condition, position), facts, &bounds)
             proof_close_equalities(facts, &bounds)
             return true if proof_unsigned_expression_safe_with_bounds(arm, facts, bounds)
@@ -165,8 +163,7 @@ extend ElisaProof:
 
         def proof_unsigned_expression_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             bounds: mutable darray[ProofBound] = []
-            for fact in facts |bounds|:
-                proof_collect_bounds(fact, facts, &bounds)
+            proof_collect_fact_bounds(facts, &bounds)
             proof_close_equalities(facts, &bounds)
             # Deliberately no bound propagation here beyond plain orders (see
             # `proof_close_plain_bounds`), and that only when the collected bounds fall short:
@@ -182,6 +179,27 @@ extend ElisaProof:
                 proof_close_plain_bounds(facts, &bounds)
                 unsigned_safe <- proof_unsigned_expression_safe_with_bounds(expression, facts, bounds)
             return unsigned_safe and proof_signed_expression_safe(expression, facts)
+
+        # `proof_unsigned_expression_safe` of every fact, with the intervals both guards read
+        # computed once for the list instead of once per fact: they depend on the facts alone.
+        # The plain-order closure is still consulted only for a fact the first intervals miss.
+        def proof_unsigned_facts_safe(facts: darray[Ast::Expr]&) -> bool:
+            bounds: mutable darray[ProofBound] = []
+            proof_collect_fact_bounds(facts, &bounds)
+            proof_close_equalities(facts, &bounds)
+            closed: mutable darray[ProofBound] = []
+            has_closed: mutable bool = false
+            signed_bounds: darray[ProofBound] = proof_signed_safety_bounds(facts)
+            for fact in facts |facts, bounds, closed, has_closed, signed_bounds|:
+                unsigned_safe: mutable bool = proof_unsigned_expression_safe_with_bounds(fact, facts, bounds)
+                if not unsigned_safe:
+                    if not has_closed:
+                        closed.extend(bounds)
+                        proof_close_plain_bounds(facts, &closed)
+                        has_closed <- true
+                    unsigned_safe <- proof_unsigned_expression_safe_with_bounds(fact, facts, closed)
+                return false if not unsigned_safe or not proof_signed_expression_safe_with_bounds(fact, facts, signed_bounds, 0)
+            return true
 
         # A closed integer subexpression is evaluated with the destination type's machine
         # semantics, not as an unbounded mathematical integer. The ordinary unsigned guard gets
@@ -275,37 +293,46 @@ extend ElisaProof:
                 _:
                     return proof_expr_equal(marked_term, term)
 
+        def proof_scalar_term_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            return proof_scalar_term_witnessed_in(expression, markers, depth)
+
         def proof_scalar_element_remaining(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> i64:
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            return proof_scalar_element_remaining_in(expression, markers, depth)
+
+        def proof_scalar_element_remaining_in(expression: Ast::Expr, facts: ProofScalarWitnesses&, depth: usize) -> i64:
             return -1 if depth > PROOF_CONGRUENCE_SCAN_DEPTH
-            for fact in facts |expression|:
-                continue if not proof_marker_has_callee(fact, "__elisa_primitive_scalar_element")
-                marker: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(fact)
-                return marker.depth if marker.known and proof_expr_equal(marker.term, expression)
+            element: mutable usize = 0
+            while element < facts.element_terms.count |element, facts, expression|:
+                return facts.element_depths[element] if proof_expr_equal(facts.element_terms[element], expression)
+                element <- element + 1
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_scalar_element_remaining(inner, facts, depth + 1)
+                    return proof_scalar_element_remaining_in(inner, facts, depth + 1)
                 Ast::Expr.Field(object, field_name, _):
                     container: mutable Ast::Expr = object
                     indexes: mutable darray[Ast::Expr] = []
                     return -1 if not proof_indexed_container_path(object, &container, &indexes, depth + 1) or indexes.count == 0
-                    for fact in facts |container, field_name, indexes, facts, depth|:
-                        continue if not proof_marker_has_callee(fact, "__elisa_primitive_scalar_element")
-                        marker: (known: bool, term: Ast::Expr, depth: i64, width: i64) = proof_element_marker_info(fact)
-                        if marker.known and proof_expr_equal_field(marker.term, container, field_name):
-                            return -1 if marker.depth < indexes.count.i64()
+                    element: mutable usize = 0
+                    while element < facts.element_terms.count |element, container, field_name, indexes, facts, depth|:
+                        if proof_expr_equal_field(facts.element_terms[element], container, field_name):
+                            marker_depth: i64 = facts.element_depths[element]
+                            return -1 if marker_depth < indexes.count.i64()
                             for index in indexes |facts, depth|:
-                                return -1 if not proof_scalar_term_witnessed(index, facts, depth + 1)
-                            return marker.depth - indexes.count.i64()
+                                return -1 if not proof_scalar_term_witnessed_in(index, facts, depth + 1)
+                            return marker_depth - indexes.count.i64()
+                        element <- element + 1
                     return -1
                 Ast::Expr.Index(object, index, _):
-                    remaining: i64 = proof_scalar_element_remaining(object, facts, depth + 1)
-                    return -1 if remaining < 1 or not proof_scalar_term_witnessed(index, facts, depth + 1)
+                    remaining: i64 = proof_scalar_element_remaining_in(object, facts, depth + 1)
+                    return -1 if remaining < 1 or not proof_scalar_term_witnessed_in(index, facts, depth + 1)
                     return remaining - 1
                 Ast::Expr.IndexN(object, arguments, _):
-                    remaining: i64 = proof_scalar_element_remaining(object, facts, depth + 1)
+                    remaining: i64 = proof_scalar_element_remaining_in(object, facts, depth + 1)
                     return -1 if remaining < arguments.count.i64()
                     for argument in arguments |facts, depth|:
-                        return -1 if not proof_scalar_term_witnessed(argument, facts, depth + 1)
+                        return -1 if not proof_scalar_term_witnessed_in(argument, facts, depth + 1)
                     return remaining - arguments.count.i64()
                 _:
                     return -1
@@ -320,19 +347,10 @@ extend ElisaProof:
         # operands. A call result is deliberately not witnessed: its return type is not resolved
         # here, and a function need not be deterministic, so two occurrences of the same call text
         # need not denote one value.
-        def proof_scalar_term_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+        def proof_scalar_term_witnessed_in(expression: Ast::Expr, facts: ProofScalarWitnesses&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            # One scan serves both marker kinds: an untrusted-operator marker refutes whatever
-            # else is found, and a primitive-scalar marker is only consulted after the scan.
-            marked_primitive: mutable bool = false
-            for fact in facts |expression, marked_primitive, depth|:
-                callee: sview = proof_marker_callee_name(fact)
-                if callee == "__elisa_untrusted_operator_type":
-                    untrusted: (known: bool, term: Ast::Expr, protocol: sview) = proof_untrusted_operator_marker_info(fact)
-                    return false if untrusted.known and proof_scalar_untrusted_operator_applies(expression, untrusted.term, depth + 1)
-                elif callee == "__elisa_primitive_scalar_type" and not marked_primitive:
-                    argument: (known: bool, term: Ast::Expr) = proof_marker_argument(fact, "__elisa_primitive_scalar_type")
-                    marked_primitive <- argument.known and proof_expr_equal(argument.term, expression)
+            for untrusted_term in facts.untrusted_terms |expression|:
+                return false if proof_scalar_untrusted_operator_applies(expression, untrusted_term, depth + 1)
             match expression:
                 Ast::Expr.IntLit(_, _):
                     return true
@@ -345,25 +363,26 @@ extend ElisaProof:
                     return parts.count == 1 and parts[0] != ""
                 _:
                     pass
-            return true if marked_primitive
+            for scalar_term in facts.scalar_terms |expression|:
+                return true if proof_expr_equal(scalar_term, expression)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_scalar_term_witnessed(inner, facts, depth + 1)
+                    return proof_scalar_term_witnessed_in(inner, facts, depth + 1)
                 Ast::Expr.Ident(name, _):
-                    return proof_scalar_witnessed(facts, name)
+                    return proof_scalar_witnesses_name(facts, name)
                 Ast::Expr.Index(_, _, _):
-                    return proof_scalar_element_remaining(expression, facts, depth + 1) == 0
+                    return proof_scalar_element_remaining_in(expression, facts, depth + 1) == 0
                 Ast::Expr.IndexN(_, _, _):
-                    return proof_scalar_element_remaining(expression, facts, depth + 1) == 0
+                    return proof_scalar_element_remaining_in(expression, facts, depth + 1) == 0
                 Ast::Expr.Field(object, field_name, _):
                     return true if field_name == "count" and proof_expr_is_collection_literal(object)
-                    return proof_scalar_element_remaining(expression, facts, depth + 1) == 0
+                    return proof_scalar_element_remaining_in(expression, facts, depth + 1) == 0
                 Ast::Expr.Unary(operator, operand, _):
-                    return proof_congruent_unary_operator(operator) and proof_scalar_term_witnessed(operand, facts, depth + 1)
+                    return proof_congruent_unary_operator(operator) and proof_scalar_term_witnessed_in(operand, facts, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return proof_congruent_binary_operator(operator) and proof_scalar_term_witnessed(left, facts, depth + 1) and proof_scalar_term_witnessed(right, facts, depth + 1)
+                    return proof_congruent_binary_operator(operator) and proof_scalar_term_witnessed_in(left, facts, depth + 1) and proof_scalar_term_witnessed_in(right, facts, depth + 1)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_scalar_term_witnessed(condition, facts, depth + 1) and proof_scalar_term_witnessed(then_expression, facts, depth + 1) and proof_scalar_term_witnessed(else_expression, facts, depth + 1)
+                    return proof_scalar_term_witnessed_in(condition, facts, depth + 1) and proof_scalar_term_witnessed_in(then_expression, facts, depth + 1) and proof_scalar_term_witnessed_in(else_expression, facts, depth + 1)
                 Ast::Expr.Call(callee, arguments, _, _):
                     # Elisa's `x.u64()` / `x.i32()` numeric-cast spellings are compiler
                     # primitives, not user calls. Treat them as scalar terms only for an
@@ -374,7 +393,7 @@ extend ElisaProof:
                     match callee:
                         Ast::Expr.Field(receiver, target, _):
                             modeled_target: bool = target == "i8" or target == "i16" or target == "i32" or target == "i64" or target == "isize" or target == "int" or target == "u8" or target == "u16" or target == "u32" or target == "u64" or target == "usize" or target == "uint"
-                            return modeled_target and proof_scalar_term_witnessed(receiver, facts, depth + 1)
+                            return modeled_target and proof_scalar_term_witnessed_in(receiver, facts, depth + 1)
                         _:
                             return false
                 _:
@@ -390,7 +409,12 @@ extend ElisaProof:
                     return false
 
         def proof_primitive_comparison(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            return proof_scalar_term_witnessed(left, facts, 0) and proof_scalar_term_witnessed(right, facts, 0)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            return proof_primitive_comparison_marked(left, right, markers)
+
+        # `markers` must be exactly `proof_scalar_witness_markers` of the fact list.
+        def proof_primitive_comparison_marked(left: Ast::Expr, right: Ast::Expr, markers: ProofScalarWitnesses&) -> bool:
+            return proof_scalar_term_witnessed_in(left, markers, 0) and proof_scalar_term_witnessed_in(right, markers, 0)
 
         def proof_unsigned_goal_identity(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             match expression:
@@ -431,8 +455,7 @@ extend ElisaProof:
 
         def proof_facts_inconsistent(facts: darray[Ast::Expr]&) -> bool:
             bounds: mutable darray[ProofBound] = []
-            for fact in facts |bounds|:
-                proof_collect_bounds(fact, facts, &bounds)
+            proof_collect_fact_bounds(facts, &bounds)
             proof_close_equalities(facts, &bounds)
             for bound in bounds:
                 return true if bound.has_lower and bound.has_upper and bound.lower > bound.upper
