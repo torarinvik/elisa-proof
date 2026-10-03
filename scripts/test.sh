@@ -939,7 +939,8 @@ if [[ "$rejected_sview_call_provenance_status" -ne 1 ]]; then
     printf '%s\n' 'proof test matrix failed: a write to the sview backing argument was accepted' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+# Compiler 2678ff10 itself rejects the read of `view` after `second.push` (semantic error 341).
+if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; semantic=[(d["kind_code"], d["line"], d["name"], d["expected"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(341, 18, "view", "second")], semantic; assert report["summary"]["semantic_errors"] == 1; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
     printf '%s\n' 'proof test matrix failed: call-return provenance was not replayed to the actual backing argument' >&2
     exit 1
 fi
@@ -957,11 +958,14 @@ run_json_report "$ROOT_DIR/examples/regionless_reference_call_return_provenance.
 for rejected_call_return in rejected_regionless_reference_return_mutability_upgrade:region-return-witness-unsupported rejected_reference_call_return_region_mismatch:region-return-escape rejected_reference_call_return_mutability_upgrade:region-return-witness-unsupported rejected_nested_reference_return_provenance:region-return-witness-unsupported rejected_nested_sview_return_provenance:region-return-witness-unsupported; do
     rejected_call_return_example="${rejected_call_return%%:*}"
     rejected_call_return_kind="${rejected_call_return##*:}"
+    # Compiler 2678ff10 itself rejects the read of `view` after `a.push` (semantic error 341).
+    rejected_call_return_semantic=""
+    [[ "$rejected_call_return_example" == rejected_nested_sview_return_provenance ]] && rejected_call_return_semantic="341:19:view:a"
     set +e
     run_json_report "$ROOT_DIR/examples/$rejected_call_return_example.elisa" >/tmp/elisa-proof-rejected-call-return.json
     rejected_call_return_status=$?
     set -e
-    if [[ "$rejected_call_return_status" -ne 1 ]] || ! REJECTED_KIND="$rejected_call_return_kind" python3 -c 'import json, os; report=json.load(open("/tmp/elisa-proof-rejected-call-return.json")); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == os.environ["REJECTED_KIND"] for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+    if [[ "$rejected_call_return_status" -ne 1 ]] || ! REJECTED_KIND="$rejected_call_return_kind" REJECTED_SEMANTIC="$rejected_call_return_semantic" python3 -c 'import json, os; report=json.load(open("/tmp/elisa-proof-rejected-call-return.json")); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; semantic=[":".join(map(str, (d["kind_code"], d["line"], d["name"], d["expected"]))) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [d for d in [os.environ["REJECTED_SEMANTIC"]] if d], semantic; assert report["summary"]["semantic_errors"] == len(semantic); assert any(f["kind"] == os.environ["REJECTED_KIND"] for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
         printf 'proof test matrix failed: %s was not refused with %s\n' "$rejected_call_return_example" "$rejected_call_return_kind" >&2
         exit 1
     fi
@@ -4691,7 +4695,8 @@ if [[ "$collection_builtin_extent_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_collection_builtin_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"borrow-call-summary-unsupported", "ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lend_still_escapes"] == "body-unverified"; assert reasons["a_push_in_the_body_still_writes"] == "body-unverified"; assert reasons["a_push_still_changes_the_count"] == "body-unverified"; assert reasons["a_pushed_lend_still_escapes"] == "body-unverified"'
+# Compiler 2678ff10 itself rejects grow(&items, sink) as storing a local reference (semantic error 609).
+run_json_report "$ROOT_DIR/examples/rejected_collection_builtin_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; semantic = [(d["kind_code"], d["line"], d["name"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(609, 15, "grow")], semantic; assert report["summary"]["semantic_errors"] == 1; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"borrow-call-summary-unsupported", "ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lend_still_escapes"] == "body-unverified"; assert reasons["a_push_in_the_body_still_writes"] == "body-unverified"; assert reasons["a_push_still_changes_the_count"] == "body-unverified"; assert reasons["a_pushed_lend_still_escapes"] == "body-unverified"'
 rejected_collection_builtin_extent_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_collection_builtin_extent_status" -ne 0 ]]; then
