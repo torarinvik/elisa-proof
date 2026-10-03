@@ -104,3 +104,50 @@ the certificate marker) is two different fact lists by design and now benefits f
 when repeated; `proof_facts_propositionally_inconsistent` is quadratic in facts
 (`proof_fact_denies` per fact) but runs once per goal and is cheap per pair; the next candidate is
 an incremental hash index for fact traces, which needs a build to validate.
+
+## Prover-side search and fact management (branch `perf/prover-search`)
+
+Measured on a 4-core, 16 GB Linux container (stage0 Elisa-core `9b2a804b` -- the pinned
+`ELISA_STAGE0_REV` no longer accepts `ELISA_COMPILER_REV`, which needs `@append_only` -- built with
+LLVM 20 by `scripts/linux_toolchain.sh`; stage0's proof discharge needs `z3` on `PATH`). Every
+change keeps every report byte-identical: all 836 lighter `examples/` and `test/repro/` inputs and
+every heavy input that completes were diffed against the integrate/all binary (sha1 of the full
+`--json` report). User CPU seconds, base -> branch:
+
+| Input | Base | Branch | Peak RSS |
+| --- | ---: | ---: | --- |
+| `kernel_arena_runtime.elisa` | 37.4 | 21.8 | 2.43 -> 1.07 GB |
+| `kernel_effect_runtime.elisa` | 154.3 | 110.9 | 3.31 -> 1.52 GB |
+| `kernel_sview_lifetimes_runtime.elisa` | 139.9 | 96.7 | 3.50 -> 1.55 GB |
+| `kernel_resource_bootstrap_runtime.elisa` | 34.0 | 20.2 | 2.14 GB |
+| `kernel_replay_standalone.elisa` | 34.9 | 19.4 | 2.14 GB |
+| `rejected_kernel_arena_cycle.elisa` | 33.6 | 19.7 | 2.14 GB |
+| 836 lighter inputs, summed | 32.1 | 24.2 | e.g. `rejected_bubble_sort` 487 -> 117 MB |
+
+**Unreclaimed AST records.** Writing an `Ast::Expr` value -- even `Ast::Expr.Invalid` or `Absent`
+as a placeholder -- allocates a record in the AST store that is never reclaimed. Lookups that
+started each call (or each module level of a declaration walk) with such a placeholder were the
+largest memory consumers: `proof_find_type_alias` and `proof_struct_field_type` alone grew
+`field_equality_runtime.elisa` past 13 GB within two minutes. Hot helpers now return an existing
+term (or an index) where callers ignore the value, and the type lookups walk without building
+terms. When adding a lookup on a hot path, do not seed results with a fresh placeholder term.
+
+**Duplicate work removed.** `proof_expr_equal` now rejects structurally different terms before
+validating both (`expr/ast_equal_prefilter.elisa`); the per-function type-bound list and the
+type-bound restore loops compare only shape-hash-equal entries; fact-list wrap guards read the
+list's intervals once (`linear/fact_list_safety.elisa`); complementary-order detection reads each
+fact's order once instead of per pair; an alias chain is walked once for all seven operator
+protocols; branch-join implications go through the run's goal result cache.
+
+**Still slow here.** The four 120-second census timeouts (`kernel_comparison`, `_congruence`,
+`_projection`, `_proposition_admission` runtimes) run past 25 minutes on this host, and about 77%
+of their time is AST replay trace validation (`proof_replay_kernel_trace_valid_memo` ->
+`proof_kernel_replay_expr_equal`), outside the search. The inputs that include the compiler's
+semantic module (`field_equality`, `tactic`, `marker_dispatch`, `lemma_summary_replay` runtimes)
+exceed 16 GB with the base binary within two minutes; with this branch `field_equality` runs 37
+minutes before reaching the limit, so its memory still grows with the source it verifies.
+
+**Profiling recipe.** The O2 product keeps no function symbols. Compile the snapshot with
+`elisac-stage1 -emit obj -O2 -g -fno-omit-frame-pointer`, link as `build.sh` does, then add a
+symbol per DWARF subprogram (`llvm-dwarfdump --debug-info`, `llvm-objcopy --add-symbol`) so
+`perf record -g` (and `-e page-faults` for allocation sites) attributes samples.
