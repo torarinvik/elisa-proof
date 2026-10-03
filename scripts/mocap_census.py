@@ -72,8 +72,8 @@ def main():
     root = args.root.resolve()
     files = sorted([*root.glob("src/*/*.elisa"), *root.glob("proof/*.elisa")])
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        results = list(pool.map(lambda path: (path, *run(path, args.timeout_seconds)), files))
-    entries = [summarize(path.relative_to(root).as_posix(), data, error) for path, data, error in results]
+        # Summarize in the worker: a full report can be hundreds of megabytes.
+        entries = list(pool.map(lambda path: summarize(path.relative_to(root).as_posix(), *run(path, args.timeout_seconds)), files))
 
     states = Counter(entry["state"] for entry in entries)
     kind_files = Counter()
