@@ -79,3 +79,36 @@ extend ElisaProof:
                 _:
                     pass
             proof_add_traced_fact(facts, report, Ast::Expr.Binary(proof_count_place(receiver, position), TokenKind.EqEq, shrunk, position), "collection-pop", position.line, owner)
+
+        # Before a value pop `x: T = v.pop()` forgets `v`, restate what the facts say about the
+        # popped slot as facts about `x`: each element equality `v[i] == e` gives the goal
+        # `x == e`, and each fact naming `v[v.count - 1]` gives itself with that slot read as `x`.
+        # Every candidate is a kernel-checked step from the facts that bind `x` to the slot.
+        def proof_pop_restate_slot(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, receiver: sview, local_name: sview, owner: sview, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            slot: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(receiver, position), Ast::Expr.Binary(proof_count_place(receiver, position), TokenKind.Minus, Ast::Expr.IntLit(1, position), position), position)
+            local: Ast::Expr = Ast::Expr.Ident(local_name, position)
+            original: darray[Ast::Expr] = proof_copy_exprs(facts)
+            candidates: mutable darray[Ast::Expr] = []
+            for fact in original |fact, receiver, slot, local, candidates|:
+                pieces: mutable darray[Ast::Expr] = []
+                proof_conjunct_components(fact, pieces)
+                for piece in pieces |piece, receiver, slot, local, candidates|:
+                    continue if candidates.count >= PROOF_ALIAS_TRANSFER_BUDGET or not proof_expr_mentions_name(piece, receiver)
+                    renamed: (changed: bool, value: Ast::Expr) = proof_replace_place(piece, slot, local, 0)
+                    candidates.push(renamed.value) if renamed.changed and not proof_expr_mentions_name(renamed.value, receiver)
+                    match piece:
+                        Ast::Expr.Binary(Ast::Expr.Index(Ast::Expr.Ident(object, _), _, _), TokenKind.EqEq, other, _):
+                            candidates.push(Ast::Expr.Binary(local, TokenKind.EqEq, other, position)) if object == receiver and not proof_expr_mentions_name(other, receiver) and not proof_expr_mentions_name(other, local_name)
+                        Ast::Expr.Binary(other, TokenKind.EqEq, Ast::Expr.Index(Ast::Expr.Ident(object, _), _, _), _):
+                            candidates.push(Ast::Expr.Binary(local, TokenKind.EqEq, other, position)) if object == receiver and not proof_expr_mentions_name(other, receiver) and not proof_expr_mentions_name(other, local_name)
+                        _:
+                            pass
+            for candidate in candidates |candidate, original, facts, report, owner, position, annotations|:
+                continue if any existing in facts where proof_expr_equal(existing, candidate)
+                match candidate:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        continue if proof_expr_equal(left, right)
+                    _:
+                        pass
+                continue if not proof_goal(original, candidate, annotations)
+                proof_add_derived_fact_from(facts, report, candidate, original, "proof-step", position.line, owner)

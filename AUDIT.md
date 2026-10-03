@@ -10837,3 +10837,21 @@ the popped slot `v[v.count - 1]` and every count bound. A value-position pop (`_
 not modeled and still forgets `v`. Fixtures: `examples/collection_pop.elisa` (proved, replayed,
 including 40 pops in a row), `examples/rejected_collection_pop.elisa` and
 `examples/rejected_collection_pop_user_method.elisa` (all claims unproven).
+
+## Builtin pop in a declaration binds the last element (BACKLOG W-04, value pop)
+
+`x: T = v.pop()` is checked as the read `x: T = v[v.count - 1]` followed by the statement pop, so
+it adds no trusted kind: the read is the ordinary declaration (with its index-bounds obligation),
+and the pop is the existing `collection-pop` boundary. Before the boundary forgets `v`, every fact
+piece that reads the popped slot is restated over `x` by a kernel-checked `proof-step` (budget
+`PROOF_ALIAS_TRANSFER_BUDGET`; trivial `x == x` restatements are skipped). `_ = v.pop()` is still
+not modeled.
+
+Fixed alongside: when an `old(v.count)` snapshot already named the count, `proof_push_before`
+reused that ghost but skipped restating count facts over it, so `requires v.count >= 2` vanished
+at the first push or pop and `ensures v.count == old(v.count) - 2 and ...` failed the wrap guard
+(a lone equality goal still proved by syntactic match). Count facts are now restated on both
+paths, one conjunct at a time. Fixtures: `examples/collection_pop_value.elisa` (proved, replayed)
+and `examples/rejected_collection_pop_value.elisa` (wrong value, first element read as last, the
+popped slot after the pop, unchanged count, and `old - 3` all unproven);
+`scripts/test_collection_pop_value.py`.

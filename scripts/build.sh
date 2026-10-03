@@ -146,10 +146,30 @@ if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_O
     clang -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
 fi
-if [[ -n "$CONTRACT_FLAG" ]]; then
-    "$COMPILER" "$CONTRACT_FLAG" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/$PROOF_MAIN"
+# Objects are shared across checkouts and agents, keyed by everything the compile reads: the
+# source snapshot, the pinned compiler revision and binary, and every compile flag. A hit skips
+# only the compile; linking, signing and the manifest below run as usual.
+# ELISA_PROOF_OBJECT_CACHE=0 disables it.
+OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
+object_key=""
+if [[ "$OBJECT_CACHE" != "0" ]]; then
+    compiler_digest="$(shasum -a 256 "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER" 2>/dev/null | cut -d' ' -f1 | tr -d '\n')"
+    object_key="$( { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$PROOF_MAIN" "$(uname -m)"
+        (cd "$SNAPSHOT_ROOT" && find src -type f | LC_ALL=C sort | xargs shasum -a 256); } | shasum -a 256 | cut -d' ' -f1)"
+fi
+if [[ -n "$object_key" && -f "$OBJECT_CACHE/$object_key.o" ]]; then
+    cp "$OBJECT_CACHE/$object_key.o" "$STAGE_OBJECT"
+    printf 'build: reused cached object %s\n' "${object_key:0:12}" >&2
 else
-    "$COMPILER" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/$PROOF_MAIN"
+    if [[ -n "$CONTRACT_FLAG" ]]; then
+        "$COMPILER" "$CONTRACT_FLAG" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/$PROOF_MAIN"
+    else
+        "$COMPILER" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/$PROOF_MAIN"
+    fi
+    if [[ -n "$object_key" ]]; then
+        mkdir -p "$OBJECT_CACHE"
+        cp "$STAGE_OBJECT" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" && mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
+    fi
 fi
 LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
 [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")

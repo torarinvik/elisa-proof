@@ -4,18 +4,61 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
-"$ROOT_DIR/scripts/build.sh"
-# The portable package checker is its own small product built from the same snapshot.
-ELISA_PROOF_MAIN=src/replay_main.elisa ELISA_PROOF_OUTPUT="$ROOT_DIR/build/elisa-proof-replay" "$ROOT_DIR/scripts/build.sh"
+# ELISA_PROOF_SKIP_BUILD=1 tests prebuilt binaries (for example on a remote runner).
+if [[ "${ELISA_PROOF_SKIP_BUILD:-0}" != "1" ]]; then
+    "$ROOT_DIR/scripts/build.sh"
+    # The portable package checker is its own small product built from the same snapshot.
+    ELISA_PROOF_MAIN=src/replay_main.elisa ELISA_PROOF_OUTPUT="$ROOT_DIR/build/elisa-proof-replay" "$ROOT_DIR/scripts/build.sh"
+else
+    # Prebuilt binaries still need build/snapshot: the standalone compile probes read the
+    # frontend export and the examples from it. Exporting compiles nothing.
+    (
+        # shellcheck source=scripts/compiler_snapshot.sh
+        source "$ROOT_DIR/scripts/compiler_snapshot.sh"
+    )
+fi
 
-# The marker-decoder regression must finish under the normal watchdog. Completion
+# ELISA_PROOF_JOBS>1 runs every literal run_json_report fixture in parallel first; the serial
+# assertions below then read those stored reports (scripts/prefetch_reports.py).
+# A preset ELISA_PROOF_REPORT_CACHE (filled by scripts/remote/farm.sh on hosts with this same
+# checkout path) is used as is, with no local prefetch.
+REPORT_CACHE="${ELISA_PROOF_REPORT_CACHE:-}"
+REPORT_PREFETCH_PID=""
+if [[ -n "$REPORT_CACHE" ]]; then
+    export ELISA_PROOF_REPORT_CACHE="$REPORT_CACHE"
+elif [[ "${ELISA_PROOF_JOBS:-1}" -gt 1 ]]; then
+    REPORT_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-reports.XXXXXX")"
+    trap 'rm -rf "$REPORT_CACHE"' EXIT
+    python3 "$ROOT_DIR/scripts/prefetch_reports.py" "$ROOT_DIR/scripts/test.sh" "$ROOT_DIR/build/elisa-proof" "$REPORT_CACHE" "$ROOT_DIR" "$(( ELISA_PROOF_JOBS > 2 ? ELISA_PROOF_JOBS - 1 : ELISA_PROOF_JOBS ))" &
+    REPORT_PREFETCH_PID=$!
+    export ELISA_PROOF_REPORT_CACHE="$REPORT_CACHE" ELISA_PROOF_JOBS
+fi
+
+# The marker-decoder regression must finish under the normal watchdog; under ELISA_PROOF_JOBS it
+# holds a heavy-fixture slot so the prefetch cannot starve it of memory. Completion
 # is not proof: unresolved obligations remain visible in the report.
 if ! ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/test/repro/audit_unsigned_marker.elisa" \
     ELISA_FULL_AUDIT_BINARY="$ROOT_DIR/build/elisa-proof" \
-    "$ROOT_DIR/scripts/audit_full_source.sh" | python3 -c 'import json, sys; audit=json.load(sys.stdin); assert audit["complete"]; assert audit["replay_gaps"] == 0'; then
+    python3 "$ROOT_DIR/scripts/report_cache.py" --slot "$ROOT_DIR/test/repro/audit_unsigned_marker.elisa" -- "$ROOT_DIR/scripts/audit_full_source.sh" | python3 -c 'import json, sys; audit=json.load(sys.stdin); assert audit["complete"]; assert audit["replay_gaps"] == 0'; then
     printf 'proof test matrix failed: unsigned-marker audit did not complete with clean replay\n' >&2
     exit 1
 fi
+
+# Run one scripts/test_*.py, reading its prefetched output when ELISA_PROOF_JOBS>1 stored one.
+run_py_test() {
+    local name="$1" entry=""
+    if [[ -n "$REPORT_CACHE" ]]; then
+        entry="$REPORT_CACHE/py-$name"
+        while [[ ! -f "$entry.rc" ]] && [[ -n "$REPORT_PREFETCH_PID" ]] && kill -0 "$REPORT_PREFETCH_PID" 2>/dev/null; do
+            sleep 1  # poll-ok: local file from our own prefetcher
+        done
+    fi
+    if [[ -n "$entry" && -f "$entry.rc" ]]; then
+        cat "$entry.out"
+        return "$(cat "$entry.rc")"
+    fi
+    python3 "$ROOT_DIR/scripts/$name"
+}
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
 # The downstream assertions still check the report's expected shape; this adapter checks that the
@@ -30,7 +73,19 @@ run_json_report() {
         printf 'proof test matrix failed: could not allocate a report buffer for %s\n' "$source_path" >&2
         return 98
     fi
-    if "$ROOT_DIR/build/elisa-proof" --json "$source_path" >"$report_path"; then
+    local cache_key=""
+    if [[ -n "$REPORT_CACHE" ]]; then
+        cache_key="$REPORT_CACHE/$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$source_path" | tr -d '\n' | shasum | cut -d' ' -f1)"
+        # Wait for a prefetched fixture's entry while the prefetcher still runs.
+        while [[ ! -f "$cache_key.rc" ]] && [[ -n "$REPORT_PREFETCH_PID" ]] && kill -0 "$REPORT_PREFETCH_PID" 2>/dev/null; do
+            sleep 1  # poll-ok: local file from our own prefetcher
+            grep -qF "\"\$ROOT_DIR/${source_path#"$ROOT_DIR/"}\"" "$ROOT_DIR/scripts/test.sh" || break
+        done
+    fi
+    if [[ -n "$cache_key" && -f "$cache_key.rc" ]]; then
+        cp "$cache_key.json" "$report_path"
+        proof_status="$(cat "$cache_key.rc")"
+    elif "$ROOT_DIR/build/elisa-proof" --json "$source_path" >"$report_path"; then
         proof_status=0
     else
         proof_status=$?
@@ -73,83 +128,85 @@ PY
 run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] > 0; assert report["summary"]["proven"] == report["summary"]["obligations"]; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0'
 
 # Missing lifetime/place information is unsupported, not a demonstrated violation.
-python3 "$ROOT_DIR/scripts/test_overlap_diagnostics.py"
-python3 "$ROOT_DIR/scripts/test_certificate_reuse.py"
-python3 "$ROOT_DIR/scripts/test_measurements.py"
-python3 "$ROOT_DIR/scripts/test_source_admission_matrix.py"
-python3 "$ROOT_DIR/scripts/test_negated_conjunction_fallthrough.py"
-python3 "$ROOT_DIR/scripts/test_parameter_heavy_return_analysis.py"
-python3 "$ROOT_DIR/scripts/test_numeric_cast_operator.py"
-python3 "$ROOT_DIR/scripts/test_rejected_numeric_cast_operator.py"
-python3 "$ROOT_DIR/scripts/test_widening_cast.py"
-python3 "$ROOT_DIR/scripts/test_call_result_width.py"
-python3 "$ROOT_DIR/scripts/test_adt_library.py"
-python3 "$ROOT_DIR/scripts/test_adt_parser.py"
-python3 "$ROOT_DIR/scripts/test_match_refuted_arms.py"
-python3 "$ROOT_DIR/scripts/test_chained_pure_calls.py"
-python3 "$ROOT_DIR/scripts/test_dispatcher_budget.py"
-python3 "$ROOT_DIR/scripts/test_qualified_constants.py"
-python3 "$ROOT_DIR/scripts/test_variant_exclusion.py"
-python3 "$ROOT_DIR/scripts/test_signed_upper_bound.py"
-python3 "$ROOT_DIR/scripts/test_refusal_gate.py"
-python3 "$ROOT_DIR/scripts/test_report_count_semantics.py"
-python3 "$ROOT_DIR/scripts/test_deterministic_call_chain.py"
-python3 "$ROOT_DIR/scripts/test_deterministic_operator_global.py"
-python3 "$ROOT_DIR/scripts/test_tuple_field_region.py"
-python3 "$ROOT_DIR/scripts/test_enum_tag_equality.py"
-python3 "$ROOT_DIR/scripts/test_signed_local_field_bounds.py"
-python3 "$ROOT_DIR/scripts/test_signed_tuple_label_bounds.py"
-python3 "$ROOT_DIR/scripts/test_usize_increment_under_count.py"
-python3 "$ROOT_DIR/scripts/test_disequality_strictness.py"
-python3 "$ROOT_DIR/scripts/test_guard_and_flag_facts.py"
-python3 "$ROOT_DIR/scripts/test_min_max_abs_summaries.py"
-python3 "$ROOT_DIR/scripts/test_literal_count.py"
-python3 "$ROOT_DIR/scripts/test_engine_state.py"
-python3 "$ROOT_DIR/scripts/test_explain.py"
-python3 "$ROOT_DIR/scripts/test_long_difference_chain.py"
-python3 "$ROOT_DIR/scripts/test_can_block_frame.py"
-python3 "$ROOT_DIR/scripts/test_collection_push_count.py"
-python3 "$ROOT_DIR/scripts/test_collection_pop.py"
-python3 "$ROOT_DIR/scripts/test_census_diff.py"
-python3 "$ROOT_DIR/scripts/test_refusal_census.py"
-python3 "$ROOT_DIR/scripts/test_body_ensures.py"
-python3 "$ROOT_DIR/scripts/test_contract_placement.py"
-python3 "$ROOT_DIR/scripts/test_scalar_reference_index.py"
-python3 "$ROOT_DIR/scripts/test_old_mutable_reference.py"
-python3 "$ROOT_DIR/scripts/test_internal_marker_names.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_disjunction.py"
-python3 "$ROOT_DIR/scripts/test_numeric_cast_contract.py"
-python3 "$ROOT_DIR/scripts/test_source_map.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_distinct_constants.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_resource_source_policy.py"
-python3 "$ROOT_DIR/scripts/test_fixed_array_constant_indices.py"
-python3 "$ROOT_DIR/scripts/test_return_branch_path_fact.py"
-python3 "$ROOT_DIR/scripts/test_kernel_inventory.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_subtraction_upper.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_remainder_range.py"
-python3 "$ROOT_DIR/scripts/test_loop_state_joins.py"
-python3 "$ROOT_DIR/scripts/test_portable_replay.py"
-python3 "$ROOT_DIR/scripts/test_linear_certificates.py"
-python3 "$ROOT_DIR/scripts/test_smt_oracle.py"
-python3 "$ROOT_DIR/scripts/test_symbolic_quantifiers.py"
-python3 "$ROOT_DIR/scripts/test_indexed_write_frame.py"
-python3 "$ROOT_DIR/scripts/test_collection_frames.py"
-python3 "$ROOT_DIR/scripts/test_loop_exit_frame.py"
-python3 "$ROOT_DIR/scripts/test_near_miss.py"
-python3 "$ROOT_DIR/scripts/test_pure_unfolding.py"
-python3 "$ROOT_DIR/scripts/test_struct_invariants.py"
-python3 "$ROOT_DIR/scripts/test_correspondence.py"
-python3 "$ROOT_DIR/scripts/test_tactic_branch_regions.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_or_goal.py"
-python3 "$ROOT_DIR/scripts/test_unsigned_sum_upper_shape.py"
-python3 "$ROOT_DIR/scripts/test_vector_index_arithmetic.py"
-python3 "$ROOT_DIR/scripts/test_adt_recursive_payload.py"
-python3 "$ROOT_DIR/scripts/test_call_sum_premise.py"
-python3 "$ROOT_DIR/scripts/test_nested_conditional_split.py"
-python3 "$ROOT_DIR/scripts/test_include_constant_scope.py"
-python3 "$ROOT_DIR/scripts/test_include_function_scope.py"
+run_py_test test_overlap_diagnostics.py
+run_py_test test_certificate_reuse.py
+run_py_test test_measurements.py
+run_py_test test_source_admission_matrix.py
+run_py_test test_negated_conjunction_fallthrough.py
+run_py_test test_parameter_heavy_return_analysis.py
+run_py_test test_numeric_cast_operator.py
+run_py_test test_rejected_numeric_cast_operator.py
+run_py_test test_widening_cast.py
+run_py_test test_call_result_width.py
+run_py_test test_adt_library.py
+run_py_test test_adt_parser.py
+run_py_test test_match_refuted_arms.py
+run_py_test test_chained_pure_calls.py
+run_py_test test_dispatcher_budget.py
+run_py_test test_qualified_constants.py
+run_py_test test_variant_exclusion.py
+run_py_test test_signed_upper_bound.py
+run_py_test test_refusal_gate.py
+run_py_test test_report_count_semantics.py
+run_py_test test_deterministic_call_chain.py
+run_py_test test_deterministic_operator_global.py
+run_py_test test_tuple_field_region.py
+run_py_test test_enum_tag_equality.py
+run_py_test test_signed_local_field_bounds.py
+run_py_test test_signed_tuple_label_bounds.py
+run_py_test test_usize_increment_under_count.py
+run_py_test test_disequality_strictness.py
+run_py_test test_guard_and_flag_facts.py
+run_py_test test_min_max_abs_summaries.py
+run_py_test test_literal_count.py
+run_py_test test_engine_state.py
+run_py_test test_explain.py
+run_py_test test_long_difference_chain.py
+run_py_test test_can_block_frame.py
+run_py_test test_collection_push_count.py
+run_py_test test_collection_pop.py
+run_py_test test_collection_pop_value.py
+run_py_test test_census_diff.py
+run_py_test test_refusal_census.py
+run_py_test test_body_ensures.py
+run_py_test test_contract_placement.py
+run_py_test test_scalar_reference_index.py
+run_py_test test_old_mutable_reference.py
+run_py_test test_internal_marker_names.py
+run_py_test test_unsigned_disjunction.py
+run_py_test test_numeric_cast_contract.py
+run_py_test test_source_map.py
+run_py_test test_unsigned_distinct_constants.py
+run_py_test test_unsigned_resource_source_policy.py
+run_py_test test_fixed_array_constant_indices.py
+run_py_test test_return_branch_path_fact.py
+run_py_test test_kernel_inventory.py
+run_py_test test_unsigned_subtraction_upper.py
+run_py_test test_unsigned_or_goal.py
+run_py_test test_unsigned_sum_upper_shape.py
+run_py_test test_unsigned_remainder_range.py
+run_py_test test_loop_state_joins.py
+run_py_test test_comprehension_resources.py
+run_py_test test_portable_replay.py
+run_py_test test_linear_certificates.py
+run_py_test test_smt_oracle.py
+run_py_test test_symbolic_quantifiers.py
+run_py_test test_indexed_write_frame.py
+run_py_test test_collection_frames.py
+run_py_test test_loop_exit_frame.py
+run_py_test test_near_miss.py
+run_py_test test_pure_unfolding.py
+run_py_test test_struct_invariants.py
+run_py_test test_correspondence.py
+run_py_test test_tactic_branch_regions.py
+run_py_test test_unsigned_or_goal.py
+run_py_test test_unsigned_sum_upper_shape.py
+run_py_test test_vector_index_arithmetic.py
+run_py_test test_adt_recursive_payload.py
+run_py_test test_call_sum_premise.py
+run_py_test test_nested_conditional_split.py
+run_py_test test_include_constant_scope.py
+run_py_test test_include_function_scope.py
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -438,7 +495,7 @@ ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \
     ELISA_FULL_AUDIT_BINARY="$ROOT_DIR/build/elisa-proof" \
     ELISA_FULL_AUDIT_DIR="$kernel_replay_audit_dir" \
     ELISA_FULL_AUDIT_MEMORY_LIMIT_KB="$KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB" \
-    "$ROOT_DIR/scripts/audit_full_source.sh" >"$kernel_replay_audit_summary"
+    python3 "$ROOT_DIR/scripts/report_cache.py" --slot "$ROOT_DIR/examples/kernel_replay_standalone.elisa" -- "$ROOT_DIR/scripts/audit_full_source.sh" >"$kernel_replay_audit_summary"
 kernel_replay_audit_status=$?
 if [[ "$kernel_replay_audit_status" -eq 3 ]]; then
     python3 - "$kernel_replay_audit_summary" <<'PY'
@@ -1443,7 +1500,7 @@ else
     optional_semantic_diagnostic='cannot compare'
 fi
 set -e
-if [[ "$optional_semantic_status" -eq 0 ]] || ! rg -F -q "$optional_semantic_diagnostic" "$optional_semantic_report"; then
+if [[ "$optional_semantic_status" -eq 0 ]] || ! grep -F -q -- "$optional_semantic_diagnostic" "$optional_semantic_report"; then
     printf 'proof test matrix failed: optional payload comparison was not rejected by the frontend\n' >&2
     if [[ -s "$optional_semantic_report" ]]; then
         printf 'compiler output for the rejected-optional-result probe:\n' >&2
@@ -2548,7 +2605,7 @@ if [[ "$congruence_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "local_struct_equality_premise", "indexed_element", "constructed_aggregate", "call_congruence", "cross_width", "wrapping_operand"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}'
+run_json_report "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "local_struct_equality_premise", "constructed_aggregate", "call_congruence", "cross_width", "wrapping_operand"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}; assert "indexed_element" in claimed'
 rejected_congruence_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_congruence_status" -ne 0 ]]; then
@@ -4584,7 +4641,7 @@ fi
 set +e
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/reserved-proof-name.o" "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" >/dev/null 2>&1
 reserved_source_compiler_status=$?
-run_json_report "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == [{"kind": "proof-internal-name", "status": "unsupported", "line": 2, "name": "__elisa_unsigned_type_bound", "message": "source identifier collides with a proof-system internal name", "counterexample_found": False, "goal_id": None, "counterexample": []}]'
+run_json_report "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == [{"kind": "proof-internal-name", "status": "unsupported", "line": 2, "file": 0, "file_line": 2, "name": "__elisa_unsigned_type_bound", "message": "source identifier collides with a proof-system internal name", "counterexample_found": False, "goal_id": None, "counterexample": []}]'
 reserved_marker_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_rebind_symbol_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"][0]["kind"] == "proof-internal-name"; assert report["findings"][0]["name"] == "__elisa_rebind_0"; assert report["findings"][0]["line"] == 5'
 reserved_rebind_status=${PIPESTATUS[1]}
@@ -4673,7 +4730,7 @@ if [[ "$global_constant_module_status" -ne 0 || "$rejected_global_constant_colli
     printf 'proof test matrix failed: module constant scope was not preserved through replay\n' >&2
     exit 1
 fi
-python3 "$ROOT_DIR/scripts/test_module_u8_constant_contract.py"
+run_py_test test_module_u8_constant_contract.py
 
 # A rebind written over the binding's own symbol takes a fresh symbol, so the new value is recorded
 # and the old one keeps its facts. The equality that records it is admitted into the difference

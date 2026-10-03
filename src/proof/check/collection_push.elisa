@@ -109,13 +109,22 @@ extend ElisaProof:
         # steps before the call boundary forgets `v`.
         def proof_push_before(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, receiver: sview, owner: sview, position: Ast::Pos) -> Ast::Expr:
             place: Ast::Expr = proof_count_place(receiver, position)
-            for fact in facts |place, report|:
+            # An `old(v.count)` snapshot already names the count with a ghost; reuse it, but
+            # still restate the count facts over it below, or the call boundary drops them.
+            existing: mutable Ast::Expr = Ast::Expr.Invalid
+            for fact in facts |place, report, existing|:
+                break if not proof_expr_is_invalid(existing)
                 match fact:
                     Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
-                        return right if proof_expr_equal(left, place) and proof_ghost_term(right, report, 0)
-                        return left if proof_expr_equal(right, place) and proof_ghost_term(left, report, 0)
+                        if proof_expr_equal(left, place) and proof_ghost_term(right, report, 0):
+                            existing <- right
+                        elif proof_expr_equal(right, place) and proof_ghost_term(left, report, 0):
+                            existing <- left
                     _:
                         pass
+            if not proof_expr_is_invalid(existing):
+                proof_push_restate_counts(facts, report, receiver, owner, place, existing, position)
+                return existing
             symbol: sview = proof_rebind_symbol(report)
             return Ast::Expr.Invalid if symbol == ""
             report.local_extent_names.push(symbol)
@@ -126,18 +135,39 @@ extend ElisaProof:
             no_names: darray[sview] = []
             proof_add_traced_fact(facts, report, Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", position), bound_arguments, no_names, position), "collection-push", position.line, owner)
             proof_add_traced_fact(facts, report, Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, alias, position), "collection-push", position.line, owner)
+            proof_push_restate_counts(facts, report, receiver, owner, place, alias, position)
+            return alias
+
+        def proof_push_restate_counts(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, receiver: sview, owner: sview, place: Ast::Expr, alias: Ast::Expr, position: Ast::Pos) -> void:
             original: darray[Ast::Expr] = proof_copy_exprs(facts)
             annotations: darray[Ast::EnumAnnotation] = []
             budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
+            # Each conjunct is restated on its own, so `v.count >= 2 and v[0] == 7` keeps its
+            # count half even though the element half still names `v`.
             for fact in original |original, facts, report, owner, receiver, place, alias, annotations, budget, position|:
-                break if budget == 0
-                renamed: (changed: bool, value: Ast::Expr) = proof_replace_place(fact, place, alias, 0)
-                continue if not renamed.changed or proof_expr_mentions_name(renamed.value, receiver)
-                continue if any existing in facts where proof_expr_equal(existing, renamed.value)
-                continue if not proof_goal(original, renamed.value, annotations)
-                budget <- budget - 1
-                proof_add_derived_fact_from(facts, report, renamed.value, original, "proof-step", position.line, owner)
-            return alias
+                pieces: mutable darray[Ast::Expr] = []
+                proof_conjunct_components(fact, pieces)
+                for piece in pieces |piece, original, facts, report, owner, receiver, place, alias, annotations, budget, position|:
+                    break if budget == 0
+                    # `0 <= v.count` is the count's type bound, which S carries already; proving
+                    # `0 <= S + k` again after every push in a long chain is the slow, failing case.
+                    match piece:
+                        Ast::Expr.Binary(Ast::Expr.IntLit(0, _), TokenKind.LtEq, right, _):
+                            continue if proof_expr_equal(right, place)
+                        _:
+                            pass
+                    renamed: (changed: bool, value: Ast::Expr) = proof_replace_place(piece, place, alias, 0)
+                    continue if not renamed.changed or proof_expr_mentions_name(renamed.value, receiver)
+                    continue if any existing in facts where proof_expr_equal(existing, renamed.value)
+                    # The binding `S == v.count` itself renames to `S == S`, which says nothing.
+                    match renamed.value:
+                        Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                            continue if proof_expr_equal(left, right)
+                        _:
+                            pass
+                    continue if not proof_goal(original, renamed.value, annotations)
+                    budget <- budget - 1
+                    proof_add_derived_fact_from(facts, report, renamed.value, original, "proof-step", position.line, owner)
 
         # A push writes only `v[S]`, where S is the count before it, so an element fact whose
         # reads of `v` are all provably below S still holds after the call boundary forgets `v`.

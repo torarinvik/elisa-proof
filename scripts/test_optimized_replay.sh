@@ -2,6 +2,12 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A host that cannot compile the prover natively (winpc's WSL is OOM-killed at ~7.4 GB) says so
+# loudly instead of failing; the Mac or a larger remote host still runs this gate.
+if [[ "${ELISA_PROOF_SKIP_OPTIMIZED:-0}" == "1" ]]; then
+    printf 'optimized replay: SKIPPED on this host (ELISA_PROOF_SKIP_OPTIMIZED=1); run it on the Mac or a large host\n'
+    exit 0
+fi
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-optimized-replay.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT INT TERM HUP
 
