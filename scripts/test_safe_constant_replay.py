@@ -29,9 +29,9 @@ assert tactic["kernel_trace_replayed"] is True, positive
 assert tactic["certificate_replayed"] is True, positive
 
 for fixture, goal, fingerprint in (
-    ("rejected_u64_max_decide", 7, 515359733),
-    ("rejected_u8_overflow_decide", 13, 1229197265),
-    ("rejected_u8_overflow_simp", 13, 1229197265),
+    ("rejected_u64_max_decide", 7, 3959704679),
+    ("rejected_u8_overflow_decide", 13, 3492578551),
+    ("rejected_u8_overflow_simp", 13, 3492578551),
 ):
     negative = report("tactic_script_" + fixture + ".json",
                       "rejected_u64_max_conflict.elisa", 1)
@@ -43,4 +43,4 @@ for fixture, goal, fingerprint in (
     assert negative["tactic"]["valid"] is False, negative
     assert negative["tactic"]["solved"] is False, negative
 
-print("constant replay: safe simplification replayed; three machine-invalid claims refused")
+print("constant replay: safe simplification replayed; three typed claims bound but lossy imports refused")

@@ -1,33 +1,37 @@
+# Positive countdowns preserve the original depth cutoff: remaining = limit + 1 - depth.
+# Entry 128 corresponds to depth 0; remaining 1 corresponds to rejected depth 127.
 # Closed typed expression evaluation is independent of the compiler AST and
-# interval solver. Both depth and total work are bounded, including shared DAGs.
+# interval solver. Both recursion depth and total work are bounded, including shared DAGs.
 extend ElisaProofKernelCore:
     private:
         const TYPED_CONSTANT_WORK_BUDGET: usize = 4096
 
-        def typed_constant_guard_remaining(nodes: darray[ProofKernelNode]&, root: usize, depth: usize, work: mutable usize&) -> (known: bool, value: bool):
-            requires depth <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-            decreases PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
-            return (false, false) if depth >= PROOF_KERNEL_REPLAY_DEPTH_LIMIT or work == 0 or root >= nodes.count
+        def typed_constant_guard_remaining(nodes: darray[ProofKernelNode]&, root: usize, remaining: usize, work: mutable usize&) -> (known: bool, value: bool):
+            requires remaining > 0
+            requires remaining <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1
+            decreases remaining
+            return (false, false) if remaining <= 1 or work == 0 or root >= nodes.count
             work <- work - 1
             guard = nodes[root]
             return (false, false) if guard.kind != "binary" or guard.auxiliary != 0 or guard.children_start != 0 or guard.children_count != 0 or guard.value != 0 or guard.name != "" or guard.secondary_name != ""
             if guard.operator == "and" or guard.operator == "or":
-                left = typed_constant_guard_remaining(nodes, guard.left, depth + 1, work)
+                left = typed_constant_guard_remaining(nodes, guard.left, remaining - 1, work)
                 return (false, false) if not left.known
-                right = typed_constant_guard_remaining(nodes, guard.right, depth + 1, work)
+                right = typed_constant_guard_remaining(nodes, guard.right, remaining - 1, work)
                 return (false, false) if not right.known
                 return (true, left.value and right.value) if guard.operator == "and"
                 return (true, left.value or right.value)
-            a = typed_constant_expression_remaining(nodes, guard.left, depth + 1, work)
+            a = typed_constant_expression_remaining(nodes, guard.left, remaining - 1, work)
             return (false, false) if not a.known
-            b = typed_constant_expression_remaining(nodes, guard.right, depth + 1, work)
+            b = typed_constant_expression_remaining(nodes, guard.right, remaining - 1, work)
             return (false, false) if not b.known
             return typed_literal_comparison(a.node, guard.operator, b.node)
 
-        def typed_constant_expression_remaining(nodes: darray[ProofKernelNode]&, root: usize, depth: usize, work: mutable usize&) -> (known: bool, node: ProofKernelNode):
-            requires depth <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-            decreases PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
-            if depth >= PROOF_KERNEL_REPLAY_DEPTH_LIMIT or work == 0 or root >= nodes.count:
+        def typed_constant_expression_remaining(nodes: darray[ProofKernelNode]&, root: usize, remaining: usize, work: mutable usize&) -> (known: bool, node: ProofKernelNode):
+            requires remaining > 0
+            requires remaining <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1
+            decreases remaining
+            if remaining <= 1 or work == 0 or root >= nodes.count:
                 empty: ProofKernelNode = ProofKernelNode{kind: "unsupported", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
                 return (false, empty)
             work <- work - 1
@@ -35,18 +39,18 @@ extend ElisaProofKernelCore:
             return (typed_literal_value(node).known, node) if node.kind == "typed-int"
             if node.kind == "if":
                 return (false, node) if node.operator != "" or node.children_start != 0 or node.children_count != 0 or node.value != 0 or node.name != "" or node.secondary_name != "" or node.left >= nodes.count
-                decision = typed_constant_guard_remaining(nodes, node.left, depth + 1, work)
+                decision = typed_constant_guard_remaining(nodes, node.left, remaining - 1, work)
                 return (false, node) if not decision.known
-                yes = typed_constant_expression_remaining(nodes, node.right, depth + 1, work)
+                yes = typed_constant_expression_remaining(nodes, node.right, remaining - 1, work)
                 return (false, node) if not yes.known
-                no = typed_constant_expression_remaining(nodes, node.auxiliary, depth + 1, work)
+                no = typed_constant_expression_remaining(nodes, node.auxiliary, remaining - 1, work)
                 return (false, node) if not no.known or yes.node.name != no.node.name
                 return yes if decision.value else no
             return (false, node) if node.kind != "binary" or (node.operator != "+" and node.operator != "-")
             return (false, node) if node.auxiliary != 0 or node.children_start != 0 or node.children_count != 0 or node.value != 0 or node.name != "" or node.secondary_name != ""
-            left = typed_constant_expression_remaining(nodes, node.left, depth + 1, work)
+            left = typed_constant_expression_remaining(nodes, node.left, remaining - 1, work)
             return (false, node) if not left.known
-            right = typed_constant_expression_remaining(nodes, node.right, depth + 1, work)
+            right = typed_constant_expression_remaining(nodes, node.right, remaining - 1, work)
             return (false, node) if not right.known
             value = typed_unsigned_add_sub(left.node, node.operator, right.node)
             return (false, node) if not value.known
@@ -56,7 +60,7 @@ extend ElisaProofKernelCore:
     public:
         def typed_constant_expression_unsigned_width(nodes: darray[ProofKernelNode]&, root: usize) -> i64:
             work: mutable usize = TYPED_CONSTANT_WORK_BUDGET
-            evaluated = typed_constant_expression_remaining(nodes, root, 0, &work)
+            evaluated = typed_constant_expression_remaining(nodes, root, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &work)
             return 0 if not evaluated.known
             literal = typed_literal_value(evaluated.node)
             return literal.width if literal.known and literal.unsigned else 0
@@ -68,8 +72,8 @@ extend ElisaProofKernelCore:
             return (false, false) if nodes[left].kind != "typed-int" and nodes[left].kind != "binary" and nodes[left].kind != "if"
             return (false, false) if nodes[right].kind != "typed-int" and nodes[right].kind != "binary" and nodes[right].kind != "if"
             work: mutable usize = TYPED_CONSTANT_WORK_BUDGET
-            a = typed_constant_expression_remaining(nodes, left, 0, &work)
+            a = typed_constant_expression_remaining(nodes, left, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &work)
             return (false, false) if not a.known
-            b = typed_constant_expression_remaining(nodes, right, 0, &work)
+            b = typed_constant_expression_remaining(nodes, right, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &work)
             return (false, false) if not b.known
             return typed_literal_comparison(a.node, operator, b.node)
