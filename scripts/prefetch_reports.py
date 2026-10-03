@@ -14,6 +14,7 @@ ELISA_PROOF_SHARDS="a,b,.../N" runs only the work items whose index mod N is lis
 hosts with the same checkout path can split one run (scripts/remote/farm.sh).
 """
 import concurrent.futures
+import glob
 import hashlib
 import os
 import re
@@ -29,8 +30,14 @@ def cache_key(path: str) -> str:
     return hashlib.sha1(os.path.realpath(path).encode("utf-8")).hexdigest()
 
 
+def matrix_text(test_script: str) -> str:
+    """test.sh plus the ordered parts it sources from scripts/test.d."""
+    parts = sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(test_script)), "test.d", "*.sh")))
+    return "".join(open(path, encoding="utf-8").read() for path in [test_script, *parts])
+
+
 def fixtures(test_script: str, root: str) -> list[str]:
-    text = open(test_script, encoding="utf-8").read()
+    text = matrix_text(test_script)
     found = set(re.findall(r'run_json_report "\$ROOT_DIR/([^"$]*\.elisa)"', text))
     # scripts/test_near_miss.py reads every rejected example through scripts/report_cache.py.
     found |= {os.path.join("examples", name) for name in os.listdir(os.path.join(root, "examples"))
@@ -41,7 +48,7 @@ def fixtures(test_script: str, root: str) -> list[str]:
 
 
 def py_tests(test_script: str, root: str) -> list[str]:
-    text = open(test_script, encoding="utf-8").read()
+    text = matrix_text(test_script)
     names = re.findall(r'^\s*run_py_test (test_[a-z_0-9]+\.py)\s*$', text, re.MULTILINE)
     return [name for name in dict.fromkeys(names) if os.path.isfile(os.path.join(root, "scripts", name))]
 

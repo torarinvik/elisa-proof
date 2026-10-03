@@ -238,7 +238,7 @@ The current local compiler wrappers can be used as:
 PATH=/Users/torarinvikbjarko/.elisac:$PATH scripts/test.sh
 ```
 
-Run the source-neutral dogfood gate with `scripts/dogfood.sh`. It requires the formalized kernel
+Run the source-neutral dogfood gate with `scripts/dogfood.sh`. The gate sources its ordered parts from `scripts/dogfood.d/`. It requires the formalized kernel
 layers and standalone replay boundary to be fully independently replayable. Set
 `ELISA_DOGFOOD_FULL=1` to additionally run the complete imported implementation through the same
 bounded audit. For direct use, first build the proof binary and run
@@ -254,7 +254,7 @@ size. `ELISA_FULL_AUDIT_RSS_LIMIT_KB` remains a compatibility alias for the memo
 Each dogfood probe is executed twice and must produce byte-identical JSON, making nondeterministic
 proof IDs, certificate ordering, or report serialization a gate failure.
 
-`scripts/test.sh` checks accepted proofs, textual imports, lemma application, structured results,
+`scripts/test.sh` sources the ordered parts in `scripts/test.d/` (each under 600 lines) and checks accepted proofs, textual imports, lemma application, structured results,
 frames, defaults, direct and mutual recursive termination, lexicographic and structural recursion,
 finite collection quantifiers, pure-call defaults, transitive and mutually recursive pure contract calls, assignment/declaration evaluation order, and rejected proof, lemma,
 self-assertion, circular-summary, recursive-lemma, nested-call-state, shadowing, contract-call,

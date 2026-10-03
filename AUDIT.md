@@ -10855,3 +10855,88 @@ paths, one conjunct at a time. Fixtures: `examples/collection_pop_value.elisa` (
 and `examples/rejected_collection_pop_value.elisa` (wrong value, first element read as last, the
 popped slot after the pop, unchanged count, and `old - 3` all unproven);
 `scripts/test_collection_pop_value.py`.
+
+## Split test matrix, W-05 design, or-chain fixtures (2026-10-03)
+
+`scripts/test.sh` had grown to 4733 lines. It is now a driver that sources nine ordered parts
+from `scripts/test.d/`, cut only where each part parses alone (`bash -n` with no warnings, so
+no cut falls inside a heredoc) and after a `fi`, `done`, `PY` or blank line. Sourcing keeps the
+single shell, so `set -e`/`set +e` state, traps, `run_json_report` and variables carry across
+parts exactly as before; the parts concatenated without their two-line headers are
+byte-identical to the old script. `check_source_length.py` now also bounds `scripts/test.sh`
+and every part at 600 lines. It already failed before this change on
+`src/proof/check/declaration_checks.elisa` (601 lines, from ca94be1); that is left as found.
+
+W-05 is designed, not implemented: [docs/w05-quantifier-oracle.md](docs/w05-quantifier-oracle.md).
+Z3 returns instantiation lists (fact index, instance term) that the checker admits only through
+the W-02 instance rule after proving the range side goals, so the TCB delta is a hint parser.
+
+`examples/or_chain.elisa` and `examples/rejected_or_chain.elisa`, checked by
+`scripts/test_or_chains.py`, pin chains of three to eight `or` operands: chained, left- and
+right-nested and mixed-relation preconditions, a chained goal proved by its last or middle
+disjunct, and a four-way chain beside the range fact that alone proves the goal (the retry
+without top-level disjunctions from e71a28c). The rejected file keeps an uncovered case, a
+nested uncovered case, a goal no disjunct satisfies, a claim past the range and an eight-case
+off-by-one unproven.
+
+**Not run.** The session that wrote this could not build a stage1 compiler (stage0 at
+`ELISA_STAGE0_REV` rejects the proof sources' `.cast[T]` syntax, and seeding stage1 failed on
+the compiler's own contract and storage checks under both that stage0 and Elisa-core main), so
+`build/elisa-proof` never existed there. The split was verified by byte-identical
+concatenation and `bash -n`; `test_or_chains.py`, its expected line set and the claim that every
+`or_chain.elisa` function proves are unverified until the next local `scripts/test.sh`.
+
+## 600-line bound on every source file (2026-10-03)
+
+`scripts/dogfood.sh` (3455 lines) is split like the test matrix: a driver sourcing six ordered
+parts from `scripts/dogfood.d/`, cut only where each part parses alone and never inside a
+heredoc; concatenated without their headers they are byte-identical to the old script.
+`src/proof/check/declaration_checks.elisa` went from 601 to 599 lines by rewording one comment;
+no code changed. `check_source_length.py` now bounds `examples/**/*.elisa`, `scripts/**/*.sh`,
+`scripts/**/*.py` and `test/**/*.py` as well as `src/`, and passes on the whole tree.
+`CLAUDE.md` records the rule and how to split when a file nears it. Not run beyond
+`check_source_length.py` and `bash -n`, for the same toolchain reason as the entry above.
+
+## W-05 oracle half (2026-10-03)
+
+`scripts/quantifier_oracle.py` implements the Z3 side of the W-05 design: it translates a
+`quantifier_problem` (the s-expression grammar in docs/w05-quantifier-oracle.md) to SMT-LIB with
+MBQI off, names each quantified fact's binder `elisa_q<index>`, and on `unsat` expands the
+proof's `let` abbreviations to collect `quant-inst` steps. An instance is kept only if its term
+uses source names and grammar operators (skolems and `div` are dropped), depth at most 6, at most
+eight per goal, records at most 4096 bytes. `scripts/test_quantifier_oracle.py` runs without the
+proof binary and passed here with z3 4.8.12: two unseen instances `k` and `(+ -1 k)` of one
+bounded fact; record fact indices follow the problem, not list position; a false goal (k may
+equal n) and a quantifier-free goal yield nothing; seven malformed and two budget problems are
+refused; a missing z3 proposes nothing and exits 0. The elisa-proof side (export, tagged hint
+records, checker path) is not written, because no compiler could be built in this session to
+test it.
+
+## First Linux run of the full matrix (2026-10-03, in progress)
+
+The toolchain now builds on Linux x86-64 (`scripts/linux_toolchain.sh`): stage0 at
+`ELISA_STAGE0_REV`, stage1 at `ELISA_COMPILER_REV` compiled by stage0 at -O0, and the stage1
+runtime object. stage1 must see `ELISA_HOST_LINUX=1 ELISA_HOST_X86_64=1`; without them products
+take the macOS mmap flags and abort in `new_region_with_owner`. Link flags are shared through
+`scripts/link_flags.sh`.
+
+Results with that toolchain:
+- `examples/or_chain.elisa` proves and replays 16/16; the rejected file fails each case for its
+  stated gate (pinned in `scripts/test_or_chains.py`). Chains open up to five disjuncts
+  (`PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT` = 4); six report `budget`/`timeout`.
+- `scripts/test.sh` passes everything before the standalone kernel audit, then stops there:
+  the audit needs 536 s against the 180 s watchdog (`ELISA_FULL_AUDIT_TIME_LIMIT` raises it).
+  Untimed it proves 4003/5416, matching ca94be1, but has **2 replay gaps**, so
+  `test/validate_kernel_replay_standalone.py` fails: certificate 2003 (goal,
+  `proof_kernel_replay_has_negative_integer_bit_pattern`, `kernel_replay/unsigned_bounds.elisa:180`,
+  108 facts) and certificate 1578 (resource-safety, `proof_kernel_replay_symbolic_renamed`).
+  `rejected_kernel_arena_cycle.elisa` fails its probe for the same two gaps. The code at those
+  lines is unchanged since 2026-09-30, so a later engine change introduced them; the last full
+  green run recorded here predates the W-02/W-04 kernel work.
+- Parts 03 onward of `test.sh` and all of `dogfood.sh` have not completed yet (dogfood was
+  killed by memory pressure while a bisect build ran beside it).
+
+Next: `git bisect start 7f742ac f68e213 && git bisect run scripts/bisect_replay_gaps.sh` (same
+compiler pin across that range; about 12 minutes per step; run nothing else that compiles at
+the same time), fix the first bad commit's replay mirror, then rerun `test.sh` with
+`ELISA_FULL_AUDIT_TIME_LIMIT=1500` and `dogfood.sh`.

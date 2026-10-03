@@ -32,6 +32,8 @@ esac
 COMPILER="${ELISA_COMPILER_BIN:-}"
 # shellcheck source=scripts/compiler_provenance.sh
 source "$ROOT_DIR/scripts/compiler_provenance.sh"
+# shellcheck source=scripts/link_flags.sh
+source "$ROOT_DIR/scripts/link_flags.sh"
 
 if [[ -z "$COMPILER" ]]; then
     # Prefer the source checkout's freshness-guarded stage1 wrapper over an
@@ -176,7 +178,10 @@ else
 fi
 LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
 [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
-clang -Wl,-dead_strip -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+# ELISA_EXTRA_LINK_INPUTS (space-separated objects) lets a host supply symbols the platform's
+# dead stripping would otherwise remove, such as unreachable native-callback entry points.
+[[ -n "${ELISA_EXTRA_LINK_INPUTS:-}" ]] && read -r -a extra_link_inputs <<< "$ELISA_EXTRA_LINK_INPUTS" && LINK_INPUTS+=("${extra_link_inputs[@]}")
+clang "${ELISA_DEAD_STRIP_LINK[@]}" -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
 # Sign before hashing so the manifest digest names the exact executable that runs.
 if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
     codesign -s - --force "$PROOF_BINARY" 2>/dev/null
