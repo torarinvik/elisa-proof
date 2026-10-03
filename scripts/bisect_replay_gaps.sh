@@ -15,6 +15,6 @@ if [[ ! -x build/elisa-proof ]]; then
     clang -no-pie -Wl,--gc-sections -o build/elisa-proof "$obj" build/profile_hooks.o "$ELISA_RUNTIME_OBJ" -lm || exit 125
 fi
 build/elisa-proof --json examples/kernel_replay_standalone.elisa > ${TMPDIR:-/tmp}/bisect_report.json 2>/dev/null
-gaps=$(python3 -c 'import json;print(json.load(open("${TMPDIR:-/tmp}/bisect_report.json"))["replay"]["gaps"])' 2>/dev/null) || exit 125
+gaps=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["replay"]["gaps"])' "${TMPDIR:-/tmp}/bisect_report.json" 2>/dev/null) || exit 125
 echo "$(git rev-parse --short HEAD) gaps=$gaps" >> ${TMPDIR:-/tmp}/bisect_trace.txt
 [[ "$gaps" -eq 0 ]]
