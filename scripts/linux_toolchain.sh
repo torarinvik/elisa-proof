@@ -133,5 +133,7 @@ printf 'export ELISA_HOST_LINUX=1 ELISA_HOST_X86_64=1\n'
 # build.sh links with the `clang` on PATH; use the one that matches the LLVM stage1 was built with.
 printf 'export PATH=%q:"$PATH"\n' "$LLVM_DIR/bin"
 printf 'export ELISA_COMPILER_BIN=%q\n' "$STAGE1"
+# The checkout stage1 was compiled from, at ELISA_COMPILER_REV; build.sh records its revision.
+printf 'export ELISA_STAGE1_ROOT=%q\n' "$TOOLCHAIN/compiler"
 printf 'export ELISA_RUNTIME_OBJ=%q\n' "$RUNTIME"
 printf 'export ELISA_STAGE0_BIN=%q\n' "$STAGE0"
