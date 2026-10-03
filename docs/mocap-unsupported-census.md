@@ -239,3 +239,6 @@ The build used stage1 from `d8b5d30`, seeded from stage0 `0b21b7b`, on Linux wit
   - two expectation sets were stale;
   - two native harnesses still built `ProofFactTrace` without `owner_line`;
   - the lemma-summary harness restored a hard-coded binding.
+- **Performance:** unchanged within noise on the same machine.
+  - `src/cli/main.elisa`: 28.0 s and 880 MB peak on base, 28.0 s and 885 MB on this branch.
+  - The replay self-audit: 27.3 s and 1680 MB on base, 27.2 s and 1686 MB on this branch.
