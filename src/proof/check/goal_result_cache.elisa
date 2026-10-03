@@ -1,0 +1,396 @@
+# Run-local result cache for the built-in decision procedure.
+#
+# `proof_goal_with_operator_mask` is a pure function of its four inputs -- the premise list, the
+# goal, the enum annotations, and the source operator mask: it takes no report, declares no
+# effect beyond allocation, and starts its split budget at zero on every call. So a second call
+# with exactly the same inputs must return exactly the same answer, and that answer can be reused
+# instead of recomputed. Nothing else is reused: the caller still records the attempt, encodes
+# the facts, and emits a certificate that independent kernel replay admits or rejects as before.
+#
+# "Exactly the same" is meant literally, and is stricter than `proof_expr_equal`:
+# - parentheses are compared, not stripped (some tiers match the unstripped goal);
+# - every node's source position is compared, because integer literal types and quantifier
+#   kinds are looked up in the annotations by position (`proof_integer_literal_tag`,
+#   `proof_quantifier_kind`), so equal shapes at different places may decide differently;
+# - premises are compared in order, and names are compared as written. The procedure is
+#   incomplete and order-sensitive (first match, pruning order, split budget), and names carry
+#   meaning (call contracts, internal markers), so neither sorting nor renaming is admitted;
+# - the annotations must equal the snapshot the cache was filled under, else it is flushed.
+# A term outside the shapes below (blocks, quantifiers, records, ...) makes the call uncacheable:
+# it simply runs the procedure. Only answers that did not exhaust a budget are stored, so a
+# budget-limited "no" is never replayed as a decided failure.
+extend ElisaProof:
+    private:
+        # Bounds on memory, not on soundness: once full, calls still run, they are just not stored.
+        const PROOF_GOAL_CACHE_ENTRY_LIMIT: usize = 65536
+        const PROOF_GOAL_CACHE_FACT_LIMIT: usize = 4194304
+
+        def proof_goal_cache_mix(hash: u32, value: i64) -> u32:
+            low: i64 = value & 4294967295
+            return (((hash.i64() ^ low) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
+
+        def proof_goal_cache_mix_pos(hash: u32, position: Ast::Pos) -> u32:
+            mixed: u32 = proof_goal_cache_mix(hash, position.line.i64())
+            return proof_goal_cache_mix(mixed, position.offset.i64())
+
+        def proof_goal_cache_pos_same(left: Ast::Pos, right: Ast::Pos) -> bool:
+            return left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
+
+        def proof_goal_cache_sview_array_hash(hash: u32, values: darray[sview]&) -> u32:
+            result: mutable u32 = proof_goal_cache_mix(hash, values.count.i64())
+            for value in values |value, result|:
+                result <- proof_goal_cache_mix(result, proof_name_hash(value).i64())
+            return result
+
+        def proof_goal_cache_array_hash(hash: u32, values: darray[Ast::Expr]&, depth: usize) -> (ok: bool, hash: u32):
+            result: mutable u32 = proof_goal_cache_mix(hash, values.count.i64())
+            for value in values |value, result, depth|:
+                child: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(value, depth + 1)
+                return (false, 0) if not child.ok
+                result <- proof_goal_cache_mix(result, child.hash.i64())
+            return (true, result)
+
+        # Structural hash over the cacheable shapes; `ok` is false for any other shape. The hash
+        # is a probe hint only, so it may ignore fields (operators, column) that equality checks.
+        def proof_goal_cache_expr_hash(expression: Ast::Expr, depth: usize) -> (ok: bool, hash: u32):
+            return (false, 0) if not ElisaProofKernelCore::depth_valid(depth)
+            basis: i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            seed: u32 = basis.u32()
+            match expression:
+                Ast::Expr.Absent:
+                    return (true, proof_goal_cache_mix(seed, 1))
+                Ast::Expr.IntLit(value, position):
+                    hash: u32 = proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(seed, 2), value), position)
+                    return (true, proof_goal_cache_mix(hash, value >> 32))
+                Ast::Expr.BoolLit(value, position):
+                    return (true, proof_goal_cache_mix_pos(proof_goal_cache_mix(seed, 4 if value else 3), position))
+                Ast::Expr.StringLit(text, position):
+                    return (true, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(seed, 5), proof_name_hash(text).i64()), position))
+                Ast::Expr.CharLit(text, position):
+                    return (true, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(seed, 6), proof_name_hash(text).i64()), position))
+                Ast::Expr.Ident(name, position):
+                    return (true, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(seed, 7), proof_name_hash(name).i64()), position))
+                Ast::Expr.ShorthandMember(parts, position):
+                    return (true, proof_goal_cache_mix_pos(proof_goal_cache_sview_array_hash(proof_goal_cache_mix(seed, 8), parts), position))
+                Ast::Expr.Paren(inner, position):
+                    child: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(inner, depth + 1)
+                    return (child.ok, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(seed, 9), child.hash.i64()), position))
+                Ast::Expr.Unary(_, operand, position):
+                    child: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(operand, depth + 1)
+                    return (child.ok, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(seed, 10), child.hash.i64()), position))
+                Ast::Expr.Move(operand, position):
+                    child: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(operand, depth + 1)
+                    return (child.ok, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(seed, 11), child.hash.i64()), position))
+                Ast::Expr.Binary(left, _, right, position):
+                    left_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(left, depth + 1)
+                    return (false, 0) if not left_hash.ok
+                    right_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(right, depth + 1)
+                    return (right_hash.ok, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(seed, 12), left_hash.hash.i64()), right_hash.hash.i64()), position))
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    callee_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(callee, depth + 1)
+                    return (false, 0) if not callee_hash.ok
+                    named: u32 = proof_goal_cache_sview_array_hash(proof_goal_cache_mix(proof_goal_cache_mix(seed, 13), callee_hash.hash.i64()), argument_names)
+                    argument_hash: (ok: bool, hash: u32) = proof_goal_cache_array_hash(named, arguments, depth)
+                    return (argument_hash.ok, proof_goal_cache_mix_pos(argument_hash.hash, position))
+                Ast::Expr.Field(object, field, position):
+                    child: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(object, depth + 1)
+                    return (child.ok, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(seed, 14), child.hash.i64()), proof_name_hash(field).i64()), position))
+                Ast::Expr.Scope(base, name, position):
+                    child: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(base, depth + 1)
+                    return (child.ok, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(seed, 15), child.hash.i64()), proof_name_hash(name).i64()), position))
+                Ast::Expr.Index(object, index, position):
+                    object_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(object, depth + 1)
+                    return (false, 0) if not object_hash.ok
+                    index_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(index, depth + 1)
+                    return (index_hash.ok, proof_goal_cache_mix_pos(proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(seed, 16), object_hash.hash.i64()), index_hash.hash.i64()), position))
+                Ast::Expr.Slice(object, low, high, position):
+                    object_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(object, depth + 1)
+                    return (false, 0) if not object_hash.ok
+                    low_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(low, depth + 1)
+                    return (false, 0) if not low_hash.ok
+                    high_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(high, depth + 1)
+                    hash: u32 = proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(seed, 17), object_hash.hash.i64()), low_hash.hash.i64()), high_hash.hash.i64())
+                    return (high_hash.ok, proof_goal_cache_mix_pos(hash, position))
+                Ast::Expr.IndexN(object, arguments, position):
+                    object_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(object, depth + 1)
+                    return (false, 0) if not object_hash.ok
+                    argument_hash: (ok: bool, hash: u32) = proof_goal_cache_array_hash(proof_goal_cache_mix(proof_goal_cache_mix(seed, 18), object_hash.hash.i64()), arguments, depth)
+                    return (argument_hash.ok, proof_goal_cache_mix_pos(argument_hash.hash, position))
+                Ast::Expr.Array(elements, position):
+                    element_hash: (ok: bool, hash: u32) = proof_goal_cache_array_hash(proof_goal_cache_mix(seed, 19), elements, depth)
+                    return (element_hash.ok, proof_goal_cache_mix_pos(element_hash.hash, position))
+                Ast::Expr.Tuple(elements, position):
+                    element_hash: (ok: bool, hash: u32) = proof_goal_cache_array_hash(proof_goal_cache_mix(seed, 20), elements, depth)
+                    return (element_hash.ok, proof_goal_cache_mix_pos(element_hash.hash, position))
+                Ast::Expr.SetLit(elements, position):
+                    element_hash: (ok: bool, hash: u32) = proof_goal_cache_array_hash(proof_goal_cache_mix(seed, 21), elements, depth)
+                    return (element_hash.ok, proof_goal_cache_mix_pos(element_hash.hash, position))
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    condition_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(condition, depth + 1)
+                    return (false, 0) if not condition_hash.ok
+                    then_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(then_expression, depth + 1)
+                    return (false, 0) if not then_hash.ok
+                    else_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(else_expression, depth + 1)
+                    hash: u32 = proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(seed, 22), condition_hash.hash.i64()), then_hash.hash.i64()), else_hash.hash.i64())
+                    return (else_hash.ok, proof_goal_cache_mix_pos(hash, position))
+                _:
+                    return (false, 0)
+            return (false, 0)
+
+        def proof_goal_cache_array_same(left: darray[Ast::Expr]&, right: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index, depth|:
+                return false if not proof_goal_cache_expr_same(left[index], right[index], depth + 1)
+            return true
+
+        # Exact identity over the shapes hashed above: variant, operator, payload, names, and the
+        # full source position of every node. Parentheses are nodes like any other.
+        def proof_goal_cache_expr_same(left: Ast::Expr, right: Ast::Expr, depth: usize) -> bool:
+            return false if not ElisaProofKernelCore::depth_valid(depth)
+            match left:
+                Ast::Expr.Absent:
+                    match right:
+                        Ast::Expr.Absent:
+                            return true
+                        _:
+                            return false
+                Ast::Expr.IntLit(value, position):
+                    match right:
+                        Ast::Expr.IntLit(other, other_position):
+                            return value == other and proof_goal_cache_pos_same(position, other_position)
+                        _:
+                            return false
+                Ast::Expr.BoolLit(value, position):
+                    match right:
+                        Ast::Expr.BoolLit(other, other_position):
+                            return value == other and proof_goal_cache_pos_same(position, other_position)
+                        _:
+                            return false
+                Ast::Expr.StringLit(text, position):
+                    match right:
+                        Ast::Expr.StringLit(other, other_position):
+                            return text == other and proof_goal_cache_pos_same(position, other_position)
+                        _:
+                            return false
+                Ast::Expr.CharLit(text, position):
+                    match right:
+                        Ast::Expr.CharLit(other, other_position):
+                            return text == other and proof_goal_cache_pos_same(position, other_position)
+                        _:
+                            return false
+                Ast::Expr.Ident(name, position):
+                    match right:
+                        Ast::Expr.Ident(other, other_position):
+                            return name == other and proof_goal_cache_pos_same(position, other_position)
+                        _:
+                            return false
+                Ast::Expr.ShorthandMember(parts, position):
+                    match right:
+                        Ast::Expr.ShorthandMember(other_parts, other_position):
+                            return proof_sview_array_equal(parts, other_parts) and proof_goal_cache_pos_same(position, other_position)
+                        _:
+                            return false
+                Ast::Expr.Paren(inner, position):
+                    match right:
+                        Ast::Expr.Paren(other_inner, other_position):
+                            return proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_expr_same(inner, other_inner, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Unary(operator, operand, position):
+                    match right:
+                        Ast::Expr.Unary(other_operator, other_operand, other_position):
+                            return operator == other_operator and proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_expr_same(operand, other_operand, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Move(operand, position):
+                    match right:
+                        Ast::Expr.Move(other_operand, other_position):
+                            return proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_expr_same(operand, other_operand, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Binary(left_operand, operator, right_operand, position):
+                    match right:
+                        Ast::Expr.Binary(other_left, other_operator, other_right, other_position):
+                            return false if operator != other_operator or not proof_goal_cache_pos_same(position, other_position)
+                            return proof_goal_cache_expr_same(left_operand, other_left, depth + 1) and proof_goal_cache_expr_same(right_operand, other_right, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    match right:
+                        Ast::Expr.Call(other_callee, other_arguments, other_argument_names, other_position):
+                            return false if not proof_goal_cache_pos_same(position, other_position) or not proof_sview_array_equal(argument_names, other_argument_names)
+                            return proof_goal_cache_expr_same(callee, other_callee, depth + 1) and proof_goal_cache_array_same(arguments, other_arguments, depth)
+                        _:
+                            return false
+                Ast::Expr.Field(object, field, position):
+                    match right:
+                        Ast::Expr.Field(other_object, other_field, other_position):
+                            return field == other_field and proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_expr_same(object, other_object, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Scope(base, name, position):
+                    match right:
+                        Ast::Expr.Scope(other_base, other_name, other_position):
+                            return name == other_name and proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_expr_same(base, other_base, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Index(object, index, position):
+                    match right:
+                        Ast::Expr.Index(other_object, other_index, other_position):
+                            return proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_expr_same(object, other_object, depth + 1) and proof_goal_cache_expr_same(index, other_index, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Slice(object, low, high, position):
+                    match right:
+                        Ast::Expr.Slice(other_object, other_low, other_high, other_position):
+                            return false if not proof_goal_cache_pos_same(position, other_position)
+                            return proof_goal_cache_expr_same(object, other_object, depth + 1) and proof_goal_cache_expr_same(low, other_low, depth + 1) and proof_goal_cache_expr_same(high, other_high, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.IndexN(object, arguments, position):
+                    match right:
+                        Ast::Expr.IndexN(other_object, other_arguments, other_position):
+                            return proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_expr_same(object, other_object, depth + 1) and proof_goal_cache_array_same(arguments, other_arguments, depth)
+                        _:
+                            return false
+                Ast::Expr.Array(elements, position):
+                    match right:
+                        Ast::Expr.Array(other_elements, other_position):
+                            return proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_array_same(elements, other_elements, depth)
+                        _:
+                            return false
+                Ast::Expr.Tuple(elements, position):
+                    match right:
+                        Ast::Expr.Tuple(other_elements, other_position):
+                            return proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_array_same(elements, other_elements, depth)
+                        _:
+                            return false
+                Ast::Expr.SetLit(elements, position):
+                    match right:
+                        Ast::Expr.SetLit(other_elements, other_position):
+                            return proof_goal_cache_pos_same(position, other_position) and proof_goal_cache_array_same(elements, other_elements, depth)
+                        _:
+                            return false
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    match right:
+                        Ast::Expr.If(other_condition, other_then, other_else, other_position):
+                            return false if not proof_goal_cache_pos_same(position, other_position)
+                            return proof_goal_cache_expr_same(condition, other_condition, depth + 1) and proof_goal_cache_expr_same(then_expression, other_then, depth + 1) and proof_goal_cache_expr_same(else_expression, other_else, depth + 1)
+                        _:
+                            return false
+                _:
+                    return false
+            return false
+
+        def proof_goal_cache_annotation_same(left: Ast::EnumAnnotation, right: Ast::EnumAnnotation) -> bool:
+            return false if left.line != right.line or left.offset != right.offset or left.detail_line != right.detail_line or left.identity_id != right.identity_id
+            return false if left.arg_start != right.arg_start or left.arg_count != right.arg_count or not proof_goal_cache_pos_same(left.pos, right.pos)
+            return left.owner == right.owner and left.name == right.name and left.module == right.module and left.detail_name == right.detail_name
+
+        def proof_goal_cache_annotations_same(left: darray[Ast::EnumAnnotation]&, right: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |left, right, index|:
+                return false if not proof_goal_cache_annotation_same(left[index], right[index])
+            return true
+
+        # Every stored answer was computed under `goal_cache_annotations`. A call under any other
+        # annotation table first discards them all; the table is then this call's.
+        def proof_goal_cache_adopt_annotations(report: mutable ProofReport&, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            return if proof_goal_cache_annotations_same(report.goal_cache_annotations, annotations)
+            proof_goal_cache_clear_entries(report)
+            report.goal_cache_annotations.clear()
+            for annotation in annotations |annotation, report|:
+                report.goal_cache_annotations.push(annotation)
+
+        def proof_goal_cache_key_hash(facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize) -> (ok: bool, hash: u32):
+            goal_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(goal, 0)
+            return (false, 0) if not goal_hash.ok
+            seed: u32 = proof_goal_cache_mix(proof_goal_cache_mix(goal_hash.hash, operator_mask.i64()), operator_mask.i64() >> 32)
+            return proof_goal_cache_array_hash(seed, facts, 0)
+
+        def proof_goal_cache_entry_matches(report: ProofReport&, entry: ProofGoalCacheEntry, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize) -> bool:
+            return false if entry.operator_mask != operator_mask or entry.facts_count != facts.count
+            return false if entry.facts_start > report.goal_cache_facts.count or entry.facts_count > report.goal_cache_facts.count - entry.facts_start
+            return false if not proof_goal_cache_expr_same(entry.goal, goal, 0)
+            for offset in 0..<facts.count |offset, facts, entry, report|:
+                return false if not proof_goal_cache_expr_same(report.goal_cache_facts[entry.facts_start + offset], facts[offset], 1)
+            return true
+
+        def proof_goal_cache_find(report: ProofReport&, hash: u32, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize) -> (found: bool, proven: bool):
+            capacity: usize = report.goal_cache_slots.count
+            return (false, false) if capacity == 0
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, capacity, report, hash, facts, goal, operator_mask|:
+                candidate: usize = report.goal_cache_slots[slot]
+                return (false, false) if candidate >= report.goal_cache_entries.count
+                entry: ProofGoalCacheEntry = report.goal_cache_entries[candidate]
+                if entry.hash == hash and proof_goal_cache_entry_matches(report, entry, facts, goal, operator_mask):
+                    return (true, entry.proven)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false)
+
+        def proof_goal_cache_slot_insert(report: mutable ProofReport&, index: usize) -> void:
+            capacity: usize = report.goal_cache_slots.count
+            return if capacity == 0
+            slot: mutable usize = (report.goal_cache_entries[index].hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, capacity, report, index|:
+                if report.goal_cache_slots[slot] >= report.goal_cache_entries.count:
+                    report.goal_cache_slots[slot] <- index
+                    return
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+
+        # Keep the slot table at most half full. Slot values at or past the entry count are empty.
+        def proof_goal_cache_reserve(report: mutable ProofReport&, entries: usize) -> void:
+            return if entries * 2 <= report.goal_cache_slots.count
+            capacity: usize = proof_index_capacity(entries * 2)
+            report.goal_cache_slots.clear()
+            report.goal_cache_slots.resize(capacity)
+            for slot in 0..<capacity |slot, report|:
+                report.goal_cache_slots[slot] <- PROOF_GOAL_CACHE_ENTRY_LIMIT
+            for index in 0..<report.goal_cache_entries.count |index, report|:
+                proof_goal_cache_slot_insert(report, index)
+
+        def proof_goal_cache_store(report: mutable ProofReport&, hash: u32, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize, proven: bool) -> void:
+            return if report.goal_cache_entries.count >= PROOF_GOAL_CACHE_ENTRY_LIMIT
+            return if facts.count > PROOF_GOAL_CACHE_FACT_LIMIT - report.goal_cache_facts.count
+            # Grow first: a rehash reinserts every existing entry, so the new one goes in once, after.
+            proof_goal_cache_reserve(report, report.goal_cache_entries.count + 1)
+            facts_start: usize = report.goal_cache_facts.count
+            for fact in facts |fact, report|:
+                report.goal_cache_facts.push(fact)
+            report.goal_cache_entries.push(ProofGoalCacheEntry{hash: hash, goal: goal, facts_start: facts_start, facts_count: facts.count, operator_mask: operator_mask, proven: proven})
+            proof_goal_cache_slot_insert(report, report.goal_cache_entries.count - 1)
+
+        def proof_goal_cache_clear_entries(report: mutable ProofReport&) -> void:
+            report.goal_cache_entries.clear()
+            report.goal_cache_facts.clear()
+            report.goal_cache_slots.clear()
+
+    public:
+        def proof_goal_cache_reset(report: mutable ProofReport&) -> void:
+            proof_goal_cache_clear_entries(report)
+            report.goal_cache_annotations.clear()
+            report.goal_cache_hits <- 0
+            report.goal_cache_misses <- 0
+
+        # Drop-in for `proof_goal_with_operator_mask`: same inputs, same result, same `exhausted`.
+        # `exhausted` must be false on entry to use the cache (every caller resets it); the stored
+        # answers are exactly those after which the procedure left it false, so a hit leaves it
+        # false too, as rerunning the procedure would have.
+        def proof_goal_cached(report: mutable ProofReport&, facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, exhausted: mutable bool&) -> bool:
+            return proof_goal_with_operator_mask(facts, goal, annotations, operator_mask, exhausted) if exhausted
+            key: (ok: bool, hash: u32) = proof_goal_cache_key_hash(facts, goal, operator_mask)
+            return proof_goal_with_operator_mask(facts, goal, annotations, operator_mask, exhausted) if not key.ok
+            proof_goal_cache_adopt_annotations(report, annotations)
+            cached: (found: bool, proven: bool) = proof_goal_cache_find(report, key.hash, facts, goal, operator_mask)
+            if cached.found:
+                report.goal_cache_hits <- report.goal_cache_hits + 1
+                return cached.proven
+            report.goal_cache_misses <- report.goal_cache_misses + 1
+            proven: bool = proof_goal_with_operator_mask(facts, goal, annotations, operator_mask, exhausted)
+            proof_goal_cache_store(report, key.hash, facts, goal, operator_mask, proven) if not exhausted
+            return proven
