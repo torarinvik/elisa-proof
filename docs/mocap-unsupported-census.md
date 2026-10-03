@@ -247,3 +247,10 @@ The build used stage1 from `d8b5d30`, seeded from stage0 `0b21b7b`, on Linux wit
     0 wherever base has 0.
   - Before that change the branch was level with base: 28.0 s / 880 MB vs 28.0 s / 885 MB on
     `main.elisa`.
+- **Census baseline:** `docs/census` was regenerated with `scripts/refusal_census.py` on this
+  branch (19543/26924 proven across 783 examples), so `scripts/census_diff.py` passes and
+  `scripts/test.sh` is green. The old baseline (2026-10-01) predated the base commit. The three
+  entries it flagged give identical results on base `7571dfa`:
+  - `unknown_widened_borrow_write`: proven 9 -> 6, obligations 11 -> 7. This change is upstream;
+    check it before treating it as intended.
+  - `typed_unsigned_literals` and `rejected_unsigned_constant_overflow`: a new `no-rule` gate.
