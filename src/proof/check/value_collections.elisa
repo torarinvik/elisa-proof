@@ -20,12 +20,15 @@ extend ElisaProof:
             for parameter in parameters |refused|:
                 proof_push_aliased(&refused, parameter.name)
             proof_value_collection_walk(body, &candidates, &refused, report, 0)
+            return if any existing in refused where existing == "*"
             for candidate in candidates |report, refused|:
                 continue if any existing in refused where existing == candidate
                 proof_push_aliased(&report.value_collection_names, candidate)
 
         def proof_value_collection_walk(body: darray[Ast::Stmt]&, candidates: mutable darray[sview]&, refused: mutable darray[sview]&, report: ProofReport&, depth: usize) -> void:
-            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                proof_push_aliased(refused, "*")
+                return
             for statement in body |candidates, refused, report, depth|:
                 match statement:
                     Ast::Stmt.VarDecl(name, type_expression, value, _):
@@ -35,23 +38,30 @@ extend ElisaProof:
                         proof_value_collection_expression(value, candidates, refused, report, depth + 1)
                     Ast::Stmt.Assign(target, operator, value, _):
                         proof_push_aliased(refused, proof_ident_name(target)) if operator == TokenKind.Assign
+                        proof_value_collection_expression(target, candidates, refused, report, depth + 1)
                         proof_value_collection_expression(value, candidates, refused, report, depth + 1)
                     Ast::Stmt.Block(_, _, binding, block_body, _):
                         proof_push_aliased(refused, binding) if binding != ""
                         proof_value_collection_walk(block_body, candidates, refused, report, depth + 1)
-                    Ast::Stmt.If(_, then_body, else_body, _):
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_value_collection_expression(condition, candidates, refused, report, depth + 1)
                         proof_value_collection_walk(then_body, candidates, refused, report, depth + 1)
                         proof_value_collection_walk(else_body, candidates, refused, report, depth + 1)
-                    Ast::Stmt.While(_, while_body, _):
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_value_collection_expression(condition, candidates, refused, report, depth + 1)
                         proof_value_collection_walk(while_body, candidates, refused, report, depth + 1)
-                    Ast::Stmt.For(_, variables, _, for_body, _):
+                    Ast::Stmt.For(_, variables, iterable, for_body, _):
+                        proof_value_collection_expression(iterable, candidates, refused, report, depth + 1)
                         for variable in variables |refused|:
                             proof_push_aliased(refused, variable) if variable != ""
                         proof_value_collection_walk(for_body, candidates, refused, report, depth + 1)
-                    Ast::Stmt.Match(_, arms, _):
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_value_collection_expression(scrutinee, candidates, refused, report, depth + 1)
                         proof_value_collection_arms(arms, candidates, refused, report, depth + 1)
-                    Ast::Stmt.Expr(expression, _):
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Contract(_, expression, _):
                         proof_value_collection_expression(expression, candidates, refused, report, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        proof_value_collection_expression(returned, candidates, refused, report, depth + 1) if value is returned
                     _:
                         pass
 
@@ -61,20 +71,64 @@ extend ElisaProof:
                 proof_structural_pattern_bindings(arm.pattern, &bindings)
                 for binding in bindings |refused|:
                     proof_push_aliased(refused, binding)
+                proof_value_collection_expression(arm.guard, candidates, refused, report, depth + 1)
                 proof_value_collection_walk(arm.body, candidates, refused, report, depth + 1)
 
-        # Statement lists nested in an expression: a block value, a match or catch expression.
+        # Every binder an expression can introduce, wherever it is nested: a comprehension
+        # variable, a lambda parameter, a block value's or a match arm's declarations. A form
+        # whose parts are not walked here refuses every name (`*`).
         def proof_value_collection_expression(expression: Ast::Expr, candidates: mutable darray[sview]&, refused: mutable darray[sview]&, report: ProofReport&, depth: usize) -> void:
-            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                proof_push_aliased(refused, "*")
+                return
             match expression:
-                Ast::Expr.Block(statements, _, _, _):
+                Ast::Expr.Block(statements, value, _, _):
                     proof_value_collection_walk(statements, candidates, refused, report, depth + 1)
-                Ast::Expr.Match(_, arms, _):
+                    proof_value_collection_expression(value, candidates, refused, report, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    proof_value_collection_expression(scrutinee, candidates, refused, report, depth + 1)
                     proof_value_collection_arms(arms, candidates, refused, report, depth + 1)
-                Ast::Expr.Catch(_, arms, _):
-                    proof_value_collection_arms(arms, candidates, refused, report, depth + 1)
-                Ast::Expr.GetElse(_, recovery, _):
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_value_collection_expression(guarded, candidates, refused, report, depth + 1)
                     proof_value_collection_walk(recovery, candidates, refused, report, depth + 1)
+                Ast::Expr.Comprehension(variable, iterable, condition, comprehension_body, _):
+                    proof_push_aliased(refused, variable)
+                    proof_value_collection_expression(iterable, candidates, refused, report, depth + 1)
+                    proof_value_collection_expression(condition, candidates, refused, report, depth + 1)
+                    proof_value_collection_expression(comprehension_body, candidates, refused, report, depth + 1)
+                Ast::Expr.Lambda(_, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    proof_push_aliased(refused, "*")
+                Ast::Expr.Unary(_, operand, _) | Ast::Expr.Paren(operand, _) | Ast::Expr.Move(operand, _) | Ast::Expr.Field(operand, _, _) | Ast::Expr.Scope(operand, _, _) | Ast::Expr.RegionNew(operand, _, _) | Ast::Expr.Refinement(operand, _, _):
+                    proof_value_collection_expression(operand, candidates, refused, report, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    proof_value_collection_expression(left, candidates, refused, report, depth + 1)
+                    proof_value_collection_expression(right, candidates, refused, report, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _) | Ast::Expr.Slice(condition, then_expression, else_expression, _):
+                    proof_value_collection_expression(condition, candidates, refused, report, depth + 1)
+                    proof_value_collection_expression(then_expression, candidates, refused, report, depth + 1)
+                    proof_value_collection_expression(else_expression, candidates, refused, report, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_value_collection_expression(callee, candidates, refused, report, depth + 1)
+                    for argument in arguments |candidates, refused, report, depth|:
+                        proof_value_collection_expression(argument, candidates, refused, report, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_value_collection_expression(object, candidates, refused, report, depth + 1)
+                    for argument in arguments |candidates, refused, report, depth|:
+                        proof_value_collection_expression(argument, candidates, refused, report, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |candidates, refused, report, depth|:
+                        proof_value_collection_expression(element, candidates, refused, report, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |candidates, refused, report, depth|:
+                        proof_value_collection_expression(entry.key, candidates, refused, report, depth + 1)
+                        proof_value_collection_expression(entry.value, candidates, refused, report, depth + 1)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |candidates, refused, report, depth|:
+                        proof_value_collection_expression(field.value, candidates, refused, report, depth + 1)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_value_collection_expression(base, candidates, refused, report, depth + 1)
+                    for field in fields |candidates, refused, report, depth|:
+                        proof_value_collection_expression(field.value, candidates, refused, report, depth + 1)
                 _:
                     pass
 
