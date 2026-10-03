@@ -15,18 +15,6 @@ extend ElisaProof:
     private:
         const PROOF_EXPR_QUICK_DIFFERS_DEPTH: usize = 6
 
-        # Parentheses are transparent to the comparator. Stripped iteratively, with no depth
-        # boundary, so no sentinel value can stand in for the term.
-        def proof_expr_quick_unwrap(expression: Ast::Expr) -> Ast::Expr:
-            current: mutable Ast::Expr = expression
-            while true |current|:
-                match current:
-                    Ast::Expr.Paren(inner, _):
-                        current <- inner
-                    _:
-                        return current
-            current
-
         # The variants the walk inspects, each of which the comparator only ever equates with the
         # same variant; zero for every other variant.
         def proof_expr_quick_kind(expression: Ast::Expr) -> usize:
@@ -51,45 +39,47 @@ extend ElisaProof:
                     return 0
 
     public:
-        # True only when `proof_expr_equal_supported(left, right)` is certainly false.
+        # True only when `proof_expr_equal_supported(left, right)` is certainly false. A
+        # parenthesis counts as a level, so a long chain of them ends the walk undecided.
         def proof_expr_quick_differs(left: Ast::Expr, right: Ast::Expr, depth: usize) -> bool:
             return false if depth >= PROOF_EXPR_QUICK_DIFFERS_DEPTH
-            left_term: Ast::Expr = proof_expr_quick_unwrap(left)
-            right_term: Ast::Expr = proof_expr_quick_unwrap(right)
-            left_kind: usize = proof_expr_quick_kind(left_term)
-            right_kind: usize = proof_expr_quick_kind(right_term)
-            # An inspected variant is equal only to the same variant. Two uninspected variants
+            match right:
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_quick_differs(left, inner, depth + 1)
+                _:
+                    pass
+            # An inspected variant is equal only to the same variant; two uninspected variants
             # are left to the comparator.
-            return left_kind != right_kind if left_kind == 0 or right_kind == 0
-            return true if left_kind != right_kind
-            match left_term:
+            match left:
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_quick_differs(inner, right, depth + 1)
                 Ast::Expr.IntLit(value, _):
-                    match right_term:
+                    match right:
                         Ast::Expr.IntLit(other, _):
                             return value != other
                         _:
                             return true
                 Ast::Expr.BoolLit(value, _):
-                    match right_term:
+                    match right:
                         Ast::Expr.BoolLit(other, _):
                             return value != other
                         _:
                             return true
                 Ast::Expr.Ident(name, _):
-                    match right_term:
+                    match right:
                         Ast::Expr.Ident(other, _):
                             return name != other
                         _:
                             return true
                 Ast::Expr.Unary(operator, operand, _):
-                    match right_term:
+                    match right:
                         Ast::Expr.Unary(other_operator, other_operand, _):
                             return true if operator != other_operator
                             return proof_expr_quick_differs(operand, other_operand, depth + 1)
                         _:
                             return true
                 Ast::Expr.Binary(left_operand, operator, right_operand, _):
-                    match right_term:
+                    match right:
                         Ast::Expr.Binary(other_left, other_operator, other_right, _):
                             return true if operator != other_operator
                             return true if proof_expr_quick_differs(left_operand, other_left, depth + 1)
@@ -97,7 +87,7 @@ extend ElisaProof:
                         _:
                             return true
                 Ast::Expr.Call(callee, arguments, _, _):
-                    match right_term:
+                    match right:
                         Ast::Expr.Call(other_callee, other_arguments, _, _):
                             return true if arguments.count != other_arguments.count
                             return true if proof_expr_quick_differs(callee, other_callee, depth + 1)
@@ -107,21 +97,21 @@ extend ElisaProof:
                         _:
                             return true
                 Ast::Expr.Field(object, field, _):
-                    match right_term:
+                    match right:
                         Ast::Expr.Field(other_object, other_field, _):
                             return true if field != other_field
                             return proof_expr_quick_differs(object, other_object, depth + 1)
                         _:
                             return true
                 Ast::Expr.Index(object, index, _):
-                    match right_term:
+                    match right:
                         Ast::Expr.Index(other_object, other_index, _):
                             return true if proof_expr_quick_differs(object, other_object, depth + 1)
                             return proof_expr_quick_differs(index, other_index, depth + 1)
                         _:
                             return true
                 _:
-                    return false
+                    return proof_expr_quick_kind(right) != 0
             return false
 
         # A hash that `proof_expr_equal` respects: equal terms hash alike. It reads only what the
@@ -129,12 +119,22 @@ extend ElisaProof:
         # operators ignored, and stops at the same depth; any other variant hashes to a constant.
         # It selects candidates for an equality scan and never stands in for the comparison.
         def proof_expr_shape_hash(expression: Ast::Expr, depth: usize) -> u32:
-            term: Ast::Expr = proof_expr_quick_unwrap(expression)
-            kind: usize = proof_expr_quick_kind(term)
+            return proof_expr_shape_hash_stripped(expression, depth, 0)
+
+        # Parentheses take no level of the walk, so terms equal up to parentheses reach the same
+        # nodes at the same depth. A chain of them as long as the kernel's depth bound makes the
+        # term unsupported, hence equal to nothing, so its hash is arbitrary.
+        def proof_expr_shape_hash_stripped(expression: Ast::Expr, depth: usize, parentheses: usize) -> u32:
             basis: i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
-            hash: u32 = proof_expr_shape_mix(basis.u32(), kind.i64())
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return basis.u32() if parentheses >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_BOUND
+                    return proof_expr_shape_hash_stripped(inner, depth, parentheses + 1)
+                _:
+                    pass
+            hash: u32 = proof_expr_shape_mix(basis.u32(), proof_expr_quick_kind(expression).i64())
             return hash if depth >= PROOF_EXPR_QUICK_DIFFERS_DEPTH
-            match term:
+            match expression:
                 Ast::Expr.IntLit(value, _):
                     return proof_expr_shape_mix(proof_expr_shape_mix(hash, value), value >> 32)
                 Ast::Expr.BoolLit(value, _):
@@ -163,3 +163,18 @@ extend ElisaProof:
         def proof_expr_shape_mix(hash: u32, value: i64) -> u32:
             low: i64 = value & 4294967295
             return (((hash.i64() ^ low) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
+
+        # Membership in a fact list through the hashes above: `hashes[i]` is the shape hash of
+        # `facts[i]`, and only hash-equal entries are compared. Same answer as scanning every entry
+        # with `proof_expr_equal`.
+        def proof_fact_list_shape_hashes(facts: darray[Ast::Expr]&) -> darray[u32]:
+            hashes: mutable darray[u32] = []
+            for fact in facts |fact, hashes|:
+                hashes.push(proof_expr_shape_hash(fact, 0))
+            return hashes
+
+        def proof_fact_list_contains_hashed(facts: darray[Ast::Expr]&, hashes: darray[u32]&, fact: Ast::Expr, hash: u32) -> bool:
+            for index in 0..<facts.count |index, facts, hashes, fact, hash|:
+                continue if index < hashes.count and hashes[index] != hash
+                return true if proof_expr_equal(facts[index], fact)
+            return false
