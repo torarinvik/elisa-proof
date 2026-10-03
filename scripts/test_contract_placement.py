@@ -8,12 +8,15 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 
 
-def report(name, expected_status):
+def report(name, expected_status, compiler_placement_lines=()):
     run = subprocess.run([str(BINARY), "--json", str(ROOT / "examples" / f"{name}.elisa")],
                          capture_output=True, text=True, timeout=60)
     assert run.returncode == expected_status, (name, run.returncode, run.stderr, run.stdout)
     data = json.loads(run.stdout)
-    assert data["summary"]["semantic_errors"] == 0, data
+    # Newer compilers (2678ff10+) also reject a misplaced requires/ensure themselves.
+    semantic = [d for d in data.get("semantic_diagnostics", []) if d["severity"] == 1]
+    assert all(d["kind_code"] == 172 and d["line"] in compiler_placement_lines for d in semantic), semantic
+    assert data["summary"]["semantic_errors"] == len(semantic), data
     assert data["replay"]["gaps"] == 0, data
     assert data["replay"]["certificates"] == data["replay"]["replayed"], data
     return data
@@ -25,7 +28,7 @@ assert accepted["findings"] == [], accepted["findings"]
 functions = [d for d in accepted["declaration_details"] if d.get("kind") == "function"]
 assert len(functions) == 6 and all(d["verified"] for d in functions), functions
 
-rejected = report("rejected_contract_placement", 1)
+rejected = report("rejected_contract_placement", 1, (12, 24, 33))
 assert rejected["status"] == "failed", rejected
 found = sorted((f["line"], f["name"], f["kind"]) for f in rejected["findings"])
 assert found == [
