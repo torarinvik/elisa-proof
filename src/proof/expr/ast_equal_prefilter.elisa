@@ -1,0 +1,125 @@
+# A cheap mismatch test run ahead of `proof_expr_equal`.
+#
+# `proof_expr_equal` validates both whole terms (`proof_kernel_expression_supported`) before the
+# structural comparator runs. Most calls come from linear scans -- fact membership, duplicate
+# checks, trace lookups -- and compare terms that differ near the root, so that validation was
+# most of the cost of answering "no". `proof_expr_quick_differs` walks a few levels of both terms
+# and reports a mismatch only where `proof_expr_equal_supported` itself returns false: the
+# comparator strips parentheses on both sides and is otherwise a conjunction of same-variant,
+# same-operator, same-name, same-literal and same-arity checks over the children, so one failed
+# check anywhere already decides the comparison. `proof_expr_equal` answers false either for an
+# unsupported term or for that comparator, so returning false early never changes its answer.
+# Everything the walk does not look at (other variants, argument names, deeper levels) is left
+# to the full path, which still validates and compares exactly as before.
+extend ElisaProof:
+    private:
+        const PROOF_EXPR_QUICK_DIFFERS_DEPTH: usize = 6
+
+        # Parentheses are transparent to the comparator. Stripped iteratively, with no depth
+        # boundary, so no sentinel value can stand in for the term.
+        def proof_expr_quick_unwrap(expression: Ast::Expr) -> Ast::Expr:
+            current: mutable Ast::Expr = expression
+            while true |current|:
+                match current:
+                    Ast::Expr.Paren(inner, _):
+                        current <- inner
+                    _:
+                        return current
+            current
+
+        # The variants the walk inspects, each of which the comparator only ever equates with the
+        # same variant; zero for every other variant.
+        def proof_expr_quick_kind(expression: Ast::Expr) -> usize:
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return 1
+                Ast::Expr.BoolLit(_, _):
+                    return 2
+                Ast::Expr.Ident(_, _):
+                    return 3
+                Ast::Expr.Unary(_, _, _):
+                    return 4
+                Ast::Expr.Binary(_, _, _, _):
+                    return 5
+                Ast::Expr.Call(_, _, _, _):
+                    return 6
+                Ast::Expr.Field(_, _, _):
+                    return 7
+                Ast::Expr.Index(_, _, _):
+                    return 8
+                _:
+                    return 0
+
+    public:
+        # True only when `proof_expr_equal_supported(left, right)` is certainly false.
+        def proof_expr_quick_differs(left: Ast::Expr, right: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_EXPR_QUICK_DIFFERS_DEPTH
+            left_term: Ast::Expr = proof_expr_quick_unwrap(left)
+            right_term: Ast::Expr = proof_expr_quick_unwrap(right)
+            left_kind: usize = proof_expr_quick_kind(left_term)
+            right_kind: usize = proof_expr_quick_kind(right_term)
+            # An inspected variant is equal only to the same variant. Two uninspected variants
+            # are left to the comparator.
+            return left_kind != right_kind if left_kind == 0 or right_kind == 0
+            return true if left_kind != right_kind
+            match left_term:
+                Ast::Expr.IntLit(value, _):
+                    match right_term:
+                        Ast::Expr.IntLit(other, _):
+                            return value != other
+                        _:
+                            return true
+                Ast::Expr.BoolLit(value, _):
+                    match right_term:
+                        Ast::Expr.BoolLit(other, _):
+                            return value != other
+                        _:
+                            return true
+                Ast::Expr.Ident(name, _):
+                    match right_term:
+                        Ast::Expr.Ident(other, _):
+                            return name != other
+                        _:
+                            return true
+                Ast::Expr.Unary(operator, operand, _):
+                    match right_term:
+                        Ast::Expr.Unary(other_operator, other_operand, _):
+                            return true if operator != other_operator
+                            return proof_expr_quick_differs(operand, other_operand, depth + 1)
+                        _:
+                            return true
+                Ast::Expr.Binary(left_operand, operator, right_operand, _):
+                    match right_term:
+                        Ast::Expr.Binary(other_left, other_operator, other_right, _):
+                            return true if operator != other_operator
+                            return true if proof_expr_quick_differs(left_operand, other_left, depth + 1)
+                            return proof_expr_quick_differs(right_operand, other_right, depth + 1)
+                        _:
+                            return true
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match right_term:
+                        Ast::Expr.Call(other_callee, other_arguments, _, _):
+                            return true if arguments.count != other_arguments.count
+                            return true if proof_expr_quick_differs(callee, other_callee, depth + 1)
+                            for index in 0..<arguments.count |arguments, other_arguments, index, depth|:
+                                return true if proof_expr_quick_differs(arguments[index], other_arguments[index], depth + 1)
+                            return false
+                        _:
+                            return true
+                Ast::Expr.Field(object, field, _):
+                    match right_term:
+                        Ast::Expr.Field(other_object, other_field, _):
+                            return true if field != other_field
+                            return proof_expr_quick_differs(object, other_object, depth + 1)
+                        _:
+                            return true
+                Ast::Expr.Index(object, index, _):
+                    match right_term:
+                        Ast::Expr.Index(other_object, other_index, _):
+                            return true if proof_expr_quick_differs(object, other_object, depth + 1)
+                            return proof_expr_quick_differs(index, other_index, depth + 1)
+                        _:
+                            return true
+                _:
+                    return false
+            return false
