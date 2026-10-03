@@ -1,5 +1,37 @@
 # shellcheck shell=bash
 # Part 3 of scripts/dogfood.sh; sourced in order by it, never run alone.
+python3 - "$REPORT_DIR/region_lend_calls.json" "$REPORT_DIR/rejected_region_lend_calls.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: region-polymorphic lending did not prove cleanly")
+nodes = report["kernel"]["nodes"]
+children = report["kernel"]["children"]
+lends = [node for node in nodes if node["kind"] == "resource-call-lend" and node["right"] > 0]
+if not lends:
+    raise SystemExit("dogfood failed: no lifetime-carrying lend reached the arena")
+for node in lends:
+    if node["children_count"] != node["auxiliary"] * 2 + node["right"]:
+        raise SystemExit("dogfood failed: a lend child list does not match its parameter and lifetime counts")
+    entries = [nodes[child] for child in children[node["children_start"] + node["auxiliary"] * 2:node["children_start"] + node["children_count"]]]
+    if any(entry["kind"] != "resource-call-region" or entry["operator"] != "param" or not entry["name"] or not entry["secondary_name"] for entry in entries):
+        raise SystemExit("dogfood failed: a lifetime map entry is malformed")
+    if len({entry["name"] for entry in entries}) != len(entries):
+        raise SystemExit("dogfood failed: a formal lifetime was pinned twice")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: lifetime boundary fixture did not fail cleanly")
+if any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"]):
+    raise SystemExit("dogfood failed: an unpinned lifetime was recorded as a lend")
+print("dogfood region_lend_calls: a lifetime parameter is pinned, never assumed")
+PY
+
+# A region-polymorphic callee that does have a summary must compose into its caller. This replayed
 # as a gap while the kernel read a construction's type name as a runtime value.
 python3 - "$REPORT_DIR/region_call_summary.json" <<'PY'
 import json
@@ -440,6 +472,9 @@ cases = (
     ("global_constant_loop_exit", {('last_slot', 'ensure-unproven')}),
     ("branch_join", {('not_always_kept', 'ensure-unproven'), ('replace_too_far', 'ensure-unproven'), ('stale_rebind', 'ensure-unproven')}),
     ("loop_state_joins", {('untrue_aggregate_bound', 'ensure-unproven'), ('escaping_arm', 'invariant-not-preserved'), ('arm_local_value', 'ensure-unproven'), ('growing_arm_local', 'invariant-not-preserved'), ('untrue_negated_order', 'ensure-unproven')}),
+    ("monotone_orders", {('untrue_strict_sum', 'ensure-unproven'), ('untrue_clamped_sum', 'ensure-unproven'), ('untrue_loose_operand', 'ensure-unproven'), ('untrue_full_share', 'ensure-unproven'), ('untrue_small_limit', 'ensure-unproven'), ('untrue_relational_clamp', 'ensure-unproven'), ('untrue_below_sum', 'ensure-unproven'), ('untrue_zero_multiple', 'ensure-unproven')}),
+    ("replay_construct_arguments", {('untrue_tighter_cap', 'ensure-unproven'), ('untrue_swapped_fields', 'ensure-unproven'), ('untrue_other_construct', 'ensure-unproven')}),
+    ("negated_guard_orders", {('untrue_tight_progress', 'ensure-unproven'), ('untrue_reversed_guard', 'ensure-unproven'), ('untrue_inclusive_guard', 'ensure-unproven')}),
 )
 for name, owners in cases:
     with open(os.path.join(report_dir, name + ".json"), encoding="utf-8") as handle:
@@ -540,59 +575,3 @@ for owner in ("needs_a_strict_fact", "gives_no_strict_conclusion", "moves_by_one
 print("dogfood strict_shift: a strict fact shifts by one, non-strictly, to its own bound")
 PY
 
-python3 - "$REPORT_DIR/sum_bound.json" "$REPORT_DIR/rejected_sum_bound.json" <<'PY'
-import json
-import sys
-
-bounded, wrapped = sys.argv[1:]
-with open(bounded, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: sum bound fixture did not prove cleanly")
-if report["replay"]["certificates"] != report["replay"]["replayed"]:
-    raise SystemExit("dogfood failed: a sum-bound certificate was left unreplayed")
-proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
-for owner in ("transpose_the_subtraction", "a_term_under_the_bound", "the_same_for_a_signed_sum", "commuted"):
-    if (owner, "goal") not in proven:
-        raise SystemExit("dogfood failed: %s did not bound its sum" % owner)
-with open(wrapped, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "failed" or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: sum bound boundary fixture did not fail cleanly")
-goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
-for owner in ("a_modular_premise_is_not_a_bound", "the_subtraction_needs_its_guard", "a_non_strict_step_gives_no_strict_goal", "a_bound_on_another_term"):
-    if goals.get((owner, "goal")) is not False:
-        raise SystemExit("dogfood failed: %s bounded a sum nothing bounds" % owner)
-print("dogfood sum_bound: a guarded subtraction bounds a sum, a wrapped premise does not")
-PY
-
-# `or` and `and` short-circuit: an operand the left one settles owes no range argument, and a
-# left operand that settles nothing still owes the right one its own.
-python3 - "$REPORT_DIR/settled_operand.json" "$REPORT_DIR/rejected_settled_operand.json" <<'PY'
-import json
-import sys
-
-settled, live = sys.argv[1:]
-with open(settled, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: settled operand fixture did not prove cleanly")
-if report["replay"]["certificates"] != report["replay"]["replayed"]:
-    raise SystemExit("dogfood failed: a settled-operand certificate was left unreplayed")
-proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
-for owner in ("empty_range_is_valid", "a_settled_conjunct", "the_live_operand_is_still_owed"):
-    if (owner, "goal") not in proven:
-        raise SystemExit("dogfood failed: %s was charged for an unreachable operand" % owner)
-with open(live, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "failed" or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: settled operand boundary fixture did not fail cleanly")
-goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
-for owner in ("or_left_false_still_owes_the_right", "and_left_true_still_owes_the_right", "a_settled_operand_does_not_settle_a_sibling", "an_unsettled_left_keeps_the_gate"):
-    if goals.get((owner, "goal")) is not False:
-        raise SystemExit("dogfood failed: %s let a neighbour settle a live operand" % owner)
-print("dogfood settled_operand: a settled operand is free, a live one still owes its range")
-PY
-
-# An early return leaves its condition negated. That negation is an order between the same two
-# atoms, and it says nothing about another pair, another direction, or a strict bound.

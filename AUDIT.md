@@ -9900,6 +9900,44 @@ module constants, so it now gets more fact room and runs out of its 64-step budg
 unsupported and unverified. `test_parameter_heavy_return_analysis.py` now accepts either budget
 dimension at limit 64 and checks that the function is not verified.
 
+## Monotone orders, variable divisors and relational clamps (2026-09-29)
+
+The engine's movement triggers (`travel_after`, `gain` in `src/audio/triggers.elisa`) met four
+holes. The linear tier is difference logic over intervals, so it could not state a goal with
+three names, a coefficient or a variable divisor. Each rule below is read only over unsigned terms
+that the wrap guard (`proof_unsigned_expression_safe`, and `proof_kernel_replay_unsigned_goal_safe`
+in the kernel) has already certified, so machine arithmetic there is integer arithmetic. Every rule
+reduces its goal to smaller order goals that go back through every tier and guard, and each costs
+one case-split level. `src/proof/kernel_replay/monotone_orders.elisa` mirrors the rules. Each
+function in that cycle carries `decreases remaining` and lowers it on every edge.
+
+- **Sums.** `a + b < c + d` follows from `a < c` and `b <= d`, or from `a <= c` and `b < d`, in
+  either pairing. `<=` needs both pairs inclusive.
+- **Weakening.** A term is below `c + d` when it is below either operand. It is below `k * w`
+  for a constant `k >= 1` when it is below `w`, since the extra amount is a wrap-free unsigned
+  term. A zero factor is refused.
+- **Quotients.** `n / d < k` for a constant `k > 0` and a non-constant `d` follows from
+  `n < k * d`. `n / d <= k` follows from `n <= k * d` together with `0 < d`. When `n` is `x * k`
+  (or `k` is 1), the comparison is `x` against `d` itself. The divisor-zero case is left to the
+  existing resource-safety obligation.
+- **Variable-divisor intervals.** The interval tier bounded a quotient only by a constant
+  divisor. A dividend in `[l, u]` with `l >= 0`, over a divisor whose lower bound is at least 1,
+  now lies in `[l / d.upper (or 0), u / d.lower]`. Truncation is flooring there, and the quotient
+  falls as the divisor grows. `unsigned_bounds.elisa` mirrors this.
+- **Relational clamps.** An `if` binding such as `p = t if t < s else s - 1` used to leave only
+  an equality. `proof_add_relational_binding_range` now takes the larger side of the condition's
+  order. It tries `p < s` and then `p <= s` as ordinary goals over the binding. Only a proved one
+  is added, as a derived `proof-step` fact.
+
+`examples/monotone_orders.elisa` proves ten cases. `examples/rejected_monotone_orders.elisa` keeps
+eight false neighbours open, each with a stated counterexample. Examples: an inclusive clamp
+reaching the bound, a full share equal to `k`, a small limit, a sum bound claimed for one operand,
+and a zero multiple. `scripts/test_monotone_orders.py` and the dogfood probes check both files.
+
+Two limits remain. A signed sum is not ordered, since it could wrap below. `(p + p) / w` has no
+interval when `p` is bounded only through its own sum, so the wrap guard refuses the goal before
+the quotient rule sees it.
+
 ## Named-tuple results: an ADT parser library (P2-03 slice, 2026-09-29)
 
 A parser returns `(value: i64, consumed: i64)` and states its contract over `result.value` and
@@ -10029,6 +10067,50 @@ both are small and tested adversarially.
 **Still open.** Distinct variants are not known to be disjoint: in an `End` arm,
 `not (tokens is Token.Number)` does not prove. That needs the enum's variant list in the checker.
 
+## Construct arguments in replay and negated guard orders (2026-09-29)
+
+Both holes came from the engine's music-transition proof (`elisa-engine` `proof/audio_music.elisa`).
+
+**Construct arguments.** A call summary over `f(T{a: x})` records its fact over the construct
+itself. `proof_replay_expr_equal_depth` had no `Construct` arm, so it could not match the fact
+to its trace, and the certificate replayed with a gap. The new arm compares the type expression
+and each field's name and value, in order.
+
+**Negated guard orders.** A failed early return such as `return 0 if a >= b` leaves
+`not (a >= b)` on the fall-through path. The plain-difference closure skipped negated facts, so
+the quotient rule could not use `a < b` to bound `a * k / b` by `k`. The closure now reads a
+negated primitive order over plain sides as its difference constraint, which
+`proof_collect_difference_constraints` already negates. The kernel mirrors this in
+`proof_kernel_replay_collect_plain_differences`.
+
+**Evidence.**
+- `examples/replay_construct_arguments.elisa` proves 11/11 replayed. The previous build proved
+  it with 3 replay gaps.
+- `examples/negated_guard_orders.elisa` proves `progress`, `proper_fraction`,
+  `descending_guard` and `below_after_guard`. The previous build left the first three open.
+- The rejected files keep open:
+  - a tighter cap;
+  - swapped construct fields;
+  - a different construct;
+  - a too-tight progress bound;
+  - a guard that runs the wrong way;
+  - a guard that leaves equality in.
+- `scripts/test_replay_construct_arguments.py` and `scripts/test_negated_guard_orders.py` pin all
+  four files, and dogfood probes them.
+- The full test and dogfood suites pass.
+
+**Still open.** A sum of two call results, such as `cap(p) + cap(q) <= 20` from two
+`result <= 10` summaries, does not prove.
+
+## Port: call-summary dispatcher snapshot budget (from `codex/wasmbrowser-proof` 55e6b4d, 2026-09-29)
+
+A medium body (12 to 24 statements) that calls a small set of one to four verified targets can
+accumulate many facts from repeated call summaries while having few parameters. It now gets the
+same fixed fact-state headroom as a parameter-heavy selector; the independent step cap remains.
+`proof_return_analysis_fact_state_budget` takes the call-target count from `call_counts`.
+
+**Evidence.** The cherry-pick applied cleanly and the prover rebuilt. Every `proof/*.elisa` in
+`elisa-engine` gives the same result before and after. The full test and dogfood suites pass.
 ## Port: bounded snapshots for call-summary dispatchers (from `codex/wasmbrowser-proof` 55e6b4d, 2026-09-29)
 
 A function body of 12–24 statements that calls at most 4 distinct targets now gets the same
@@ -10100,6 +10182,31 @@ constant from `report.source_declarations`. Refused: a parameter named like the 
 or duplicate constants, functions declared inside a module, non-integer initializers.
 Function bodies are covered separately (see "Qualified module constants in function bodies").
 Tests: `scripts/test_qualified_constants.py`.
+
+### Unreadable premises are set aside, not fatal (2026-09-30)
+
+A premise that the wrap guard could not range-check, for example the guard
+`(index % n) < 0` over a signed remainder by a variable divisor, used to end
+every goal on its path. Goals that never mention it, like `0 < n` under
+`requires n > 0`, were affected too. The engine's filter-tap bound
+(`MotionFilterIndex::wrapped` in elisa-engine) met this.
+
+When the field-place and nested-conditional generalizations do not close the
+goal, the producer (`proof_goal_without_unsafe_premises`) now drops every
+premise the guard refuses and decides the goal over the rest. The kernel
+mirror in `resource_model.elisa` does the same. It filters with its own
+unsigned and signed safety checks and recomputes bounds over the kept
+premises, and the recursion is limited by `remaining`. This is sound because
+removing premises can only weaken what follows.
+
+Tests:
+- `examples/unreadable_premise_weakening.elisa` proves; all replayed.
+- `examples/rejected_unreadable_premise_weakening.elisa`, which returns `n`
+  against `result < n`, stays unproven.
+- `scripts/test.sh` assertions and `dogfood.sh` probes.
+
+Still open: a real signed-remainder rule. `index % n` with `n > 0` has
+`|r| < n` and takes the sign of `index`, but nothing reads that yet.
 
 ### Signed parameter range facts: probed, not landed (2026-09-29)
 
@@ -10384,6 +10491,65 @@ the old clear. Fixtures: `examples/can_block_frame.elisa` (proved, replayed) and
 `examples/rejected_can_block_frame.elisa` (own count, assigned local, block-local relation stay
 unproven). An explicit `modifies` clause still needs front-end syntax the compiler lacks.
 
+### Replay refutes contradictory arithmetic facts (2026-09-30)
+
+Kernel replay only knew propositional inconsistency: a literal `false`, or a fact next to its
+own negation. So `c <= 9, c >= 10` could not close even `ensure false`. Any proof that used a
+caller's `requires` to rule out one side of a helper's `ensure A or B` left a replay gap, even
+though the producer proved it. Four goals of the engine's `AnimationPoseIndex` proof hit this.
+
+`proof_kernel_replay_facts_arithmetically_inconsistent`
+(`kernel_replay/arithmetic_refutation.elisa`) handles this. For each comparison fact over
+witnessed primitive scalars, it asks the existing interval and difference-constraint rules
+whether the other facts prove its complement. If they do, the fact set has no model and the
+goal follows. It runs only after the fixed-width guard has accepted every fact, and the
+complement uses the same guard as `proof_kernel_replay_negative_fact`.
+
+Tests:
+- `examples/arithmetic_refutation_replay.elisa` proves with 0 gaps.
+- `examples/rejected_arithmetic_refutation_replay.elisa` (`requires current <= 10`, where the escape disjunct can hold) stays unproven.
+- Control: the prover binary from before the fix leaves 2 replay gaps on the positive example.
+
+### Closed false and complementary premises close a case split (2026-09-30)
+
+A callee summary `result == 7 or d > 0` could not be used at a call with the literal `0`. The
+argument was substituted correctly, but the branch holding `0 > 0` never closed: inconsistency
+only read per-variable bounds, and a comparison between constants names no variable. The same
+happened when the caller's `requires e >= d` faced the disjunct `e < d`, since two variables
+give no single-variable interval. The engine's `PoseFadeIndex` proof hit both.
+
+- `proof_closed_safe_constant_comparison_false` (`linear/fixed_width_arithmetic.elisa`) marks a
+  premise comparing two safe constants that evaluates false. It joins the propositional check,
+  and replay mirrors it with `proof_kernel_replay_false_constant_comparison`
+  (`kernel_replay/fact_model.elisa`), built on the existing negated constant-comparison rule.
+- `proof_facts_order_complementary` (`linear/order_and_sign.elisa`) finds two witnessed
+  primitive orders over the same operands that complement each other, in either spelling.
+  It runs only inside a case split, like the replay refutation it relies on.
+
+Tests:
+- `examples/closed_and_complementary_refutation.elisa` proves with 0 gaps.
+- `examples/rejected_closed_and_complementary_refutation.elisa` (a true literal, and a weaker
+  `e <= d`) stays unproven.
+- Control: the prover binary from before the fix fails 4 goals of the positive example.
+
+### Returned constants keep the signed return type (2026-09-30)
+
+Return goals are built by substituting the returned expression for `result`, which dropped the
+declared return type. A closed returned constant then met the ambiguous-constant refusal, so
+`ensure result >= -5` over `return 0`, `ensure 0 - 5 <= result`, `ensure result <= -5` over
+`return -6`, and constant-offset goals such as `result + 50000 >= 0` over guarded early returns
+never proved. When the declared return type is a strict signed width, the goal mentions `result`
+and no call, and the returned value is a closed integer constant representable at that width, the
+checker now binds a fresh reserved symbol to the value (`local-binding`) with the signed type
+marker, range facts and scalar marker (`type-bound`), and certifies the goal over that symbol.
+Kernel replay already accepts these boundary facts through its typed-constant guard, so no replay
+change was needed. Out-of-width literals and unsigned returns stay refused.
+
+Tests: `examples/typed_return_constants.elisa` proves 17/17 with zero gaps (the previous binary
+proves 9/17); `examples/rejected_typed_return_constants.elisa` keeps each wrong returned constant
+(`-6` against `>= -5`, `0 - 6`, `-4` against `<= -5`, `-50001` against `result + 50000 >= 0`)
+ensure-unproven while the correct returns beside them prove. Both are in `scripts/test.sh` and
+`scripts/dogfood.sh`.
 ## Builtin push grows the count by one and appends its value (BACKLOG D-02, E-01)
 
 `v.push(x)` on a parameter declared as a mutable reference to a builtin `darray` now records
@@ -10743,6 +10909,41 @@ between the two checker revisions, then add a focused regression or document a j
 semantics-preserving accounting change before updating census data. Until then the census diff
 is expected to fail on this fixture.
 
+### Floating-point functions are checked by syntactic containment (2026-10-01)
+
+A function with a floating-point parameter used to be refused outright
+(`contract-expression-unsupported`), so no float contract could be checked, not even
+"this division only runs after a positive-length guard". Such a function now runs in float mode
+(`proof_float_mode`, set per function in `proof_check_function` and cleared after it). In float
+mode `proof_goal_with_operator_mask` proves a goal only when one fact contains it syntactically:
+exact match, conjunct projection or double negation (`proof_fact_contains`). No linear, ordering,
+congruence or case-split rule runs, equality rewriting (`rewrite`, source-bound `rewrite`) is
+refused because `+0 == -0` and NaN break substitution, and tactic JSON allows only `assumption`
+and `exact`. Each rule left is sound for any Boolean semantics, so NaN, rounding and signed zeros
+cannot make a claim true that is false at run time. `f64`/`f32` operands count as built-in operator
+receivers (no user protocol) only in float mode, and float literals only as operator operands
+there; outside float mode floats stay unmodeled. Float literals inside contracts are still
+rejected by kernel proposition formation; name them as constants.
+
+Tests: `examples/float_opaque_guard.elisa` proves 5/5: `not (length > EPSILON)` returns for NaN
+too, so the fall-through fact is the callee's `requires length > EPSILON`, and a conjunctive guard
+projects it. `examples/rejected_float_le_guard.elisa` keeps the `length <= EPSILON` guard
+`call-requires-unproven` (NaN falls through). `examples/rejected_float_nan_order.elisa` keeps
+`not (x != x)` and `x < y or y <= x` unproven. The existing reflexivity, alias, field, enum,
+expression and builtin-alias float controls stay rejected, now as unproven goals rather than
+refused functions. All are in `scripts/test.sh` and `scripts/dogfood.sh`.
+
+The census baseline was regenerated alongside this change. The four float examples now show
+`no-rule` gates because their functions are analysed instead of rejected outright.
+`rejected_no_op_statement.elisa` (proven 4 -> 3) and
+`rejected_negative_i64_module_constant_contract.elisa` (a new `ambiguous-constant-fact` gate)
+behave identically under the main-branch prover built from the merged sources. Those two changes
+were inherited from the merge, not caused by float mode, and remain open on main.
+`scripts/dogfood.sh` currently stops at two inherited probes, and the main-branch prover returns
+identical reports for both. `rejected_no_op_statement` now also reports `call-requires-unproven`.
+`rejected_short_circuit_call` produces an extra `mutable_left_fact_must_not_survive` verdict.
+With the first probe relaxed in a scratch copy, every float probe passed before the run stopped
+at the second.
 ## Linear certificates (BACKLOG C-02/C-03, 2026-10-01)
 
 A comparison goal over at most six integer names that no earlier tier closes is now searched by

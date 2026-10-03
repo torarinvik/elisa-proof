@@ -1,5 +1,24 @@
 # shellcheck shell=bash
 # Part 7 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+if [[ "$rejected_converted_index_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a converted index was admitted without its bounds\n' >&2
+    exit 1
+fi
+
+# An index in an if-expression arm is bounds-checked under that arm's condition.
+set +e
+run_json_report "$ROOT_DIR/examples/guarded_arm_indexes.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+guarded_arm_index_status=${PIPESTATUS[1]}
+set -e
+if [[ "$guarded_arm_index_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a guarded index in a conditional arm was not proven\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_guarded_arm_indexes.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("other_guard", "index-upper-unproven") in owners; assert ("else_arm", "index-upper-unproven") in owners'
+rejected_guarded_arm_index_status=${PIPESTATUS[1]}
+set -e
 if [[ "$rejected_guarded_arm_index_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a conditional arm index was admitted under the wrong guard\n' >&2
     exit 1
@@ -574,24 +593,4 @@ fi
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_replay_literal_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_rebound_literal_loses_its_guard"] == "body-unverified"; assert reasons["a_guard_for_one_literal_is_not_a_guard_for_another"] == "body-unverified"; assert reasons["an_empty_literal_has_no_element"] == "body-unverified"'
 rejected_replay_literal_facts_status=${PIPESTATUS[1]}
-set -e
-if [[ "$rejected_replay_literal_facts_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a guard over one collection literal was credited to another\n' >&2
-    exit 1
-fi
-
-# Every unsigned result is nonnegative even when its operation wraps; other arithmetic claims still
-# require the no-wrap guard. A width witness over a place must not flow through a signed call.
-set +e
-run_json_report "$ROOT_DIR/examples/unsigned_nonnegative_sum.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"grow", "a_sum_is_never_negative", "a_product_is_never_negative", "a_guarded_sum_is_nonnegative", "a_field_and_a_binder", "a_place_width_survives_a_call"}'
-unsigned_nonnegative_sum_status=${PIPESTATUS[1]}
-set -e
-if [[ "$unsigned_nonnegative_sum_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a nonnegativity claim was refused for want of a wrap proof\n' >&2
-    exit 1
-fi
-
-set +e
-run_json_report "$ROOT_DIR/examples/rejected_unsigned_nonnegative_sum.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert set(reasons) == {"a_signed_sum_may_be_negative", "an_unguarded_difference_is_nonnegative", "a_nested_difference_is_nonnegative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index", "an_exact_guard_bounds_its_own_sum"}; assert reasons["an_unguarded_difference_is_nonnegative"] == "verified"; assert reasons["an_exact_guard_bounds_its_own_sum"] == "verified"; assert reasons["a_nested_difference_is_nonnegative"] == "verified"; assert all(reasons[name] == "body-unverified" for name in ("a_signed_sum_may_be_negative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"))'
-rejected_unsigned_nonnegative_sum_status=${PIPESTATUS[1]}
 set -e

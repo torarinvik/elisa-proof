@@ -1,5 +1,17 @@
 # shellcheck shell=bash
 # Part 3 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+if [[ "$rejected_conditional_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: false conditional postcondition was accepted\n' >&2
+    exit 1
+fi
+
+run_json_report "$ROOT_DIR/examples/implicit_structural_decreases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'
+implicit_structural_status=${PIPESTATUS[1]}
+if [[ "$implicit_structural_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: implicit structural termination\n' >&2
+    exit 1
+fi
+
 run_json_report "$ROOT_DIR/examples/inferred_product_structural_decreases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'
 inferred_product_structural_status=${PIPESTATUS[1]}
 if [[ "$inferred_product_structural_status" -ne 0 ]]; then
@@ -371,7 +383,23 @@ if [[ "$shadowed_float_alias_status" -ne 1 ]]; then
     printf 'proof test matrix failed: a floating alias reusing a primitive spelling was accepted\n' >&2
     exit 1
 fi
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"] == "failed" and r["summary"]["semantic_errors"] > 0; d=next(d for d in r["declaration_details"] if d["name"] == "rejected_builtin_float_alias_reflexivity"); assert not d["verified"] and d["verification_reason"] == "body-unverified"; assert not any(g["name"] == d["name"] and g["proven"] for g in r["goals"]); assert r["repair_queue"] == []' "$shadowed_float_alias_report"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"] == "failed" and r["summary"]["semantic_errors"] > 0; d=next(d for d in r["declaration_details"] if d["name"] == "rejected_builtin_float_alias_reflexivity"); assert not d["verified"] and d["verification_reason"] == "body-unverified"; assert not any(g["name"] == d["name"] and g["proven"] and g["rule"] == "goal" for g in r["goals"]); assert all(q["failure"]["kind"] == "ensure-unproven" for q in r["repair_queue"])' "$shadowed_float_alias_report"
+float_mode_report="$standalone_probe_dir/float-opaque-guard.json"
+run_json_report "$ROOT_DIR/examples/float_opaque_guard.elisa" >"$float_mode_report"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"] == "proved" and r["findings"] == []; v={d["name"]: d["verified"] for d in r["declaration_details"]}; assert v["float_scale"] and v["float_normalize_x"] and v["float_guarded_pair"]' "$float_mode_report"
+for float_probe in rejected_float_le_guard rejected_float_nan_order; do
+    float_probe_report="$standalone_probe_dir/$float_probe.json"
+    set +e
+    run_json_report "$ROOT_DIR/examples/$float_probe.elisa" >"$float_probe_report"
+    float_probe_status=$?
+    set -e
+    if [[ "$float_probe_status" -ne 1 ]]; then
+        printf 'proof test matrix failed: float mode accepted %s\n' "$float_probe" >&2
+        exit 1
+    fi
+done
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert [(f["name"], f["kind"]) for f in r["findings"]] == [("float_normalize_le", "call-requires-unproven")]' "$standalone_probe_dir/rejected_float_le_guard.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert sorted(f["name"] for f in r["findings"] if f["kind"] == "ensure-unproven") == ["float_not_self_unequal", "float_trichotomy"]; assert not any(g["proven"] for g in r["goals"] if g["rule"] == "goal")' "$standalone_probe_dir/rejected_float_nan_order.json"
 unsigned_alias_rejection_report="$standalone_probe_dir/rejected-unsigned-alias.json"
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_unsigned_alias.elisa" >"$unsigned_alias_rejection_report"
@@ -568,31 +596,3 @@ borrow_mutable_status=$?
 borrow_lexical_scope_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_disjoint_fields.elisa" >/dev/null
 borrow_disjoint_fields_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_nested_disjoint_fields.elisa" >/dev/null
-borrow_nested_disjoint_fields_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_four_nested_fields.elisa" >/dev/null
-borrow_four_nested_fields_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_four_nested_alias.elisa" >/dev/null
-rejected_borrow_four_nested_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_move_disjoint_field.elisa" >/dev/null
-borrow_move_disjoint_field_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_call_summary.elisa" >/dev/null
-borrow_call_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_indexed_places.elisa" >/dev/null
-borrow_indexed_places_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_multi_indexed_places.elisa" >/dev/null
-borrow_multi_indexed_places_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_dynamic_whole_root.elisa" >/dev/null
-borrow_dynamic_whole_root_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_dynamic_multi_whole_root.elisa" >/dev/null
-borrow_dynamic_multi_whole_root_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_symbolic_disjoint.elisa" >/dev/null
-borrow_symbolic_disjoint_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_symbolic_alias.elisa" >/dev/null
-rejected_borrow_symbolic_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_nested_expression.elisa" >/dev/null
-borrow_nested_expression_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_reference_return_summary.elisa" >/dev/null
-borrow_reference_return_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/value_match_pure_call.elisa" >/dev/null
-value_match_pure_call_status=$?

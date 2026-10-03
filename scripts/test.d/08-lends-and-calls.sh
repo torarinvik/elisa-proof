@@ -1,5 +1,25 @@
 # shellcheck shell=bash
 # Part 8 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+if [[ "$rejected_replay_literal_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a guard over one collection literal was credited to another\n' >&2
+    exit 1
+fi
+
+# Every unsigned result is nonnegative even when its operation wraps; other arithmetic claims still
+# require the no-wrap guard. A width witness over a place must not flow through a signed call.
+set +e
+run_json_report "$ROOT_DIR/examples/unsigned_nonnegative_sum.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"grow", "a_sum_is_never_negative", "a_product_is_never_negative", "a_guarded_sum_is_nonnegative", "a_field_and_a_binder", "a_place_width_survives_a_call"}'
+unsigned_nonnegative_sum_status=${PIPESTATUS[1]}
+set -e
+if [[ "$unsigned_nonnegative_sum_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a nonnegativity claim was refused for want of a wrap proof\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_unsigned_nonnegative_sum.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert set(reasons) == {"a_signed_sum_may_be_negative", "an_unguarded_difference_is_nonnegative", "a_nested_difference_is_nonnegative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index", "an_exact_guard_bounds_its_own_sum"}; assert reasons["an_unguarded_difference_is_nonnegative"] == "verified"; assert reasons["an_exact_guard_bounds_its_own_sum"] == "verified"; assert reasons["a_nested_difference_is_nonnegative"] == "verified"; assert all(reasons[name] == "body-unverified" for name in ("a_signed_sum_may_be_negative", "a_strict_claim_is_not_admitted", "a_wrapping_sum_bounds_nothing", "a_wrapping_sum_is_no_index"))'
+rejected_unsigned_nonnegative_sum_status=${PIPESTATUS[1]}
+set -e
 if [[ "$rejected_unsigned_nonnegative_sum_status" -ne 0 ]]; then
     printf 'proof test matrix failed: the nonnegativity rule admitted more than nonnegativity\n' >&2
     exit 1
@@ -23,6 +43,88 @@ rejected_negated_guard_range_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_negated_guard_range_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a negated comparison gave more than its complement\n' >&2
+    exit 1
+fi
+
+# A premise the wrap guard cannot read, `(index % n) < 0`, is set aside rather than abandoning
+# every goal on its path; replay drops the same premises. A false claim stays unproven.
+set +e
+run_json_report "$ROOT_DIR/examples/unreadable_premise_weakening.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"wrapped", "guarded_zero"}'
+unreadable_premise_status=${PIPESTATUS[1]}
+set -e
+if [[ "$unreadable_premise_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an unreadable premise still abandoned an unrelated goal\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_unreadable_premise_weakening.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}; assert {f["name"] for f in report["findings"]} == {"too_far"}'
+rejected_unreadable_premise_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_unreadable_premise_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: setting a premise aside proved a false claim\n' >&2
+    exit 1
+fi
+
+# Replay refutes arithmetically contradictory facts: a helper's escape disjunct ruled out by the
+# caller's bound. A bound that admits the escape still proves nothing.
+set +e
+run_json_report "$ROOT_DIR/examples/arithmetic_refutation_replay.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []'
+arithmetic_refutation_status=${PIPESTATUS[1]}
+set -e
+if [[ "$arithmetic_refutation_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: replay did not refute contradictory arithmetic facts\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_arithmetic_refutation_replay.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}; assert {f["name"] for f in report["findings"]} == {"loose"}'
+rejected_arithmetic_refutation_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_arithmetic_refutation_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a consistent bound was treated as contradictory\n' >&2
+    exit 1
+fi
+
+# A disjunctive summary is refuted at the call site by a closed false comparison (a literal
+# argument) or by the caller's complementary order fact. A true literal or a weaker order
+# still proves nothing.
+set +e
+run_json_report "$ROOT_DIR/examples/closed_and_complementary_refutation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []'
+closed_complementary_status=${PIPESTATUS[1]}
+set -e
+if [[ "$closed_complementary_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a closed false or complementary premise did not close its branch\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_closed_and_complementary_refutation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}; assert {f["name"] for f in report["findings"]} == {"positive_literal", "weak_requirement"}'
+rejected_closed_complementary_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_closed_complementary_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a satisfiable premise was treated as contradictory\n' >&2
+    exit 1
+fi
+
+# A returned closed constant keeps the signed return type, so an ensure comparing result with a
+# negative or wide constant is decided at that width, on plain and guarded returns alike. A
+# returned value that breaks the claim still proves nothing.
+set +e
+run_json_report "$ROOT_DIR/examples/typed_return_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []'
+typed_return_constants_status=${PIPESTATUS[1]}
+set -e
+if [[ "$typed_return_constants_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a returned constant lost its signed return type\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_typed_return_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert {f["kind"] for f in report["findings"]} == {"ensure-unproven"}; assert sorted(f["line"] for f in report["findings"]) == [6, 11, 16, 21]'
+rejected_typed_return_constants_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_typed_return_constants_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a typed returned constant proved a false bound\n' >&2
     exit 1
 fi
 
@@ -494,104 +596,3 @@ fi
 set +e
 "$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/batch_clean.json"
 proof_batch_clean_status=$?
-"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/batch_open.json"
-proof_batch_open_status=$?
-set -e
-if [[ "$proof_batch_clean_status" -ne 0 || "$proof_batch_open_status" -ne 1 ]]; then
-    printf 'proof test matrix failed: --repair-all exit codes clean=%s open=%s\n' "$proof_batch_clean_status" "$proof_batch_open_status" >&2
-    exit 1
-fi
-set +e
-python3 - "$proof_render_dir" <<'PY'
-import json
-import os
-import sys
-
-directory = sys.argv[1]
-def load(name):
-    with open(os.path.join(directory, name), encoding="utf-8") as handle:
-        return json.load(handle)
-
-clean = load("batch_clean.json")
-assert clean["format"] == "elisa-proof-repair-batch-v1"
-assert clean["status"] == "nothing_to_repair"
-assert clean["summary"]["unresolved"] == 0 and clean["summary"]["repaired"] == 0
-assert clean["goals"] == []
-open_file = load("batch_open.json")
-assert open_file["status"] == "partial"
-assert open_file["summary"]["unresolved"] == 3 and open_file["summary"]["repaired"] == 0
-assert {entry["goal_id"] for entry in open_file["goals"]} == {1, 3, 5}
-assert {entry["name"] for entry in open_file["goals"]} == {"unrelated_hypothesis", "wrong_direction", "needs_arithmetic_we_do_not_have"}
-for entry in open_file["goals"]:
-    assert entry["status"] == "unrepaired" and entry["script"] is None
-    assert entry["tried"] == open_file["summary"]["candidates"]
-PY
-proof_batch_shape_status=$?
-set -e
-if [[ "$proof_batch_shape_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: --repair-all reporting\n' >&2
-    exit 1
-fi
-
-# An unpinned lifetime and a region value reaching a formal that declares none are each refused.
-set +e
-run_json_report "$ROOT_DIR/examples/rejected_region_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "unpinned_formal") in findings; assert ("region-call-opaque", "unmapped_lifetime") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'
-rejected_region_lend_calls_status=${PIPESTATUS[1]}
-set -e
-if [[ "$rejected_region_lend_calls_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: an unpinned lifetime was lent\n' >&2
-    exit 1
-fi
-
-if [[ "$rejected_shared_borrow_calls_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: an escaping, moved or exclusively borrowed capability was lent without a summary\n' >&2
-    exit 1
-fi
-
-set +e
-run_json_report "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert {f["name"]: f["status"] for f in report["findings"]} == {"too_wide_quantifier": "timeout", "too_large_model": "timeout", "unsupported_reasoning": "unknown", "false_comparison": "disproved", "too_many_congruence_terms": "timeout", "too_many_congruence_rounds": "timeout", "too_many_disjunctions": "timeout", "too_deep_conditional": "timeout", "too_deep_disjunctive_goal": "timeout"}'
-rejected_budget_status=${PIPESTATUS[1]}
-set -e
-if [[ "$rejected_budget_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: exhausted, undecided and refuted goals were not reported as distinct states\n' >&2
-    exit 1
-fi
-
-# A certified cancellation replays its ground form only where the width guards decided every step.
-set +e
-run_json_report "$ROOT_DIR/examples/rejected_normalized_ground_difference.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"]}; assert reasons == {"unsigned_cancellation_wraps": "body-unverified", "unbounded_signed_cancellation": "body-unverified", "bounded_signed_cancellation": "verified"}, reasons'
-normalized_ground_difference_status=${PIPESTATUS[1]}
-set -e
-if [[ "$normalized_ground_difference_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a ground difference replayed outside its width guards\n' >&2
-    exit 1
-fi
-"$ROOT_DIR/build/elisa-proof" --goal 1 "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "timeout"; assert report["failure"]["status"] == "timeout"; assert report["failure"]["counterexample_found"] is False'
-budget_goal_status=${PIPESTATUS[1]}
-if [[ "$budget_goal_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: the focused-goal API did not report an exhausted search as a timeout\n' >&2
-    exit 1
-fi
-
-run_json_report "$ROOT_DIR/examples/effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert {"wider_row", "union_row", "exact_row", "no_calls", "calls_rowless"} <= certified; rows = {d["name"]: d["effects"] for d in report["declaration_details"] if d["kind"] == "function"}; assert rows["exact_row"] == ["Memory.Allocate"]; assert rows["pure_callee"] is None'
-effect_containment_status=${PIPESTATUS[1]}
-if [[ "$effect_containment_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a containable declared effect row was not imported or certified\n' >&2
-    exit 1
-fi
-
-set +e
-run_json_report "$ROOT_DIR/examples/rejected_effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert not (certified & {"narrower_than_callee", "one_uncovered_callee", "opaque_callee"}); kinds = {f["name"]: (f["kind"], f["status"]) for f in report["findings"]}; assert kinds["narrower_than_callee"] == ("effect-row-exceeded", "disproved"); assert kinds["opaque_callee"] == ("effect-call-opaque", "unsupported")'
-rejected_effect_status=${PIPESTATUS[1]}
-set -e
-if [[ "$rejected_effect_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: an uncontained or unresolved effect row was certified\n' >&2
-    exit 1
-fi
-
-# Internal proof witnesses and generated rebind symbols share the ordinary identifier AST node.
-# A source declaration in that namespace must be rejected before it can counterfeit a compiler
-# type witness or collide with a fresh proof-state name.
-set +e
-"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/reserved-proof-name.o" "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" >/dev/null 2>&1
-reserved_source_compiler_status=$?

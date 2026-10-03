@@ -1,5 +1,61 @@
 # shellcheck shell=bash
 # Part 4 of scripts/dogfood.sh; sourced in order by it, never run alone.
+python3 - "$REPORT_DIR/sum_bound.json" "$REPORT_DIR/rejected_sum_bound.json" <<'PY'
+import json
+import sys
+
+bounded, wrapped = sys.argv[1:]
+with open(bounded, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: sum bound fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a sum-bound certificate was left unreplayed")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("transpose_the_subtraction", "a_term_under_the_bound", "the_same_for_a_signed_sum", "commuted"):
+    if (owner, "goal") not in proven:
+        raise SystemExit("dogfood failed: %s did not bound its sum" % owner)
+with open(wrapped, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: sum bound boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for owner in ("a_modular_premise_is_not_a_bound", "the_subtraction_needs_its_guard", "a_non_strict_step_gives_no_strict_goal", "a_bound_on_another_term"):
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s bounded a sum nothing bounds" % owner)
+print("dogfood sum_bound: a guarded subtraction bounds a sum, a wrapped premise does not")
+PY
+
+# `or` and `and` short-circuit: an operand the left one settles owes no range argument, and a
+# left operand that settles nothing still owes the right one its own.
+python3 - "$REPORT_DIR/settled_operand.json" "$REPORT_DIR/rejected_settled_operand.json" <<'PY'
+import json
+import sys
+
+settled, live = sys.argv[1:]
+with open(settled, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: settled operand fixture did not prove cleanly")
+if report["replay"]["certificates"] != report["replay"]["replayed"]:
+    raise SystemExit("dogfood failed: a settled-operand certificate was left unreplayed")
+proven = {(goal["name"], goal["rule"]) for goal in report["goals"] if goal["proven"]}
+for owner in ("empty_range_is_valid", "a_settled_conjunct", "the_live_operand_is_still_owed"):
+    if (owner, "goal") not in proven:
+        raise SystemExit("dogfood failed: %s was charged for an unreachable operand" % owner)
+with open(live, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: settled operand boundary fixture did not fail cleanly")
+goals = {(goal["name"], goal["rule"]): goal["proven"] for goal in report["goals"]}
+for owner in ("or_left_false_still_owes_the_right", "and_left_true_still_owes_the_right", "a_settled_operand_does_not_settle_a_sibling", "an_unsettled_left_keeps_the_gate"):
+    if goals.get((owner, "goal")) is not False:
+        raise SystemExit("dogfood failed: %s let a neighbour settle a live operand" % owner)
+print("dogfood settled_operand: a settled operand is free, a live one still owes its range")
+PY
+
+# An early return leaves its condition negated. That negation is an order between the same two
+# atoms, and it says nothing about another pair, another direction, or a strict bound.
 python3 - "$REPORT_DIR/negated_guard_order.json" "$REPORT_DIR/rejected_negated_guard_order.json" <<'PY'
 import json
 import sys
@@ -526,53 +582,3 @@ print("dogfood negated_guard_range: an early-return guard is an order, and its c
 PY
 
 # A lend that cannot outlive its call does not make the binding reachable later.
-python3 - "$REPORT_DIR/confined_lend_extent.json" "$REPORT_DIR/rejected_confined_lend_extent.json" <<'PY'
-import json
-import sys
-
-kept, escaped = sys.argv[1:]
-with open(kept, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: confined lend fixture did not prove cleanly")
-verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
-for owner in ("a_confined_lend_before_a_loop", "a_shared_lend_before_a_loop", "two_confined_lends"):
-    if owner not in verified:
-        raise SystemExit("dogfood failed: %s forgot a binding whose lend ended with its call" % owner)
-with open(escaped, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "failed" or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: confined lend boundary fixture did not fail cleanly")
-reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("a_leaked_lend_loses_the_extent", "a_returned_lend_loses_it_too", "a_confined_lend_still_writes", "a_lend_inside_the_loop"):
-    if reasons.get(owner) != "body-unverified":
-        raise SystemExit("dogfood failed: %s treated an escaping lend as confined" % owner)
-print("dogfood confined_lend_extent: a lend that ends with its call is not an alias afterwards")
-PY
-
-# The same, at the call inside the loop rather than at the loop head.
-python3 - "$REPORT_DIR/confined_lend_across_calls.json" "$REPORT_DIR/rejected_confined_lend_across_calls.json" <<'PY'
-import json
-import sys
-
-kept, reached = sys.argv[1:]
-with open(kept, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: across-calls fixture did not prove cleanly")
-verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
-for owner in ("a_call_in_the_body_keeps_the_range", "a_lent_local_in_the_body", "an_element_argument"):
-    if owner not in verified:
-        raise SystemExit("dogfood failed: %s lost a range fact to a call that could not reach it" % owner)
-with open(reached, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "failed" or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: across-calls boundary fixture did not fail cleanly")
-reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("an_escaping_lend_loses_the_range", "the_body_lends_the_collection", "a_fact_before_the_lend"):
-    if reasons.get(owner) != "body-unverified":
-        raise SystemExit("dogfood failed: %s kept a fact across a call that reaches it" % owner)
-print("dogfood confined_lend_across_calls: a call restores what it could not reach, and no more")
-PY
-
-# An aggregate local from a call keeps its own symbol, so the places under it stay places.

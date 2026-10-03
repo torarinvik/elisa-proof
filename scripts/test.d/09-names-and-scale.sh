@@ -1,5 +1,106 @@
 # shellcheck shell=bash
 # Part 9 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/batch_open.json"
+proof_batch_open_status=$?
+set -e
+if [[ "$proof_batch_clean_status" -ne 0 || "$proof_batch_open_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: --repair-all exit codes clean=%s open=%s\n' "$proof_batch_clean_status" "$proof_batch_open_status" >&2
+    exit 1
+fi
+set +e
+python3 - "$proof_render_dir" <<'PY'
+import json
+import os
+import sys
+
+directory = sys.argv[1]
+def load(name):
+    with open(os.path.join(directory, name), encoding="utf-8") as handle:
+        return json.load(handle)
+
+clean = load("batch_clean.json")
+assert clean["format"] == "elisa-proof-repair-batch-v1"
+assert clean["status"] == "nothing_to_repair"
+assert clean["summary"]["unresolved"] == 0 and clean["summary"]["repaired"] == 0
+assert clean["goals"] == []
+open_file = load("batch_open.json")
+assert open_file["status"] == "partial"
+assert open_file["summary"]["unresolved"] == 3 and open_file["summary"]["repaired"] == 0
+assert {entry["goal_id"] for entry in open_file["goals"]} == {1, 3, 5}
+assert {entry["name"] for entry in open_file["goals"]} == {"unrelated_hypothesis", "wrong_direction", "needs_arithmetic_we_do_not_have"}
+for entry in open_file["goals"]:
+    assert entry["status"] == "unrepaired" and entry["script"] is None
+    assert entry["tried"] == open_file["summary"]["candidates"]
+PY
+proof_batch_shape_status=$?
+set -e
+if [[ "$proof_batch_shape_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: --repair-all reporting\n' >&2
+    exit 1
+fi
+
+# An unpinned lifetime and a region value reaching a formal that declares none are each refused.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_region_lend_calls.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; findings = {(finding["kind"], finding["name"]) for finding in report["findings"]}; assert ("region-call-opaque", "unpinned_formal") in findings; assert ("region-call-opaque", "unmapped_lifetime") in findings; assert not any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"])'
+rejected_region_lend_calls_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_region_lend_calls_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an unpinned lifetime was lent\n' >&2
+    exit 1
+fi
+
+if [[ "$rejected_shared_borrow_calls_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an escaping, moved or exclusively borrowed capability was lent without a summary\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert {f["name"]: f["status"] for f in report["findings"]} == {"too_wide_quantifier": "timeout", "too_large_model": "timeout", "unsupported_reasoning": "unknown", "false_comparison": "disproved", "too_many_congruence_terms": "timeout", "too_many_congruence_rounds": "timeout", "too_many_disjunctions": "timeout", "too_deep_conditional": "timeout", "too_deep_disjunctive_goal": "timeout"}'
+rejected_budget_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_budget_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: exhausted, undecided and refuted goals were not reported as distinct states\n' >&2
+    exit 1
+fi
+
+# A certified cancellation replays its ground form only where the width guards decided every step.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_normalized_ground_difference.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"]}; assert reasons == {"unsigned_cancellation_wraps": "body-unverified", "unbounded_signed_cancellation": "body-unverified", "bounded_signed_cancellation": "verified"}, reasons'
+normalized_ground_difference_status=${PIPESTATUS[1]}
+set -e
+if [[ "$normalized_ground_difference_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a ground difference replayed outside its width guards\n' >&2
+    exit 1
+fi
+"$ROOT_DIR/build/elisa-proof" --goal 1 "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "timeout"; assert report["failure"]["status"] == "timeout"; assert report["failure"]["counterexample_found"] is False'
+budget_goal_status=${PIPESTATUS[1]}
+if [[ "$budget_goal_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: the focused-goal API did not report an exhausted search as a timeout\n' >&2
+    exit 1
+fi
+
+run_json_report "$ROOT_DIR/examples/effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert {"wider_row", "union_row", "exact_row", "no_calls", "calls_rowless"} <= certified; rows = {d["name"]: d["effects"] for d in report["declaration_details"] if d["kind"] == "function"}; assert rows["exact_row"] == ["Memory.Allocate"]; assert rows["pure_callee"] is None'
+effect_containment_status=${PIPESTATUS[1]}
+if [[ "$effect_containment_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a containable declared effect row was not imported or certified\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert not (certified & {"narrower_than_callee", "one_uncovered_callee", "opaque_callee"}); kinds = {f["name"]: (f["kind"], f["status"]) for f in report["findings"]}; assert kinds["narrower_than_callee"] == ("effect-row-exceeded", "disproved"); assert kinds["opaque_callee"] == ("effect-call-opaque", "unsupported")'
+rejected_effect_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_effect_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an uncontained or unresolved effect row was certified\n' >&2
+    exit 1
+fi
+
+# Internal proof witnesses and generated rebind symbols share the ordinary identifier AST node.
+# A source declaration in that namespace must be rejected before it can counterfeit a compiler
+# type witness or collide with a fresh proof-state name.
+set +e
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/reserved-proof-name.o" "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" >/dev/null 2>&1
+reserved_source_compiler_status=$?
 run_json_report "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == [{"kind": "proof-internal-name", "status": "unsupported", "line": 2, "file": 0, "file_line": 2, "name": "__elisa_unsigned_type_bound", "message": "source identifier collides with a proof-system internal name", "counterexample_found": False, "goal_id": None, "counterexample": []}]'
 reserved_marker_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_rebind_symbol_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"][0]["kind"] == "proof-internal-name"; assert report["findings"][0]["name"] == "__elisa_rebind_0"; assert report["findings"][0]["line"] == 5'

@@ -513,6 +513,9 @@ run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
 run_probe rejected_float_field examples/rejected_float_field.elisa 1
 run_probe rejected_float_enum examples/rejected_float_enum.elisa 1
 run_probe rejected_float_expression examples/rejected_float_expression.elisa 1
+run_probe float_opaque_guard examples/float_opaque_guard.elisa 0
+run_probe rejected_float_le_guard examples/rejected_float_le_guard.elisa 1
+run_probe rejected_float_nan_order examples/rejected_float_nan_order.elisa 1
 run_probe integer_alias examples/integer_alias.elisa 0
 run_probe unsigned_alias examples/unsigned_alias.elisa 0
 run_probe rejected_unsigned_alias examples/rejected_unsigned_alias.elisa 1
@@ -593,6 +596,3 @@ run_probe rejected_borrow_four_nested_alias examples/rejected_borrow_four_nested
 run_probe borrow_indexed_places examples/borrow_indexed_places.elisa 0
 run_probe rejected_borrow_index_alias examples/rejected_borrow_index_alias.elisa 1
 run_probe rejected_borrow_after_move examples/rejected_borrow_after_move.elisa 1
-run_probe rejected_negative_affine_difference examples/rejected_negative_affine_difference.elisa 1
-run_probe rejected_negative_affine_goal examples/rejected_negative_affine_goal.elisa 1
-run_probe rejected_borrow_call_duplicate_alias examples/rejected_borrow_call_duplicate_alias.elisa 1

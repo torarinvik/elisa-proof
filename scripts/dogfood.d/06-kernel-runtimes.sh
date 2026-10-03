@@ -1,5 +1,56 @@
 # shellcheck shell=bash
 # Part 6 of scripts/dogfood.sh; sourced in order by it, never run alone.
+printf 'dogfood proposition_admission_runtime: abstract atoms, typed source terms, and tactic boundaries passed\n'
+
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/comparison-runtime.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/comparison-runtime"
+printf 'dogfood comparison_runtime: witnessed comparisons, typed negative constants, width-tagged unsigned literals, and every range-quantifier instance checked; unwitnessed reflexivity refused\n'
+
+# Congruence closure is exercised against the kernel directly: every participating former must
+# carry an equality, and every excluded former (call, move, address-of, namespace path, guarded
+# access, quantifier) must refuse to, on both the dedicated rule and full goal replay.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/congruence-runtime.o" "$ROOT_DIR/examples/kernel_congruence_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/congruence-runtime"
+printf 'dogfood congruence_runtime: participating formers carried equalities and excluded formers refused\n'
+
+# Propositional fact projection is exercised against the kernel directly: a conjunction entails
+# each conjunct, a negated disjunction entails each negated disjunct, a double negation cancels,
+# and the dual forms - a disjunction, a negated conjunction - must stay refused in both signs.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/projection-runtime.o" "$ROOT_DIR/examples/kernel_projection_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/projection-runtime"
+printf 'dogfood projection_runtime: conjunct and negated-disjunct projection admitted, duals refused\n'
+
+# Declared effect containment is checked against the kernel directly: contained rows admitted,
+# uncontained rows refused, and every malformed effect graph rejected rather than interpreted.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/effect-runtime.o" "$ROOT_DIR/examples/kernel_effect_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/effect-runtime"
+printf 'dogfood effect_runtime: contained rows admitted and uncontained or malformed rows refused\n'
+
+# Bootstrap coverage: compile the runtime with stage0 as well; an installed stage1
+# runtime is not an implicit bootstrap dependency. The reduced resource trace
+# guards the stage0 miscompile of allocations made through an unannotated mutable
+# reference inside a region-polymorphic function (see AUDIT.md); the full arena
+# harness then confirms the whole replay layer under the bootstrap compiler.
 # Respect the same explicit stage0 compiler supplied to the stage1 driver/build; otherwise a
 # stale, unrelated `elisac-stage0` earlier on PATH can replace the verified bootstrap product.
 if [[ -n "$BOOTSTRAP_COMPILER" ]]; then

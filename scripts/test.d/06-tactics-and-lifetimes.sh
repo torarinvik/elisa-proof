@@ -1,5 +1,23 @@
 # shellcheck shell=bash
 # Part 6 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+for typed_goal in 1 9; do
+    typed_script="$standalone_probe_dir/typed_unsigned_decide_$typed_goal.json"
+    printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":%s,"goal_fingerprint":%s},"actions":[{"action":"decide"}]}' "$typed_goal" "$(typed_goal_fingerprint "$typed_goal")" >"$typed_script"
+    set +e
+    typed_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$typed_script" "$ROOT_DIR/examples/typed_unsigned_literals.elisa")"
+    set -e
+    if ! printf '%s' "$typed_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["source_goal_binding"]["fingerprint_match"] is True; expected = sys.argv[1] == "1"; assert t["valid"] is expected and t["solved"] is expected; assert (r["status"] == "proved") is expected; assert not expected or (t["kernel_replayed"] is True and t["certificate_replayed"] is True)' "$typed_goal"; then
+        printf 'proof test matrix failed: typed unsigned decide tactic on goal %s\n' "$typed_goal" >&2
+        exit 1
+    fi
+done
+# Migration: the v1 fingerprint recorded for the u64 maximum goal before literals carried their
+# type no longer binds, so a stale script cannot silently address the re-typed proposition.
+stale_script="$standalone_probe_dir/typed_unsigned_stale_v1.json"
+printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":7,"goal_fingerprint":515359733},"actions":[{"action":"decide","accepted":false}]}' >"$stale_script"
+set +e
+stale_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$stale_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa")"
+set -e
 if ! printf '%s' "$stale_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); b=r["source_goal_binding"]; assert r["status"] == "failed" and b["fingerprint_match"] is False and b["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert r["tactic"]["reason"] == "target.goal_fingerprint does not match the imported kernel goal and hypotheses"'; then
     printf 'proof test matrix failed: a stale v1 goal fingerprint still bound a typed-literal goal\n' >&2
     exit 1
@@ -574,23 +592,4 @@ fi
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_converted_index_bounds.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("unchecked_low", "index-lower-unproven") in owners; assert ("unchecked_high", "index-upper-unproven") in owners; assert any(name == "signed_target" for name, _ in owners)'
 rejected_converted_index_status=${PIPESTATUS[1]}
-set -e
-if [[ "$rejected_converted_index_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a converted index was admitted without its bounds\n' >&2
-    exit 1
-fi
-
-# An index in an if-expression arm is bounds-checked under that arm's condition.
-set +e
-run_json_report "$ROOT_DIR/examples/guarded_arm_indexes.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
-guarded_arm_index_status=${PIPESTATUS[1]}
-set -e
-if [[ "$guarded_arm_index_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a guarded index in a conditional arm was not proven\n' >&2
-    exit 1
-fi
-
-set +e
-run_json_report "$ROOT_DIR/examples/rejected_guarded_arm_indexes.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("other_guard", "index-upper-unproven") in owners; assert ("else_arm", "index-upper-unproven") in owners'
-rejected_guarded_arm_index_status=${PIPESTATUS[1]}
 set -e

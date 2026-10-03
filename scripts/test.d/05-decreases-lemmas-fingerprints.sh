@@ -1,5 +1,23 @@
 # shellcheck shell=bash
 # Part 5 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+"$ROOT_DIR/build/elisa-proof" --goal -1 "$ROOT_DIR/examples/verified.elisa" >/dev/null
+focused_negative_goal_status=$?
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["format"] == "elisa-proof-theorems-v1"; assert catalog["source"]["complete"] is True; assert [item["name"] for item in catalog["theorems"]] == ["nonnegative", "named_nonnegative"]; assert all(item["verified"] and item["signature_valid"] and item["proof_goals_valid"] and item["proof_replay_complete"] for item in catalog["theorems"]); assert all(theorem["proof_goals"] and all(goal["proven"] and goal["replayed"] and isinstance(goal["certificate_id"], int) for goal in theorem["proof_goals"]) for theorem in catalog["theorems"]); assert catalog["theorems"][0]["parameters"] == ["x"]; assert catalog["theorems"][0]["parameter_types"] == [{"kind": "ident", "name": "i64", "line": 1}]; assert [item["name"] for item in catalog["theorems"][1]["parameter_types"]] == ["i64", "i64"]; assert len(catalog["theorems"][1]["requires"]) == 2; assert len(catalog["theorems"][1]["ensures"]) == 1'
+theorem_catalog_statuses=("${PIPESTATUS[@]}")
+theorem_catalog_status=${theorem_catalog_statuses[0]}
+theorem_catalog_json_status=${theorem_catalog_statuses[1]}
+run_json_report "$ROOT_DIR/examples/lemma.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); traces = [trace for trace in report["kernel"]["fact_traces"] if trace["kind"] == "lemma-summary"]; assert report["status"] == "proved" and report["replay"]["gaps"] == 0; assert [trace["dependency"] for trace in traces] == ["nonnegative", "named_nonnegative"]; assert [len(trace["summary_bindings"]) for trace in traces] == [1, 2]; assert [len(trace["summary_require_goal_ids"]) for trace in traces] == [1, 2]; assert all(trace["summary_ensure_index"] == 0 for trace in traces); goals = report["goals"]; assert all(all(goals[goal_id]["proven"] and goals[goal_id]["replay_status"] == "replayed" for goal_id in trace["summary_require_goal_ids"]) for trace in traces)'
+lemma_summary_provenance_statuses=("${PIPESTATUS[@]}")
+lemma_summary_provenance_status=${lemma_summary_provenance_statuses[0]}
+lemma_summary_provenance_json_status=${lemma_summary_provenance_statuses[1]}
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/rejected_lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["source"]["complete"] is False; assert len(catalog["theorems"]) == 1; theorem = catalog["theorems"][0]; assert theorem["name"] == "unsound"; assert theorem["verified"] is False; assert theorem["verification_reason"] == "body-unverified"; assert theorem["signature_valid"] is True; assert theorem["proof_goals_valid"] is True; assert theorem["proof_replay_complete"] is False; assert any(not goal["proven"] and goal["certificate_id"] is None and not goal["replayed"] for goal in theorem["proof_goals"])'
+rejected_theorem_catalog_statuses=("${PIPESTATUS[@]}")
+rejected_theorem_catalog_status=${rejected_theorem_catalog_statuses[0]}
+rejected_theorem_catalog_json_status=${rejected_theorem_catalog_statuses[1]}
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma_default_catalog.elisa" | python3 -c 'import json, sys; theorem = json.load(sys.stdin)["theorems"][0]; assert theorem["verified"] is True; assert theorem["parameters"] == ["x", "amount"]; assert theorem["parameter_defaults"] == [None, {"kind": "int", "value": 7}]'
+default_theorem_catalog_statuses=("${PIPESTATUS[@]}")
+default_theorem_catalog_status=${default_theorem_catalog_statuses[0]}
+default_theorem_catalog_json_status=${default_theorem_catalog_statuses[1]}
 python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/theorem_fingerprint_a.elisa" "$ROOT_DIR/examples/theorem_fingerprint_b.elisa" "$ROOT_DIR/examples/theorem_fingerprint_changed.elisa" <<'PY'
 import json, subprocess, sys
 def fingerprint(path):
@@ -576,21 +594,3 @@ typed_goal_fingerprint() {
 }
 # Goal 1 is `0xFFFFFFFFFFFFFFFFu64 > 0u64` (true), goal 9 is `... < 0u64` (false). The
 # script names the literal only by its source offset; the type comes from the source table.
-for typed_goal in 1 9; do
-    typed_script="$standalone_probe_dir/typed_unsigned_decide_$typed_goal.json"
-    printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":%s,"goal_fingerprint":%s},"actions":[{"action":"decide"}]}' "$typed_goal" "$(typed_goal_fingerprint "$typed_goal")" >"$typed_script"
-    set +e
-    typed_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$typed_script" "$ROOT_DIR/examples/typed_unsigned_literals.elisa")"
-    set -e
-    if ! printf '%s' "$typed_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["source_goal_binding"]["fingerprint_match"] is True; expected = sys.argv[1] == "1"; assert t["valid"] is expected and t["solved"] is expected; assert (r["status"] == "proved") is expected; assert not expected or (t["kernel_replayed"] is True and t["certificate_replayed"] is True)' "$typed_goal"; then
-        printf 'proof test matrix failed: typed unsigned decide tactic on goal %s\n' "$typed_goal" >&2
-        exit 1
-    fi
-done
-# Migration: the v1 fingerprint recorded for the u64 maximum goal before literals carried their
-# type no longer binds, so a stale script cannot silently address the re-typed proposition.
-stale_script="$standalone_probe_dir/typed_unsigned_stale_v1.json"
-printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":7,"goal_fingerprint":515359733},"actions":[{"action":"decide","accepted":false}]}' >"$stale_script"
-set +e
-stale_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$stale_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa")"
-set -e

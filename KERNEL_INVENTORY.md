@@ -157,12 +157,12 @@ summary trace cannot be relabelled as one.
 | `branch-condition` | `check/statement_checks.elisa`, `check/bounds_and_facts.elisa`, `check/returns/matches.elisa` | the condition of the taken branch |
 | `loop-condition` | `check/statement_checks.elisa`, `check/returns/loops.elisa` | a `while` condition inside the body |
 | `loop-invariant` | `check/statement_checks.elisa`, `check/returns/loops.elisa` | an invariant assumed at body entry (and proved separately) |
-| `loop-range` | `check/statement_checks.elisa` | a `for` index's range bounds |
+| `loop-range` | `check/loop_range_facts.elisa` | a `for` index's range bounds |
 | `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
 | `collection-push` | `check/collection_push.elisa` | after `v.push(x)` on a mutable darray reference parameter: `v.count == T + 1`, `v[T] == x` and `v[v.count - 1] == x`, the pre-push count T an unsigned 64-bit scalar at most 2^63 - 2 |
 | `collection-pop` | `check/collection_pop.elisa` | after a statement `v.pop()` on a mutable darray reference parameter: `1 <= S` (the builtin traps on an empty array) and `v.count == S - 1`, S the pre-pop count |
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
-| `indexed-write` | `check/indexed_writes.elisa` | `v[i] == x` for the stored cell after an indexed write `v[i] <- x` |
+| `indexed-write` | `check/indexed_writes.elisa` | `v[i] == x` for the stored cell after an indexed write `v[i] <- x`, on a scalar element whose stored value's reads survive the write |
 | `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
 <!-- /inventory:boundary-trace-kinds -->
 
@@ -272,6 +272,7 @@ claims marked "(checked)".
 | `proof_integer_literal_tag` | `proof/expr/literal_types.elisa` | source adapter |
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
 | `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
+| `proof_internal_rebind_name` | `proof/check/internal_name_safety.elisa` | source adapter |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some
