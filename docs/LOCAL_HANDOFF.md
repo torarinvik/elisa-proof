@@ -4,6 +4,33 @@ Written 2026-10-03 by the cloud integration session for a local Claude Code agen
 The local worktrees are about four hours behind. Everything below is pushed to GitHub. Treat this
 file as the plan: follow the order, verify every step, and stop to ask the user wherever it says to.
 
+## Status update, 19:00 UTC (newest; supersedes the sections below where they differ)
+
+- **Elisa-compiler `main` = `f4aefeb`**: adds `66a0d52`, validated, as `f4aefeb`. The linux_shim links
+  static LLVM; a full seed against LLVM 23.1.2 links and the product runs.
+- **`perf/prover-search` = `e62442d`**, validated by its agent (LLVM 20, z3 4.8.12):
+  - full `--json` reports byte-identical to the base on 836 inputs plus the heavy kernel runtimes;
+  - 87 test_*.py pass, except test_goal_disjunct_split, which fails on its base and is fixed on
+    integrate/all-3z3zby.
+
+  Gains in user CPU:
+
+  | Workload | Before | After |
+  |---|---|---|
+  | kernel_arena | 37.4 s | 21.8 s (RSS 2.43 → 1.07 GB) |
+  | kernel_effect | 154 s | 111 s (RSS 3.3 → 1.5 GB) |
+  | kernel_sview_lifetimes | 140 s | 97 s |
+  | lighter corpus, summed | 32.1 s | 24.2 s |
+
+  It is NOT yet merged with integrate/all-3z3zby. Its agent is doing that now. Conflict:
+  `src/proof/expr/ast_equal.elisa`, where both branches add a structural prefilter to
+  `proof_expr_equal`. Keep both early-false lines, or one if it subsumes the other, then re-run the
+  identity diff. Merge into elisa-proof main after integrate/all-3z3zby.
+- **perf/stage1-seed-memory = `096025a`**: the arena change `ec39b19` passes gen3 fixpoint, and its
+  adversarial failures match main's. It still waits on differential_corpus matching main.
+- **elisa-proof `main` is still `7bf8c51`**: pushing to it is blocked from the cloud session by the
+  permission settings. Fast-forward it locally to `origin/integrate/all-3z3zby`.
+
 ## Status update, 18:17 UTC (supersedes the branch table below where they differ)
 
 Already merged into the main branches from the cloud session:
