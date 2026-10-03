@@ -2,7 +2,7 @@
 precondition is a case whatever the nesting, a chained goal needs one provable disjunct, and a
 chain unrelated to the goal must not stop the range facts beside it from proving it (the retry
 without top-level disjunctive facts). An uncovered case, a goal no disjunct satisfies, a claim
-past the range and an off-by-one over an eight-case chain all stay unproven."""
+past the range and a five-case off-by-one stay unproven, and a true six-case chain is refused\nat the split budget (four nested splits), as a timeout rather than a disproof."""
 import json
 import os
 from pathlib import Path
@@ -25,8 +25,10 @@ data = run(ROOT / "examples/rejected_or_chain.elisa")
 assert data["status"] != "proved"
 assert data["replay"]["gaps"] == 0
 assert all(f["status"] != "proved" for f in data["findings"])
-assert sorted((f["name"], f["line"]) for f in data["findings"] if f["kind"] == "ensure-unproven") == [
-    ("chain_does_not_tighten_range", 20), ("eight_case_off_by_one", 25), ("nested_uncovered_case", 10),
-    ("no_disjunct_holds", 14), ("uncovered_case", 5)], data["findings"]
+assert sorted((f["name"], f["line"], f["refusal_gate"], f["status"]) for f in data["findings"]
+              if f["kind"] == "ensure-unproven") == [
+    ("chain_does_not_tighten_range", 21, "no-rule", "unknown"), ("five_case_off_by_one", 26, "connective", "disproved"),
+    ("nested_uncovered_case", 11, "no-rule", "disproved"), ("no_disjunct_holds", 15, "connective", "disproved"),
+    ("six_case_budget", 33, "budget", "timeout"), ("uncovered_case", 6, "connective", "disproved")], data["findings"]
 
-print("or chains: chained facts split, chained goals introduce, uncovered cases refused")
+print("or chains: chains up to five disjuncts split, chained goals introduce, uncovered cases and the six-case budget refused")
