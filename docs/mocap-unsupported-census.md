@@ -3,17 +3,18 @@
 Source: `torarinvik/mocap-cleaner` `main` at `ff1699d`, read-only. Prover: this branch
 (`agent/mocap-unsupported`, based on `mocap-cleaner-proofs` `7571dfa`).
 
-**How this was produced.** The prover could not be built in the session that wrote this, so
-every row is a static reading of the mocap source against the prover's refusal gates, not a
-captured `--json` report. Each row says how sure it is:
+**How this was produced.** Every number below comes from `build/elisa-proof --json` runs on
+2026-10-03. Two builds were compared:
 
-- **certain**: the gate fires on a syntactic shape that is present, with no state dependence.
-- **likely**: the shape is present and the gate normally fires on it, but whether it does
-  depends on facts the checker has at that point.
-- **open**: no gate could be pinned down statically. Run `build/elisa-proof --json` and read the
-  `findings` array to settle it.
+- the base commit `7571dfa`;
+- this branch.
 
-Before relying on a row, re-run `scripts/proof_status.py` (mocap) with this prover build.
+Both were built with the stage1 compiler at the pinned `ELISA_COMPILER_REV` `d8b5d30`, seeded from
+the pinned stage0 `0b21b7b`, on Linux with LLVM 20. The `../../../elisa-engine-mocap` includes
+resolved to an `elisa-engine` checkout.
+
+An earlier, static-only version of this census guessed several causes. Where the reports
+disagreed with it, the reports win. The corrections are listed in §3.
 
 ## 1. Where `unsupported` / `unknown` come from
 
@@ -110,36 +111,64 @@ Roles::RIGHT_FOOT` is constants; the call wraps the if-expression), so they were
 
 `main` inherits all three through its includes.
 
-## 3. Per file
+## 3. Per file (measured)
 
-"Own" means a construct in the file itself; "via" means it comes from an include.
+"In the file itself" means findings whose source position is in that file. "Via includes"
+means findings from functions in included files, which still count against the file.
 
-| File | Status | Triggering construct(s) | Prover location | Confidence |
-| --- | --- | --- | --- | --- |
-| `src/cli/main.elisa` | unsupported | via A (glb_tracks, rig_physics, ops_file); via B (stack, rig_stack, rig_physics); via C (console, report, folder); own: `catch` value forms (3), if-expression with a call (319), get-else recovery (10) | `declaration_checks.elisa:205`; `statement_checks.elisa:530`; `statement_checks.elisa:173,178` | A, B certain; catch likely |
-| `src/io/console.elisa` | unsupported | own: `for c in s` over an `sview` parameter; `while s[i] != 0` over a `cstr`; extern `c_putchar` | resources region checks (`region-alias-unsupported`); `index_checks.elisa:234` | likely |
-| `src/io/folder.elisa` | unsupported | own: 8 extern declarations with `can[...]` rows, `cstr`/`sview` buffers, `while` loops over C strings | resources region checks; `index_checks.elisa:234`; `declaration_checks.elisa:424` if a caller declares `can` | likely |
-| `src/io/glb_tracks.elisa` | unsupported | own A: `to_fixed(value: f32)`; via A: `glb_document.elisa`; lambdas/captured value blocks (5) | `declaration_checks.elisa:205`; `pattern_support.elisa` `Lambda` → `statement_checks.elisa:530` | A certain |
-| `src/io/ops_file.elisa` | unsupported | via A and B (rig_stack); via C (report); own: extern file I/O | as above | A certain |
-| `src/io/report.elisa` | unsupported | own C: 6 externs, `push_text(out, s: sview)` iterating an `sview`; get-else (5) | resources region checks; `runtime_support_and_calls.elisa:339` | likely |
-| `src/io/rig.elisa` | unsupported | own A: `f64`/`MotionQuat` parameters throughout; via A: motion_quat, glb_document; own B: 139, 267; `catch` (1) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
-| `src/io/rig_map.elisa` | unsupported | via A only (`glb_document.elisa`, through `GlbDocument` parameters); no float of its own | `declaration_checks.elisa:205` | certain |
-| `src/ops/corrections.elisa` | unsupported | via A (glb_tracks, glb_document); own: `catch` forms (10), float locals and struct fields, a lambda | `declaration_checks.elisa:205`; `statement_checks.elisa:173,178,530` | A certain |
-| `src/ops/presets.elisa` | unsupported | via A and B (rig_stack, stack); own code is enum `match` plus `push` (supported) | as above | certain via includes |
-| `src/ops/rig_stack.elisa` | unsupported | own A (MotionQuat/f64 parameters); via A (limb, motion_quat, ik); own B (eight sites, all fixed) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
-| `src/ops/stack.elisa` | unsupported | own B (65, 70, 74, 76, all fixed); `cache: mutable Cache&` field and index writes (`cache.results[at] <- ...`); via `track.elisa` | `statement_checks.elisa:530`; possibly `borrow-source-opaque` in `src/proof/resources/` | B certain; borrow likely |
-| `src/physics/rig_physics.elisa` | unsupported | own A (f64 / `MotionQuat::V` parameters, `.sqrt()`); via A; own B (four sites, all fixed) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
-| `src/tools/limb.elisa` | unsupported | own A; via A (ik, motion_quat, rig); own B (68); `catch` (3) | `declaration_checks.elisa:205`; `statement_checks.elisa:530` | certain |
-| `src/tools/track.elisa` | unsupported | own B: 34, 97, 98, all fixed. Remaining candidates: indexed writes through a mutable local (`window[j] <- ...`, `out[i] <- ...`); `current <- next` whole-container rebind inside a captured `while` | `statement_checks.elisa:530` (B); resource and borrow checks in `src/proof/resources/` | B certain; the rest open |
-| `src/core/key_weight.elisa` | unknown | no unsupported construct. Most likely an unproven goal in `ramp`: the wrap guard on `part * FULL` needs `part <= whole <= 2 * MAX_FRAMES` through a module constant, and `v: i64 = part * FULL / whole` is a division local (mocap G25). Could also be `requires frame >= -MAX_FRAMES` (a negated constant, mocap G19/G21 family) | goal failures (`*-unproven`, status unknown) via `report_recording.elisa:67` | open |
-| `proof/key_weight_laws.elisa` | unknown | inherits `key_weight.elisa`'s open goal through `include`; its own calls only need preconditions that the laws state directly | as above | likely (inherited) |
-| `src/io/report_diff.elisa` | n/a | **not in mocap `main` at ff1699d** (neither is it on any branch) | — | — |
-| `src/io/workers.elisa` | n/a | **not in mocap `main` at ff1699d** | — | — |
-| `src/ops/retime_apply.elisa` | n/a | **not in mocap `main` at ff1699d** | — | — |
-| `src/ops/rig_cache.elisa` | n/a | **not in mocap `main` at ff1699d** | — | — |
+| File | Base `7571dfa` | This branch | Proven (base → now) | Unsupported findings in the file itself (top kinds) | Unsupported via includes |
+| --- | --- | --- | --- | --- | --- |
+| `src/cli/main.elisa` | unsupported | **unsupported** | 1548/2426 → 1566/2449 | `function-summary-unverified` 76, `contract-proposition-type` 50, `borrow-call-opaque` 31 | `contract-expression-unsupported` 160, `contract-proposition-type` 72 |
+| `src/io/console.elisa` | unsupported | **unsupported** | 4/12 → 4/12 | `contract-proposition-type` 1, `borrow-call-opaque` 1, `function-summary-unverified` 1 | none |
+| `src/io/folder.elisa` | unsupported | **unsupported** | 19/27 → 19/27 | `contract-proposition-type` 7 | none |
+| `src/io/glb_tracks.elisa` | unsupported | **unsupported** | 821/1181 → 839/1204 | `contract-expression-unsupported` 5, `contract-proposition-type` 2, `control-flow-analysis-budget` 1 | `contract-expression-unsupported` 84, `function-summary-unverified` 37 |
+| `src/io/ops_file.elisa` | unsupported | **unsupported** | 1112/1623 → 1130/1647 | `borrow-call-opaque` 7, `function-summary-unverified` 5, `borrow-call-summary-unsupported` 3 | `contract-expression-unsupported` 136, `contract-proposition-type` 56 |
+| `src/io/report.elisa` | unsupported | **unsupported** | 8/39 → 8/39 | `function-summary-unverified` 22, `contract-proposition-type` 2, `borrow-call-opaque` 2 | none |
+| `src/io/rig.elisa` | unsupported | **unsupported** | 216/450 → 216/450 | `contract-expression-unsupported` 19, `contract-proposition-type` 7, `control-flow-analysis-budget` 1 | `contract-expression-unsupported` 103, `function-summary-unverified` 14 |
+| `src/io/rig_map.elisa` | unsupported | **unsupported** | 213/399 → 213/399 | `function-summary-unverified` 3, `contract-expression-unsupported` 2, `contract-proposition-type` 1 | `contract-expression-unsupported` 82, `function-summary-unverified` 11 |
+| `src/ops/corrections.elisa` | unsupported | **unsupported** | 857/1222 → 875/1245 | `contract-expression-unsupported` 3, `contract-proposition-type` 1, `control-flow-analysis-budget` 1 | `contract-expression-unsupported` 89, `function-summary-unverified` 37 |
+| `src/ops/presets.elisa` | unsupported | **unsupported** | 1126/1602 → 1144/1625 | `control-flow-analysis-budget` 1 | `contract-expression-unsupported` 142, `contract-proposition-type` 40 |
+| `src/ops/rig_stack.elisa` | unsupported | **unsupported** | 1010/1426 → 1028/1450 | `contract-expression-unsupported` 15, `contract-proposition-type` 11, `index-bounds-opaque` 3 | `contract-expression-unsupported` 127, `contract-proposition-type` 29 |
+| `src/ops/stack.elisa` | unsupported | **unsupported** | 608/775 → 626/798 | `function-summary-unverified` 12, `borrow-call-opaque` 9, `expression-unsupported` 3 | `index-bounds-opaque` 19, `function-summary-unverified` 11 |
+| `src/physics/rig_physics.elisa` | unsupported | **unsupported** | 1271/1781 → 1289/1805 | `contract-expression-unsupported` 19, `contract-proposition-type` 5, `expression-unsupported` 4 | `contract-expression-unsupported` 142, `contract-proposition-type` 40 |
+| `src/tools/limb.elisa` | unsupported | **unsupported** | 438/687 → 438/687 | `contract-expression-unsupported` 4, `contract-proposition-type` 3, `control-flow-analysis-budget` 1 | `contract-expression-unsupported` 123, `contract-proposition-type` 26 |
+| `src/tools/track.elisa` | unsupported | **unsupported** | 495/615 → 513/639 | `index-bounds-opaque` 19, `function-summary-unverified` 11, `expression-unsupported` 2 | none |
+| `src/core/key_weight.elisa` | unknown | **proved** | 36/36 → 36/36 | none | none |
+| `proof/key_weight_laws.elisa` | unknown | **proved** | 60/60 → 60/60 | none | none |
 
-The four missing files are probably newer local work that was never pushed. Re-run the census on
-them once they are pushed.
+`src/io/report_diff.elisa`, `src/io/workers.elisa`, `src/ops/retime_apply.elisa` and
+`src/ops/rig_cache.elisa` are not on mocap `main` at `ff1699d` or on any pushed branch.
+
+What the reports show:
+
+- **`key_weight` and `key_weight_laws` were `unknown` because of replay gaps, not open goals.**
+  All 36 and 60 obligations were proven, but 6 and 9 certificates failed independent replay.
+  - The producer reads `not (frame < key)` beside `not (frame == key)` as `frame > key`. The
+    replay kernel's negated-comparison path lacked that step.
+  - Fixed in `src/proof/kernel_replay/difference_constraints.elisa`. Both files are now
+    `proved`, and `corrections` loses its 6 gaps.
+- **The floating-point parameter boundary dominates.** It accounts for 1255 of the
+  unsupported findings across these files, almost all of it via includes, as §2.A says. It is
+  deliberately kept.
+- **Corrections to the static census:**
+  - `function-summary-unverified` (447) and `index-bounds-opaque` (248) are `unsupported` in this
+    build.
+  - `contract-proposition-type` (398, "kernel proposition formation rejected the term or
+    operator") is the second most common cause, and the static reading missed it.
+  - `console`, `folder` and `report` are refused mainly by `contract-proposition-type`,
+    unverified summaries and `borrow-call-opaque`, not by region rules. No
+    `region-alias-unsupported` finding came from those three files.
+- **`track` and `stack`** have no float or include cause left. Their remaining refusals are:
+  - `index-bounds-opaque` in `odd_sample`, `sample` and `lock`, where an index is `x.usize()`
+    of a signed value whose bound reaches the index only through a conversion;
+  - unverified callee summaries;
+  - two `expression-unsupported` findings, which are a `while` condition indexing `window[j - 1]`
+    in `median`.
+  These are the next candidates, and each needs its own soundness argument.
+- **Obligations rise by 18 to 25 per file with if-expression sites.** The arms of formerly
+  refused statements are now checked. Most of the new goals prove. Some arm goals open as
+  ordinary unproven findings, which is why finding counts rise slightly while no file loses a
+  proof.
 
 ## 4. What this branch changes
 
@@ -185,13 +214,28 @@ Fixtures:
 - **Extern effect rows:** not a hit. `effect-call-opaque` only fires for a function that declares
   `can[...]` and calls something with no row. The only such function, `main`, calls no extern
   directly, and the extern AST node carries no effect row to import anyway.
-- **C, I/O buffers (`sview`/`cstr` iteration, `cache` field writes through `mutable Cache&`):**
-  the findings could not be determined without running the prover, and guessing a relaxation of
-  the region or borrow rules is exactly what must not be done. Settle them from a real
-  `--json` report first.
-- **`key_weight` / `key_weight_laws` (unknown):** an unproven goal, not an unsupported
-  construct. The goal could not be identified statically; get it from the report's
-  `goal_attempts`.
+- **C, I/O files (`console`, `folder`, `report`):** the reports show `contract-proposition-type`,
+  unverified summaries and `borrow-call-opaque`, not region rules. Each is a separate kernel or
+  resource-model extension, with its own soundness argument, and none is attempted here.
+- **`key_weight` / `key_weight_laws`:** fixed. They were replay gaps, not open goals (see §3). Both are now
+  `proved`.
 - **Missing engine checkout:** the `../../../elisa-engine-mocap` includes only resolve with that
   sibling worktree. Without it every including file also gets `import-error`. This is an
   environment issue, not a prover issue.
+
+## 6. Test status of this branch
+
+The build used stage1 from `d8b5d30`, seeded from stage0 `0b21b7b`, on Linux with LLVM 20.
+
+- **`scripts/test.sh`:** every check passes except the final `scripts/census_diff.py`. That
+  compares against the committed `docs/census` baseline and reports
+  `typed_unsigned_literals` (a new `no-rule` gate) and `unknown_widened_borrow_write`
+  (9 → 6 proven). Both behave identically on base `7571dfa`, so the baseline is stale. Whether
+  the second is an upstream regression or an intended change is for the owners to decide before
+  re-baselining.
+- **`scripts/dogfood.sh`:** passes. This branch also repairs four failures already present on
+  the base commit:
+  - the standalone replay self-audit was one fact over budget;
+  - two expectation sets were stale;
+  - two native harnesses still built `ProofFactTrace` without `owner_line`;
+  - the lemma-summary harness restored a hard-coded binding.
