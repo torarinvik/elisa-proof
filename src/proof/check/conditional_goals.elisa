@@ -22,23 +22,13 @@ extend ElisaProof:
                     else_case: Ast::Expr = Ast::Expr.Binary(condition, TokenKind.Or, else_goal.value, position)
                     # The final step's facts end with the two cases.
                     return false if facts.count >= 2 and proof_expr_equal(facts[facts.count - 2], then_case) and proof_expr_equal(facts[facts.count - 1], else_case)
-                    return false if not proof_certify_goal_with_rule(facts, then_case, report, line, name, annotations, "")
-                    return false if not proof_certify_goal_with_rule(facts, else_case, report, line, name, annotations, "")
-                    # The final step reads only the two cases: `G` follows from them alone, and
-                    # every other disjunction in the facts would only cost the split its depth.
-                    # Each case is recorded with the full facts as its premises.
-                    staged: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
-                    premises: darray[Ast::Expr] = proof_copy_exprs(facts)
-                    proof_add_derived_fact_from(&staged, report, then_case, premises, "proof-step", line, name)
-                    proof_add_derived_fact_from(&staged, report, else_case, premises, "proof-step", line, name)
-                    return false if staged.count != facts.count + 2
-                    # Type markers stay: the width gates read them.
-                    cases: mutable darray[Ast::Expr] = []
-                    for fact in facts |cases|:
-                        cases.push(fact) if proof_join_type_marker(fact)
-                    cases.push(then_case)
-                    cases.push(else_case)
-                    return proof_certify_goal_with_rule(cases, goal, report, line, name, annotations, "")
+                    # Never nested: a case's own goal can unfold into a conditional again (a
+                    # callee body inlined), and each level would split anew.
+                    return false if report.conditional_split_active
+                    report.conditional_split_active <- true
+                    proven: bool = proof_certify_conditional_cases(facts, goal, then_case, else_case, report, line, name, annotations)
+                    report.conditional_split_active <- false
+                    return proven
                 _:
                     return false
 
@@ -57,3 +47,30 @@ extend ElisaProof:
                     proof_goal_conditional_terms(right, terms, depth + 1)
                 _:
                     return
+
+        def proof_certify_conditional_cases(facts: darray[Ast::Expr]&, goal: Ast::Expr, then_case: Ast::Expr, else_case: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            # The facts the solver cannot split: bounds, markers, equalities. A case proved from
+            # these alone needs no split, so its certificate and trace replay cheaply; the other
+            # disjunctions are kept out of the final step for the same reason.
+            plain: mutable darray[Ast::Expr] = []
+            for fact in facts |plain|:
+                split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(fact)
+                plain.push(fact) if not split.known
+            cases: mutable darray[Ast::Expr] = proof_copy_exprs(plain)
+            return false if not proof_stage_conditional_case(facts, plain, then_case, &cases, report, line, name, annotations)
+            return false if not proof_stage_conditional_case(facts, plain, else_case, &cases, report, line, name, annotations)
+            return proof_certify_goal_with_rule(cases, goal, report, line, name, annotations, "")
+
+        # Prove one case and add it to the final step's facts with the smallest premise set
+        # that worked. A case that is already a fact (a guarded arm fact the join imported)
+        # keeps its own trace.
+        def proof_stage_conditional_case(facts: darray[Ast::Expr]&, plain: darray[Ast::Expr]&, case: Ast::Expr, cases: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            if any fact in facts where proof_expr_equal(fact, case):
+                cases.push(case)
+                return true
+            before: usize = cases.count
+            if proof_certify_goal_with_rule(plain, case, report, line, name, annotations, ""):
+                proof_add_derived_fact_from(cases, report, case, plain, "proof-step", line, name)
+            elif proof_certify_goal_with_rule(facts, case, report, line, name, annotations, ""):
+                proof_add_derived_fact_from(cases, report, case, facts, "proof-step", line, name)
+            return cases.count > before
