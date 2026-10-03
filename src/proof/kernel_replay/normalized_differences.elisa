@@ -11,7 +11,7 @@ extend ElisaProofKernelReplay:
         # `-` and their unary forms, every operator node carrying an integer width for the goal's
         # wrap guard to have decided it under. The encoder removes source parentheses, so a
         # `paren` node here was built by some other rule and is declined rather than read.
-        def proof_kernel_replay_collect_normal_terms(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, sign: i64, facts: darray[usize], terms: mutable darray[ProofKernelReplayNormalTerm]&, depth: usize) -> bool:
+        def proof_kernel_replay_collect_normal_terms(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, sign: i64, signed: bool, facts: darray[usize], terms: mutable darray[ProofKernelReplayNormalTerm]&, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
             return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
@@ -30,15 +30,32 @@ extend ElisaProofKernelReplay:
                     return true
                 "unary":
                     return false if node.operator != "+" and node.operator != "-"
+                    negated: ProofKernelReplayInt = proof_kernel_replay_signed_negated_literal(nodes, root, signed)
+                    if negated.known:
+                        terms.push(ProofKernelReplayNormalTerm{name: "", coefficient: negated.value if sign > 0 else 0 - negated.value})
+                        return true
                     return false if not proof_kernel_replay_normal_term_has_width(nodes, children, root, facts)
-                    return proof_kernel_replay_collect_normal_terms(nodes, children, node.left, sign if node.operator == "+" else 0 - sign, facts, terms, depth + 1)
+                    return proof_kernel_replay_collect_normal_terms(nodes, children, node.left, sign if node.operator == "+" else 0 - sign, signed, facts, terms, depth + 1)
                 "binary":
                     return false if node.operator != "+" and node.operator != "-"
                     return false if not proof_kernel_replay_normal_term_has_width(nodes, children, root, facts)
-                    return false if not proof_kernel_replay_collect_normal_terms(nodes, children, node.left, sign, facts, terms, depth + 1)
-                    return proof_kernel_replay_collect_normal_terms(nodes, children, node.right, sign if node.operator == "+" else 0 - sign, facts, terms, depth + 1)
+                    return false if not proof_kernel_replay_collect_normal_terms(nodes, children, node.left, sign, signed, facts, terms, depth + 1)
+                    return proof_kernel_replay_collect_normal_terms(nodes, children, node.right, sign if node.operator == "+" else 0 - sign, signed, facts, terms, depth + 1)
                 _:
                     return false
+
+        # Mirror of the producer's signed `-literal`: a unary minus directly over a non-negative
+        # literal, read as a constant only when a side of the comparison is signed.
+        def proof_kernel_replay_signed_negated_literal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, signed: bool) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if not signed or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            return ProofKernelReplayInt{known: false, value: 0} if nodes[root].kind != "unary" or nodes[root].operator != "-"
+            operand: usize = nodes[root].left
+            return ProofKernelReplayInt{known: false, value: 0} if operand >= nodes.count or not proof_kernel_replay_valid(nodes, operand)
+            return ProofKernelReplayInt{known: false, value: 0} if nodes[operand].kind != "int" or nodes[operand].value < 0
+            return ProofKernelReplayInt{known: true, value: 0 - nodes[operand].value}
+
+        def proof_kernel_replay_normal_comparison_signed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, facts: darray[usize]) -> bool:
+            return proof_kernel_replay_signed_width_in_expression(nodes, children, facts, left_root, 0) != 0 or proof_kernel_replay_signed_width_in_expression(nodes, children, facts, right_root, 0) != 0
 
         def proof_kernel_replay_normal_term_has_width(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize]) -> bool:
             return proof_kernel_replay_signed_width_in_expression(nodes, children, facts, root, 0) != 0 or proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, 0) != 0
@@ -48,8 +65,9 @@ extend ElisaProofKernelReplay:
         def proof_kernel_replay_normal_difference(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, facts: darray[usize]) -> (known: bool, first: ProofKernelReplayAffine, second: ProofKernelReplayAffine):
             empty: ProofKernelReplayAffine = ProofKernelReplayAffine{known: false, base: "", offset: 0, negative: false}
             terms: mutable darray[ProofKernelReplayNormalTerm] = []
-            return (false, empty, empty) if not proof_kernel_replay_collect_normal_terms(nodes, children, left_root, 1, facts, &terms, 0)
-            return (false, empty, empty) if not proof_kernel_replay_collect_normal_terms(nodes, children, right_root, -1, facts, &terms, 0)
+            signed: bool = proof_kernel_replay_normal_comparison_signed(nodes, children, left_root, right_root, facts)
+            return (false, empty, empty) if not proof_kernel_replay_collect_normal_terms(nodes, children, left_root, 1, signed, facts, &terms, 0)
+            return (false, empty, empty) if not proof_kernel_replay_collect_normal_terms(nodes, children, right_root, -1, signed, facts, &terms, 0)
             constant: mutable i64 = 0
             positive: mutable sview = ""
             negative: mutable sview = ""
@@ -84,8 +102,84 @@ extend ElisaProofKernelReplay:
         def proof_kernel_replay_normalized_difference_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize]) -> bool:
             return false if operator != "==" and operator != "<" and operator != "<=" and operator != ">" and operator != ">="
             normal: (known: bool, first: ProofKernelReplayAffine, second: ProofKernelReplayAffine) = proof_kernel_replay_normal_difference(nodes, children, left_root, right_root, facts)
-            return false if not normal.known
+            if not normal.known:
+                scaled: (known: bool, first: ProofKernelReplayAffine, second: ProofKernelReplayAffine, operator: sview) = proof_kernel_replay_scaled_single_difference(nodes, children, left_root, operator, right_root, facts)
+                return false if not scaled.known
+                return proof_kernel_replay_difference_affine_comparison(nodes, children, scaled.first, scaled.operator, scaled.second, facts, true)
             return proof_kernel_replay_difference_affine_comparison(nodes, children, normal.first, operator, normal.second, facts, true)
+
+        # Mirror of the producer's floor quotient for a positive divisor.
+        def proof_kernel_replay_floor_quotient(numerator: i64, divisor: i64) -> ProofKernelReplayInt:
+            return ProofKernelReplayInt{known: false, value: 0} if divisor <= 0
+            quotient: i64 = numerator / divisor
+            product: ProofKernelReplayInt = proof_kernel_replay_mul_safe(quotient, divisor)
+            return ProofKernelReplayInt{known: false, value: 0} if not product.known
+            return ProofKernelReplayInt{known: true, value: quotient - 1} if product.value > numerator
+            return ProofKernelReplayInt{known: true, value: quotient}
+
+        # Mirror of the producer's scaled single name: `k * x + c` against zero, rewritten over
+        # the integers as a unit bound on `x` with floor and ceiling quotients.
+        def proof_kernel_replay_scaled_single_difference(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize]) -> (known: bool, first: ProofKernelReplayAffine, second: ProofKernelReplayAffine, operator: sview):
+            empty: ProofKernelReplayAffine = ProofKernelReplayAffine{known: false, base: "", offset: 0, negative: false}
+            terms: mutable darray[ProofKernelReplayNormalTerm] = []
+            signed: bool = proof_kernel_replay_normal_comparison_signed(nodes, children, left_root, right_root, facts)
+            return (false, empty, empty, operator) if not proof_kernel_replay_collect_normal_terms(nodes, children, left_root, 1, signed, facts, &terms, 0)
+            return (false, empty, empty, operator) if not proof_kernel_replay_collect_normal_terms(nodes, children, right_root, -1, signed, facts, &terms, 0)
+            constant: mutable i64 = 0
+            name: mutable sview = ""
+            scale: mutable i64 = 0
+            for index in 0..<terms.count |index, terms, constant, name, scale|:
+                term: ProofKernelReplayNormalTerm = terms[index]
+                if term.name == "":
+                    folded: ProofKernelReplayInt = proof_kernel_replay_add_safe(constant, term.coefficient)
+                    return (false, empty, empty, operator) if not folded.known
+                    constant <- folded.value
+                    continue
+                seen: mutable bool = false
+                for earlier in 0..<index |earlier, index, terms, term, seen|:
+                    seen <- true if terms[earlier].name == term.name
+                continue if seen
+                # Unit coefficients under a capped term count: this sum cannot overflow.
+                total: mutable i64 = 0
+                for later in index..<terms.count |later, terms, term, total|:
+                    total <- total + terms[later].coefficient if terms[later].name == term.name
+                continue if total == 0
+                return (false, empty, empty, operator) if name != ""
+                name <- term.name
+                scale <- total
+            return (false, empty, empty, operator) if name == "" or scale == 1 or scale == -1 or scale == 0
+            if operator == "==":
+                quotient: i64 = constant / scale
+                product: ProofKernelReplayInt = proof_kernel_replay_mul_safe(quotient, scale)
+                return (false, empty, empty, operator) if not product.known or product.value != constant
+                return (true, ProofKernelReplayAffine{known: true, base: name, offset: quotient, negative: false}, ProofKernelReplayAffine{known: true, base: "", offset: 0, negative: false}, "==")
+            coefficient: mutable i64 = scale
+            offset: mutable i64 = constant
+            if operator == "<" or operator == ">" or operator == ">=":
+                if operator == ">" or operator == ">=":
+                    coefficient <- 0 - scale
+                    flipped: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, constant)
+                    return (false, empty, empty, operator) if not flipped.known
+                    offset <- flipped.value
+                if operator == "<" or operator == ">":
+                    stepped: ProofKernelReplayInt = proof_kernel_replay_add_safe(offset, 1)
+                    return (false, empty, empty, operator) if not stepped.known
+                    offset <- stepped.value
+            elif operator != "<=":
+                return (false, empty, empty, operator)
+            negated: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, offset)
+            return (false, empty, empty, operator) if not negated.known
+            if coefficient > 0:
+                upper: ProofKernelReplayInt = proof_kernel_replay_floor_quotient(negated.value, coefficient)
+                return (false, empty, empty, operator) if not upper.known
+                shifted: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, upper.value)
+                return (false, empty, empty, operator) if not shifted.known
+                return (true, ProofKernelReplayAffine{known: true, base: name, offset: shifted.value, negative: false}, ProofKernelReplayAffine{known: true, base: "", offset: 0, negative: false}, "<=")
+            floor: ProofKernelReplayInt = proof_kernel_replay_floor_quotient(negated.value, 0 - coefficient)
+            return (false, empty, empty, operator) if not floor.known
+            lower: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, floor.value)
+            return (false, empty, empty, operator) if not lower.known
+            return (true, ProofKernelReplayAffine{known: true, base: "", offset: lower.value, negative: false}, ProofKernelReplayAffine{known: true, base: name, offset: 0, negative: false}, "<=")
 
         # Mirror of the producer's counter rebind import: `next == count + 1` joins the unsigned
         # subtraction guard's orders only beside a strict peer `count < bound` of the same width,

@@ -65,21 +65,21 @@ extend ElisaProof:
             proof_replay_global_constant_lookup(declarations, &empty_scope, &empty_scope, constant_name, constant_line, expected_value, &root_visible, &root_valid, &root_matches, 0)
             root_matches == 1 and root_valid
 
-        def proof_replay_global_constant_find_candidates(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, function_name: sview, constant_name: sview, constant_line: u32, expected_value: i64, current_scope: darray[sview]&, function_matches: mutable usize&, candidates: mutable usize&, depth: usize) -> void:
+        def proof_replay_global_constant_find_candidates(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, function_name: sview, constant_name: sview, constant_line: u32, expected_value: i64, owner_line: u32, current_scope: darray[sview]&, function_matches: mutable usize&, candidates: mutable usize&, depth: usize) -> void:
             return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
-            for declaration in declarations |declarations, all_declarations, function_name, constant_name, constant_line, expected_value, current_scope, function_matches, candidates, depth|:
+            for declaration in declarations |declarations, all_declarations, function_name, constant_name, constant_line, expected_value, owner_line, current_scope, function_matches, candidates, depth|:
                 match declaration:
-                    Ast::Decl.Func(candidate_name, parameters, _, _, _, _, _):
-                        if candidate_name == function_name:
+                    Ast::Decl.Func(candidate_name, parameters, _, _, _, _, candidate_position):
+                        if candidate_name == function_name and (owner_line == 0 or candidate_position.line == owner_line):
                             function_matches <- function_matches + 1
                             candidates <- candidates + 1 if proof_replay_global_constant_resolves(all_declarations, current_scope, parameters, constant_name, constant_line, expected_value)
                     Ast::Decl.Module(module_name, body, _):
                         next_scope: mutable darray[sview] = []
                         next_scope.extend(current_scope)
                         next_scope.push(module_name)
-                        proof_replay_global_constant_find_candidates(body, all_declarations, function_name, constant_name, constant_line, expected_value, &next_scope, function_matches, candidates, depth + 1)
+                        proof_replay_global_constant_find_candidates(body, all_declarations, function_name, constant_name, constant_line, expected_value, owner_line, &next_scope, function_matches, candidates, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_replay_global_constant_find_candidates(body, all_declarations, function_name, constant_name, constant_line, expected_value, current_scope, function_matches, candidates, depth + 1)
+                        proof_replay_global_constant_find_candidates(body, all_declarations, function_name, constant_name, constant_line, expected_value, owner_line, current_scope, function_matches, candidates, depth + 1)
                     _:
                         pass
 
@@ -96,20 +96,52 @@ extend ElisaProof:
                 _:
                     return false
 
-        # A qualified constant resolves from the root only for a root function that is the sole
-        # function of its name and has no parameter spelled like the path's first segment.
-        def proof_replay_qualified_function_count(declarations: darray[Ast::Decl]&, function_name: sview, first: sview, in_module: bool, total: mutable usize&, rooted: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
-            for declaration in declarations |function_name, first, in_module, total, rooted, depth|:
+        # The parser may record a nested module under its qualified spelling (`Outer::{name}`),
+        # so a declared name matches when it is `name` or ends in `::name`.
+        def proof_replay_qualified_segment_matches(declared: sview, name: sview) -> bool:
+            return true if declared == name
+            declared_length: usize = sview_len(declared)
+            name_length: usize = sview_len(name)
+            return false if name_length == 0 or declared_length < name_length + 2
+            start: usize = declared_length - name_length
+            return false if sview_at(declared, start - 1) != 58 or sview_at(declared, start - 2) != 58
+            for offset in 0..<name_length |offset, declared, name, start|:
+                return false if sview_at(declared, start + offset) != sview_at(name, offset)
+            return true
+
+        # Independent of the producer: a module, enum or struct named `name` below the root.
+        def proof_replay_nested_namespace(declarations: darray[Ast::Decl]&, name: sview, nested: bool, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |name, nested, depth|:
                 match declaration:
-                    Ast::Decl.Func(candidate_name, parameters, _, _, _, _, _):
-                        if candidate_name == function_name:
-                            total <- total + 1
-                            rooted <- rooted + 1 if in_module == false and not (any parameter in parameters where parameter.name == first)
-                    Ast::Decl.Module(_, body, _):
-                        proof_replay_qualified_function_count(body, function_name, first, true, total, rooted, depth + 1)
+                    Ast::Decl.Module(module_name, body, _):
+                        return true if ((nested or module_name != name) and proof_replay_qualified_segment_matches(module_name, name)) or proof_replay_nested_namespace(body, name, true, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_replay_qualified_function_count(body, function_name, first, in_module, total, rooted, depth + 1)
+                        return true if proof_replay_nested_namespace(body, name, nested, depth + 1)
+                    Ast::Decl.Enum(enum_name, _, _, _, _):
+                        return true if (nested or enum_name != name) and proof_replay_qualified_segment_matches(enum_name, name)
+                    Ast::Decl.Struct(struct_name, _, _, _, _, _, _):
+                        return true if (nested or struct_name != name) and proof_replay_qualified_segment_matches(struct_name, name)
+                    _:
+                        pass
+            return false
+
+        # A qualified constant resolves from the root for the sole function of its name with no
+        # parameter spelled like the path's first segment, when that function is at the root or
+        # the segment names no nested namespace that could be nearer.
+        # A function inside a module counts only when `first` names no nested namespace.
+        def proof_replay_qualified_function_count(declarations: darray[Ast::Decl]&, function_name: sview, owner_line: u32, first: sview, in_module: bool, shadowable: bool, total: mutable usize&, rooted: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |function_name, owner_line, first, in_module, shadowable, total, rooted, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate_name, parameters, _, _, _, _, candidate_position):
+                        if candidate_name == function_name and (owner_line == 0 or candidate_position.line == owner_line):
+                            total <- total + 1
+                            rooted <- rooted + 1 if (in_module == false or shadowable == false) and not (any parameter in parameters where parameter.name == first)
+                    Ast::Decl.Module(_, body, _):
+                        proof_replay_qualified_function_count(body, function_name, owner_line, first, true, shadowable, total, rooted, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_qualified_function_count(body, function_name, owner_line, first, in_module, shadowable, total, rooted, depth + 1)
                     _:
                         pass
 
@@ -117,7 +149,8 @@ extend ElisaProof:
             return false if path.count < 2
             total: mutable usize = 0
             rooted: mutable usize = 0
-            proof_replay_qualified_function_count(report.source_declarations, trace.name, path[0], false, &total, &rooted, 0)
+            shadowable: bool = proof_replay_nested_namespace(report.source_declarations, path[0], false, 0)
+            proof_replay_qualified_function_count(report.source_declarations, trace.name, trace.owner_line, path[0], false, shadowable, &total, &rooted, 0)
             return false if total != 1 or rooted != 1
             wanted_scope: mutable darray[sview] = []
             for index in 0..<path.count - 1 |index, path, wanted_scope|:
@@ -129,7 +162,27 @@ extend ElisaProof:
             proof_replay_global_constant_lookup(report.source_declarations, &wanted_scope, &empty_scope, path[path.count - 1], trace.line, expected_value, &visible, &valid, &matches, 0)
             return matches == 1 and valid
 
+        # The start line of the function named `name` that owns a goal at `line`: the latest such
+        # declaration starting at or before it. Functions do not nest, so no same-named function
+        # can start between the owner's declaration and a goal inside its body. 0 when none.
+        def proof_replay_owner_function_line(declarations: darray[Ast::Decl]&, name: sview, line: u32, best: mutable u32&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |name, line, best, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate_name, _, _, _, _, _, candidate_position):
+                        best <- candidate_position.line if candidate_name == name and candidate_position.line <= line and candidate_position.line > best
+                    Ast::Decl.Module(_, body, _):
+                        proof_replay_owner_function_line(body, name, line, best, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_owner_function_line(body, name, line, best, depth + 1)
+                    _:
+                        pass
+
+        # A constant fact stamped with its owner's declaration line is valid only for that owner:
+        # while a certificate is replayed, `replay_owner_line` names the certificate's function,
+        # so a same-named function in another module cannot borrow the fact.
         def proof_replay_global_constant_fact_is_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.owner_line != 0 and report.replay_owner_line != 0 and trace.owner_line != report.replay_owner_line
             match trace.expression:
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                     qualified_path: mutable darray[sview] = []
@@ -158,7 +211,7 @@ extend ElisaProof:
                     function_matches: mutable usize = 0
                     candidates: mutable usize = 0
                     root_scope: mutable darray[sview] = []
-                    proof_replay_global_constant_find_candidates(report.source_declarations, report.source_declarations, trace.name, constant_name, trace.line, expected_value, &root_scope, &function_matches, &candidates, 0)
+                    proof_replay_global_constant_find_candidates(report.source_declarations, report.source_declarations, trace.name, constant_name, trace.line, expected_value, trace.owner_line, &root_scope, &function_matches, &candidates, 0)
                     function_matches == 1 and candidates == 1
                 _:
                     false

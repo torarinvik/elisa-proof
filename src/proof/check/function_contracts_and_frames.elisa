@@ -17,9 +17,9 @@ extend ElisaProof:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     function_name: sview = proof_callable_name(callee)
-                    function_index: usize = proof_function_index(functions, function_name)
+                    function_index: usize = proof_function_index_for_callee(functions, callee)
                     return false if function_name == "" or function_index >= functions.names.count
-                    caller_index: usize = proof_function_index(functions, name)
+                    caller_index: usize = proof_function_index_of_current(functions, name)
                     caller_is_pure: bool = caller_index < functions.pure.count and functions.pure[caller_index]
                     recursive_summary_call: bool = function_index < functions.recursive.count and functions.recursive[function_index] and proof_functions_same_recursive_component(functions, caller_index, function_index)
                     if (function_index >= functions.verified.count or not functions.verified[function_index]) and not recursive_summary_call:
@@ -50,6 +50,13 @@ extend ElisaProof:
                     # the kernel can still reproduce the goal independently.
                     for mapped_argument in mapped_arguments |argument_values, caller_names, caller_values|:
                         argument_values.push(proof_substitute(mapped_argument, caller_names, caller_values))
+                    # A literal argument's summary is also stated over the literal itself, so facts
+                    # such as `clamp(x, 0, n) >= 0` stay readable to the width and wrap gates.
+                    summary_arguments: darray[Ast::Expr] = proof_copy_exprs(argument_values)
+                    literal_symbols: mutable darray[sview] = []
+                    literal_widths: mutable darray[i64] = []
+                    literal_values: mutable darray[Ast::Expr] = []
+                    proof_bind_literal_call_arguments(&argument_values, &literal_symbols, &literal_widths, &literal_values, functions, function_index, facts, report, name, position)
                     requires_ok: mutable bool = true
                     require_goal_ids: mutable darray[usize] = []
                     requires_start: usize = functions.requires_starts[function_index]
@@ -182,16 +189,18 @@ extend ElisaProof:
                         # summary's normal havoc/frame handling; enclosing move invalidation still
                         # removes it.
                         proof_restore_type_bound_facts(old_facts, facts, caller_names, report, name)
+                        proof_restore_global_constant_facts(old_facts, facts, report, name)
                         # A verified callee without a `changes` frame is havoced exactly like an
                         # opaque one, and the same argument bounds that havoc: a callee reaches the
                         # caller only through references and globals, so a fact over a by-value
                         # scalar the caller's body never references survives this call too.
                         proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_statement_lend_roots(expression, functions))
+                    proof_restore_literal_call_facts(literal_symbols, literal_widths, literal_values, facts, report, name, position) if literal_symbols.count > 0
                     ensures_start: usize = functions.ensure_starts[function_index]
                     ensures_count: usize = functions.ensure_counts[function_index]
                     result_names: mutable darray[sview] = ["result"]
                     result_values: mutable darray[Ast::Expr] = [result_value]
-                    for ensure_index in 0..<ensures_count |facts, parameter_names, argument_values, functions, ensures_start, result_value, result_names, result_values, report, name, position|:
+                    for ensure_index in 0..<ensures_count |facts, parameter_names, argument_values, summary_arguments, literal_symbols, functions, ensures_start, result_value, result_names, result_values, report, name, position|:
                         source_ensure: Ast::Expr = functions.all_ensures[ensures_start + ensure_index]
                         ensured: mutable Ast::Expr = proof_substitute(source_ensure, parameter_names, argument_values)
                         call_old_snapshot: mutable Ast::Expr = Ast::Expr.Absent
@@ -232,7 +241,10 @@ extend ElisaProof:
                                     return false
                             _:
                                 ensured <- proof_substitute(ensured, result_names, result_values)
-                        proof_add_function_summary_fact(facts, report, ensured, position.line, name, function_name, parameter_names, argument_values, result_value, require_goal_ids, ensure_index, has_call_old, call_old_snapshot)
+                        proof_add_function_summary_fact(facts, report, ensured, position.line, name, function_name, parameter_names, argument_values, result_value, require_goal_ids, ensure_index, has_call_old, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0)
+                        if literal_symbols.count > 0 and not has_call_old:
+                            literal_ensured: Ast::Expr = proof_substitute(proof_substitute(source_ensure, parameter_names, summary_arguments), result_names, result_values)
+                            proof_add_function_summary_fact(facts, report, literal_ensured, position.line, name, function_name, parameter_names, summary_arguments, result_value, require_goal_ids, ensure_index, false, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0) if not proof_expr_equal(literal_ensured, ensured)
                         proof_add_pure_call_witnesses(result_value, facts, functions, report, position.line, name, 0)
                         proof_add_deterministic_call_witness(result_value, facts, functions, report, position.line, name)
                     return true
@@ -542,7 +554,7 @@ extend ElisaProof:
             return if witnessed_calls >= PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT
             match expression:
                 Ast::Expr.Call(callee, arguments, _, position):
-                    called: usize = proof_function_index(functions, proof_callable_name(callee))
+                    called: usize = proof_function_index_for_callee(functions, callee)
                     return if called >= functions.deterministic.count or not functions.deterministic[called]
                     return if called < functions.pure.count and functions.pure[called]
                     return if called >= functions.verified.count or not functions.verified[called]
@@ -552,7 +564,7 @@ extend ElisaProof:
                         return if not proof_scalar_term_witnessed(argument, facts, 0)
                     proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
                     # The declared signed width, exactly as for a pure call's witness.
-                    callee_name: sview = proof_ident_name(callee)
+                    callee_name: sview = proof_callable_name(callee)
                     return if callee_name == ""
                     declared: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(report.source_declarations, callee_name, 0)
                     return if declared.count != 1

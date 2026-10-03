@@ -6,6 +6,39 @@ extend ElisaProof:
     private:
         const PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT: usize = 32
 
+        # The parser may record a nested module under its qualified spelling (`Outer::{name}`),
+        # so a declared name matches when it is `name` or ends in `::name`.
+        def proof_qualified_segment_matches(declared: sview, name: sview) -> bool:
+            return true if declared == name
+            declared_length: usize = sview_len(declared)
+            name_length: usize = sview_len(name)
+            return false if name_length == 0 or declared_length < name_length + 2
+            start: usize = declared_length - name_length
+            return false if sview_at(declared, start - 1) != 58 or sview_at(declared, start - 2) != 58
+            for offset in 0..<name_length |offset, declared, name, start|:
+                return false if sview_at(declared, start + offset) != sview_at(name, offset)
+            return true
+
+        # True when a module, enum or struct named `name` is declared below the root. From a
+        # function inside a module such a namespace could be the nearer meaning of `name::X`, so a
+        # nested function resolves a qualified path from the root only when none exists.
+        def proof_qualified_nested_namespace(declarations: darray[Ast::Decl]&, name: sview, nested: bool, depth: usize) -> bool:
+            return true if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            for declaration in declarations |name, nested, depth|:
+                match declaration:
+                    Ast::Decl.Module(module_name, body, _):
+                        return true if (nested or module_name != name) and proof_qualified_segment_matches(module_name, name)
+                        return true if proof_qualified_nested_namespace(body, name, true, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return true if proof_qualified_nested_namespace(body, name, nested, depth + 1)
+                    Ast::Decl.Enum(enum_name, _, _, _, _):
+                        return true if (nested or enum_name != name) and proof_qualified_segment_matches(enum_name, name)
+                    Ast::Decl.Struct(struct_name, _, _, _, _, _, _):
+                        return true if (nested or struct_name != name) and proof_qualified_segment_matches(struct_name, name)
+                    _:
+                        pass
+            return false
+
         def proof_qualified_constant_term(scope: darray[sview]&, name: sview, position: Ast::Pos) -> Ast::Expr:
             path: mutable Ast::Expr = Ast::Expr.Ident(scope[0], position)
             for index in 1..<scope.count |index, scope, position, path|:
@@ -201,9 +234,9 @@ extend ElisaProof:
                         rewritten.push(statement)
             return rewritten
 
-        def proof_qualified_constants_collect[@r](file: Ast::File&, declarations: darray[Ast::Decl]&, current: darray[sview]&, contracts: mutable darray[Ast::Expr]& @r, function_body: mutable darray[Ast::Stmt]& @r, parameters: darray[Ast::ParamDecl]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, depth: usize) -> void:
+        def proof_qualified_constants_collect[@r](file: Ast::File&, declarations: darray[Ast::Decl]&, current: darray[sview]&, contracts: mutable darray[Ast::Expr]& @r, function_body: mutable darray[Ast::Stmt]& @r, parameters: darray[Ast::ParamDecl]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, nested_function: bool, depth: usize) -> void:
             return if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
-            for declaration in declarations |file, current, contracts, function_body, parameters, facts, report, function_name, depth|:
+            for declaration in declarations |file, current, contracts, function_body, parameters, facts, report, function_name, nested_function, depth|:
                 match declaration:
                     Ast::Decl.Const(constant_name, constant_type, initializer, constant_mutable, position):
                         if current.count > 0 and constant_mutable == false and (any parameter in parameters where parameter.name == current[0]) == false:
@@ -214,40 +247,104 @@ extend ElisaProof:
                             mentioned <- true if proof_qualified_body_mentioned(function_body, current, constant_name, 0) and not proof_qualified_body_declares(function_body, current[0], 0)
                             counted_from: mutable darray[sview] = []
                             declared_once: bool = proof_qualified_constant_declared_count(file.top_decls, current, constant_name, &counted_from, 0) == 1
-                            if imported.known and mentioned and declared_once:
+                            unshadowed: bool = not nested_function or not proof_qualified_nested_namespace(file.top_decls, current[0], false, 0)
+                            if imported.known and mentioned and declared_once and unshadowed:
                                 term: Ast::Expr = proof_qualified_constant_term(current, constant_name, position)
                                 fact: Ast::Expr = Ast::Expr.Binary(term, TokenKind.EqEq, Ast::Expr.IntLit(imported.value, position), position)
                                 proof_add_traced_fact(facts, report, fact, "global-constant", position.line, function_name)
                                 proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(term, position), position.line, function_name)
-                                rewritten_body: darray[Ast::Stmt] = proof_qualified_body_rewrite(function_body, current, constant_name, Ast::Expr.IntLit(imported.value, position), 0)
+                                # A negative value is substituted as `-magnitude`, the shape the arithmetic tiers read.
+                                literal: Ast::Expr = Ast::Expr.IntLit(imported.value, position) if imported.value >= 0 else Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(0 - imported.value, position), position)
+                                rewritten_body: darray[Ast::Stmt] = proof_qualified_body_rewrite(function_body, current, constant_name, literal, 0)
                                 function_body.clear()
                                 for statement in rewritten_body |function_body|:
                                     function_body.push(statement)
-                                for contract_index in 0..<contracts.count |contract_index, contracts, current, constant_name, position, imported|:
-                                    contracts[contract_index] <- proof_qualified_constant_rewrite(contracts[contract_index], current, constant_name, Ast::Expr.IntLit(imported.value, position), 0)
+                                for contract_index in 0..<contracts.count |contract_index, contracts, current, constant_name, literal|:
+                                    contracts[contract_index] <- proof_qualified_constant_rewrite(contracts[contract_index], current, constant_name, literal, 0)
                     Ast::Decl.Module(module_name, body, _):
                         next_scope: mutable darray[sview] = []
                         next_scope.extend(current)
                         next_scope.push(module_name)
-                        proof_qualified_constants_collect(file, body, &next_scope, contracts, function_body, parameters, facts, report, function_name, depth + 1)
+                        proof_qualified_constants_collect(file, body, &next_scope, contracts, function_body, parameters, facts, report, function_name, nested_function, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_qualified_constants_collect(file, body, current, contracts, function_body, parameters, facts, report, function_name, depth + 1)
+                        proof_qualified_constants_collect(file, body, current, contracts, function_body, parameters, facts, report, function_name, nested_function, depth + 1)
                     _:
                         pass
 
-        # Only a function declared at the root and named uniquely resolves its qualified paths from
-        # the root; a function inside a module could see a nearer module of the same name.
-        def proof_import_qualified_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, preconditions: mutable darray[Ast::Expr]&, postconditions: mutable darray[Ast::Expr]&, function_body: mutable darray[Ast::Stmt]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos) -> void:
+        # A function, identified by name and declaration line, resolves its qualified paths from the root. One inside a module
+        # does so only for a first segment no nested module, enum or struct could shadow.
+        # The requires of every function this body calls, read only to decide which constants
+        # to import: a call site must discharge `fade <= Fade::FULL` although the caller never
+        # spells the path. A repeated bare name contributes every row so named; importing the
+        # value of a constant the body does not need is harmless, since the fact is true.
+        def proof_qualified_callee_requires(functions: ProofFunctionTable&, function_index: usize, contracts: mutable darray[Ast::Expr]&) -> void:
+            return if function_index >= functions.call_starts.count or function_index >= functions.call_counts.count
+            call_start: usize = functions.call_starts[function_index]
+            call_count: usize = functions.call_counts[function_index]
+            return if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start
+            for offset in 0..<call_count |offset, functions, call_start, contracts|:
+                called: sview = functions.all_calls[call_start + offset]
+                direct: usize = proof_function_index(functions, called)
+                continue if direct >= functions.names.count and not proof_function_name_may_repeat(functions, called)
+                first: usize = direct if direct < functions.names.count else 0
+                last: usize = direct + 1 if direct < functions.names.count else functions.names.count
+                for callee in first..<last |callee, functions, called, contracts|:
+                    continue if functions.names[callee] != called or callee >= functions.requires_starts.count or callee >= functions.requires_counts.count
+                    requires_start: usize = functions.requires_starts[callee]
+                    requires_count: usize = functions.requires_counts[callee]
+                    continue if requires_start > functions.all_requires.count or requires_count > functions.all_requires.count - requires_start
+                    for requirement in 0..<requires_count |requirement, functions, requires_start, contracts|:
+                        contracts.push(functions.all_requires[requires_start + requirement])
+
+        # The requires and ensures row ranges of one table entry, empty when out of range.
+        def proof_qualified_own_rows(functions: ProofFunctionTable&, function_index: usize) -> (requires_start: usize, requires_count: usize, ensures_start: usize, ensures_count: usize):
+            requires_start: mutable usize = 0
+            requires_count: mutable usize = 0
+            ensures_start: mutable usize = 0
+            ensures_count: mutable usize = 0
+            if function_index < functions.requires_starts.count and function_index < functions.requires_counts.count:
+                start: usize = functions.requires_starts[function_index]
+                count: usize = functions.requires_counts[function_index]
+                if start <= functions.all_requires.count and count <= functions.all_requires.count - start:
+                    requires_start <- start
+                    requires_count <- count
+            if function_index < functions.ensure_starts.count and function_index < functions.ensure_counts.count:
+                start: usize = functions.ensure_starts[function_index]
+                count: usize = functions.ensure_counts[function_index]
+                if start <= functions.all_ensures.count and count <= functions.all_ensures.count - start:
+                    ensures_start <- start
+                    ensures_count <- count
+            return (requires_start, requires_count, ensures_start, ensures_count)
+
+        def proof_import_qualified_constant_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, preconditions: mutable darray[Ast::Expr]&, postconditions: mutable darray[Ast::Expr]&, function_body: mutable darray[Ast::Stmt]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos, functions: mutable ProofFunctionTable&, function_index: usize) -> void:
+            proof_qualify_repeated_calls(functions, function_index, parameters, preconditions, postconditions, function_body)
             function_scope: mutable darray[sview] = []
             root_scope: mutable darray[sview] = []
             name_matches: mutable usize = 0
             matches: mutable usize = 0
             proof_global_constant_find_function_scope(file.top_decls, function_name, position.line, &root_scope, &function_scope, &name_matches, &matches, 0)
-            return if name_matches != 1 or matches != 1 or function_scope.count != 0
+            return if matches != 1
+            report.trace_owner_line <- position.line
             contracts: mutable darray[Ast::Expr] = []
             contracts.extend(preconditions)
             contracts.extend(postconditions)
-            proof_qualified_constants_collect(file, file.top_decls, &root_scope, &contracts, function_body, parameters, facts, report, function_name, 0)
+            proof_qualified_callee_requires(functions, function_index, &contracts)
+            # This function's own table rows are the call-summary source its callers read.
+            # Rewriting them with the same literals freezes a qualified constant there, as
+            # `proof_resolve_global_constants_in_contracts` does for an unqualified one, so a
+            # caller meets `x <= 10000000` rather than an untyped path `x <= Fade::MAX_FRAMES`.
+            row_ranges: (requires_start: usize, requires_count: usize, ensures_start: usize, ensures_count: usize) = proof_qualified_own_rows(functions, function_index)
+            rows_at: usize = contracts.count
+            for row in 0..<row_ranges.requires_count |row, contracts, functions, row_ranges|:
+                contracts.push(functions.all_requires[row_ranges.requires_start + row])
+            for row in 0..<row_ranges.ensures_count |row, contracts, functions, row_ranges|:
+                contracts.push(functions.all_ensures[row_ranges.ensures_start + row])
+            proof_qualified_constants_collect(file, file.top_decls, &root_scope, &contracts, function_body, parameters, facts, report, function_name, function_scope.count > 0, 0)
+            report.trace_owner_line <- 0
+            for row in 0..<row_ranges.requires_count |row, contracts, functions, row_ranges, rows_at|:
+                functions.all_requires[row_ranges.requires_start + row] <- contracts[rows_at + row]
+            for row in 0..<row_ranges.ensures_count |row, contracts, functions, row_ranges, rows_at|:
+                functions.all_ensures[row_ranges.ensures_start + row] <- contracts[rows_at + row_ranges.requires_count + row]
             for index in 0..<preconditions.count |index, preconditions, contracts|:
                 preconditions[index] <- contracts[index]
             for index in 0..<postconditions.count |index, postconditions, contracts, preconditions|:

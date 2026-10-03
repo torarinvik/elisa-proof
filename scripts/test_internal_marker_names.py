@@ -26,7 +26,9 @@ for filename, reserved_name, source_line in (
     assert report["summary"]["semantic_errors"] == 0, report["summary"]
     assert report["summary"]["proven"] == 0, report["summary"]
     assert report["replay"]["gaps"] == 0, report["replay"]
-    assert report["findings"] == [{
+    # The source map adds `file`/`file_line` to every finding; they are checked by test_source_map.py.
+    findings = [{key: value for key, value in finding.items() if key not in ("file", "file_line")} for finding in report["findings"]]
+    assert findings == [{
         "kind": "proof-internal-name",
         "status": "unsupported",
         "line": source_line,

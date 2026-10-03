@@ -94,12 +94,12 @@ def certificate_rules() -> set[str]:
 
 
 def boundary_trace_kinds() -> set[str]:
-    text = read(PROOF / "replay" / "certificate_validation.elisa")
+    text = read(PROOF / "replay" / "certificate_validation.elisa") + read(PROOF / "replay" / "boundary_trace_shapes.elisa")
     return match_arms(function_body(text, "proof_replay_boundary_trace_kind"))
 
 
 def derived_trace_kinds() -> set[str]:
-    text = strip_comments(read(PROOF / "replay" / "certificate_validation.elisa"))
+    text = strip_comments(read(PROOF / "replay" / "certificate_validation.elisa") + read(PROOF / "replay" / "boundary_trace_shapes.elisa"))
     lists = [set(re.findall(r'trace\.kind != "([^"]+)"', line))
              for line in text.splitlines() if 'trace.kind != "proof-step"' in line]
     if not lists or any(kinds != lists[0] for kinds in lists):
@@ -108,7 +108,7 @@ def derived_trace_kinds() -> set[str]:
 
 
 def summary_trace_kinds() -> set[str]:
-    text = strip_comments(read(PROOF / "replay" / "certificate_validation.elisa"))
+    text = strip_comments(read(PROOF / "replay" / "certificate_validation.elisa") + read(PROOF / "replay" / "boundary_trace_shapes.elisa"))
     return set(re.findall(r'if trace\.kind == "([^"]+-summary)":', text))
 
 

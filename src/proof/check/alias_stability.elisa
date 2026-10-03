@@ -16,7 +16,7 @@ extend ElisaProof:
             report.fact_trace_summary_values.extend(argument_values)
             requires_start: usize = report.fact_trace_summary_require_goal_ids.count
             report.fact_trace_summary_require_goal_ids.extend(require_goal_ids)
-            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "lemma-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index})
+            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "lemma-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index, owner_line: 0})
 
         def proof_type_bound_name(expression: Ast::Expr) -> sview:
             marker_name: sview = proof_unsigned_marker_name(expression)
@@ -84,6 +84,22 @@ extend ElisaProof:
                 for existing in facts |existing, fact, duplicate|:
                     duplicate <- true if proof_expr_equal(existing, fact)
                 facts.push(fact) if not duplicate
+
+        # An imported qualified constant, `Limits::TOP == 8`, names an immutable declaration, so a
+        # call cannot falsify it; its path is no binding the stability scan can read, so it is
+        # restored by its trace, with the scalar witness of the same path.
+        def proof_restore_global_constant_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: ProofReport&, owner: sview) -> void:
+            for fact in source |fact, source, facts, report, owner|:
+                continue if not proof_fact_is_global_constant(report, fact, owner)
+                match fact:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, _, position):
+                        continue if proof_ident_name(left) != ""
+                        facts.push(fact) if not (any existing in facts where proof_expr_equal(existing, fact))
+                        witness: Ast::Expr = proof_scalar_term_marker(left, position)
+                        if any candidate in source where proof_expr_equal(candidate, witness):
+                            facts.push(witness) if not (any existing in facts where proof_expr_equal(existing, witness))
+                    _:
+                        pass
 
         # A loop or pattern binder can shadow a name while the proof state still uses source
         # spellings. Remove inherited type facts for those spellings before entering the child
@@ -215,7 +231,7 @@ extend ElisaProof:
 
         def proof_collect_aliased_call_arguments(callee: Ast::Expr, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, functions: ProofFunctionTable&, aliased: mutable darray[sview]&, confinable: bool) -> void:
             called: sview = proof_callable_name(callee)
-            index: usize = proof_function_index(functions, called)
+            index: usize = proof_function_index_for_callee(functions, callee)
             known: bool = called != "" and index < functions.names.count
             # A method call's receiver is not among its arguments, so it is recorded here by name.
             # A collection builtin is the exception the confinement rule already covers by another
@@ -289,7 +305,7 @@ extend ElisaProof:
                     # walk descends into the lent place instead of the lend, which records
                     # anything nested inside it without recording the lend itself.
                     called_name: sview = proof_callable_name(callee)
-                    called_index: usize = proof_function_index(functions, called_name)
+                    called_index: usize = proof_function_index_for_callee(functions, callee)
                     callee_known: bool = called_name != "" and called_index < functions.names.count
                     for position in 0..<arguments.count |position, arguments, argument_names, functions, aliased, confinable, callee_known, called_index|:
                         argument: Ast::Expr = arguments[position]
@@ -453,7 +469,9 @@ extend ElisaProof:
                     return proof_expr_call_stable(marker.term, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1) if marker.known
                     # A width marker is the same kind of type statement, with a literal width.
                     width_marker_name: sview = proof_marker_callee_name(expression)
-                    if (width_marker_name == "__elisa_unsigned_type_bound" or width_marker_name == "__elisa_signed_type_bound") and arguments.count == 2:
+                    # A place width marker over a call result, `f(x)` typed from its declared return,
+                    # is worth what that call term is worth, like the others.
+                    if (width_marker_name == "__elisa_unsigned_type_bound" or width_marker_name == "__elisa_signed_type_bound" or width_marker_name == "__elisa_signed_place_type_bound") and arguments.count == 2:
                         match arguments[1]:
                             Ast::Expr.IntLit(_, _):
                                 return proof_expr_call_stable(arguments[0], facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)

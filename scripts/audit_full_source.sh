@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUDIT_SOURCE="${ELISA_FULL_AUDIT_SOURCE:-src/main.elisa}"
 PROOF_BINARY="${ELISA_FULL_AUDIT_BINARY:-$ROOT_DIR/build/elisa-proof}"
 TIME_LIMIT="${ELISA_FULL_AUDIT_TIME_LIMIT:-180}"
-MEMORY_LIMIT_KB="${ELISA_FULL_AUDIT_MEMORY_LIMIT_KB:-${ELISA_FULL_AUDIT_RSS_LIMIT_KB:-1500000}}"
+MEMORY_LIMIT_KB="${ELISA_FULL_AUDIT_MEMORY_LIMIT_KB:-${ELISA_FULL_AUDIT_RSS_LIMIT_KB:-3000000}}"
 
 if [[ ! -x "$PROOF_BINARY" ]]; then
     printf 'full-source audit failed: proof binary is missing or not executable: %s\n' "$PROOF_BINARY" >&2

@@ -7,7 +7,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-GATES = {"budget", "literal-width", "ambiguous-constant-goal", "ambiguous-constant-fact", "wrap-guard-fact",
+GATES = {"budget", "literal-width", "ambiguous-constant-goal", "wrap-guard-fact",
          "wrap-guard-goal", "quantifier", "overloaded-operator", "no-rule", "connective",
          "non-comparison-goal", "opaque-call-goal"}
 

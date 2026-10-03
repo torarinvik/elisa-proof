@@ -1,0 +1,137 @@
+# Call-graph edge collection: callable leaves with the module qualifier they were written with.
+extend ElisaProof:
+    public:
+        # The module qualifier of a `Module::name` callee, by its innermost segment, or "" for a
+        # bare name. Call-graph rows keep it beside the name so a repeated name can be resolved
+        # against the owner the source actually wrote.
+        def proof_call_qualifier(callee: Ast::Expr) -> sview:
+            match callee:
+                Ast::Expr.Scope(base, _, _):
+                    return proof_callable_name(base)
+                _:
+                    return ""
+
+        # Record one call edge, aligned across names and qualifiers, unless the same qualified
+        # edge is already present.
+        def proof_push_call_name(names: mutable darray[sview]&, qualifiers: mutable darray[sview]&, called: sview, qualifier: sview) -> void:
+            for index in 0..<names.count |index, names, qualifiers, called, qualifier|:
+                return if names[index] == called and index < qualifiers.count and qualifiers[index] == qualifier
+            names.push(called)
+            qualifiers.push(qualifier)
+
+        # Collect callable leaves for the proof kernel's call graph. Unsupported expression
+        # forms become an opaque edge so a hidden recursive call cannot be admitted by a summary
+        # lookup. This graph is only used to prevent circular executable postcondition proofs;
+        # it is not a semantic call-resolution replacement for the compiler.
+        def proof_collect_call_names(expression: Ast::Expr, names: mutable darray[sview]&, qualifiers: mutable darray[sview]&) -> void:
+            match expression:
+                Ast::Expr.Invalid:
+                    pass
+                Ast::Expr.Absent:
+                    pass
+                Ast::Expr.IntLit(_, _):
+                    pass
+                Ast::Expr.FloatLit(_, _):
+                    pass
+                Ast::Expr.StringLit(_, _):
+                    pass
+                Ast::Expr.CharLit(_, _):
+                    pass
+                Ast::Expr.BoolLit(_, _):
+                    pass
+                Ast::Expr.Ident(_, _):
+                    pass
+                Ast::Expr.Call(callee, arguments, _, _):
+                    called: sview = proof_callable_name(callee)
+                    proof_push_call_name(names, qualifiers, called, proof_call_qualifier(callee)) if called != ""
+                    proof_collect_call_names(callee, names, qualifiers)
+                    for argument in arguments |names, qualifiers|:
+                        proof_collect_call_names(argument, names, qualifiers)
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    if lowered.known:
+                        proof_collect_call_names(lowered.call, names, qualifiers)
+                    else:
+                        proof_push_call_name(names, qualifiers, "__opaque_call__", "")
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_call_names(inner, names, qualifiers)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_call_names(operand, names, qualifiers)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_call_names(left, names, qualifiers)
+                    proof_collect_call_names(right, names, qualifiers)
+                Ast::Expr.Field(object, _, _):
+                    proof_collect_call_names(object, names, qualifiers)
+                Ast::Expr.Scope(base, _, _):
+                    proof_collect_call_names(base, names, qualifiers)
+                Ast::Expr.Index(object, index, _):
+                    proof_collect_call_names(object, names, qualifiers)
+                    proof_collect_call_names(index, names, qualifiers)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_collect_call_names(object, names, qualifiers)
+                    proof_collect_call_names(low, names, qualifiers)
+                    proof_collect_call_names(high, names, qualifiers)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_collect_call_names(object, names, qualifiers)
+                    for argument in arguments |names, qualifiers|:
+                        proof_collect_call_names(argument, names, qualifiers)
+                Ast::Expr.Move(operand, _):
+                    proof_collect_call_names(operand, names, qualifiers)
+                Ast::Expr.RegionNew(operand, _, _):
+                    proof_collect_call_names(operand, names, qualifiers)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |names, qualifiers|:
+                        proof_collect_call_names(element, names, qualifiers)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |names, qualifiers|:
+                        proof_collect_call_names(element, names, qualifiers)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |names, qualifiers|:
+                        proof_collect_call_names(element, names, qualifiers)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |names, qualifiers|:
+                        proof_collect_call_names(entry.key, names, qualifiers)
+                        proof_collect_call_names(entry.value, names, qualifiers)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    proof_collect_call_names(type_expression, names, qualifiers)
+                    for field in fields |names, qualifiers|:
+                        proof_collect_call_names(field.value, names, qualifiers)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_collect_call_names(base, names, qualifiers)
+                    for field in fields |names, qualifiers|:
+                        proof_collect_call_names(field.value, names, qualifiers)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_collect_call_names(condition, names, qualifiers)
+                    proof_collect_call_names(then_expr, names, qualifiers)
+                    proof_collect_call_names(else_expr, names, qualifiers)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_collect_call_names(iterable, names, qualifiers)
+                    proof_collect_call_names(condition, names, qualifiers)
+                    proof_collect_call_names(body, names, qualifiers)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_collect_call_names(base, names, qualifiers)
+                    proof_collect_call_names(predicate, names, qualifiers)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    proof_collect_call_names(scrutinee, names, qualifiers)
+                    for arm in arms |names, qualifiers|:
+                        proof_collect_call_names(arm.guard, names, qualifiers)
+                        proof_collect_body_call_names(arm.body, names, qualifiers)
+                Ast::Expr.Catch(guarded, arms, _):
+                    proof_collect_call_names(guarded, names, qualifiers)
+                    for arm in arms |names, qualifiers|:
+                        proof_collect_call_names(arm.guard, names, qualifiers)
+                        proof_collect_body_call_names(arm.body, names, qualifiers)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_collect_call_names(guarded, names, qualifiers)
+                    proof_collect_body_call_names(recovery, names, qualifiers)
+                Ast::Expr.Lambda(_, _, _):
+                    # A lambda may be invoked through an opaque value later. Treat its body as
+                    # an opaque edge until closure invocation is represented in the graph.
+                    proof_push_call_name(names, qualifiers, "__opaque_call__", "")
+                Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Block(statements, value, _, _):
+                    proof_collect_body_call_names(statements, names, qualifiers)
+                    proof_collect_call_names(value, names, qualifiers)
+                _:
+                    proof_push_call_name(names, qualifiers, "__opaque_call__", "")

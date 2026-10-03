@@ -1,0 +1,290 @@
+const PROOF_DIVISION_TERM_LIMIT: usize = 2
+
+extend ElisaProof:
+    private:
+        # Division and remainder by a variable or positive literal divisor. The interval tiers
+        # bound `a % b` and `a / b` only through the operands' constant ranges, so `frame % count < count` never
+        # closes: the bound it needs is relational. Each such term in the goal is generalized to
+        # a reserved `__elisa_division_term_N` name, which source code cannot spell, and the
+        # generalized goal is decided under relational facts about that name:
+        #
+        #   b >= 1, a >= 0        a % b >= 0 and a % b <= b - 1
+        #   b >= 1, a >= 0        a / b >= 0 and a / b <= a
+        #   b >= 1, a <= 0        a / b >= a and a / b <= 0
+        #   b >= 1, a in [L, U]   a / b <= U when a >= 0, a / b >= L when a <= 0
+        #   b >= 1, x <= b, K >= 0 (a = x * K)    a / b <= K
+        #
+        # Each side condition is itself proved from the facts, under the split budget. The
+        # facts hold for truncating signed division of any value the source computes (the
+        # operation traps rather than wraps; a divisor >= 1 excludes `MIN / -1`), and
+        # instantiating the name back gives the original goal. Unsigned terms are refused. The
+        # kernel mirror is `proof_kernel_replay_division_goal`.
+        def proof_division_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+            return false if not proof_comparison_goal_shape(goal)
+            return false if proof_expr_mentions_name(goal, proof_division_term_name(0))
+            for fact in facts |goal|:
+                return false if proof_expr_mentions_name(fact, proof_division_term_name(0))
+            terms: mutable darray[Ast::Expr] = []
+            proof_collect_division_terms(goal, &terms, 0)
+            return false if terms.count == 0
+            rewritten_goal: mutable Ast::Expr = goal
+            rewritten_facts: mutable darray[Ast::Expr] = []
+            rewritten_facts.extend(facts)
+            added: mutable darray[Ast::Expr] = []
+            # A side condition that fails only means the rule does not apply; its search budget
+            # says nothing about the goal, so it does not mark the goal undecided.
+            side_exhausted: mutable bool = false
+            # The single term's proven bounds, for the monotone step below.
+            lower: mutable Ast::Expr = Ast::Expr.Invalid
+            upper: mutable Ast::Expr = Ast::Expr.Invalid
+            for index in 0..<terms.count |terms, facts, annotations, operator_mask, depth, budget, split_depth, side_exhausted, rewritten_goal, rewritten_facts, added, lower, upper|:
+                term: Ast::Expr = terms[index]
+                continue if proof_unsigned_width_in_expression(term, facts) != 0 or not proof_scalar_term_witnessed(term, facts, 0)
+                parts: (known: bool, dividend: Ast::Expr, percent: bool, divisor: Ast::Expr) = proof_division_parts(term)
+                continue if not parts.known
+                position: Ast::Pos = Ast::expr_pos(term)
+                one: Ast::Expr = Ast::Expr.IntLit(1, position)
+                zero: Ast::Expr = Ast::Expr.IntLit(0, position)
+                continue if not proof_goal_depth(facts, Ast::Expr.Binary(parts.divisor, TokenKind.GtEq, one, position), annotations, operator_mask, depth, budget, split_depth + 1, &side_exhausted)
+                fresh: Ast::Expr = Ast::Expr.Ident(proof_division_term_name(index), Ast::pos_at_line(0))
+                dividend_nonnegative: bool = proof_goal_depth(facts, Ast::Expr.Binary(parts.dividend, TokenKind.GtEq, zero, position), annotations, operator_mask, depth, budget, split_depth + 1, &side_exhausted)
+                if parts.percent:
+                    continue if not dividend_nonnegative
+                    added.push(Ast::Expr.Binary(fresh, TokenKind.GtEq, zero, position))
+                    added.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, Ast::Expr.Binary(parts.divisor, TokenKind.Minus, one, position), position))
+                    lower <- zero
+                    upper <- Ast::Expr.Binary(parts.divisor, TokenKind.Minus, one, position)
+                else:
+                    # The dividend's constant range bounds the quotient too, so the wrap guards
+                    # of sums over the fresh name need no relational reasoning.
+                    range: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_division_dividend_range(parts.dividend, facts)
+                    if dividend_nonnegative:
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.GtEq, zero, position))
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, parts.dividend, position))
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, proof_division_literal(range.upper, position), position)) if range.has_upper
+                        lower <- zero
+                        upper <- parts.dividend
+                    elif proof_goal_depth(facts, Ast::Expr.Binary(parts.dividend, TokenKind.LtEq, zero, position), annotations, operator_mask, depth, budget, split_depth + 1, &side_exhausted):
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.GtEq, parts.dividend, position))
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, zero, position))
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.GtEq, proof_division_literal(range.lower, position), position)) if range.has_lower
+                        lower <- parts.dividend
+                        upper <- zero
+                    scaled: (known: bool, factor: Ast::Expr, constant: i64) = proof_division_scaled(parts.dividend)
+                    if scaled.known and proof_goal_depth(facts, Ast::Expr.Binary(scaled.factor, TokenKind.LtEq, parts.divisor, position), annotations, operator_mask, depth, budget, split_depth + 1, &side_exhausted):
+                        added.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, Ast::Expr.IntLit(scaled.constant, position), position))
+                # The fresh name stands for a primitive scalar, as the witnessed term did.
+                added.push(proof_scalar_term_marker(fresh, position))
+                # And carries the signed width of its operands, so sums over it stay in range.
+                width: i64 = proof_signed_width_in_expression(term, facts)
+                added.push(proof_signed_type_marker(fresh, width, position)) if width != 0
+                rewritten_goal <- proof_generalize_place(rewritten_goal, term, fresh, 0).value
+                next_facts: mutable darray[Ast::Expr] = []
+                for fact in rewritten_facts |term, fresh, next_facts|:
+                    next_facts.push(proof_generalize_place(fact, term, fresh, 0).value)
+                rewritten_facts <- next_facts
+            return false if added.count == 0
+            rewritten_facts.extend(added)
+            return true if proof_goal_depth(rewritten_facts, rewritten_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+            return terms.count == 1 and proof_division_monotone(goal, terms[0], lower, upper)
+
+        # A goal linear in one bounded term `t` (`lower <= t <= upper`) holds when it holds with
+        # `t` at the bound that makes it hardest: for `L >= R` a negative coefficient of `t` in
+        # `L - R` takes `upper`, a positive one `lower`, and `<=` the reverse. The bound is
+        # substituted and the goal decided only when every atom cancels, which is exact integer
+        # arithmetic; `-l - (-l - d) / 2 >= d` becomes `-l - (-l - d) >= d`, that is `0 >= 0`.
+        # Kernel mirror: `proof_kernel_replay_division_monotone`.
+        def proof_division_monotone(goal: Ast::Expr, term: Ast::Expr, lower: Ast::Expr, upper: Ast::Expr) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, position):
+                    return false if operator != TokenKind.LtEq and operator != TokenKind.Lt and operator != TokenKind.GtEq and operator != TokenKind.Gt
+                    marker: Ast::Expr = Ast::Expr.Ident(proof_division_term_name(0), Ast::pos_at_line(0))
+                    generalized: Ast::Expr = proof_generalize_place(goal, term, marker, 0).value
+                    sum: (known: bool, coefficient: i64, constant: i64) = proof_division_linear_sum(generalized, marker, false)
+                    return false if not sum.known or sum.coefficient == 0
+                    at_least: bool = operator == TokenKind.GtEq or operator == TokenKind.Gt
+                    use_upper: bool = sum.coefficient < 0 if at_least else sum.coefficient > 0
+                    substituted: mutable Ast::Expr = proof_generalize_place(goal, term, lower, 0).value
+                    if use_upper:
+                        substituted <- proof_generalize_place(goal, term, upper, 0).value
+                    decided: (known: bool, coefficient: i64, constant: i64) = proof_division_linear_sum(substituted, marker, true)
+                    return false if not decided.known or decided.coefficient != 0
+                    return decided.constant >= 0 if operator == TokenKind.GtEq
+                    return decided.constant > 0 if operator == TokenKind.Gt
+                    return decided.constant <= 0 if operator == TokenKind.LtEq
+                    return decided.constant < 0
+                _:
+                    return false
+            return false
+
+        # The coefficient of `marker` in `left - right` of a comparison, and the constant; with
+        # `cancel`, only when every other name cancels.
+        def proof_division_linear_sum(comparison: Ast::Expr, marker: Ast::Expr, cancel: bool) -> (known: bool, coefficient: i64, constant: i64):
+            match proof_strip_parens(comparison):
+                Ast::Expr.Binary(left, operator, right, _):
+                    atoms: mutable darray[sview] = []
+                    coefficients: mutable darray[i64] = []
+                    constant: mutable i64 = 0
+                    return (false, 0, 0) if not proof_division_collect(left, 1, &atoms, &coefficients, &constant, 0)
+                    return (false, 0, 0) if not proof_division_collect(right, -1, &atoms, &coefficients, &constant, 0)
+                    marker_name: sview = proof_ident_name(marker)
+                    coefficient: mutable i64 = 0
+                    for index in 0..<atoms.count |index, atoms, coefficients, marker_name, coefficient|:
+                        coefficient <- coefficient + coefficients[index] if atoms[index] == marker_name
+                    for index in 0..<atoms.count |index, atoms, coefficients, marker_name, cancel|:
+                        continue if not cancel or atoms[index] == marker_name
+                        total: mutable i64 = 0
+                        for other in 0..<atoms.count |other, index, atoms, coefficients, total|:
+                            total <- total + coefficients[other] if atoms[other] == atoms[index]
+                        return (false, 0, 0) if total != 0
+                    return (true, coefficient, constant)
+                _:
+                    return (false, 0, 0)
+            return (false, 0, 0)
+
+        # `expression` as a signed sum of names and one constant, over `+`, `-` and unary `-`.
+        def proof_division_collect(expression: Ast::Expr, sign: i64, atoms: mutable darray[sview]&, coefficients: mutable darray[i64]&, constant: mutable i64&, depth: usize) -> bool:
+            return false if depth >= 16 or atoms.count >= 16
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_division_collect(inner, sign, atoms, coefficients, constant, depth + 1)
+                Ast::Expr.IntLit(value, _):
+                    return false if value < -1000000000000 or value > 1000000000000
+                    constant <- constant + (value if sign > 0 else 0 - value)
+                    return constant >= -1000000000000000 and constant <= 1000000000000000
+                Ast::Expr.Ident(name, _):
+                    return false if name == ""
+                    atoms.push(name)
+                    coefficients.push(sign)
+                    return true
+                Ast::Expr.Unary(operator, operand, _):
+                    return operator == TokenKind.Minus and proof_division_collect(operand, 0 - sign, atoms, coefficients, constant, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    return false if not proof_division_collect(left, sign, atoms, coefficients, constant, depth + 1)
+                    return proof_division_collect(right, sign if operator == TokenKind.Plus else 0 - sign, atoms, coefficients, constant, depth + 1)
+                _:
+                    return false
+            return false
+
+        def proof_division_dividend_range(dividend: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
+            bounds: mutable darray[ProofBound] = []
+            proof_collect_fact_bounds(facts, &bounds)
+            proof_close_equalities(facts, &bounds)
+            proof_signed_add_type_bounds(facts, &bounds)
+            return proof_interval(dividend, bounds)
+
+        def proof_division_term_name(index: usize) -> sview:
+            return "__elisa_division_term_0" if index == 0
+            "__elisa_division_term_1"
+
+        # `a / b` or `a % b` whose divisor is not an integer constant, or is a literal >= 1
+        # (the interval tiers bound the term only by the dividend's range, not relationally).
+        def proof_division_parts(expression: Ast::Expr) -> (known: bool, dividend: Ast::Expr, percent: bool, divisor: Ast::Expr):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (false, left, false, right) if operator != TokenKind.Slash and operator != TokenKind.Percent
+                    constant: (known: bool, value: i64) = proof_constant_int(right)
+                    return (false, left, false, right) if constant.known and constant.value < 1
+                    return (true, left, operator == TokenKind.Percent, right)
+                _:
+                    return (false, expression, false, expression)
+            return (false, expression, false, expression)
+
+        # `x * K` or `K * x` with a nonnegative literal `K`.
+        def proof_division_scaled(expression: Ast::Expr) -> (known: bool, factor: Ast::Expr, constant: i64):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, TokenKind.Star, right, _):
+                    match right:
+                        Ast::Expr.IntLit(value, _):
+                            return (value >= 0, left, value)
+                        _:
+                            pass
+                    match left:
+                        Ast::Expr.IntLit(value, _):
+                            return (value >= 0, right, value)
+                        _:
+                            pass
+                    return (false, expression, 0)
+                _:
+                    return (false, expression, 0)
+            return (false, expression, 0)
+
+        # Outermost division terms of the goal, in pre-order, without descending into calls,
+        # indexes or conditionals.
+        def proof_collect_division_terms(expression: Ast::Expr, terms: mutable darray[Ast::Expr]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or terms.count >= PROOF_DIVISION_TERM_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_division_terms(inner, terms, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_division_terms(operand, terms, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    if proof_division_parts(expression).known:
+                        for existing in terms |expression|:
+                            return if proof_expr_equal(existing, expression)
+                        terms.push(expression)
+                        return
+                    proof_collect_division_terms(left, terms, depth + 1)
+                    proof_collect_division_terms(right, terms, depth + 1)
+                _:
+                    pass
+
+        # The difference-constraint tiers read `d - l`, not `d < -l` or `-l - t`. When the goal
+        # negates a name `x`, `-x` is generalized to a reserved name that source code cannot
+        # spell, bounded by the negated constant range of `x`; the goal and facts keep every
+        # other occurrence of `x`, so the rule only weakens them. Kernel mirror:
+        # `proof_kernel_replay_negated_name_goal`.
+        def proof_negated_name_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT or not proof_comparison_goal_shape(goal)
+            fresh_name: sview = "__elisa_negated_name"
+            return false if proof_expr_mentions_name(goal, fresh_name)
+            for fact in facts:
+                return false if proof_expr_mentions_name(fact, fresh_name)
+            name: sview = proof_negated_name(goal, 0)
+            return false if name == ""
+            position: Ast::Pos = Ast::expr_pos(goal)
+            operand: Ast::Expr = Ast::Expr.Ident(name, position)
+            return false if proof_unsigned_width_in_expression(operand, facts) != 0 or not proof_scalar_term_witnessed(operand, facts, 0)
+            width: i64 = proof_signed_width_in_expression(operand, facts)
+            range: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_division_dividend_range(operand, facts)
+            return false if width == 0 or not range.has_lower or not range.has_upper
+            negated_lower: (known: bool, value: i64) = proof_sub_safe(0, range.upper)
+            negated_upper: (known: bool, value: i64) = proof_sub_safe(0, range.lower)
+            return false if not negated_lower.known or not negated_upper.known
+            term: Ast::Expr = Ast::Expr.Unary(TokenKind.Minus, operand, position)
+            fresh: Ast::Expr = Ast::Expr.Ident(fresh_name, Ast::pos_at_line(0))
+            rewritten_facts: mutable darray[Ast::Expr] = []
+            for fact in facts |term, fresh, rewritten_facts|:
+                rewritten_facts.push(proof_generalize_place(fact, term, fresh, 0).value)
+            rewritten_facts.push(Ast::Expr.Binary(fresh, TokenKind.GtEq, proof_division_literal(negated_lower.value, position), position))
+            rewritten_facts.push(Ast::Expr.Binary(fresh, TokenKind.LtEq, proof_division_literal(negated_upper.value, position), position))
+            rewritten_facts.push(proof_scalar_term_marker(fresh, position))
+            rewritten_facts.push(proof_signed_type_marker(fresh, width, position))
+            proof_goal_depth(rewritten_facts, proof_generalize_place(goal, term, fresh, 0).value, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+
+        # A literal as source spells it: a negative value is a negated positive literal.
+        def proof_division_literal(value: i64, position: Ast::Pos) -> Ast::Expr:
+            return Ast::Expr.IntLit(value, position) if value >= 0
+            magnitude: (known: bool, value: i64) = proof_sub_safe(0, value)
+            return Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(magnitude.value, position), position) if magnitude.known
+            Ast::Expr.IntLit(value, position)
+
+        # The first name negated by a unary minus in the expression, in pre-order.
+        def proof_negated_name(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_negated_name(inner, depth + 1)
+                Ast::Expr.Unary(operator, operand, _):
+                    name: sview = proof_ident_name(operand)
+                    return name if operator == TokenKind.Minus and name != ""
+                    return proof_negated_name(operand, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    found: sview = proof_negated_name(left, depth + 1)
+                    return found if found != ""
+                    return proof_negated_name(right, depth + 1)
+                _:
+                    return ""
+            return ""

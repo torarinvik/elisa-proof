@@ -217,7 +217,8 @@ extend ElisaProofKernelReplay:
             return false if binding.name == "" or binding.type_name == ""
             return false if binding.sort != "boolean" and binding.sort != "integer" and binding.sort != "floating" and binding.sort != "character" and binding.sort != "string" and binding.sort != "aggregate" and binding.sort != "named" and binding.sort != "container" and binding.sort != "void" and binding.sort != "proposition"
             if binding.kind == "value":
-                return false if binding.owner != ""
+                # A non-empty owner names the module that owns a constant (G68); lookup admits it
+                # only through a matching qualifier.
                 return false if binding.owner_type_identity != 0 or binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default or binding.parameter_by_reference
             elif binding.kind == "reference-value":
                 return false if binding.owner != "" or not binding.parameter_by_reference
@@ -294,3 +295,57 @@ extend ElisaProofKernelReplay:
             return true if total_bindings == 0 or node_count == 0
             per_binding_limit: usize = ElisaProofKernelCore::PROOF_KERNEL_TYPE_SCAN_BUDGET / ElisaProofKernelCore::PROOF_KERNEL_TYPE_SCAN_FACTOR / node_count
             return total_bindings <= per_binding_limit
+
+        def proof_kernel_replay_find_value_binding(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, index: ProofKernelReplayTypingIndex, name: sview, work: mutable usize&) -> (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding):
+            return proof_kernel_replay_find_owned_value_binding(environment, index, name, "", work)
+
+        # Bindings visible under `qualifier` (empty: unqualified). An unqualified name sees only
+        # unowned bindings; a qualified one only bindings owned by a module of that name (G68).
+        # Lexical (local) bindings shadow the global environment, as in the source language;
+        # remaining disagreement among same-level candidates is still ambiguous and unknown.
+        def proof_kernel_replay_find_owned_value_binding(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, index: ProofKernelReplayTypingIndex, name: sview, qualifier: sview, work: mutable usize&) -> (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding):
+            empty: ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
+            found: mutable bool = false
+            ambiguous: mutable bool = false
+            selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = empty
+            local_found: mutable bool = false
+            local_ambiguous: mutable bool = false
+            local_selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = empty
+            global_count: usize = environment.global_bindings.count
+            return (false, selected) if index.source_binding_count != proof_kernel_replay_type_environment_binding_count(environment) or index.value_binding_count > index.value_binding_indices.count
+            for value_offset in 0..<index.value_binding_count |value_offset, environment, index, name, qualifier, global_count, found, ambiguous, selected, local_found, local_ambiguous, local_selected, work|:
+                return (false, selected) if not proof_kernel_replay_type_work_consume(work)
+                binding_index: usize = index.value_binding_indices[value_offset]
+                return (false, selected) if binding_index >= index.source_binding_count
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                kind_valid: bool = match binding.kind:
+                    "value": true
+                    "reference-value": true
+                    "proposition": true
+                    _: false
+                return (false, selected) if not kind_valid
+                if binding.name == name and binding.owner == qualifier:
+                    if binding_index >= global_count:
+                        if not local_found:
+                            local_selected <- binding
+                            local_found <- true
+                        elif not proof_kernel_replay_typing_evidence_equal(local_selected, binding):
+                            local_ambiguous <- true
+                    elif not found:
+                        selected <- binding
+                        found <- true
+                    elif not proof_kernel_replay_typing_evidence_equal(selected, binding):
+                        ambiguous <- true
+            return (not local_ambiguous, local_selected) if local_found
+            return (found and not ambiguous, selected)
+
+        # The module qualifier of a `Module::name` term: the base's name. Constants of a nested
+        # module are registered under both its qualified and its leaf owner, so equality suffices;
+        # leaf owners shared by differently-typed constants are ambiguous and rejected.
+        def proof_kernel_replay_scope_qualifier(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> sview:
+            return "" if root >= nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return "" if node.kind != "scope" or node.left >= nodes.count
+            base: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
+            return base.name if base.kind == "ident" or base.kind == "scope"
+            return ""
