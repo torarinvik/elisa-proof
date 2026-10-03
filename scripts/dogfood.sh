@@ -1976,8 +1976,13 @@ with open(unreadable, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: no-op boundary fixture did not fail cleanly")
-if {f["kind"] for f in report["findings"]} != {"expression-unsupported"}:
+# The refusal is reported as unsupported. The fixture's second function then shows that it
+# reaches past the match: the precondition is gone at the later call, which is reported too.
+kinds = {(f["name"], f["kind"]) for f in report["findings"]}
+if ("a_dropped_arm_is_refused", "expression-unsupported") not in kinds or ("the_refusal_reaches_past_the_match", "expression-unsupported") not in kinds:
     raise SystemExit("dogfood failed: an unreadable statement was not reported as unsupported")
+if not kinds <= {("a_dropped_arm_is_refused", "expression-unsupported"), ("the_refusal_reaches_past_the_match", "expression-unsupported"), ("the_refusal_reaches_past_the_match", "call-requires-unproven")}:
+    raise SystemExit("dogfood failed: an unreadable statement produced an unexpected finding: %s" % sorted(kinds))
 reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
 for owner in ("a_dropped_arm_is_refused", "the_refusal_reaches_past_the_match"):
     if reasons.get(owner) != "body-unverified":
@@ -2488,7 +2493,7 @@ with open(dropped, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: rejected short-circuit fixture did not fail cleanly")
 kinds = {(finding["name"], finding["kind"]) for finding in report["findings"]}
-expected = {("skipped_call_must_not_establish_and", "ensure-unproven"), ("skipped_call_must_not_establish_or", "ensure-unproven"), ("skipped_call_must_not_establish_a_guard", "ensure-unproven"), ("pre_call_value_must_not_survive", "ensure-unproven"), ("skipped_requires_is_still_checked", "call-requires-unproven")}
+expected = {("skipped_call_must_not_establish_and", "ensure-unproven"), ("skipped_call_must_not_establish_or", "ensure-unproven"), ("skipped_call_must_not_establish_a_guard", "ensure-unproven"), ("pre_call_value_must_not_survive", "ensure-unproven"), ("skipped_requires_is_still_checked", "call-requires-unproven"), ("mutable_left_fact_must_not_survive", "ensure-unproven")}
 if kinds != expected:
     raise SystemExit("dogfood failed: unexpected verdicts around a skipped call: %s" % sorted(kinds ^ expected))
 print("dogfood short_circuit_call: a skipped call is havocked and checked but establishes nothing")
