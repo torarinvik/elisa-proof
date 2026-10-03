@@ -48,7 +48,10 @@ Producer and replay kernel check their expression forms independently. Numeric
 literal leaves, unwitnessed terms, invalid Boolean payloads, malformed references,
 and cyclic logical nodes do not enter this rule. The focused native control is
 `scripts/test_kernel_logical_equations.sh`; this is not general Boolean equality
-normalization or proof of the assistant's implementation.
+normalization or proof of the assistant's implementation. Bounded logical constant
+reduction also handles constant-determined conjunctions/disjunctions and nested
+negation. Formation is checked before absorption: an invalid or unwitnessed operand
+cannot be hidden beside `false` or `true`. Unknown terms are not constant values.
 `declaration_details` provides deterministic source-level
 function/module metadata, parameter names, contract counts, recursion/purity/structural flags,
 and executable-summary status. For executable functions, `verified` is true only after the body
