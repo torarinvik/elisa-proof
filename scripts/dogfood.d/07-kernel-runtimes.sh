@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Part 6 of scripts/dogfood.sh; sourced in order by it, never run alone.
+# Part 7 of scripts/dogfood.sh; sourced in order by it, never run alone.
 printf 'dogfood proposition_admission_runtime: abstract atoms, typed source terms, and tactic boundaries passed\n'
 
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/comparison-runtime.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1

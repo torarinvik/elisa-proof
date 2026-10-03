@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Part 2 of scripts/dogfood.sh; sourced in order by it, never run alone.
+# Part 3 of scripts/dogfood.sh; sourced in order by it, never run alone.
 run_probe rejected_negative_affine_difference examples/rejected_negative_affine_difference.elisa 1
 run_probe rejected_negative_affine_goal examples/rejected_negative_affine_goal.elisa 1
 run_probe rejected_borrow_call_duplicate_alias examples/rejected_borrow_call_duplicate_alias.elisa 1
