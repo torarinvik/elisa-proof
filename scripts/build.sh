@@ -153,7 +153,13 @@ else
 fi
 LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
 [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
-clang -Wl,-dead_strip -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+# ld64 spells section garbage collection -dead_strip; GNU ld and lld spell it --gc-sections and
+# default to PIE, which the non-PIC Elisa object cannot be linked into.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    clang -Wl,-dead_strip -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+else
+    clang -no-pie -Wl,--gc-sections -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+fi
 # Sign before hashing so the manifest digest names the exact executable that runs.
 if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
     codesign -s - --force "$PROOF_BINARY" 2>/dev/null
