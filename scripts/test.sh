@@ -3944,6 +3944,8 @@ if [[ "$rejected_effect_status" -ne 0 ]]; then
     exit 1
 fi
 
+python3 "$ROOT_DIR/scripts/test_effect_loop_control.py"
+
 # Internal proof witnesses and generated rebind symbols share the ordinary identifier AST node.
 # A source declaration in that namespace must be rejected before it can counterfeit a compiler
 # type witness or collide with a fresh proof-state name.
