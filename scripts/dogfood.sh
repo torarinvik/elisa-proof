@@ -1628,7 +1628,7 @@ cases = (
     ("call_result_places", {('wraps', 'ensure-unproven'), ('other_argument', 'ensure-unproven'), ('stale_argument', 'ensure-unproven')}),
     ("rebind_join", {('overshoot', 'ensure-unproven'), ('overshoot', 'invariant-not-preserved')}),
     ("conditional_conversions", {('widened_bound', 'ensure-unproven')}),
-    ("conditional_call_arms", {('wrong_guard', 'call-requires-unproven'), ('skipped_arm', 'ensure-unproven'), ('nested_arm', 'expression-unsupported')}),
+    ("conditional_call_arms", {('wrong_guard', 'call-requires-unproven'), ('skipped_arm', 'ensure-unproven'), ('called_nested_condition', 'expression-unsupported'), ('call_before_arm', 'expression-unsupported'), ('short_circuit_path', 'expression-unsupported'), ('nested_wrong_guard', 'call-requires-unproven')}),
     ("guarded_conditional_arms", {('wrong_arm', 'ensure-unproven'), ('weak_guard', 'ensure-unproven')}),
     ("captured_block_exit", {('unchecked', 'ensure-unproven'), ('broken', 'invariant-not-preserved'), ('broken', 'ensure-unproven')}),
     ("global_constant_loop_exit", {('last_slot', 'ensure-unproven')}),

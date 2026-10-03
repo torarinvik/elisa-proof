@@ -3436,7 +3436,7 @@ if [[ "$conditional_call_arms_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_conditional_call_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("wrong_guard", "call-requires-unproven") in owners; assert ("skipped_arm", "ensure-unproven") in owners; assert ("nested_arm", "expression-unsupported") in owners; assert not any(name in ("halve",) for name, _ in owners)'
+run_json_report "$ROOT_DIR/examples/rejected_conditional_call_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("wrong_guard", "call-requires-unproven") in owners; assert ("skipped_arm", "ensure-unproven") in owners; assert ("called_nested_condition", "expression-unsupported") in owners; assert ("call_before_arm", "expression-unsupported") in owners; assert ("short_circuit_path", "expression-unsupported") in owners; assert ("nested_wrong_guard", "call-requires-unproven") in owners; assert not any(name in ("halve",) for name, _ in owners)'
 rejected_conditional_call_arms_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_conditional_call_arms_status" -ne 0 ]]; then
