@@ -183,9 +183,14 @@ if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
     printf 'missing profiler ABI hook source: %s\n' "$PROFILE_HOOKS_SOURCE" >&2
     exit 2
 fi
-if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_OBJ" ]]; then
+# The stamp names the clang that built the hook object, so switching toolchains rebuilds it
+# instead of linking an object from the previous clang.
+PROFILE_HOOKS_STAMP="$PROFILE_HOOKS_OBJ.clang"
+profile_hooks_clang="$(clang --version | head -1) $PROFILE_HOOKS_SOURCE"
+if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_OBJ" || ! -f "$PROFILE_HOOKS_STAMP" || "$(<"$PROFILE_HOOKS_STAMP")" != "$profile_hooks_clang" ]]; then
     clang -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
+    printf '%s\n' "$profile_hooks_clang" > "$PROFILE_HOOKS_STAMP"
 fi
 # Objects are shared across checkouts and agents, keyed by everything the compile reads: the
 # source snapshot, the pinned compiler revision and binary, and every compile flag. A hit skips
