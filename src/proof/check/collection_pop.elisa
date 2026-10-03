@@ -1,0 +1,81 @@
+# `v.pop()` as a statement on a mutable `darray` reference parameter removes exactly one element
+# (BACKLOG W-04). A builtin pop traps on an empty array, so when it returns the count before it,
+# S, was at least one and the count after it is S - 1. It writes no element: element facts whose
+# reads of `v` avoid `v.count` survive the call boundary, each re-checked from the fact it came
+# from. Count facts are restated over S by proof_push_before, as for a push.
+extend ElisaProof:
+    private:
+        def proof_pop_receiver(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, frame_parameters: darray[sview]&, functions: ProofFunctionTable&, report: ProofReport&, owner: sview) -> sview:
+            return proof_darray_method_receiver(expression, "pop", names, values, frame_parameters, functions, report, owner)
+
+        def proof_pop_kept_elements(facts: darray[Ast::Expr]&, receiver: sview, before: Ast::Expr, kept: mutable darray[Ast::Expr]&, premises: mutable darray[Ast::Expr]&) -> void:
+            match before:
+                Ast::Expr.Invalid:
+                    return
+                _:
+                    pass
+            place: Ast::Expr = proof_count_place(receiver, Ast::expr_pos(before))
+            for original in facts |original, receiver, place, kept, premises|:
+                pieces: mutable darray[Ast::Expr] = []
+                proof_conjunct_components(original, pieces)
+                for piece in pieces |piece, original, receiver, place, kept, premises|:
+                    continue if kept.count >= PROOF_ALIAS_TRANSFER_BUDGET or not proof_expr_mentions_name(piece, receiver)
+                    match piece:
+                        Ast::Expr.Call(_, _, _, _):
+                            continue
+                        _:
+                            pass
+                    # The count shrinks, so no fact over it survives as written; that includes
+                    # the popped slot itself, spelled `v[v.count - 1]`.
+                    continue if proof_expr_reads(piece, place, 0)
+                    # Only element reads `v[i]` and the count may mention `v`.
+                    continue if not proof_pop_reads_are_elements(piece, receiver, 0)
+                    continue if any existing in kept where proof_expr_equal(existing, piece)
+                    kept.push(piece)
+                    premises.push(original)
+
+        # Every mention of `receiver` in `expression` is the object of an index `receiver[i]`.
+        def proof_pop_reads_are_elements(expression: Ast::Expr, receiver: sview, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return name != receiver
+                Ast::Expr.Paren(inner, _):
+                    return proof_pop_reads_are_elements(inner, receiver, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_pop_reads_are_elements(operand, receiver, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_pop_reads_are_elements(left, receiver, depth + 1) and proof_pop_reads_are_elements(right, receiver, depth + 1)
+                Ast::Expr.Index(Ast::Expr.Ident(_, _), index, _):
+                    return proof_pop_reads_are_elements(index, receiver, depth + 1)
+                _:
+                    return false
+
+        # After the call boundary has forgotten `v`, record the one thing the pop did to it.
+        def proof_pop_after(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, receiver: sview, before: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
+            match before:
+                Ast::Expr.Invalid:
+                    return
+                _:
+                    pass
+            # Trusted: the builtin pop traps when the count is zero, so a pop that returned
+            # started from at least one element.
+            proof_add_fact_once(facts, report, Ast::Expr.Binary(Ast::Expr.IntLit(1, position), TokenKind.LtEq, before, position), "collection-pop", owner, position)
+            # Fold an earlier `T + k` or `T - k` so the new count stays one sum deep.
+            shrunk: mutable Ast::Expr = Ast::Expr.Binary(before, TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
+            match before:
+                Ast::Expr.Binary(left, TokenKind.Plus, Ast::Expr.IntLit(added, _), _):
+                    if added == 1:
+                        shrunk <- left
+                    elif added > 1 and added < PROOF_PUSH_OFFSET_LIMIT:
+                        shrunk <- Ast::Expr.Binary(left, TokenKind.Plus, Ast::Expr.IntLit(added - 1, position), position)
+                Ast::Expr.Binary(left, TokenKind.Minus, Ast::Expr.IntLit(taken, _), _):
+                    if taken > 0 and taken < PROOF_PUSH_OFFSET_LIMIT:
+                        shrunk <- Ast::Expr.Binary(left, TokenKind.Minus, Ast::Expr.IntLit(taken + 1, position), position)
+                _:
+                    pass
+            proof_add_traced_fact(facts, report, Ast::Expr.Binary(proof_count_place(receiver, position), TokenKind.EqEq, shrunk, position), "collection-pop", position.line, owner)

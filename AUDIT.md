@@ -10823,3 +10823,17 @@ keeps off-by-one, wrong lower bound, other body and captured binder unproven.
 `scripts/test_symbolic_quantifiers.py` adds a non-range malformed case and a budget case (cover
 fact past the scan limit). Open: prefix-sorted examples need two-binder bodies, and triggered
 instances for reads `xs[k]` inside a covered range.
+
+## Builtin pop shrinks the count by one (BACKLOG W-04, pop)
+
+A statement `v.pop()` on a mutable darray reference parameter is recognised by the same receiver
+check as a push (no arguments, no user function named `pop`, the parameter itself). The pre-pop
+count S comes from `proof_push_before`. New trusted boundary kind `collection-pop`, shape-checked
+only by replay: `1 <= S`, because the builtin traps on an empty array (`emit_darray_pop_value`),
+and `v.count == S - 1`, folded with an earlier `T + k` or `T - k` so the count stays one sum deep.
+A pop writes no element. Element facts whose only mentions of `v` are index reads, and which do
+not read `v.count`, are re-derived after the boundary from the fact they came from. That excludes
+the popped slot `v[v.count - 1]` and every count bound. A value-position pop (`_ = v.pop()`) is
+not modeled and still forgets `v`. Fixtures: `examples/collection_pop.elisa` (proved, replayed,
+including 40 pops in a row), `examples/rejected_collection_pop.elisa` and
+`examples/rejected_collection_pop_user_method.elisa` (all claims unproven).
