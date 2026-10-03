@@ -14,11 +14,11 @@ p = subprocess.run([binary, "--json", str(ROOT / "test/constant_disjunction_deni
 r = json.loads(p.stdout)
 assert p.returncode == 1 and r["summary"]["semantic_errors"] == 0
 assert not r["trust"]["trusted_assumptions"]
-assert r["replay"] == {"certificates": 7, "replayed": 7, "gaps": 0}
-for name in ("closed_order_denial", "reversed_order_denial"):
+assert r["replay"] == {"certificates": 10, "replayed": 10, "gaps": 0}
+for name in ("closed_order_denial", "reversed_order_denial", "full_width_order_denial"):
     goals = [g for g in r["goals"] if g["name"] == name]
     assert goals and all(g["proven"] and g["replay_status"] == "replayed" for g in goals)
-negatives = ("rejected_true_order", "rejected_symbolic_order", "rejected_wrong_value")
+negatives = ("rejected_true_order", "rejected_symbolic_order", "rejected_wrong_value", "rejected_true_full_width_order")
 for name in negatives:
     assert any(not g["proven"] for g in r["goals"] if g["name"] == name)
 assert collections.Counter((f["name"], f["kind"]) for f in r["findings"]) == {
