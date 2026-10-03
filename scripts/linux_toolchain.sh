@@ -88,9 +88,10 @@ if [[ ! -x "$STAGE1" ]]; then
     ulimit -s unlimited
     if ! "$STAGE0" -emit obj -O0 -o "$TOOLCHAIN/stage1.o" "$TOOLCHAIN/compiler/src/driver/elisac.elisa" \
         > "$TOOLCHAIN/stage1.log" 2>&1; then
-        # stage0 at ELISA_STAGE0_REV cannot discharge some of the compiler's own contracts (at
-        # 2678ff10, ten `ensure`s on elisacore_std/arena.elisa's clamp). -permissive compiles
-        # those into runtime checks instead of refusing, so the compiler still traps if one fails.
+        # An older stage0 may fail to discharge some of the compiler's own contracts (Elisa-core
+        # builds before a58c4f96 refused ten `ensure`s on 2678ff10's elisacore_std/arena.elisa
+        # clamp). -permissive compiles those into runtime checks instead of refusing, so the
+        # compiler still traps if one fails.
         log "stage0 refused a contract in strict mode; retrying with -permissive (runtime checks)"
         "$STAGE0" -emit obj -O0 -permissive -o "$TOOLCHAIN/stage1.o" "$TOOLCHAIN/compiler/src/driver/elisac.elisa" \
             > "$TOOLCHAIN/stage1.permissive.log" 2>&1 \
