@@ -219,17 +219,42 @@ extend ElisaProof:
                 _:
                     return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "")
 
+        # `x.usize()` (or any unsigned width conversion) as an index. The bounds are checked on
+        # `x` itself: `0 <= x` and `x < count`. For such an `x` the conversion yields a value in
+        # `[0, x]` -- `x` unchanged when it fits the target, a truncation of a nonnegative value
+        # otherwise -- or panics before any read, so the access is in bounds either way. Signed
+        # targets are excluded (a truncation could turn negative), as is a conversion a source
+        # function shadows and a receiver that holds a move or any call but a pure conversion.
+        def proof_index_unsigned_conversion(index: Ast::Expr, functions: ProofFunctionTable&) -> (known: bool, receiver: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            match proof_strip_parens(index):
+                Ast::Expr.Call(callee, arguments, _, _):
+                    conversion: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, arguments.count, functions)
+                    return (false, Ast::Expr.Invalid) if not conversion.known
+                    match callee:
+                        Ast::Expr.Field(_, target, _):
+                            return (false, Ast::Expr.Invalid) if target != "u8" and target != "u16" and target != "u32" and target != "u64" and target != "usize"
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                    return (false, Ast::Expr.Invalid) if not proof_expr_calls_are_conversions(conversion.receiver, functions, 0) or proof_expr_has_move(conversion.receiver)
+                    return (true, conversion.receiver)
+                _:
+                    pass
+            return (false, Ast::Expr.Invalid)
+
         def proof_check_index_access(object: Ast::Expr, index: Ast::Expr, position: Ast::Pos, facts: mutable darray[Ast::Expr]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> void:
             return if proof_is_type_cast_index(object)
             checked_index: mutable Ast::Expr = index
             checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
-            if proof_expr_has_call(index):
+            unsigned_conversion: (known: bool, receiver: Ast::Expr) = proof_index_unsigned_conversion(index, functions)
+            if unsigned_conversion.known:
+                checked_index <- unsigned_conversion.receiver
+            elif proof_expr_has_call(index):
                 resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name)
                 if resolved.known:
                     checked_index <- resolved.value
                 else:
                     checked_index <- Ast::Expr.Invalid
-            if not proof_indexable_object(object) or proof_expr_has_call(object) or proof_expr_has_move(object) or proof_expr_is_invalid(checked_index) or proof_expr_has_call(checked_index) or proof_expr_has_move(checked_index):
+            if not proof_indexable_object(object) or proof_expr_has_call(object) or proof_expr_has_move(object) or proof_expr_is_invalid(checked_index) or (proof_expr_has_call(checked_index) and not (unsigned_conversion.known and proof_expr_calls_are_conversions(checked_index, functions, 0))) or proof_expr_has_move(checked_index):
                 report.proof_obligation(false)
                 proof_add_finding(report, "index-bounds-opaque", position.line, name, "indexed access has no statically tracked collection bound")
                 return
@@ -249,6 +274,19 @@ extend ElisaProof:
                 fixed_upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, Ast::Expr.IntLit(fixed_extent, position), position)
                 fixed_upper_proven <- proof_goal(checked_facts, fixed_upper, annotations)
                 proof_add_type_bound_fact(checked_facts, report, upper, position.line, name) if fixed_upper_proven
+            # A signed position bounded by the count's own `i64` conversion: `0 <= x` and
+            # `x < count.i64()` give `x < count`. `count` is a `usize`, so `count.i64()` is
+            # `count` itself, a negative wrap, or a panic before the bound is read; a positive
+            # `count.i64()` above a nonnegative `x` is therefore `count`. The `i64` bound is
+            # certified like any goal, and only then is `x < count` recorded with type-bound
+            # provenance, as the fixed-array extent above is.
+            if not fixed_upper_proven and lower_proven:
+                converted_count: Ast::Expr = Ast::Expr.Call(Ast::Expr.Field(count, "i64", position), [], [], position)
+                converted_upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, converted_count, position)
+                if proof_resource_function_name_count(functions, "i64") == 0 and not proof_goal(checked_facts, upper, annotations) and proof_goal(checked_facts, converted_upper, annotations):
+                    converted_proven: bool = proof_certify_goal_with_rule(checked_facts, converted_upper, report, position.line, name, annotations, "index-upper")
+                    report.proof_obligation(converted_proven)
+                    proof_add_type_bound_fact(checked_facts, report, upper, position.line, name) if converted_proven
             upper_proven: bool = proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "index-upper")
             report.proof_obligation(upper_proven)
             proof_add_latest_goal_finding(report, "index-upper-unproven", position.line, name, "indexed access may exceed the collection bound") if not upper_proven
