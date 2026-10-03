@@ -101,7 +101,7 @@ clang -c -O2 -o "$PROFILE_HOOKS_OBJ" "$PROFILE_HOOKS_SOURCE"
 link_native() {
     local output="$1"
     shift
-    clang -Wl,-dead_strip -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
+    clang "${ELISA_DEAD_STRIP_LINK[@]}" -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
 }
 
 run_probe() {
