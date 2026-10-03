@@ -239,6 +239,11 @@ The build used stage1 from `d8b5d30`, seeded from stage0 `0b21b7b`, on Linux wit
   - two expectation sets were stale;
   - two native harnesses still built `ProofFactTrace` without `owner_line`;
   - the lemma-summary harness restored a hard-coded binding.
-- **Performance:** unchanged within noise on the same machine.
-  - `src/cli/main.elisa`: 28.0 s and 880 MB peak on base, 28.0 s and 885 MB on this branch.
-  - The replay self-audit: 27.3 s and 1680 MB on base, 27.2 s and 1686 MB on this branch.
+- **Performance:** a sampling profile of a `-g` build put `proof_disjunct_modus_ponens` in 22 of
+  30 stacks on `main.elisa`. The redundant survivor-branch search it triggered is now skipped.
+  - mocap `main`, `track` and `rig_physics` together: 66.1 s -> 55.6 s (16% faster), with the
+    same 3368/4893 obligations proven.
+  - Over all 781 examples: status, proven counts and findings are identical, and replay gaps are
+    0 wherever base has 0.
+  - Before that change the branch was level with base: 28.0 s / 880 MB vs 28.0 s / 885 MB on
+    `main.elisa`.
