@@ -254,3 +254,13 @@ The build used stage1 from `d8b5d30`, seeded from stage0 `0b21b7b`, on Linux wit
   - `unknown_widened_borrow_write`: proven 9 -> 6, obligations 11 -> 7. This change is upstream;
     check it before treating it as intended.
   - `typed_unsigned_literals` and `rejected_unsigned_constant_overflow`: a new `no-rule` gate.
+- **After the arm-index split** (`guarded_arm_indexes`): `scripts/test.sh` and
+  `scripts/dogfood.sh` both pass in full. Over the census corpus, 19565/26956 obligations are
+  proven, against a baseline of 19543/26924, with no regressions. Proven obligations on the mocap
+  files: `track` 514 -> 542, `stack` 626 -> 654, `rig_stack` 1033 -> 1061, `rig_physics`
+  1294 -> 1323, `main` 1570 -> 1599.
+- **Remaining `call-requires-unproven` in `Track::sample` / `odd_sample`:** these are mocap
+  contract gaps. `Span::wrap`/`clamp` and `Window::mirror` need `count <= MAX_FRAMES` and frame
+  bounds that the callers do not state. `values.count.i64() != 0` does not give
+  `values.count.i64() >= 1`, because no runtime guarantee bounds a darray count by `i64::MAX`.
+  Adding `requires values.count <= Span::MAX_FRAMES` (or equivalent) in mocap is the fix.
