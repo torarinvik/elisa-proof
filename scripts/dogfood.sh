@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ld64 spells section garbage collection -dead_strip; GNU ld spells it --gc-sections and
+# defaults to PIE, which the non-PIC Elisa objects cannot be linked into (as in build.sh).
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    ELISA_LINK_GC_FLAGS=(-Wl,-dead_strip)
+else
+    ELISA_LINK_GC_FLAGS=(-no-pie -Wl,--gc-sections)
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER="${ELISA_COMPILER_BIN:-}"
 # shellcheck source=scripts/compiler_provenance.sh
@@ -103,7 +111,7 @@ clang -c -O2 -o "$PROFILE_HOOKS_OBJ" "$PROFILE_HOOKS_SOURCE"
 link_native() {
     local output="$1"
     shift
-    clang -Wl,-dead_strip -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
+    clang "${ELISA_LINK_GC_FLAGS[@]}" -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
 }
 
 run_probe() {

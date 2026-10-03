@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ld64 spells section garbage collection -dead_strip; GNU ld spells it --gc-sections and
+# defaults to PIE, which the non-PIC Elisa objects cannot be linked into (as in build.sh).
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    ELISA_LINK_GC_FLAGS=(-Wl,-dead_strip)
+else
+    ELISA_LINK_GC_FLAGS=(-no-pie -Wl,--gc-sections)
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
@@ -263,12 +271,12 @@ for ast_probe in field_equality_runtime marker_dispatch_runtime; do
         exit 1
     fi
     if [[ "${#field_runtime_inputs[@]}" -gt 0 ]]; then
-        if ! "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/$ast_probe" "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}"; then
+        if ! "${CLANG:-clang}" "${ELISA_LINK_GC_FLAGS[@]}" -o "$standalone_probe_dir/$ast_probe" "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}"; then
             printf 'proof test matrix failed: AST allocation differential test %s did not link\n' "$ast_probe" >&2
             exit 1
         fi
     else
-        if ! "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/$ast_probe" "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/profile_hooks.o"; then
+        if ! "${CLANG:-clang}" "${ELISA_LINK_GC_FLAGS[@]}" -o "$standalone_probe_dir/$ast_probe" "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/profile_hooks.o"; then
             printf 'proof test matrix failed: AST allocation differential test %s did not link\n' "$ast_probe" >&2
             exit 1
         fi
@@ -279,13 +287,13 @@ for ast_probe in field_equality_runtime marker_dispatch_runtime; do
     fi
 done
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/examples/kernel_sview_lifetimes_runtime.elisa" >/dev/null 2>&1 &&
-    "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-sview-lifetimes" "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
+    "${CLANG:-clang}" "${ELISA_LINK_GC_FLAGS[@]}" -o "$standalone_probe_dir/kernel-sview-lifetimes" "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
     "$standalone_probe_dir/kernel-sview-lifetimes"
 if [[ "$?" -ne 0 ]]; then
     printf 'proof test matrix failed: native sview lifetime replay boundary tests failed\n' >&2
     exit 1
 fi
-"${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-proposition-admission" "$standalone_probe_dir/kernel-proposition-admission.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
+"${CLANG:-clang}" "${ELISA_LINK_GC_FLAGS[@]}" -o "$standalone_probe_dir/kernel-proposition-admission" "$standalone_probe_dir/kernel-proposition-admission.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
 "$standalone_probe_dir/kernel-proposition-admission"
 kernel_proposition_admission_status=$?
 if [[ "$kernel_proposition_admission_status" -ne 0 ]]; then
@@ -293,14 +301,14 @@ if [[ "$kernel_proposition_admission_status" -ne 0 ]]; then
     exit 1
 fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-intern.o" "$ROOT_DIR/examples/kernel_intern_runtime.elisa" >/dev/null 2>&1 &&
-    "${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/kernel-intern" "$standalone_probe_dir/kernel-intern.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
+    "${CLANG:-clang}" "${ELISA_LINK_GC_FLAGS[@]}" -o "$standalone_probe_dir/kernel-intern" "$standalone_probe_dir/kernel-intern.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
     "$standalone_probe_dir/kernel-intern"
 kernel_intern_status=$?
 if [[ "$kernel_intern_status" -ne 0 ]]; then
     printf 'proof test matrix failed: kernel term sharing boundary tests failed (%s)\n' "$kernel_intern_status" >&2
     exit 1
 fi
-"${CLANG:-clang}" -Wl,-dead_strip -o "$standalone_probe_dir/report-invariants" "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
+"${CLANG:-clang}" "${ELISA_LINK_GC_FLAGS[@]}" -o "$standalone_probe_dir/report-invariants" "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
 "$standalone_probe_dir/report-invariants"
 report_invariants_status=$?
 if [[ "$report_invariants_status" -ne 0 ]]; then
