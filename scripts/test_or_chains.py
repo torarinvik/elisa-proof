@@ -1,0 +1,32 @@
+"""Chains of three or more `or` operands, as facts and as goals. Each disjunct of a chained
+precondition is a case whatever the nesting, a chained goal needs one provable disjunct, and a
+chain unrelated to the goal must not stop the range facts beside it from proving it (the retry
+without top-level disjunctive facts). An uncovered case, a goal no disjunct satisfies, a claim
+past the range and an off-by-one over an eight-case chain all stay unproven."""
+import json
+import os
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+
+def run(path):
+    result = subprocess.run([str(BINARY), "--json", str(path)], capture_output=True, text=True, timeout=600)
+    return json.loads(result.stdout)
+
+
+data = run(ROOT / "examples/or_chain.elisa")
+assert data["status"] == "proved" and data["findings"] == [], (data["summary"], data["findings"])
+assert data["replay"]["gaps"] == 0 and data["replay"]["certificates"] == data["replay"]["replayed"], data["replay"]
+
+data = run(ROOT / "examples/rejected_or_chain.elisa")
+assert data["status"] != "proved"
+assert data["replay"]["gaps"] == 0
+assert all(f["status"] != "proved" for f in data["findings"])
+assert sorted((f["name"], f["line"]) for f in data["findings"] if f["kind"] == "ensure-unproven") == [
+    ("chain_does_not_tighten_range", 20), ("eight_case_off_by_one", 25), ("nested_uncovered_case", 10),
+    ("no_disjunct_holds", 14), ("uncovered_case", 5)], data["findings"]
+
+print("or chains: chained facts split, chained goals introduce, uncovered cases refused")

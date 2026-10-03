@@ -10837,3 +10837,33 @@ the popped slot `v[v.count - 1]` and every count bound. A value-position pop (`_
 not modeled and still forgets `v`. Fixtures: `examples/collection_pop.elisa` (proved, replayed,
 including 40 pops in a row), `examples/rejected_collection_pop.elisa` and
 `examples/rejected_collection_pop_user_method.elisa` (all claims unproven).
+
+## Split test matrix, W-05 design, or-chain fixtures (2026-10-03)
+
+`scripts/test.sh` had grown to 4733 lines. It is now a driver that sources nine ordered parts
+from `scripts/test.d/`, cut only where each part parses alone (`bash -n` with no warnings, so
+no cut falls inside a heredoc) and after a `fi`, `done`, `PY` or blank line. Sourcing keeps the
+single shell, so `set -e`/`set +e` state, traps, `run_json_report` and variables carry across
+parts exactly as before; the parts concatenated without their two-line headers are
+byte-identical to the old script. `check_source_length.py` now also bounds `scripts/test.sh`
+and every part at 600 lines. It already failed before this change on
+`src/proof/check/declaration_checks.elisa` (601 lines, from ca94be1); that is left as found.
+
+W-05 is designed, not implemented: [docs/w05-quantifier-oracle.md](docs/w05-quantifier-oracle.md).
+Z3 returns instantiation lists (fact index, instance term) that the checker admits only through
+the W-02 instance rule after proving the range side goals, so the TCB delta is a hint parser.
+
+`examples/or_chain.elisa` and `examples/rejected_or_chain.elisa`, checked by
+`scripts/test_or_chains.py`, pin chains of three to eight `or` operands: chained, left- and
+right-nested and mixed-relation preconditions, a chained goal proved by its last or middle
+disjunct, and a four-way chain beside the range fact that alone proves the goal (the retry
+without top-level disjunctions from e71a28c). The rejected file keeps an uncovered case, a
+nested uncovered case, a goal no disjunct satisfies, a claim past the range and an eight-case
+off-by-one unproven.
+
+**Not run.** The session that wrote this could not build a stage1 compiler (stage0 at
+`ELISA_STAGE0_REV` rejects the proof sources' `.cast[T]` syntax, and seeding stage1 failed on
+the compiler's own contract and storage checks under both that stage0 and Elisa-core main), so
+`build/elisa-proof` never existed there. The split was verified by byte-identical
+concatenation and `bash -n`; `test_or_chains.py`, its expected line set and the claim that every
+`or_chain.elisa` function proves are unverified until the next local `scripts/test.sh`.

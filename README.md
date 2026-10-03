@@ -254,7 +254,7 @@ size. `ELISA_FULL_AUDIT_RSS_LIMIT_KB` remains a compatibility alias for the memo
 Each dogfood probe is executed twice and must produce byte-identical JSON, making nondeterministic
 proof IDs, certificate ordering, or report serialization a gate failure.
 
-`scripts/test.sh` checks accepted proofs, textual imports, lemma application, structured results,
+`scripts/test.sh` sources the ordered parts in `scripts/test.d/` (each under 600 lines) and checks accepted proofs, textual imports, lemma application, structured results,
 frames, defaults, direct and mutual recursive termination, lexicographic and structural recursion,
 finite collection quantifiers, pure-call defaults, transitive and mutually recursive pure contract calls, assignment/declaration evaluation order, and rejected proof, lemma,
 self-assertion, circular-summary, recursive-lemma, nested-call-state, shadowing, contract-call,
