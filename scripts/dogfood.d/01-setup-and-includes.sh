@@ -88,7 +88,17 @@ ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" ELISA_PROOF_PROD
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 
 REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-dogfood.XXXXXX")"
-trap 'rm -rf "$REPORT_DIR"' EXIT
+PROBE_PREFETCH_PID=""
+trap '[[ -n "$PROBE_PREFETCH_PID" ]] && kill "$PROBE_PREFETCH_PID" 2>/dev/null; rm -rf "$REPORT_DIR"' EXIT
+# ELISA_PROOF_JOBS>1 runs both verifier runs of every literal run_probe line in parallel first;
+# run_probe then reads those stored runs in its usual order (scripts/prefetch_probes.py).
+PROBE_CACHE=""
+if [[ "${ELISA_PROOF_JOBS:-1}" -gt 1 ]]; then
+    PROBE_CACHE="$REPORT_DIR/probe-cache"
+    mkdir -p "$PROBE_CACHE"
+    python3 "$ROOT_DIR/scripts/prefetch_probes.py" "$ROOT_DIR/scripts/dogfood.sh" "$ROOT_DIR/build/elisa-proof" "$PROBE_CACHE" "$ROOT_DIR" "$ELISA_PROOF_JOBS" &
+    PROBE_PREFETCH_PID=$!
+fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
 PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$REPORT_DIR/profile-hooks.o}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
@@ -103,24 +113,43 @@ link_native() {
     clang "${ELISA_DEAD_STRIP_LINK[@]}" -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
 }
 
+# One verifier run of run_probe (run 1, or run 2 for the determinism repeat) into `output`, read
+# from the prefetch when it stored that run. Sets probe_status to the verifier's exit status.
+probe_verifier_run() {
+    local label="$1" source="$2" run="$3" output="$4" entry=""
+    if [[ -n "$PROBE_CACHE" ]]; then
+        entry="$PROBE_CACHE/$label.$run"
+        while [[ -f "$PROBE_CACHE/$label.pending" && ! -f "$entry.rc" ]] && kill -0 "$PROBE_PREFETCH_PID" 2>/dev/null; do
+            sleep 0.1  # poll-ok: local file from our own prefetcher
+        done
+    fi
+    if [[ -n "$entry" && -f "$entry.rc" ]]; then
+        cat "$entry.err" >&2
+        cp "$entry.json" "$output"
+        probe_status="$(<"$entry.rc")"
+        set -e
+        return 0
+    fi
+    set +e
+    "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/$source" >"$output"
+    probe_status=$?
+    set -e
+}
+
 run_probe() {
     local label="$1"
     local source="$2"
     local expected_status="$3"
     local output="$REPORT_DIR/$label.json"
     local repeat_output="$REPORT_DIR/$label.repeat.json"
-    set +e
-    "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/$source" >"$output"
-    local actual_status=$?
-    set -e
+    probe_verifier_run "$label" "$source" 1 "$output"
+    local actual_status="$probe_status"
     if [[ "$actual_status" -ne "$expected_status" ]]; then
         printf 'dogfood failed: %s exited %s (expected %s)\n' "$label" "$actual_status" "$expected_status" >&2
         return 1
     fi
-    set +e
-    "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/$source" >"$repeat_output"
-    local repeat_status=$?
-    set -e
+    probe_verifier_run "$label" "$source" 2 "$repeat_output"
+    local repeat_status="$probe_status"
     if [[ "$repeat_status" -ne "$expected_status" ]]; then
         printf 'dogfood failed: %s changed exit status on repeat (%s vs %s)\n' "$label" "$repeat_status" "$expected_status" >&2
         return 1
