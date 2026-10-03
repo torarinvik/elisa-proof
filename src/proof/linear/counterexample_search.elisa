@@ -166,8 +166,8 @@ extend ElisaProof:
             return false
 
         # Counterexample assignments are user-facing semantic claims, unlike heuristic proof
-        # search. Restrict them to atomic scalar comparisons: the evaluator stores every value in
-        # i64 and cannot model narrower-width wrapping or overloaded operations on computed terms.
+        # search. Restrict them to atomic scalar comparisons: i64 holds raw machine bits,
+        # but computed wrapping terms and overloaded operations are not modeled here.
         # Source-constant equalities are the sole exception to requiring a primitive marker: their
         # exact immutable declaration and integer value are independently recorded as a trace.
         def proof_counterexample_integer_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
@@ -259,21 +259,21 @@ extend ElisaProof:
                 return if candidates[index] == value
             candidates.push(value)
 
-        def proof_counterexample_search(index: usize, names: darray[sview]&, values: mutable darray[i64]&, starts: darray[usize]&, counts: darray[usize]&, candidates: darray[i64]&, facts: darray[Ast::Expr]&, goal: Ast::Expr, budget: mutable usize&) -> bool:
+        def proof_counterexample_search(index: usize, names: darray[sview]&, values: mutable darray[i64]&, starts: darray[usize]&, counts: darray[usize]&, candidates: darray[i64]&, facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&) -> bool:
             if index == names.count:
                 return false if budget == 0
                 budget <- budget - 1
-                for fact in facts |fact, names, values|:
-                    fact_value: (known: bool, value: bool) = proof_counterexample_bool(fact, names, values, facts)
+                for fact in facts |fact, names, values, annotations|:
+                    fact_value: (known: bool, value: bool) = proof_counterexample_machine_bool(fact, names, values, facts, annotations, 0)
                     return false if not fact_value.known or not fact_value.value
-                goal_value: (known: bool, value: bool) = proof_counterexample_bool(goal, names, values, facts)
+                goal_value: (known: bool, value: bool) = proof_counterexample_machine_bool(goal, names, values, facts, annotations, 0)
                 return goal_value.known and not goal_value.value
             start: usize = starts[index]
             end: usize = start + counts[index]
             candidate_index: mutable usize = start
-            while candidate_index < end |candidate_index, end, candidates, values, index, names, starts, counts, facts, goal, budget|:
+            while candidate_index < end |candidate_index, end, candidates, values, index, names, starts, counts, facts, goal, annotations, budget|:
                 values[index] <- candidates[candidate_index]
-                return true if proof_counterexample_search(index + 1, names, values, starts, counts, candidates, facts, goal, budget)
+                return true if proof_counterexample_search(index + 1, names, values, starts, counts, candidates, facts, goal, annotations, budget)
                 candidate_index <- candidate_index + 1
             return false
 
@@ -296,7 +296,12 @@ extend ElisaProof:
             counts: mutable darray[usize] = []
             candidates: mutable darray[i64] = []
             for name in names |name, starts, counts, candidates, bounds|:
-                bound: ProofBound = proof_bound_for(bounds, name)
+                bound: mutable ProofBound = proof_bound_for(bounds, name)
+                # Signed interval pruning must not discard high-bit unsigned candidates.
+                # Declared machine ranges and every premise are checked at the leaf.
+                if proof_unsigned_marker_width_for_name(facts, name) != 0:
+                    bound.has_lower <- false
+                    bound.has_upper <- false
                 start: usize = candidates.count
                 proof_counterexample_add_candidate(&candidates, start, bound, 0)
                 proof_counterexample_add_candidate(&candidates, start, bound, 1)
@@ -309,7 +314,7 @@ extend ElisaProof:
             values: mutable darray[i64] = []
             values.resize(names.count)
             budget: mutable usize = PROOF_GOAL_COUNTEREXAMPLE_BUDGET
-            found: bool = proof_counterexample_search(0, names, &values, starts, counts, candidates, facts, goal, &budget)
+            found: bool = proof_counterexample_search(0, names, &values, starts, counts, candidates, facts, goal, report.source_annotations, &budget)
             return false if not found
             position: Ast::Pos = Ast::expr_pos(goal)
             for index in 0..<names.count |index, names, values, assignments, position|:
