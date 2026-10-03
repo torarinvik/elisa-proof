@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Part 3 of scripts/dogfood.sh; sourced in order by it, never run alone.
+# Part 4 of scripts/dogfood.sh; sourced in order by it, never run alone.
 python3 - "$REPORT_DIR/region_lend_calls.json" "$REPORT_DIR/rejected_region_lend_calls.json" <<'PY'
 import json
 import sys

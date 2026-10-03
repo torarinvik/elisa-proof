@@ -78,18 +78,27 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
     RUNTIME_OBJ="${HOME}/.elisac/elisacore_runtime.o"
 fi
 
-ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" "$ROOT_DIR/scripts/build.sh"
 # The portable checker links only the kernel and the package reader; build it with the same
-# compiler so the self-audit packages below replay outside the tool that produced them.
-ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" ELISA_PROOF_MAIN=src/replay_main.elisa \
-    ELISA_PROOF_OUTPUT="$ROOT_DIR/build/elisa-proof-replay" "$ROOT_DIR/scripts/build.sh"
+# compiler, in the same call, so the self-audit packages below replay outside the tool that
+# produced them.
+ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" ELISA_PROOF_PRODUCTS=all "$ROOT_DIR/scripts/build.sh"
 # build.sh has just refreshed the snapshot; the executable harnesses below that
 # include compiler sources must compile from the same pinned export.
 # shellcheck source=scripts/compiler_snapshot.sh
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 
 REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-dogfood.XXXXXX")"
-trap 'rm -rf "$REPORT_DIR"' EXIT
+PROBE_PREFETCH_PID=""
+trap '[[ -n "$PROBE_PREFETCH_PID" ]] && kill "$PROBE_PREFETCH_PID" 2>/dev/null; rm -rf "$REPORT_DIR"' EXIT
+# ELISA_PROOF_JOBS>1 runs both verifier runs of every literal run_probe line in parallel first;
+# run_probe then reads those stored runs in its usual order (scripts/prefetch_probes.py).
+PROBE_CACHE=""
+if [[ "${ELISA_PROOF_JOBS:-1}" -gt 1 ]]; then
+    PROBE_CACHE="$REPORT_DIR/probe-cache"
+    mkdir -p "$PROBE_CACHE"
+    python3 "$ROOT_DIR/scripts/prefetch_probes.py" "$ROOT_DIR/scripts/dogfood.sh" "$ROOT_DIR/build/elisa-proof" "$PROBE_CACHE" "$ROOT_DIR" "$ELISA_PROOF_JOBS" &
+    PROBE_PREFETCH_PID=$!
+fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
 PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$REPORT_DIR/profile-hooks.o}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
@@ -101,7 +110,30 @@ clang -c -O2 -o "$PROFILE_HOOKS_OBJ" "$PROFILE_HOOKS_SOURCE"
 link_native() {
     local output="$1"
     shift
-    clang "${ELISA_DEAD_STRIP_LINK[@]}" -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
+    elisa_link_native "$REPORT_DIR" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
+}
+
+# One verifier run of run_probe (run 1, or run 2 for the determinism repeat) into `output`, read
+# from the prefetch when it stored that run. Sets probe_status to the verifier's exit status.
+probe_verifier_run() {
+    local label="$1" source="$2" run="$3" output="$4" entry=""
+    if [[ -n "$PROBE_CACHE" ]]; then
+        entry="$PROBE_CACHE/$label.$run"
+        while [[ -f "$PROBE_CACHE/$label.pending" && ! -f "$entry.rc" ]] && kill -0 "$PROBE_PREFETCH_PID" 2>/dev/null; do
+            sleep 0.1  # poll-ok: local file from our own prefetcher
+        done
+    fi
+    if [[ -n "$entry" && -f "$entry.rc" ]]; then
+        cat "$entry.err" >&2
+        cp "$entry.json" "$output"
+        probe_status="$(<"$entry.rc")"
+        set -e
+        return 0
+    fi
+    set +e
+    "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/$source" >"$output"
+    probe_status=$?
+    set -e
 }
 
 run_probe() {
@@ -110,18 +142,14 @@ run_probe() {
     local expected_status="$3"
     local output="$REPORT_DIR/$label.json"
     local repeat_output="$REPORT_DIR/$label.repeat.json"
-    set +e
-    "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/$source" >"$output"
-    local actual_status=$?
-    set -e
+    probe_verifier_run "$label" "$source" 1 "$output"
+    local actual_status="$probe_status"
     if [[ "$actual_status" -ne "$expected_status" ]]; then
         printf 'dogfood failed: %s exited %s (expected %s)\n' "$label" "$actual_status" "$expected_status" >&2
         return 1
     fi
-    set +e
-    "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/$source" >"$repeat_output"
-    local repeat_status=$?
-    set -e
+    probe_verifier_run "$label" "$source" 2 "$repeat_output"
+    local repeat_status="$probe_status"
     if [[ "$repeat_status" -ne "$expected_status" ]]; then
         printf 'dogfood failed: %s changed exit status on repeat (%s vs %s)\n' "$label" "$repeat_status" "$expected_status" >&2
         return 1
@@ -508,91 +536,3 @@ assert report["summary"]["semantic_errors"] == 0
 assert report["replay"]["gaps"] == 0
 print("dogfood include_stale_pwd: compiler and prover ignore stale PWD metadata")
 PY
-run_probe rejected_float_reflexivity examples/rejected_float_reflexivity.elisa 1
-run_probe rejected_float_alias examples/rejected_float_alias.elisa 1
-run_probe rejected_float_field examples/rejected_float_field.elisa 1
-run_probe rejected_float_enum examples/rejected_float_enum.elisa 1
-run_probe rejected_float_expression examples/rejected_float_expression.elisa 1
-run_probe float_opaque_guard examples/float_opaque_guard.elisa 0
-run_probe rejected_float_le_guard examples/rejected_float_le_guard.elisa 1
-run_probe rejected_float_nan_order examples/rejected_float_nan_order.elisa 1
-run_probe integer_alias examples/integer_alias.elisa 0
-run_probe unsigned_alias examples/unsigned_alias.elisa 0
-run_probe rejected_unsigned_alias examples/rejected_unsigned_alias.elisa 1
-run_probe unsigned_refinement examples/unsigned_refinement.elisa 0
-run_probe rejected_unsigned_refinement examples/rejected_unsigned_refinement.elisa 1
-run_probe refinement_alias_contracts examples/refinement_alias_contracts.elisa 0
-run_probe rejected_refinement_alias_argument examples/rejected_refinement_alias_argument.elisa 1
-run_probe unsigned_fact_safety examples/unsigned_fact_safety.elisa 0
-run_probe rejected_unsigned_fact_explosion examples/rejected_unsigned_fact_explosion.elisa 1
-python3 - "$REPORT_DIR/rejected_unsigned_fact_explosion.json" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    report = json.load(handle)
-assert report["summary"]["semantic_errors"] == 0
-assert report["summary"]["proven"] == 2
-assert {(f["name"], f["kind"]) for f in report["findings"]} == {
-    ("unsigned_fact_explosion", "ensure-unproven"),
-    ("unsigned_subtraction_explosion", "ensure-unproven"),
-}
-PY
-run_probe unsigned_local examples/unsigned_local.elisa 0
-run_probe rejected_unsigned_local examples/rejected_unsigned_local.elisa 1
-run_probe rejected_unsigned_local_states examples/rejected_unsigned_local_states.elisa 1
-run_probe unsigned_constant_in_range examples/unsigned_constant_in_range.elisa 0
-run_probe rejected_unsigned_constant examples/rejected_unsigned_constant_overflow.elisa 1
-run_probe rejected_unsigned_local_constant examples/rejected_unsigned_local_constant_overflow.elisa 1
-
-# Unsigned locals stay symbolic with their compiler width. Every arithmetic goal in
-# the rejected fixtures is false under wrapping, stale after a rebinding, or leaks a
-# shadowed symbol's facts; none may prove or certify. Only the per-function
-# resource-safety obligations, which carry no arithmetic, are admitted.
-python3 - "$REPORT_DIR/unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local.json" "$REPORT_DIR/rejected_unsigned_local_states.json" "$REPORT_DIR/unsigned_constant_in_range.json" "$REPORT_DIR/rejected_unsigned_constant.json" "$REPORT_DIR/rejected_unsigned_local_constant.json" <<'PY'
-import json
-import sys
-
-accepted, *rejected = sys.argv[1:4]
-with open(accepted, encoding="utf-8") as handle:
-    report = json.load(handle)
-assert report["status"] == "proved"
-assert report["summary"]["proven"] == report["summary"]["obligations"] == 16
-assert report["findings"] == []
-for path in rejected:
-    with open(path, encoding="utf-8") as handle:
-        report = json.load(handle)
-    if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0:
-        raise SystemExit("dogfood failed: unsigned local fixture did not fail cleanly")
-    arithmetic_goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]
-    if not arithmetic_goals or any(goal["proven"] for goal in arithmetic_goals):
-        raise SystemExit("dogfood failed: an unsigned local goal was proven under erased semantics")
-    if report["replay"]["certificates"] != len(report["goals"]) - len(arithmetic_goals):
-        raise SystemExit("dogfood failed: unsigned local fixture certified an arithmetic goal")
-
-with open(sys.argv[4], encoding="utf-8") as handle:
-    report = json.load(handle)
-assert report["status"] == "proved"
-assert report["summary"]["semantic_errors"] == 0
-
-for path in sys.argv[5:]:
-    with open(path, encoding="utf-8") as handle:
-        report = json.load(handle)
-    if report["status"] != "failed" or report["replay"]["gaps"] != 0:
-        raise SystemExit("dogfood failed: unsigned constant overflow fixture did not fail cleanly")
-    arithmetic_goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]
-    if not arithmetic_goals or any(goal["proven"] for goal in arithmetic_goals):
-        raise SystemExit("dogfood failed: an unsigned constant overflow goal was proven")
-PY
-
-# This fixture intentionally contains unsupported surface around the standalone replay module.
-# A non-zero command verdict is expected, but every certificate it does emit must replay.
-run_probe replay_standalone examples/kernel_replay_standalone.elisa 1
-run_probe arena_cycle_rejected examples/rejected_kernel_arena_cycle.elisa 1
-run_probe structural_shadowed_subterm examples/structural_shadowed_subterm.elisa 0
-run_probe rejected_match_shadow_fact examples/rejected_match_shadow_fact.elisa 1
-run_probe borrow_four_nested_fields examples/borrow_four_nested_fields.elisa 0
-run_probe rejected_borrow_four_nested_alias examples/rejected_borrow_four_nested_alias.elisa 1
-run_probe borrow_indexed_places examples/borrow_indexed_places.elisa 0
-run_probe rejected_borrow_index_alias examples/rejected_borrow_index_alias.elisa 1
-run_probe rejected_borrow_after_move examples/rejected_borrow_after_move.elisa 1

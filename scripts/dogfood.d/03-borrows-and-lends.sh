@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Part 2 of scripts/dogfood.sh; sourced in order by it, never run alone.
+# Part 3 of scripts/dogfood.sh; sourced in order by it, never run alone.
 run_probe rejected_negative_affine_difference examples/rejected_negative_affine_difference.elisa 1
 run_probe rejected_negative_affine_goal examples/rejected_negative_affine_goal.elisa 1
 run_probe rejected_borrow_call_duplicate_alias examples/rejected_borrow_call_duplicate_alias.elisa 1
@@ -404,7 +404,7 @@ refused = {
     "unrelated_operand",
     "distinct_former",
     "struct_equality_premise",
-    "indexed_element",
+    "local_struct_equality_premise",
     "constructed_aggregate",
     "call_congruence",
     "cross_width",
@@ -415,6 +415,9 @@ if refused & claimed:
     raise SystemExit("dogfood failed: congruence admitted %s" % sorted(refused & claimed))
 if refused - {finding["name"] for finding in report["findings"]}:
     raise SystemExit("dogfood failed: an adversarial congruence goal produced no diagnostic")
+# Builtin fixed-array indexing carries scalar witnesses (101a785), so this one proves by design.
+if "indexed_element" not in claimed:
+    raise SystemExit("dogfood failed: witnessed indexed congruence no longer proves")
 PY
 
 # A comparison concluded from two terms denoting the same value needs both operands witnessed as

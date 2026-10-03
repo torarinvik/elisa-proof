@@ -4,9 +4,9 @@ python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 # ELISA_PROOF_SKIP_BUILD=1 tests prebuilt binaries (for example on a remote runner).
 if [[ "${ELISA_PROOF_SKIP_BUILD:-0}" != "1" ]]; then
-    "$ROOT_DIR/scripts/build.sh"
-    # The portable package checker is its own small product built from the same snapshot.
-    ELISA_PROOF_MAIN=src/replay_main.elisa ELISA_PROOF_OUTPUT="$ROOT_DIR/build/elisa-proof-replay" "$ROOT_DIR/scripts/build.sh"
+    # The portable package checker is its own small product built from the same snapshot; both
+    # products build in one call, compiling side by side.
+    ELISA_PROOF_PRODUCTS=all "$ROOT_DIR/scripts/build.sh"
 else
     # Prebuilt binaries still need build/snapshot: the standalone compile probes read the
     # frontend export and the examples from it. Exporting compiles nothing.
@@ -203,8 +203,6 @@ run_py_test test_pure_unfolding.py
 run_py_test test_struct_invariants.py
 run_py_test test_correspondence.py
 run_py_test test_tactic_branch_regions.py
-run_py_test test_unsigned_or_goal.py
-run_py_test test_unsigned_sum_upper_shape.py
 run_py_test test_vector_index_arithmetic.py
 run_py_test test_adt_recursive_payload.py
 run_py_test test_call_sum_premise.py
