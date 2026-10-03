@@ -1,15 +1,5 @@
 # shellcheck shell=bash
 # Part 2 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
-for replay_fixture in replay_constant loop_accumulator arithmetic_identity equality_alias congruence summary_swapped_arguments quantifier collection_quantifier quantifier_structural_terms expression_witness call_stable_facts shared_borrow_calls writable_lend_calls region_lend_calls region_call_summary condition_call_positions product_sign frame_lifetime difference_constraints disjunctive_facts modulo_division_bounds proof_step_derivation pattern_proof pattern_or pinned_pattern pattern_scalar_literals total_match value_match value_match_nested_pure_call bounded_model loop_range_facts for_invariant for_loop_control_invariant indexed_frame slice_bounds indexn_kernel indexn_call_summary pure_index_call index_call_summary slice_call_summary fixed_array_bounds fixed_array_fields nested_call_kept_values literal_index disjunctive_goals leaving_branch_join pass_statement counting_loop_measure fixed_array_slice_bounds checked_index_fallback getelse_recovery getelse_checked_index getelse_call getelse_loop_control getelse_raise catch_expression catch_nested_pure_arm_call loop_control_invariant continue_decreases continue_decreases_branch shorthand_member constructor_kernel dogfood_kernel region_allocation region_statement region_auto_close region_new_call_argument region_new_mutable_call_argument unsigned_alias resource_nested_scalar_call body_ensures contract_placement replay_qualified_constant_argument conditional_join; do
-    run_json_report "$ROOT_DIR/examples/$replay_fixture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0'
-    replay_probe_status=$?
-    if [[ "$replay_probe_status" -ne 0 ]]; then
-        printf 'proof test matrix failed: replay coverage for %s\n' "$replay_fixture" >&2
-        exit 1
-    fi
-done
-run_json_report "$ROOT_DIR/examples/region_allocation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert "resource-region-open" in kinds and "resource-region-alloc" in kinds and "resource-region-bind" in kinds and "resource-region-alloc-discard" in kinds and "resource-region-close" in kinds'
-region_allocation_probe_status=${PIPESTATUS[1]}
 if [[ "$region_allocation_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: new[r] allocation/binding/discard transitions were not replayed\n' >&2
     exit 1
@@ -584,3 +574,25 @@ if [[ "$rejected_getelse_recovery_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: falling-through get-else recovery was not rejected\n' >&2
     exit 1
 fi
+run_json_report "$ROOT_DIR/examples/conditional_proof.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["obligations"] == 6; assert report["summary"]["proven"] == 6; assert report["replay"]["gaps"] == 0'
+conditional_probe_status=${PIPESTATUS[1]}
+if [[ "$conditional_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: conditional postcondition case elimination\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_conditional_proof.elisa" >/tmp/elisa-proof-rejected-conditional.json
+rejected_conditional_status=$?
+if [[ "$rejected_conditional_status" -ne 1 ]]; then
+    printf 'proof test matrix failed: false conditional postcondition was accepted\n' >&2
+    exit 1
+fi
+
+run_json_report "$ROOT_DIR/examples/implicit_structural_decreases.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'
+implicit_structural_status=${PIPESTATUS[1]}
+if [[ "$implicit_structural_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: implicit structural termination\n' >&2
+    exit 1
+fi
+

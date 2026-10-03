@@ -1,0 +1,146 @@
+# Statements whose value is an if-expression with calls, checked as the `if` they denote.
+extend ElisaProof:
+    private:
+        # `x: T = A if c else B`, `t <- A if c else B` (with `t` a bare name) and
+        # `return A if c else B` evaluate `c` and then exactly one arm. When the condition or an
+        # arm holds a call other than an integer conversion, the if-expression cannot enter the
+        # proof state as a term: the call may not run, so instantiating its summary would assume
+        # its `ensure`s on a path where its `requires` were never checked. The statement is
+        # rewritten instead to the control flow it denotes, with the rest of the block as the
+        # continuation of each arm:
+        #
+        #     S[A if c else B]; rest   ==>   if c: S[A]; rest   else: S[B]; rest
+        #
+        # Both sides evaluate `c` once, then exactly one of `A` and `B`, then `rest`, so they have
+        # the same paths and the same state at every point; a binding `S` introduces stays in
+        # scope for `rest` because `rest` runs in the same arm. Each arm is checked by the
+        # ordinary `if` rule and passes every statement gate on its own, so a call in `c`, `A`
+        # or `B` is treated exactly as the same program written with statements: its `requires`
+        # are checked on the path that runs it and nothing about it is assumed on the path that
+        # skips it. An assignment target must be a bare name, so evaluating it has no effect the
+        # reordering could move. Conversion-only arms are already admitted as a term and are left
+        # alone. A tail expression is already a `return` in the AST, so it is covered, and an
+        # expression statement is split the same way. An if-expression nested inside the value
+        # is split only under the conditions of `proof_nested_conditional_value`. The
+        # continuation is duplicated, so a block with many such statements can spend the
+        # return-analysis budget; that is reported as a refusal like any other budget overrun.
+        def proof_split_conditional_value(body: darray[Ast::Stmt]&) -> (known: bool, body: darray[Ast::Stmt]) can[Memory.Allocate, Abort.Panic]:
+            split: mutable darray[Ast::Stmt] = []
+            for index in 0..<body.count |index, body, split|:
+                arms: (known: bool, condition: Ast::Expr, then_statement: Ast::Stmt, else_statement: Ast::Stmt, position: Ast::Pos) = proof_conditional_value_arms(body[index])
+                if arms.known:
+                    then_body: mutable darray[Ast::Stmt] = []
+                    else_body: mutable darray[Ast::Stmt] = []
+                    then_body.push(arms.then_statement)
+                    else_body.push(arms.else_statement)
+                    for rest in (index + 1)..<body.count |rest, body, then_body, else_body|:
+                        then_body.push(body[rest])
+                        else_body.push(body[rest])
+                    split.push(Ast::Stmt.If(arms.condition, then_body, else_body, arms.position))
+                    return (true, split)
+                split.push(body[index])
+            return (false, split)
+
+        def proof_conditional_value_arms(statement: Ast::Stmt) -> (known: bool, condition: Ast::Expr, then_statement: Ast::Stmt, else_statement: Ast::Stmt, position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+            match statement:
+                Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                    parts: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_conditional_value_parts(initializer)
+                    return (true, parts.condition, Ast::Stmt.VarDecl(local_name, type_expression, parts.then_value, position), Ast::Stmt.VarDecl(local_name, type_expression, parts.else_value, position), parts.position) if parts.known
+                Ast::Stmt.Assign(target, operator, initializer, position):
+                    if proof_ident_name(target) != "":
+                        parts: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_conditional_value_parts(initializer)
+                        return (true, parts.condition, Ast::Stmt.Assign(target, operator, parts.then_value, position), Ast::Stmt.Assign(target, operator, parts.else_value, position), parts.position) if parts.known
+                Ast::Stmt.Return(value, position):
+                    if value is returned:
+                        parts: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_conditional_value_parts(returned)
+                        return (true, parts.condition, Ast::Stmt.Return(parts.then_value, position), Ast::Stmt.Return(parts.else_value, position), parts.position) if parts.known
+                Ast::Stmt.Expr(expression, position):
+                    parts: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_conditional_value_parts(expression)
+                    return (true, parts.condition, Ast::Stmt.Expr(parts.then_value, position), Ast::Stmt.Expr(parts.else_value, position), parts.position) if parts.known
+                _:
+                    pass
+            return (false, Ast::Expr.Invalid, Ast::Stmt.Invalid, Ast::Stmt.Invalid, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+
+        def proof_conditional_value_parts(expression: Ast::Expr) -> (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+            match proof_strip_parens(expression):
+                Ast::Expr.If(condition, then_value, else_value, position):
+                    admitted_as_term: bool = proof_expr_calls_are_conversions(condition, 0) and proof_expr_calls_are_conversions(then_value, 0) and proof_expr_calls_are_conversions(else_value, 0)
+                    return (true, condition, then_value, else_value, position) if not admitted_as_term
+                _:
+                    pass
+            return proof_nested_conditional_value(expression, 0)
+
+        # An if-expression nested inside a statement's value, `S[C[A if c else B]]`, is split to
+        # `if c: S[C[A]] else: S[C[B]]` only when that moves nothing observable. The split
+        # evaluates `c` before the rest of `C`, so `c` must be call-free (integer conversions
+        # aside): reading it earlier then cannot run anything. Every subterm `C` evaluates before
+        # the if-expression must be call-free too, so nothing that runs first could change what
+        # `c` reads; terms evaluated after it are evaluated after the chosen arm in both forms.
+        # The path to the if-expression may pass only through strict nodes -- calls, parentheses,
+        # field and index reads, tuples, unary operators and binary operators that always
+        # evaluate both sides -- so `c` is evaluated on exactly the paths that evaluated it
+        # before. `and`, `or`, `|>`, other if-expressions, matches, blocks and lambdas stop the
+        # search, and their statements still meet the gate.
+        def proof_nested_conditional_value(expression: Ast::Expr, depth: usize) -> (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+            none: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = (false, Ast::Expr.Invalid, Ast::Expr.Invalid, Ast::Expr.Invalid, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+            return none if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.If(condition, then_value, else_value, position):
+                    return none if not proof_expr_calls_are_conversions(condition, 0)
+                    return none if proof_expr_calls_are_conversions(then_value, 0) and proof_expr_calls_are_conversions(else_value, 0)
+                    return (true, condition, then_value, else_value, position)
+                Ast::Expr.Paren(inner, position):
+                    found: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(inner, depth + 1)
+                    return (true, found.condition, Ast::Expr.Paren(found.then_value, position), Ast::Expr.Paren(found.else_value, position), found.position) if found.known
+                Ast::Expr.Unary(operator, operand, position):
+                    found: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(operand, depth + 1)
+                    return (true, found.condition, Ast::Expr.Unary(operator, found.then_value, position), Ast::Expr.Unary(operator, found.else_value, position), found.position) if found.known
+                Ast::Expr.Field(object, field, position):
+                    found: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(object, depth + 1)
+                    return (true, found.condition, Ast::Expr.Field(found.then_value, field, position), Ast::Expr.Field(found.else_value, field, position), found.position) if found.known
+                Ast::Expr.Binary(left, operator, right, position):
+                    return none if not proof_nested_conditional_strict_operator(operator)
+                    found_left: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(left, depth + 1)
+                    return (true, found_left.condition, Ast::Expr.Binary(found_left.then_value, operator, right, position), Ast::Expr.Binary(found_left.else_value, operator, right, position), found_left.position) if found_left.known
+                    return none if not proof_expr_calls_are_conversions(left, 0)
+                    found_right: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(right, depth + 1)
+                    return (true, found_right.condition, Ast::Expr.Binary(left, operator, found_right.then_value, position), Ast::Expr.Binary(left, operator, found_right.else_value, position), found_right.position) if found_right.known
+                Ast::Expr.Index(object, index, position):
+                    found_object: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(object, depth + 1)
+                    return (true, found_object.condition, Ast::Expr.Index(found_object.then_value, index, position), Ast::Expr.Index(found_object.else_value, index, position), found_object.position) if found_object.known
+                    return none if not proof_expr_calls_are_conversions(object, 0)
+                    found_index: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(index, depth + 1)
+                    return (true, found_index.condition, Ast::Expr.Index(object, found_index.then_value, position), Ast::Expr.Index(object, found_index.else_value, position), found_index.position) if found_index.known
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    # The callee term (a method receiver included) is evaluated before the
+                    # arguments, and it must be call-free (conversions aside) to be passed over.
+                    return none if not proof_expr_calls_are_conversions(callee, 0)
+                    for index in 0..<arguments.count |index, arguments, argument_names, callee, position, depth|:
+                        found: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(arguments[index], depth + 1)
+                        if found.known:
+                            then_arguments: mutable darray[Ast::Expr] = []
+                            else_arguments: mutable darray[Ast::Expr] = []
+                            then_arguments.extend(arguments)
+                            else_arguments.extend(arguments)
+                            then_arguments[index] <- found.then_value
+                            else_arguments[index] <- found.else_value
+                            return (true, found.condition, Ast::Expr.Call(callee, then_arguments, argument_names, position), Ast::Expr.Call(callee, else_arguments, argument_names, position), found.position)
+                        return none if not proof_expr_calls_are_conversions(arguments[index], 0)
+                Ast::Expr.Tuple(elements, position):
+                    for index in 0..<elements.count |index, elements, position, depth|:
+                        found: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(elements[index], depth + 1)
+                        if found.known:
+                            then_elements: mutable darray[Ast::Expr] = []
+                            else_elements: mutable darray[Ast::Expr] = []
+                            then_elements.extend(elements)
+                            else_elements.extend(elements)
+                            then_elements[index] <- found.then_value
+                            else_elements[index] <- found.else_value
+                            return (true, found.condition, Ast::Expr.Tuple(then_elements, position), Ast::Expr.Tuple(else_elements, position), found.position)
+                        return none if not proof_expr_calls_are_conversions(elements[index], 0)
+                _:
+                    pass
+            return none
+
+        def proof_nested_conditional_strict_operator(operator: TokenKind) -> bool:
+            return operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.EqEq or operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt or operator == TokenKind.LtEq or operator == TokenKind.GtEq or operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret or operator == TokenKind.LShift or operator == TokenKind.RShift

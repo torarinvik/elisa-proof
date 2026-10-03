@@ -582,3 +582,17 @@ for path in sys.argv[5:]:
         raise SystemExit("dogfood failed: an unsigned constant overflow goal was proven")
 PY
 
+# This fixture intentionally contains unsupported surface around the standalone replay module.
+# A non-zero command verdict is expected, but every certificate it does emit must replay.
+run_probe replay_standalone examples/kernel_replay_standalone.elisa 1
+run_probe arena_cycle_rejected examples/rejected_kernel_arena_cycle.elisa 1
+run_probe structural_shadowed_subterm examples/structural_shadowed_subterm.elisa 0
+run_probe rejected_match_shadow_fact examples/rejected_match_shadow_fact.elisa 1
+run_probe borrow_four_nested_fields examples/borrow_four_nested_fields.elisa 0
+run_probe rejected_borrow_four_nested_alias examples/rejected_borrow_four_nested_alias.elisa 1
+run_probe borrow_indexed_places examples/borrow_indexed_places.elisa 0
+run_probe rejected_borrow_index_alias examples/rejected_borrow_index_alias.elisa 1
+run_probe rejected_borrow_after_move examples/rejected_borrow_after_move.elisa 1
+run_probe rejected_negative_affine_difference examples/rejected_negative_affine_difference.elisa 1
+run_probe rejected_negative_affine_goal examples/rejected_negative_affine_goal.elisa 1
+run_probe rejected_borrow_call_duplicate_alias examples/rejected_borrow_call_duplicate_alias.elisa 1

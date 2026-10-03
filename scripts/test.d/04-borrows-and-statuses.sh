@@ -1,39 +1,5 @@
 # shellcheck shell=bash
 # Part 4 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_mutable_write.elisa" >/dev/null
-borrow_mutable_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_lexical_scope.elisa" >/dev/null
-borrow_lexical_scope_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_disjoint_fields.elisa" >/dev/null
-borrow_disjoint_fields_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_nested_disjoint_fields.elisa" >/dev/null
-borrow_nested_disjoint_fields_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_four_nested_fields.elisa" >/dev/null
-borrow_four_nested_fields_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_four_nested_alias.elisa" >/dev/null
-rejected_borrow_four_nested_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_move_disjoint_field.elisa" >/dev/null
-borrow_move_disjoint_field_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_call_summary.elisa" >/dev/null
-borrow_call_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_indexed_places.elisa" >/dev/null
-borrow_indexed_places_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_multi_indexed_places.elisa" >/dev/null
-borrow_multi_indexed_places_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_dynamic_whole_root.elisa" >/dev/null
-borrow_dynamic_whole_root_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_dynamic_multi_whole_root.elisa" >/dev/null
-borrow_dynamic_multi_whole_root_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_symbolic_disjoint.elisa" >/dev/null
-borrow_symbolic_disjoint_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_symbolic_alias.elisa" >/dev/null
-rejected_borrow_symbolic_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_nested_expression.elisa" >/dev/null
-borrow_nested_expression_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_reference_return_summary.elisa" >/dev/null
-borrow_reference_return_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/value_match_pure_call.elisa" >/dev/null
-value_match_pure_call_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/value_match_named_payload.elisa" >/dev/null
 value_match_named_payload_status=$?
 "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/catch_pure_arm_call.elisa" >/dev/null
@@ -584,3 +550,38 @@ focused_open_goal_json_status=${focused_open_goal_statuses[1]}
 focused_proved_goal_statuses=("${PIPESTATUS[@]}")
 focused_proved_goal_status=${focused_proved_goal_statuses[0]}
 focused_proved_goal_json_status=${focused_proved_goal_statuses[1]}
+"$ROOT_DIR/build/elisa-proof" --goal 999999 "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["status"] == "not_found"; assert goal["goal"] is None; assert goal["failure"] is None'
+focused_missing_goal_statuses=("${PIPESTATUS[@]}")
+focused_missing_goal_status=${focused_missing_goal_statuses[0]}
+focused_missing_goal_json_status=${focused_missing_goal_statuses[1]}
+python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/goal_fingerprint_a.elisa" "$ROOT_DIR/examples/goal_fingerprint_b.elisa" <<'PY'
+import json
+import subprocess
+import sys
+
+first = json.loads(subprocess.check_output([sys.argv[1], "--goal", "1", sys.argv[2]]))
+shifted = json.loads(subprocess.check_output([sys.argv[1], "--goal", "2", sys.argv[3]]))
+assert first["goal_fingerprint"] == shifted["goal_fingerprint"]
+assert first["goal"]["line"] != shifted["goal"]["line"]
+PY
+stable_goal_fingerprint_status=$?
+"$ROOT_DIR/build/elisa-proof" --goal 4294967296 "$ROOT_DIR/examples/verified.elisa" >/dev/null
+focused_overflow_goal_status=$?
+"$ROOT_DIR/build/elisa-proof" --goal -1 "$ROOT_DIR/examples/verified.elisa" >/dev/null
+focused_negative_goal_status=$?
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["format"] == "elisa-proof-theorems-v1"; assert catalog["source"]["complete"] is True; assert [item["name"] for item in catalog["theorems"]] == ["nonnegative", "named_nonnegative"]; assert all(item["verified"] and item["signature_valid"] and item["proof_goals_valid"] and item["proof_replay_complete"] for item in catalog["theorems"]); assert all(theorem["proof_goals"] and all(goal["proven"] and goal["replayed"] and isinstance(goal["certificate_id"], int) for goal in theorem["proof_goals"]) for theorem in catalog["theorems"]); assert catalog["theorems"][0]["parameters"] == ["x"]; assert catalog["theorems"][0]["parameter_types"] == [{"kind": "ident", "name": "i64", "line": 1}]; assert [item["name"] for item in catalog["theorems"][1]["parameter_types"]] == ["i64", "i64"]; assert len(catalog["theorems"][1]["requires"]) == 2; assert len(catalog["theorems"][1]["ensures"]) == 1'
+theorem_catalog_statuses=("${PIPESTATUS[@]}")
+theorem_catalog_status=${theorem_catalog_statuses[0]}
+theorem_catalog_json_status=${theorem_catalog_statuses[1]}
+run_json_report "$ROOT_DIR/examples/lemma.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); traces = [trace for trace in report["kernel"]["fact_traces"] if trace["kind"] == "lemma-summary"]; assert report["status"] == "proved" and report["replay"]["gaps"] == 0; assert [trace["dependency"] for trace in traces] == ["nonnegative", "named_nonnegative"]; assert [len(trace["summary_bindings"]) for trace in traces] == [1, 2]; assert [len(trace["summary_require_goal_ids"]) for trace in traces] == [1, 2]; assert all(trace["summary_ensure_index"] == 0 for trace in traces); goals = report["goals"]; assert all(all(goals[goal_id]["proven"] and goals[goal_id]["replay_status"] == "replayed" for goal_id in trace["summary_require_goal_ids"]) for trace in traces)'
+lemma_summary_provenance_statuses=("${PIPESTATUS[@]}")
+lemma_summary_provenance_status=${lemma_summary_provenance_statuses[0]}
+lemma_summary_provenance_json_status=${lemma_summary_provenance_statuses[1]}
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/rejected_lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["source"]["complete"] is False; assert len(catalog["theorems"]) == 1; theorem = catalog["theorems"][0]; assert theorem["name"] == "unsound"; assert theorem["verified"] is False; assert theorem["verification_reason"] == "body-unverified"; assert theorem["signature_valid"] is True; assert theorem["proof_goals_valid"] is True; assert theorem["proof_replay_complete"] is False; assert any(not goal["proven"] and goal["certificate_id"] is None and not goal["replayed"] for goal in theorem["proof_goals"])'
+rejected_theorem_catalog_statuses=("${PIPESTATUS[@]}")
+rejected_theorem_catalog_status=${rejected_theorem_catalog_statuses[0]}
+rejected_theorem_catalog_json_status=${rejected_theorem_catalog_statuses[1]}
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma_default_catalog.elisa" | python3 -c 'import json, sys; theorem = json.load(sys.stdin)["theorems"][0]; assert theorem["verified"] is True; assert theorem["parameters"] == ["x", "amount"]; assert theorem["parameter_defaults"] == [None, {"kind": "int", "value": 7}]'
+default_theorem_catalog_statuses=("${PIPESTATUS[@]}")
+default_theorem_catalog_status=${default_theorem_catalog_statuses[0]}
+default_theorem_catalog_json_status=${default_theorem_catalog_statuses[1]}

@@ -1,56 +1,5 @@
 # shellcheck shell=bash
 # Part 5 of scripts/dogfood.sh; sourced in order by it, never run alone.
-# A lend that cannot outlive its call does not make the binding reachable later.
-python3 - "$REPORT_DIR/confined_lend_extent.json" "$REPORT_DIR/rejected_confined_lend_extent.json" <<'PY'
-import json
-import sys
-
-kept, escaped = sys.argv[1:]
-with open(kept, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: confined lend fixture did not prove cleanly")
-verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
-for owner in ("a_confined_lend_before_a_loop", "a_shared_lend_before_a_loop", "two_confined_lends"):
-    if owner not in verified:
-        raise SystemExit("dogfood failed: %s forgot a binding whose lend ended with its call" % owner)
-with open(escaped, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "failed" or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: confined lend boundary fixture did not fail cleanly")
-reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("a_leaked_lend_loses_the_extent", "a_returned_lend_loses_it_too", "a_confined_lend_still_writes", "a_lend_inside_the_loop"):
-    if reasons.get(owner) != "body-unverified":
-        raise SystemExit("dogfood failed: %s treated an escaping lend as confined" % owner)
-print("dogfood confined_lend_extent: a lend that ends with its call is not an alias afterwards")
-PY
-
-# The same, at the call inside the loop rather than at the loop head.
-python3 - "$REPORT_DIR/confined_lend_across_calls.json" "$REPORT_DIR/rejected_confined_lend_across_calls.json" <<'PY'
-import json
-import sys
-
-kept, reached = sys.argv[1:]
-with open(kept, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: across-calls fixture did not prove cleanly")
-verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}
-for owner in ("a_call_in_the_body_keeps_the_range", "a_lent_local_in_the_body", "an_element_argument"):
-    if owner not in verified:
-        raise SystemExit("dogfood failed: %s lost a range fact to a call that could not reach it" % owner)
-with open(reached, encoding="utf-8") as handle:
-    report = json.load(handle)
-if report["status"] != "failed" or report["replay"]["gaps"]:
-    raise SystemExit("dogfood failed: across-calls boundary fixture did not fail cleanly")
-reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}
-for owner in ("an_escaping_lend_loses_the_range", "the_body_lends_the_collection", "a_fact_before_the_lend"):
-    if reasons.get(owner) != "body-unverified":
-        raise SystemExit("dogfood failed: %s kept a fact across a call that reaches it" % owner)
-print("dogfood confined_lend_across_calls: a call restores what it could not reach, and no more")
-PY
-
-# An aggregate local from a call keeps its own symbol, so the places under it stay places.
 python3 - "$REPORT_DIR/aggregate_local_symbol.json" "$REPORT_DIR/rejected_aggregate_local_symbol.json" <<'PY'
 import json
 import sys
@@ -178,7 +127,7 @@ with open(dropped, encoding="utf-8") as handle:
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: rejected short-circuit fixture did not fail cleanly")
 kinds = {(finding["name"], finding["kind"]) for finding in report["findings"]}
-expected = {("skipped_call_must_not_establish_and", "ensure-unproven"), ("skipped_call_must_not_establish_or", "ensure-unproven"), ("skipped_call_must_not_establish_a_guard", "ensure-unproven"), ("pre_call_value_must_not_survive", "ensure-unproven"), ("skipped_requires_is_still_checked", "call-requires-unproven")}
+expected = {("skipped_call_must_not_establish_and", "ensure-unproven"), ("skipped_call_must_not_establish_or", "ensure-unproven"), ("skipped_call_must_not_establish_a_guard", "ensure-unproven"), ("pre_call_value_must_not_survive", "ensure-unproven"), ("skipped_requires_is_still_checked", "call-requires-unproven"), ("mutable_left_fact_must_not_survive", "ensure-unproven")}
 if kinds != expected:
     raise SystemExit("dogfood failed: unexpected verdicts around a skipped call: %s" % sorted(kinds ^ expected))
 print("dogfood short_circuit_call: a skipped call is havocked and checked but establishes nothing")
@@ -588,3 +537,62 @@ if [[ -n "$RUNTIME_OBJ" ]]; then
 else
     link_native "$runtime_dir/proposition-admission-runtime" "$runtime_dir/proposition-admission-runtime.o" "$runtime_dir/runtime-support.o"
 fi
+set +e
+"$runtime_dir/proposition-admission-runtime"
+admission_status=$?
+set -e
+if [[ "$admission_status" -ne 0 ]]; then
+    printf 'dogfood failed: native typed proposition-admission suite exited %s\n' "$admission_status" >&2
+    exit 1
+fi
+printf 'dogfood proposition_admission_runtime: abstract atoms, typed source terms, and tactic boundaries passed\n'
+
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/comparison-runtime.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/comparison-runtime"
+printf 'dogfood comparison_runtime: witnessed comparisons, typed negative constants, width-tagged unsigned literals, and every range-quantifier instance checked; unwitnessed reflexivity refused\n'
+
+# Congruence closure is exercised against the kernel directly: every participating former must
+# carry an equality, and every excluded former (call, move, address-of, namespace path, guarded
+# access, quantifier) must refuse to, on both the dedicated rule and full goal replay.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/congruence-runtime.o" "$ROOT_DIR/examples/kernel_congruence_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/congruence-runtime" "$runtime_dir/congruence-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/congruence-runtime"
+printf 'dogfood congruence_runtime: participating formers carried equalities and excluded formers refused\n'
+
+# Propositional fact projection is exercised against the kernel directly: a conjunction entails
+# each conjunct, a negated disjunction entails each negated disjunct, a double negation cancels,
+# and the dual forms - a disjunction, a negated conjunction - must stay refused in both signs.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/projection-runtime.o" "$ROOT_DIR/examples/kernel_projection_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/projection-runtime" "$runtime_dir/projection-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/projection-runtime"
+printf 'dogfood projection_runtime: conjunct and negated-disjunct projection admitted, duals refused\n'
+
+# Declared effect containment is checked against the kernel directly: contained rows admitted,
+# uncontained rows refused, and every malformed effect graph rejected rather than interpreted.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/effect-runtime.o" "$ROOT_DIR/examples/kernel_effect_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/effect-runtime" "$runtime_dir/effect-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/effect-runtime"
+printf 'dogfood effect_runtime: contained rows admitted and uncontained or malformed rows refused\n'
+
+# Bootstrap coverage: compile the runtime with stage0 as well; an installed stage1
+# runtime is not an implicit bootstrap dependency. The reduced resource trace
+# guards the stage0 miscompile of allocations made through an unannotated mutable
+# reference inside a region-polymorphic function (see AUDIT.md); the full arena
+# harness then confirms the whole replay layer under the bootstrap compiler.

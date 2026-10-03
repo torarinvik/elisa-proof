@@ -1,75 +1,5 @@
 # shellcheck shell=bash
 # Part 6 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
-for tactic_fixture in rejected_u64_max_decide rejected_u8_overflow_decide rejected_u8_overflow_simp; do
-    case "$tactic_fixture" in
-        rejected_u64_max_decide)
-            tactic_source_goal="$REJECTED_U64_MAX_GOAL_ID"
-            tactic_goal_fingerprint="$REJECTED_U64_MAX_GOAL_FINGERPRINT"
-            ;;
-        rejected_u8_overflow_*)
-            tactic_source_goal="$REJECTED_U8_OVERFLOW_GOAL_ID"
-            tactic_goal_fingerprint="$REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT"
-            ;;
-    esac
-    tactic_report="$standalone_probe_dir/$tactic_fixture.json"
-    set +e
-    "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_$tactic_fixture.json" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$tactic_report"
-    tactic_exit=$?
-    set -e
-    if [[ "$tactic_exit" -ne 1 ]] || ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); t=r["tactic"]; binding=r["source_goal_binding"]; assert r["status"] == "failed" and binding["goal_id"] == int(sys.argv[2]); assert binding["fingerprint_match"] is True and binding["goal_fingerprint"]["value"] == int(sys.argv[3]); assert t["valid"] is False and t["solved"] is False; assert t["reason"] == "tactic action outcome contradicted the script'"'"'s expected acceptance" and t["action_count"] == 1 and t["accepted_count"] == 0' "$tactic_report" "$tactic_source_goal" "$tactic_goal_fingerprint"; then
-        printf 'proof test matrix failed: unsound unsigned tactic proof was accepted (%s)\n' "$tactic_fixture" >&2
-        exit 1
-    fi
-    # The same action declared as refused must be a well-formed script that runs the tactic and
-    # observes the refusal, so the rejection above cannot come from a malformed document.
-    refused_script="$standalone_probe_dir/$tactic_fixture.refused.json"
-    python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); [a.__setitem__("accepted", False) for a in s["actions"]]; json.dump(s, open(sys.argv[2], "w"))' "$ROOT_DIR/examples/tactic_script_$tactic_fixture.json" "$refused_script"
-    refused_report="$standalone_probe_dir/$tactic_fixture.refused.report.json"
-    set +e
-    "$ROOT_DIR/build/elisa-proof" --tactics "$refused_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$refused_report"
-    refused_exit=$?
-    set -e
-    if [[ "$refused_exit" -ne 1 ]] || ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); t=r["tactic"]; assert r["status"] == "failed"; assert t["valid"] is True and t["solved"] is False; assert t["action_count"] == 1 and t["accepted_count"] == 0' "$refused_report"; then
-        printf 'proof test matrix failed: unsigned tactic refusal was not observed as a refused action (%s)\n' "$tactic_fixture" >&2
-        exit 1
-    fi
-done
-
-# A `u64`/`usize` literal above the i64 range keeps its recorded type through proof search, the
-# kernel arena and replay: true orderings prove and replay, the orderings its wrapped payload
-# would satisfy under signed order stay refused, and no refusal claims a counterexample.
-set +e
-run_json_report "$ROOT_DIR/examples/typed_unsigned_literals.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["verification_state"] == "unknown"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; proved = {"u64_max_exceeds_zero", "u64_max_equals_itself", "u64_max_exceeds_high_bit", "usize_high_bit_at_least_small"}; refused = {"u64_max_is_not_below_zero", "u64_high_bit_is_not_below_max", "u64_max_is_not_zero", "untyped_wrapped_literal_is_not_ordered"}; assert all(functions[name]["verified"] for name in proved); assert not any(functions[name]["verified"] for name in refused); findings = {f["name"]: f for f in report["findings"] if f["kind"] == "ensure-unproven"}; assert set(findings) == refused; assert all(f["status"] == "unknown" and not f["counterexample_found"] for f in findings.values())'
-typed_unsigned_status=${PIPESTATUS[1]}
-set -e
-if [[ "$typed_unsigned_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: typed high-bit unsigned literal comparison\n' >&2
-    exit 1
-fi
-typed_goal_fingerprint() {
-    "$ROOT_DIR/build/elisa-proof" --goal "$1" "$ROOT_DIR/examples/typed_unsigned_literals.elisa" \
-        | python3 -c 'import json,sys; g=json.load(sys.stdin)["goal_fingerprint"]; assert g["algorithm"] == "fnv1a32-kernel-goal-v2"; print(g["value"])'
-}
-# Goal 1 is `0xFFFFFFFFFFFFFFFFu64 > 0u64` (true), goal 9 is `... < 0u64` (false). The
-# script names the literal only by its source offset; the type comes from the source table.
-for typed_goal in 1 9; do
-    typed_script="$standalone_probe_dir/typed_unsigned_decide_$typed_goal.json"
-    printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":%s,"goal_fingerprint":%s},"actions":[{"action":"decide"}]}' "$typed_goal" "$(typed_goal_fingerprint "$typed_goal")" >"$typed_script"
-    set +e
-    typed_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$typed_script" "$ROOT_DIR/examples/typed_unsigned_literals.elisa")"
-    set -e
-    if ! printf '%s' "$typed_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["source_goal_binding"]["fingerprint_match"] is True; expected = sys.argv[1] == "1"; assert t["valid"] is expected and t["solved"] is expected; assert (r["status"] == "proved") is expected; assert not expected or (t["kernel_replayed"] is True and t["certificate_replayed"] is True)' "$typed_goal"; then
-        printf 'proof test matrix failed: typed unsigned decide tactic on goal %s\n' "$typed_goal" >&2
-        exit 1
-    fi
-done
-# Migration: the v1 fingerprint recorded for the u64 maximum goal before literals carried their
-# type no longer binds, so a stale script cannot silently address the re-typed proposition.
-stale_script="$standalone_probe_dir/typed_unsigned_stale_v1.json"
-printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":7,"goal_fingerprint":515359733},"actions":[{"action":"decide","accepted":false}]}' >"$stale_script"
-set +e
-stale_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$stale_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa")"
-set -e
 if ! printf '%s' "$stale_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); b=r["source_goal_binding"]; assert r["status"] == "failed" and b["fingerprint_match"] is False and b["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert r["tactic"]["reason"] == "target.goal_fingerprint does not match the imported kernel goal and hypotheses"'; then
     printf 'proof test matrix failed: a stale v1 goal fingerprint still bound a typed-literal goal\n' >&2
     exit 1
@@ -584,3 +514,83 @@ if [[ "$conditional_conversions_status" -ne 0 ]]; then
 fi
 
 set +e
+run_json_report "$ROOT_DIR/examples/rejected_conditional_conversions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("widened_bound", "ensure-unproven")}'
+rejected_conditional_conversions_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_conditional_conversions_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a conditional arm assumed a conversion value\n' >&2
+    exit 1
+fi
+
+# A call in an if-expression arm of a declaration, rebind or return is checked as the `if` it
+# denotes: its precondition under the arm's condition, its summary only on its own path.
+set +e
+run_json_report "$ROOT_DIR/examples/conditional_call_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+conditional_call_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$conditional_call_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call in a conditional arm was refused\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_conditional_call_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("wrong_guard", "call-requires-unproven") in owners; assert ("skipped_arm", "ensure-unproven") in owners; assert ("called_nested_condition", "expression-unsupported") in owners; assert ("call_before_arm", "expression-unsupported") in owners; assert ("short_circuit_path", "expression-unsupported") in owners; assert ("nested_wrong_guard", "call-requires-unproven") in owners; assert not any(name in ("halve",) for name, _ in owners)'
+rejected_conditional_call_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_conditional_call_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a conditional call arm lent facts across arms or skipped a precondition\n' >&2
+    exit 1
+fi
+
+# `not (a < b)` beside `not (a == b)` is `a > b` in both the producer and replay.
+set +e
+run_json_report "$ROOT_DIR/examples/negated_disequality_strictness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+negated_disequality_status=${PIPESTATUS[1]}
+set -e
+if [[ "$negated_disequality_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a negated comparison beside a disequality did not prove and replay\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_negated_disequality_strictness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("other_pair", "call-requires-unproven") in owners'
+rejected_negated_disequality_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_negated_disequality_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a disequality over another pair made a negated comparison strict\n' >&2
+    exit 1
+fi
+
+# The then arm of an if-expression is range-checked under its own condition.
+set +e
+run_json_report "$ROOT_DIR/examples/guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+guarded_conditional_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$guarded_conditional_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a subtraction guarded by its if-expression condition was refused\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrong_arm", "ensure-unproven"), ("weak_guard", "ensure-unproven")}'
+rejected_guarded_conditional_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_guarded_conditional_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an if-expression condition guarded the wrong arm or more than it says\n' >&2
+    exit 1
+fi
+
+# A closed constant beside a strictly typed peer is read at the peers width.
+set +e
+run_json_report "$ROOT_DIR/examples/typed_wide_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+typed_wide_constants_status=${PIPESTATUS[1]}
+set -e
+if [[ "$typed_wide_constants_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a wide, folded or conditional constant beside a typed peer lost its bound\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_typed_wide_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrapped_bound", "ensure-unproven"), ("off_by_one", "ensure-unproven"), ("wide_then_arm", "ensure-unproven")}'
+rejected_typed_wide_constants_status=${PIPESTATUS[1]}
+set -e

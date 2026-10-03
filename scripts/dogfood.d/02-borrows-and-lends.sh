@@ -1,19 +1,5 @@
 # shellcheck shell=bash
 # Part 2 of scripts/dogfood.sh; sourced in order by it, never run alone.
-# This fixture intentionally contains unsupported surface around the standalone replay module.
-# A non-zero command verdict is expected, but every certificate it does emit must replay.
-run_probe replay_standalone examples/kernel_replay_standalone.elisa 1
-run_probe arena_cycle_rejected examples/rejected_kernel_arena_cycle.elisa 1
-run_probe structural_shadowed_subterm examples/structural_shadowed_subterm.elisa 0
-run_probe rejected_match_shadow_fact examples/rejected_match_shadow_fact.elisa 1
-run_probe borrow_four_nested_fields examples/borrow_four_nested_fields.elisa 0
-run_probe rejected_borrow_four_nested_alias examples/rejected_borrow_four_nested_alias.elisa 1
-run_probe borrow_indexed_places examples/borrow_indexed_places.elisa 0
-run_probe rejected_borrow_index_alias examples/rejected_borrow_index_alias.elisa 1
-run_probe rejected_borrow_after_move examples/rejected_borrow_after_move.elisa 1
-run_probe rejected_negative_affine_difference examples/rejected_negative_affine_difference.elisa 1
-run_probe rejected_negative_affine_goal examples/rejected_negative_affine_goal.elisa 1
-run_probe rejected_borrow_call_duplicate_alias examples/rejected_borrow_call_duplicate_alias.elisa 1
 run_probe rejected_unsigned_overflow_goal examples/rejected_unsigned_overflow_goal.elisa 1
 run_probe borrow_multi_indexed_places examples/borrow_multi_indexed_places.elisa 0
 run_probe rejected_borrow_multi_index_alias examples/rejected_borrow_multi_index_alias.elisa 1
@@ -128,6 +114,8 @@ run_probe rebind_join examples/rebind_join.elisa 0
 run_probe rejected_rebind_join examples/rejected_rebind_join.elisa 1
 run_probe conditional_conversions examples/conditional_conversions.elisa 0
 run_probe rejected_conditional_conversions examples/rejected_conditional_conversions.elisa 1
+run_probe conditional_call_arms examples/conditional_call_arms.elisa 0
+run_probe rejected_conditional_call_arms examples/rejected_conditional_call_arms.elisa 1
 run_probe guarded_conditional_arms examples/guarded_conditional_arms.elisa 0
 run_probe rejected_guarded_conditional_arms examples/rejected_guarded_conditional_arms.elisa 1
 run_probe captured_block_exit examples/captured_block_exit.elisa 0
@@ -573,3 +561,38 @@ for name in ("swap_pair", "read_and_write", "touch_borrowed"):
 print("dogfood writable_lend_calls: an exclusive lend is confined to a whole-place write")
 PY
 
+# A lifetime parameter does not stop a call from being a lend. The callee may allocate into a
+# mapped caller region and can never close one, so the claim is the lifetime pinning itself:
+# every formal lifetime resolves to a region active at the call and to the actual's own region.
+python3 - "$REPORT_DIR/region_lend_calls.json" "$REPORT_DIR/rejected_region_lend_calls.json" <<'PY'
+import json
+import sys
+
+accepted, rejected = sys.argv[1:]
+with open(accepted, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "proved" or report["findings"] or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: region-polymorphic lending did not prove cleanly")
+nodes = report["kernel"]["nodes"]
+children = report["kernel"]["children"]
+lends = [node for node in nodes if node["kind"] == "resource-call-lend" and node["right"] > 0]
+if not lends:
+    raise SystemExit("dogfood failed: no lifetime-carrying lend reached the arena")
+for node in lends:
+    if node["children_count"] != node["auxiliary"] * 2 + node["right"]:
+        raise SystemExit("dogfood failed: a lend child list does not match its parameter and lifetime counts")
+    entries = [nodes[child] for child in children[node["children_start"] + node["auxiliary"] * 2:node["children_start"] + node["children_count"]]]
+    if any(entry["kind"] != "resource-call-region" or entry["operator"] != "param" or not entry["name"] or not entry["secondary_name"] for entry in entries):
+        raise SystemExit("dogfood failed: a lifetime map entry is malformed")
+    if len({entry["name"] for entry in entries}) != len(entries):
+        raise SystemExit("dogfood failed: a formal lifetime was pinned twice")
+with open(rejected, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report["status"] != "failed" or report["summary"]["semantic_errors"] != 0 or report["replay"]["gaps"]:
+    raise SystemExit("dogfood failed: lifetime boundary fixture did not fail cleanly")
+if any(node["kind"] == "resource-call-lend" for node in report["kernel"]["nodes"]):
+    raise SystemExit("dogfood failed: an unpinned lifetime was recorded as a lend")
+print("dogfood region_lend_calls: a lifetime parameter is pinned, never assumed")
+PY
+
+# A region-polymorphic callee that does have a summary must compose into its caller. This replayed
