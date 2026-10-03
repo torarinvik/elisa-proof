@@ -1,0 +1,92 @@
+extend ElisaProof:
+    private:
+        # The locals of a body whose every binding is a declared value collection: each
+        # declaration of the name has a type that holds no reference anywhere inside it
+        # (`darray[i64]`, never `darray[i64&]` or a reference to one). A builtin call on such a
+        # receiver, `out.push(t)`, copies its arguments into storage that cannot hold a
+        # reference, so it lends none of them: `t` stays a by-value scalar a later call cannot
+        # reach. Without this every pushed scalar counted as referenced, and each fact over it was
+        # dropped at the next call (G75: `out.push(t)` in a `while t < end` body dropped the loop
+        # condition and both `t` invariants).
+        #
+        # A name qualifies only when nothing else in the body could bind it to another type: it is
+        # not a parameter, and it never appears as an inferred `=` binding, a `for` variable, a
+        # block binding or a match-pattern binding. A lambda anywhere already disables the alias
+        # analysis wholesale through its `*` sentinel.
+        def proof_collect_value_collections(body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&) -> void:
+            report.value_collection_names.clear()
+            candidates: mutable darray[sview] = []
+            refused: mutable darray[sview] = []
+            for parameter in parameters |refused|:
+                proof_push_aliased(&refused, parameter.name)
+            proof_value_collection_walk(body, &candidates, &refused, report, 0)
+            for candidate in candidates |report, refused|:
+                continue if any existing in refused where existing == candidate
+                proof_push_aliased(&report.value_collection_names, candidate)
+
+        def proof_value_collection_walk(body: darray[Ast::Stmt]&, candidates: mutable darray[sview]&, refused: mutable darray[sview]&, report: ProofReport&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            for statement in body |candidates, refused, report, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(name, type_expression, value, _):
+                        value_type: bool = proof_type_is_reference_free(type_expression, report.source_declarations, 0) and proof_value_collection_type(type_expression)
+                        proof_push_aliased(candidates, name) if value_type
+                        proof_push_aliased(refused, name) if not value_type
+                        proof_value_collection_expression(value, candidates, refused, report, depth + 1)
+                    Ast::Stmt.Assign(target, operator, value, _):
+                        proof_push_aliased(refused, proof_ident_name(target)) if operator == TokenKind.Assign
+                        proof_value_collection_expression(value, candidates, refused, report, depth + 1)
+                    Ast::Stmt.Block(_, _, binding, block_body, _):
+                        proof_push_aliased(refused, binding) if binding != ""
+                        proof_value_collection_walk(block_body, candidates, refused, report, depth + 1)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        proof_value_collection_walk(then_body, candidates, refused, report, depth + 1)
+                        proof_value_collection_walk(else_body, candidates, refused, report, depth + 1)
+                    Ast::Stmt.While(_, while_body, _):
+                        proof_value_collection_walk(while_body, candidates, refused, report, depth + 1)
+                    Ast::Stmt.For(_, variables, _, for_body, _):
+                        for variable in variables |refused|:
+                            proof_push_aliased(refused, variable) if variable != ""
+                        proof_value_collection_walk(for_body, candidates, refused, report, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        proof_value_collection_arms(arms, candidates, refused, report, depth + 1)
+                    Ast::Stmt.Expr(expression, _):
+                        proof_value_collection_expression(expression, candidates, refused, report, depth + 1)
+                    _:
+                        pass
+
+        def proof_value_collection_arms(arms: darray[Ast::MatchArm]&, candidates: mutable darray[sview]&, refused: mutable darray[sview]&, report: ProofReport&, depth: usize) -> void:
+            for arm in arms |candidates, refused, report, depth|:
+                bindings: mutable darray[sview] = []
+                proof_structural_pattern_bindings(arm.pattern, &bindings)
+                for binding in bindings |refused|:
+                    proof_push_aliased(refused, binding)
+                proof_value_collection_walk(arm.body, candidates, refused, report, depth + 1)
+
+        # Statement lists nested in an expression: a block value, a match or catch expression.
+        def proof_value_collection_expression(expression: Ast::Expr, candidates: mutable darray[sview]&, refused: mutable darray[sview]&, report: ProofReport&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Block(statements, _, _, _):
+                    proof_value_collection_walk(statements, candidates, refused, report, depth + 1)
+                Ast::Expr.Match(_, arms, _):
+                    proof_value_collection_arms(arms, candidates, refused, report, depth + 1)
+                Ast::Expr.Catch(_, arms, _):
+                    proof_value_collection_arms(arms, candidates, refused, report, depth + 1)
+                Ast::Expr.GetElse(_, recovery, _):
+                    proof_value_collection_walk(recovery, candidates, refused, report, depth + 1)
+                _:
+                    pass
+
+        # A growable collection written by type: `darray[T]` or `set[T]`, possibly `mutable`.
+        def proof_value_collection_type(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_value_collection_type(inner)
+                Ast::Expr.Unary(TokenKind.Mutable, inner, _):
+                    return proof_value_collection_type(inner)
+                Ast::Expr.Index(head, _, _):
+                    head_name: sview = proof_ident_name(head)
+                    return head_name == "darray" or head_name == "set"
+                _:
+                    return false

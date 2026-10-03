@@ -4279,7 +4279,7 @@ if [[ "$loop_entry_state_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]; assert goals and all(goal["proven"] for goal in goals); assert any(goal["name"] == "source_times" for goal in goals); assert report["findings"] == []'
+run_json_report "$ROOT_DIR/examples/while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]; assert goals and all(goal["proven"] for goal in goals); assert {"source_times", "pushed_times"} <= {goal["name"] for goal in goals}; assert report["findings"] == []'
 while_loop_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$while_loop_facts_status" -ne 0 ]]; then
@@ -4288,7 +4288,7 @@ if [[ "$while_loop_facts_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("written_binding_loses_its_fact_after_the_loop", "call-requires-unproven") in owners; assert ("written_binding_loses_its_fact_in_the_body", "call-requires-unproven") in owners'
+run_json_report "$ROOT_DIR/examples/rejected_while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("written_binding_loses_its_fact_after_the_loop", "call-requires-unproven") in owners; assert ("written_binding_loses_its_fact_in_the_body", "call-requires-unproven") in owners; assert ("pushed_collection_still_grows", "call-requires-unproven") in owners'
 rejected_while_loop_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_while_loop_facts_status" -ne 0 ]]; then
