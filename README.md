@@ -238,7 +238,7 @@ The current local compiler wrappers can be used as:
 PATH=/Users/torarinvikbjarko/.elisac:$PATH scripts/test.sh
 ```
 
-Run the source-neutral dogfood gate with `scripts/dogfood.sh`. It requires the formalized kernel
+Run the source-neutral dogfood gate with `scripts/dogfood.sh`. The gate sources its ordered parts from `scripts/dogfood.d/`. It requires the formalized kernel
 layers and standalone replay boundary to be fully independently replayable. Set
 `ELISA_DOGFOOD_FULL=1` to additionally run the complete imported implementation through the same
 bounded audit. For direct use, first build the proof binary and run

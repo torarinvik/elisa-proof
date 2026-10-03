@@ -10867,3 +10867,14 @@ the compiler's own contract and storage checks under both that stage0 and Elisa-
 `build/elisa-proof` never existed there. The split was verified by byte-identical
 concatenation and `bash -n`; `test_or_chains.py`, its expected line set and the claim that every
 `or_chain.elisa` function proves are unverified until the next local `scripts/test.sh`.
+
+## 600-line bound on every source file (2026-10-03)
+
+`scripts/dogfood.sh` (3455 lines) is split like the test matrix: a driver sourcing six ordered
+parts from `scripts/dogfood.d/`, cut only where each part parses alone and never inside a
+heredoc; concatenated without their headers they are byte-identical to the old script.
+`src/proof/check/declaration_checks.elisa` went from 601 to 599 lines by rewording one comment;
+no code changed. `check_source_length.py` now bounds `examples/**/*.elisa`, `scripts/**/*.sh`,
+`scripts/**/*.py` and `test/**/*.py` as well as `src/`, and passes on the whole tree.
+`CLAUDE.md` records the rule and how to split when a file nears it. Not run beyond
+`check_source_length.py` and `bash -n`, for the same toolchain reason as the entry above.
