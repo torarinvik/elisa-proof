@@ -4172,6 +4172,24 @@ if [[ "$loop_entry_state_status" -ne 0 ]]; then
 fi
 
 set +e
+run_json_report "$ROOT_DIR/examples/while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]; assert goals and all(goal["proven"] for goal in goals); assert any(goal["name"] == "source_times" for goal in goals); assert report["findings"] == []'
+while_loop_facts_status=${PIPESTATUS[1]}
+set -e
+if [[ "$while_loop_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a while loop dropped a guard or a fact over a binding it does not write (G75)\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("written_binding_loses_its_fact_after_the_loop", "call-requires-unproven") in owners; assert ("written_binding_loses_its_fact_in_the_body", "call-requires-unproven") in owners'
+rejected_while_loop_facts_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_while_loop_facts_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a fact over a binding the while body writes survived the loop (G75)\n' >&2
+    exit 1
+fi
+
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_loop_entry_state.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = {}; [goals.setdefault(goal["name"], []).append(goal["proven"]) for goal in report["goals"] if goal["rule"] == "goal"]; assert goals["entry_value_must_not_reach_the_body"] == [False]; assert goals["entry_value_must_not_reach_an_uncaptured_body"] == [False]; assert False in goals["false_invariant_must_not_be_preserved"]; assert not all(goals["break_must_not_yield_the_exit_condition"]); owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("entry_value_must_not_reach_the_body", "call-requires-unproven") in owners; assert ("entry_value_must_not_reach_an_uncaptured_body", "call-requires-unproven") in owners; assert ("false_invariant_must_not_be_preserved", "invariant-not-preserved") in owners; assert ("break_must_not_yield_the_exit_condition", "ensure-unproven") in owners'
 rejected_loop_entry_state_status=${PIPESTATUS[1]}
 set -e
