@@ -3444,6 +3444,25 @@ if [[ "$rejected_conditional_call_arms_status" -ne 0 ]]; then
     exit 1
 fi
 
+# `not (a < b)` beside `not (a == b)` is `a > b` in both the producer and replay.
+set +e
+run_json_report "$ROOT_DIR/examples/negated_disequality_strictness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+negated_disequality_status=${PIPESTATUS[1]}
+set -e
+if [[ "$negated_disequality_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a negated comparison beside a disequality did not prove and replay\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_negated_disequality_strictness.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("other_pair", "call-requires-unproven") in owners'
+rejected_negated_disequality_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_negated_disequality_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a disequality over another pair made a negated comparison strict\n' >&2
+    exit 1
+fi
+
 # The then arm of an if-expression is range-checked under its own condition.
 set +e
 run_json_report "$ROOT_DIR/examples/guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
