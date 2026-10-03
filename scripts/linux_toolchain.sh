@@ -5,7 +5,9 @@
 #   eval "$(scripts/linux_toolchain.sh)"     # builds once into $ELISA_TOOLCHAIN_DIR, then reuses it
 #
 # Steps, each skipped when its output already exists:
-#   1. stage0: Elisa-core at ELISA_STAGE0_REV, `go build` against LLVM 20 (llvm-20-dev).
+#   1. stage0: Elisa-core at ELISA_STAGE0_REV, `go build` against ELISA_LLVM_DIR: Debian's shared
+#      llvm-20-dev by default, or a static release tree such as LLVM-23.1.2-Linux-X64 from the
+#      llvm-project GitHub releases (ELISA_LLVM_DIR=/opt/llvm-23), which ships no libLLVM.so.
 #   2. stage1: Elisa-compiler at ELISA_COMPILER_REV compiled by stage0. The upstream seed script
 #      links with Apple-only flags and at -O3, so the object is compiled at -O0 here and linked
 #      with GNU ld flags; the native-callback entry points that Apple's dead stripping removes are
@@ -35,6 +37,19 @@ command -v go >/dev/null || fail "missing go"
 mkdir -p "$TOOLCHAIN"
 export ELISA_HOST_LINUX=1 ELISA_HOST_X86_64=1
 
+# How to link LLVM: the shared library when the tree has one (Debian), otherwise every static
+# component library in one group plus the system libraries they need (release tarballs).
+if [[ -e "$LLVM_DIR/lib/libLLVM.so" ]]; then
+    LLVM_STATIC=0
+    LLVM_LINK=(-L"$LLVM_DIR/lib" -lLLVM -Wl,-rpath,"$LLVM_DIR/lib")
+else
+    LLVM_STATIC=1
+    # shellcheck disable=SC2207
+    LLVM_LINK=(-L"$LLVM_DIR/lib" -Wl,--start-group $("$LLVM_DIR/bin/llvm-config" --libs --link-static) -Wl,--end-group
+               $("$LLVM_DIR/bin/llvm-config" --system-libs --link-static) -lstdc++)
+fi
+log "LLVM $("$LLVM_DIR/bin/llvm-config" --version) at $LLVM_DIR ($([[ "$LLVM_STATIC" == 1 ]] && echo static || echo shared))"
+
 # A private checkout at an exact commit; fetches from the sibling repository, then its origin.
 checkout() {
     local source="$1" target="$2" revision="$3"
@@ -53,11 +68,17 @@ checkout() {
 if [[ ! -x "$STAGE0" ]]; then
     log "building stage0 at $STAGE0_REV"
     checkout "$CORE_REPO" "$TOOLCHAIN/stage0" "$STAGE0_REV"
-    # The cgo flags name -lLLVM-C, which Debian's packages fold into libLLVM.
+    # The cgo flags name -lLLVM-C, which Debian's packages fold into libLLVM. A static tree has
+    # neither name, so empty archives satisfy both and the component libraries do the work.
     mkdir -p "$TOOLCHAIN/llvm-c"
-    ln -sf "$LLVM_DIR/lib/libLLVM.so" "$TOOLCHAIN/llvm-c/libLLVM-C.so"
+    if [[ "$LLVM_STATIC" == 1 ]]; then
+        rm -f "$TOOLCHAIN/llvm-c/libLLVM-C.so" "$TOOLCHAIN/llvm-c/libLLVM.a" "$TOOLCHAIN/llvm-c/libLLVM-C.a"
+        ar rc "$TOOLCHAIN/llvm-c/libLLVM.a" && ar rc "$TOOLCHAIN/llvm-c/libLLVM-C.a"
+    else
+        ln -sf "$LLVM_DIR/lib/libLLVM.so" "$TOOLCHAIN/llvm-c/libLLVM-C.so"
+    fi
     (cd "$TOOLCHAIN/stage0/compiler" \
-        && CGO_CFLAGS="-I$LLVM_DIR/include" CGO_LDFLAGS="-L$TOOLCHAIN/llvm-c -L$LLVM_DIR/lib" \
+        && CGO_CFLAGS="-I$LLVM_DIR/include" CGO_LDFLAGS="-L$TOOLCHAIN/llvm-c ${LLVM_LINK[*]}" \
            go build -o bin/elisac ./src)
 fi
 
@@ -65,11 +86,20 @@ if [[ ! -x "$STAGE1" ]]; then
     log "building stage1 at $COMPILER_REV (stage0, -O0; several minutes)"
     checkout "$COMPILER_REPO" "$TOOLCHAIN/compiler" "$COMPILER_REV"
     ulimit -s unlimited
-    "$STAGE0" -emit obj -O0 -o "$TOOLCHAIN/stage1.o" "$TOOLCHAIN/compiler/src/driver/elisac.elisa" \
-        > "$TOOLCHAIN/stage1.log" 2>&1 || fail "stage0 refused the compiler; see $TOOLCHAIN/stage1.log"
+    if ! "$STAGE0" -emit obj -O0 -o "$TOOLCHAIN/stage1.o" "$TOOLCHAIN/compiler/src/driver/elisac.elisa" \
+        > "$TOOLCHAIN/stage1.log" 2>&1; then
+        # An older stage0 may fail to discharge some of the compiler's own contracts (Elisa-core
+        # builds before a58c4f96 refused ten `ensure`s on 2678ff10's elisacore_std/arena.elisa
+        # clamp). -permissive compiles those into runtime checks instead of refusing, so the
+        # compiler still traps if one fails.
+        log "stage0 refused a contract in strict mode; retrying with -permissive (runtime checks)"
+        "$STAGE0" -emit obj -O0 -permissive -o "$TOOLCHAIN/stage1.o" "$TOOLCHAIN/compiler/src/driver/elisac.elisa" \
+            > "$TOOLCHAIN/stage1.permissive.log" 2>&1 \
+            || fail "stage0 refused the compiler; see $TOOLCHAIN/stage1.log and stage1.permissive.log"
+    fi
     bash "$TOOLCHAIN/compiler/scripts/write_profiler_hook_fallbacks.sh" > "$TOOLCHAIN/stage1_hooks.c"
     undefined="$("$LLVM_DIR/bin/clang" -no-pie -o "$TOOLCHAIN/probe" "$TOOLCHAIN/stage1.o" "$TOOLCHAIN/stage1_hooks.c" \
-        -L"$LLVM_DIR/lib" -lLLVM -lm 2>&1 | grep -o "undefined reference to \`[^']*'" | sed "s/.*\`//;s/'//" | sort -u || true)"
+        "${LLVM_LINK[@]}" -lm 2>&1 | grep -o "undefined reference to \`[^']*'" | sed "s/.*\`//;s/'//" | sort -u || true)"
     {
         echo '#include <stdlib.h>'
         index=0
@@ -83,7 +113,7 @@ if [[ ! -x "$STAGE1" ]]; then
         done
     } > "$TOOLCHAIN/stage1_stubs.c"
     "$LLVM_DIR/bin/clang" -no-pie -o "$STAGE1" "$TOOLCHAIN/stage1.o" "$TOOLCHAIN/stage1_hooks.c" "$TOOLCHAIN/stage1_stubs.c" \
-        -L"$LLVM_DIR/lib" -lLLVM -Wl,-rpath,"$LLVM_DIR/lib" -lm
+        "${LLVM_LINK[@]}" -lm
     rm -f "$TOOLCHAIN/probe" "$TOOLCHAIN/stage1.o"
 fi
 
@@ -96,6 +126,8 @@ fi
 # stage1 recurses once per AST level; give it the stack its macOS link reserves.
 printf 'ulimit -s unlimited\n'
 printf 'export ELISA_HOST_LINUX=1 ELISA_HOST_X86_64=1\n'
+# build.sh links with the `clang` on PATH; use the one that matches the LLVM stage1 was built with.
+printf 'export PATH=%q:"$PATH"\n' "$LLVM_DIR/bin"
 printf 'export ELISA_COMPILER_BIN=%q\n' "$STAGE1"
 printf 'export ELISA_RUNTIME_OBJ=%q\n' "$RUNTIME"
 printf 'export ELISA_STAGE0_BIN=%q\n' "$STAGE0"

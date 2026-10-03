@@ -191,16 +191,21 @@ OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
 compiler_digest=""
 source_digests=""
 if [[ "$OBJECT_CACHE" != "0" ]]; then
-    # Without a stage1 checkout (a bare elisac-stage1 binary) there is no product beside the
-    # wrapper to hash; an empty path made shasum fail and, under pipefail, stopped the build.
-    compiler_files=("$COMPILER")
-    stage1_product="${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}"
-    [[ -n "$stage1_product" ]] && compiler_files=("$stage1_product" "$COMPILER")
-    compiler_digest="$(shasum -a 256 "${compiler_files[@]}" 2>/dev/null | cut -d' ' -f1 | tr -d '\n')"
-    source_digests="$(cd "$SNAPSHOT_ROOT" && find src -type f | LC_ALL=C sort | xargs shasum -a 256)"
+    # Hash only the compiler files that exist: with ELISA_COMPILER_BIN pointing straight at a
+    # stage1 binary (scripts/linux_toolchain.sh) there is no checkout root, and an empty path
+    # made shasum fail, which pipefail turned into a silent build failure.
+    compiler_files=()
+    for compiler_file in "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER"; do
+        [[ -n "$compiler_file" && -f "$compiler_file" ]] && compiler_files+=("$compiler_file")
+    done
+    # Without a compiler binary to hash, a key could match an object built by another compiler.
+    if [[ ${#compiler_files[@]} -gt 0 ]]; then
+        compiler_digest="$(shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n')"
+        source_digests="$(cd "$SNAPSHOT_ROOT" && find src -type f | LC_ALL=C sort | xargs shasum -a 256)"
+    fi
 fi
 object_key_of() {
-    [[ "$OBJECT_CACHE" != "0" ]] || return 0
+    [[ "$OBJECT_CACHE" != "0" && -n "$compiler_digest" ]] || return 0
     { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1" "$(uname -m)"
         printf '%s\n' "$source_digests"; } | shasum -a 256 | cut -d' ' -f1
 }
