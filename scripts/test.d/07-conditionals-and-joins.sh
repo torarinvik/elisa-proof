@@ -1,5 +1,24 @@
 # shellcheck shell=bash
 # Part 7 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+if [[ "$rejected_guarded_conditional_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: an if-expression condition guarded the wrong arm or more than it says\n' >&2
+    exit 1
+fi
+
+# A closed constant beside a strictly typed peer is read at the peers width.
+set +e
+run_json_report "$ROOT_DIR/examples/typed_wide_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+typed_wide_constants_status=${PIPESTATUS[1]}
+set -e
+if [[ "$typed_wide_constants_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a wide, folded or conditional constant beside a typed peer lost its bound\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_typed_wide_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrapped_bound", "ensure-unproven"), ("off_by_one", "ensure-unproven"), ("wide_then_arm", "ensure-unproven")}'
+rejected_typed_wide_constants_status=${PIPESTATUS[1]}
+set -e
 if [[ "$rejected_typed_wide_constants_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a constant typed at its peer width hid a wrap or a wrong bound\n' >&2
     exit 1
@@ -577,22 +596,3 @@ fi
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_negated_guard_range.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; formation = [f for f in report["findings"] if f["kind"] == "contract-proposition-type"]; assert len(formation) == 6 and {f["name"] for f in formation} == {"a_negated_struct_order_does_not_chain", "a_negated_struct_order_gives_no_strict_chain"}; assert {f["kind"] for f in report["findings"]} == {"contract-proposition-type", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert set(reasons) == {"a_negated_struct_order_does_not_chain", "a_negated_struct_order_gives_no_strict_chain", "a_negated_modular_guard_bounds_nothing", "a_negated_equality_is_not_an_order"}; assert all(reason == "body-unverified" for reason in reasons.values())'
 rejected_negated_guard_range_status=${PIPESTATUS[1]}
-set -e
-if [[ "$rejected_negated_guard_range_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a negated comparison gave more than its complement\n' >&2
-    exit 1
-fi
-
-# A lend that cannot outlive its call leaves nothing a later call could reach, so a loop entered
-# afterwards keeps the binding. It is still a write during its own call, and a callee that can keep
-# it -- through a parameter or a return whose type can hold a reference -- keeps the old answer.
-set +e
-run_json_report "$ROOT_DIR/examples/confined_lend_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"fill", "read_only", "a_confined_lend_before_a_loop", "a_shared_lend_before_a_loop", "two_confined_lends"}'
-confined_lend_extent_status=${PIPESTATUS[1]}
-set -e
-if [[ "$confined_lend_extent_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a lend that ends with its call still forgot a loop binding\n' >&2
-    exit 1
-fi
-
-set +e

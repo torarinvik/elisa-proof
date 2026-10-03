@@ -1,5 +1,24 @@
 # shellcheck shell=bash
 # Part 8 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+set -e
+if [[ "$rejected_negated_guard_range_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a negated comparison gave more than its complement\n' >&2
+    exit 1
+fi
+
+# A lend that cannot outlive its call leaves nothing a later call could reach, so a loop entered
+# afterwards keeps the binding. It is still a write during its own call, and a callee that can keep
+# it -- through a parameter or a return whose type can hold a reference -- keeps the old answer.
+set +e
+run_json_report "$ROOT_DIR/examples/confined_lend_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"fill", "read_only", "a_confined_lend_before_a_loop", "a_shared_lend_before_a_loop", "two_confined_lends"}'
+confined_lend_extent_status=${PIPESTATUS[1]}
+set -e
+if [[ "$confined_lend_extent_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a lend that ends with its call still forgot a loop binding\n' >&2
+    exit 1
+fi
+
+set +e
 run_json_report "$ROOT_DIR/examples/rejected_confined_lend_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["semantic_errors"] == 1; assert any(diagnostic["name"] == "holder" and "cannot be returned with a region-less type" in diagnostic["message"] for diagnostic in report["semantic_diagnostics"]); assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"borrow-call-summary-unsupported", "ensure-unproven", "index-upper-unproven"}; assert {(f["kind"], f["name"]) for f in report["findings"] if f["kind"] == "borrow-call-summary-unsupported"} == {("borrow-call-summary-unsupported", "a_leaked_lend_loses_the_extent"), ("borrow-call-summary-unsupported", "a_returned_lend_loses_it_too")}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_leaked_lend_loses_the_extent"] == "body-unverified"; assert reasons["a_returned_lend_loses_it_too"] == "body-unverified"; assert reasons["a_confined_lend_still_writes"] == "body-unverified"; assert reasons["a_lend_inside_the_loop"] == "body-unverified"'
 rejected_confined_lend_extent_status=${PIPESTATUS[1]}
 set -e
@@ -574,20 +593,3 @@ set +e
 run_json_report "$ROOT_DIR/examples/import_empty_root.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source"]["bytes"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == []'
 empty_import_status=${PIPESTATUS[1]}
 set -e
-if [[ "$empty_import_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: successful empty include expansion was not preserved\n' >&2
-    exit 1
-fi
-
-if "$ROOT_DIR/build/elisa-proof" --unknown-option "$ROOT_DIR/examples/verified.elisa" >/dev/null 2>&1; then
-    printf 'proof test matrix failed: unknown CLI option was accepted\n' >&2
-    exit 1
-fi
-
-# A megabyte of source must produce a verdict rather than a stack overflow. The tool used to die
-# on anything past roughly half a megabyte, which is less than `src/proof/check.elisa` itself: a
-# declaration whose initializer is a conditional expression, inside a captured loop body, leaks
-# stack on every iteration in the compiler this is built with, and the include expander read one
-# byte per iteration through exactly that shape. The generated file is plain and large on purpose;
-# what is under test is that the size is survivable, not what it proves.
-large_source_dir="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-large.XXXXXX")"

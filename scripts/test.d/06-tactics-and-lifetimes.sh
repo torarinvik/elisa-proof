@@ -561,6 +561,25 @@ if [[ "$rejected_negated_disequality_status" -ne 0 ]]; then
     exit 1
 fi
 
+# An unsigned-conversion index is bounds-checked on the converted value.
+set +e
+run_json_report "$ROOT_DIR/examples/converted_index_bounds.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+converted_index_status=${PIPESTATUS[1]}
+set -e
+if [[ "$converted_index_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a converted index with proven bounds was refused\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_converted_index_bounds.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("unchecked_low", "index-lower-unproven") in owners; assert ("unchecked_high", "index-upper-unproven") in owners; assert any(name == "signed_target" for name, _ in owners)'
+rejected_converted_index_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_converted_index_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a converted index was admitted without its bounds\n' >&2
+    exit 1
+fi
+
 # The then arm of an if-expression is range-checked under its own condition.
 set +e
 run_json_report "$ROOT_DIR/examples/guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
@@ -574,23 +593,4 @@ fi
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrong_arm", "ensure-unproven"), ("weak_guard", "ensure-unproven")}'
 rejected_guarded_conditional_arms_status=${PIPESTATUS[1]}
-set -e
-if [[ "$rejected_guarded_conditional_arms_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: an if-expression condition guarded the wrong arm or more than it says\n' >&2
-    exit 1
-fi
-
-# A closed constant beside a strictly typed peer is read at the peers width.
-set +e
-run_json_report "$ROOT_DIR/examples/typed_wide_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
-typed_wide_constants_status=${PIPESTATUS[1]}
-set -e
-if [[ "$typed_wide_constants_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a wide, folded or conditional constant beside a typed peer lost its bound\n' >&2
-    exit 1
-fi
-
-set +e
-run_json_report "$ROOT_DIR/examples/rejected_typed_wide_constants.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrapped_bound", "ensure-unproven"), ("off_by_one", "ensure-unproven"), ("wide_then_arm", "ensure-unproven")}'
-rejected_typed_wide_constants_status=${PIPESTATUS[1]}
 set -e

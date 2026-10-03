@@ -1,5 +1,22 @@
 # shellcheck shell=bash
 # Part 9 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+if [[ "$empty_import_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: successful empty include expansion was not preserved\n' >&2
+    exit 1
+fi
+
+if "$ROOT_DIR/build/elisa-proof" --unknown-option "$ROOT_DIR/examples/verified.elisa" >/dev/null 2>&1; then
+    printf 'proof test matrix failed: unknown CLI option was accepted\n' >&2
+    exit 1
+fi
+
+# A megabyte of source must produce a verdict rather than a stack overflow. The tool used to die
+# on anything past roughly half a megabyte, which is less than `src/proof/check.elisa` itself: a
+# declaration whose initializer is a conditional expression, inside a captured loop body, leaks
+# stack on every iteration in the compiler this is built with, and the include expander read one
+# byte per iteration through exactly that shape. The generated file is plain and large on purpose;
+# what is under test is that the size is survivable, not what it proves.
+large_source_dir="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-large.XXXXXX")"
 python3 - "$large_source_dir/large.elisa" <<'PY'
 import sys
 (path,) = sys.argv[1:]
