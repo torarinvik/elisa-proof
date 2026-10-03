@@ -4,6 +4,38 @@ Written 2026-10-03 by the cloud integration session for a local Claude Code agen
 The local worktrees are about four hours behind. Everything below is pushed to GitHub. Treat this
 file as the plan: follow the order, verify every step, and stop to ask the user wherever it says to.
 
+## Status update, 18:17 UTC (supersedes the branch table below where they differ)
+
+Already merged into the main branches from the cloud session:
+
+- **Elisa-core `main` = `ffbf5de`**: stage0 drops the legacy `rewrite` keyword. `ELISA_STAGE0_REV`
+  on the integration branch pins it.
+- **Elisa-compiler `main` = `65e195b`**:
+  - all 8 commits of `perf/frontend-typecheck` (front end about 4x faster: `-emit progress` 129 s →
+    24 s on the compiler, 113 s → 24 s on elisa-proof; self-compile 395 s → 299 s; corpus 4644/4644
+    identical, self-compiled object byte-identical);
+  - the validated seed-memory script and tool commits (fork-free RSS guards, z3 preflight,
+    `tools/memprof`), cherry-picked.
+
+  Still owed: the frontend agent is running `test/parity/run_all.sh` on `65e195b` against
+  `df344e0`. Bump elisa-proof's `ELISA_COMPILER_REV` to `65e195b` once that parity run is clean.
+
+NOT merged yet:
+
+- **elisa-proof `main` (still `7bf8c51`)**: fast-forward it to `integrate/all-3z3zby` (`2e9cacf`) once
+  `scripts/test.sh` and `dogfood.sh` pass. The cloud container kept rebooting (out of memory)
+  during the full suite, so the push to `main` was held for the user. That branch now also includes
+  `perf/replay-pipeline` `471c882`, the profiler-hook rebuild stamp.
+- **`perf/prover-search`, now `b947933`**: not reviewed. This is step 2 below.
+- **Arena WIP `ec39b19`** (seed-memory, -7% self-compile time and peak RSS): differential_corpus
+  gave 17 different answers and adversarial_differential 3 mismatches on its branch. Keep it out
+  until the same runs on `main` show those failures already happen there.
+- **`perf/codegen-backend`**: nothing pushed yet.
+
+New finding: stage0 accepts a struct holding dicts that a callee builds and returns by value, and
+then frees its buckets with the callee's region. That's a region-escape soundness gap; file an
+Elisa-core ticket.
+
 ## Ground rules
 
 - Soundness first. Never accept a change that makes the checker accept something it used to refuse.
