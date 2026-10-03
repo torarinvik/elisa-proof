@@ -10893,3 +10893,32 @@ equal n) and a quantifier-free goal yield nothing; seven malformed and two budge
 refused; a missing z3 proposes nothing and exits 0. The elisa-proof side (export, tagged hint
 records, checker path) is not written, because no compiler could be built in this session to
 test it.
+
+## First Linux run of the full matrix (2026-10-03, in progress)
+
+The toolchain now builds on Linux x86-64 (`scripts/linux_toolchain.sh`): stage0 at
+`ELISA_STAGE0_REV`, stage1 at `ELISA_COMPILER_REV` compiled by stage0 at -O0, and the stage1
+runtime object. stage1 must see `ELISA_HOST_LINUX=1 ELISA_HOST_X86_64=1`; without them products
+take the macOS mmap flags and abort in `new_region_with_owner`. Link flags are shared through
+`scripts/link_flags.sh`.
+
+Results with that toolchain:
+- `examples/or_chain.elisa` proves and replays 16/16; the rejected file fails each case for its
+  stated gate (pinned in `scripts/test_or_chains.py`). Chains open up to five disjuncts
+  (`PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT` = 4); six report `budget`/`timeout`.
+- `scripts/test.sh` passes everything before the standalone kernel audit, then stops there:
+  the audit needs 536 s against the 180 s watchdog (`ELISA_FULL_AUDIT_TIME_LIMIT` raises it).
+  Untimed it proves 4003/5416, matching ca94be1, but has **2 replay gaps**, so
+  `test/validate_kernel_replay_standalone.py` fails: certificate 2003 (goal,
+  `proof_kernel_replay_has_negative_integer_bit_pattern`, `kernel_replay/unsigned_bounds.elisa:180`,
+  108 facts) and certificate 1578 (resource-safety, `proof_kernel_replay_symbolic_renamed`).
+  `rejected_kernel_arena_cycle.elisa` fails its probe for the same two gaps. The code at those
+  lines is unchanged since 2026-09-30, so a later engine change introduced them; the last full
+  green run recorded here predates the W-02/W-04 kernel work.
+- Parts 03 onward of `test.sh` and all of `dogfood.sh` have not completed yet (dogfood was
+  killed by memory pressure while a bisect build ran beside it).
+
+Next: `git bisect start 7f742ac f68e213 && git bisect run scripts/bisect_replay_gaps.sh` (same
+compiler pin across that range; about 12 minutes per step; run nothing else that compiles at
+the same time), fix the first bad commit's replay mirror, then rerun `test.sh` with
+`ELISA_FULL_AUDIT_TIME_LIMIT=1500` and `dogfood.sh`.
