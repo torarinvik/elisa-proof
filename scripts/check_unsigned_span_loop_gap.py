@@ -9,9 +9,11 @@ if not __debug__:
 cases = {
     "unsigned_span_loop_probe.elisa": [],
     "unsigned_span_full_width_probe.elisa": [],
+    "unsigned_span_literal_endpoint_probe.elisa": [],
     "rejected_unsigned_span_loop_stalled.elisa": ["loop-decreases-unproven"],
     "rejected_unsigned_span_loop_backward.elisa": ["invariant-not-preserved", "loop-decreases-unproven"],
     "rejected_unsigned_span_descent_guards.elisa": ["ensure-unproven"] * 3,
+    "rejected_unsigned_span_literal_endpoint.elisa": ["ensure-unproven"] * 2,
 }
 for name, expected in cases.items():
     run = subprocess.run([str(ROOT / "build/elisa-proof"), "--json", str(ROOT / "test" / name)],
@@ -21,4 +23,4 @@ for name, expected in cases.items():
     assert [f["kind"] for f in r["findings"]] == expected
     assert r["replay"]["certificates"] == r["replay"]["replayed"] and r["replay"]["gaps"] == 0
     assert not r["trust"]["trusted_assumptions"]
-print("Unsigned loop descent proves and replays; five false-step/guard claims reject")
+print("Unsigned named/literal loop descent proves and replays; seven false-step/guard claims reject")
