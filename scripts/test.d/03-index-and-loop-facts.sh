@@ -38,19 +38,19 @@ if [[ "$bounded_recursive_depth_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_implicit_structural_decreases.elisa" >/tmp/elisa-proof-rejected-implicit-structural.json
+run_json_report "$ROOT_DIR/examples/rejected_implicit_structural_decreases.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-implicit-structural.json"
 rejected_implicit_structural_status=$?
 if [[ "$rejected_implicit_structural_status" -ne 1 ]]; then
     printf 'proof test matrix failed: nondecreasing implicit recursion was accepted\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/rejected_inferred_product_structural_decreases.elisa" >/tmp/elisa-proof-rejected-inferred-product-structural.json
+run_json_report "$ROOT_DIR/examples/rejected_inferred_product_structural_decreases.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-inferred-product-structural.json"
 rejected_inferred_product_structural_status=$?
 if [[ "$rejected_inferred_product_structural_status" -ne 1 ]]; then
     printf 'proof test matrix failed: nondecreasing inferred product recursion was accepted\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/rejected_bounded_recursive_depth.elisa" >/tmp/elisa-proof-rejected-bounded-depth.json
+run_json_report "$ROOT_DIR/examples/rejected_bounded_recursive_depth.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-bounded-depth.json"
 rejected_bounded_recursive_depth_status=$?
 if [[ "$rejected_bounded_recursive_depth_status" -ne 1 ]]; then
     printf 'proof test matrix failed: unbounded numeric recursion was accepted\n' >&2
@@ -468,7 +468,7 @@ if ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["stat
 fi
 kernel_core_repeat_a="$(mktemp)"
 kernel_core_repeat_b="$(mktemp)"
-trap 'rm -f "$kernel_core_repeat_a" "$kernel_core_repeat_b"' EXIT
+TEST_CLEANUP+=("$kernel_core_repeat_a" "$kernel_core_repeat_b")
 run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" >"$kernel_core_repeat_a"
 run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" >"$kernel_core_repeat_b"
 if ! cmp -s "$kernel_core_repeat_a" "$kernel_core_repeat_b"; then

@@ -29,7 +29,7 @@ if [[ "$TEST_HOST" != "$HOST" ]]; then
     rsync -az -e "ssh -o BatchMode=yes -o LogLevel=ERROR${TEST_PORT:+ -p $TEST_PORT}" "$WORK/ship/" "$TEST_HOST:work/elisa-proof/build/" || exit 1
 fi
 step "test (jobs=$JOBS on $TEST_HOST)"
-"${TSSH[@]}" "cd ~/work/elisa-proof && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=\$HOME/work/Elisa-compiler LLVM_CONFIG=/usr/lib/llvm-19/bin/llvm-config PATH=\$HOME/work/Elisa-compiler/tools/linux_shim:\$PATH && ELISA_PROOF_SKIP_BUILD=1 ELISA_PROOF_JOBS=$JOBS ELISA_FULL_AUDIT_TIME_LIMIT=$AUDIT_LIMIT ELISA_PROOF_SKIP_OPTIMIZED=$SKIP_OPTIMIZED bash scripts/test.sh > /tmp/elisa-proof-test.log 2>&1; echo test=\$? >> /tmp/elisa-proof-test.log"
+"${TSSH[@]}" "cd ~/work/elisa-proof && export ELISA_STAGE1_MAX_RSS_KB=\${ELISA_STAGE1_MAX_RSS_KB:-16777216} GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=\$HOME/work/Elisa-compiler LLVM_CONFIG=/usr/lib/llvm-19/bin/llvm-config PATH=\$HOME/work/Elisa-compiler/tools/linux_shim:\$PATH && ELISA_PROOF_SKIP_BUILD=1 ELISA_PROOF_JOBS=$JOBS ELISA_FULL_AUDIT_TIME_LIMIT=$AUDIT_LIMIT ELISA_PROOF_SKIP_OPTIMIZED=$SKIP_OPTIMIZED bash scripts/test.sh > /tmp/elisa-proof-test.log 2>&1; echo test=\$? >> /tmp/elisa-proof-test.log"
 scp -q ${TEST_PORT:+-P "$TEST_PORT"} -o LogLevel=ERROR "$TEST_HOST:/tmp/elisa-proof-test.log" "$WORK/test.log"
 step done
 tail -5 "$WORK/test.log"

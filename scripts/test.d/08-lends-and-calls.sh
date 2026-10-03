@@ -380,7 +380,7 @@ fi
 # only `proof ... qed` means the kernel checked it, so a goal that is unproven, or proven without a
 # replayed certificate, must never render one.
 proof_render_dir="$(mktemp -d)"
-trap 'rm -rf "$proof_render_dir"' EXIT
+TEST_CLEANUP+=("$proof_render_dir")
 set +e
 proved_goal=$(run_json_report "$ROOT_DIR/examples/condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if goal["rule"] == "index-upper" and goal["proven"]))')
 "$ROOT_DIR/build/elisa-proof" --proof "$proved_goal" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/proved.txt"

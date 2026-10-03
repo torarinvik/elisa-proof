@@ -26,7 +26,7 @@ if [[ -n "$REPORT_CACHE" ]]; then
     export ELISA_PROOF_REPORT_CACHE="$REPORT_CACHE"
 elif [[ "${ELISA_PROOF_JOBS:-1}" -gt 1 ]]; then
     REPORT_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-reports.XXXXXX")"
-    trap 'rm -rf "$REPORT_CACHE"' EXIT
+    TEST_CLEANUP+=("$REPORT_CACHE")
     python3 "$ROOT_DIR/scripts/prefetch_reports.py" "$ROOT_DIR/scripts/test.sh" "$ROOT_DIR/build/elisa-proof" "$REPORT_CACHE" "$ROOT_DIR" "$(( ELISA_PROOF_JOBS > 2 ? ELISA_PROOF_JOBS - 1 : ELISA_PROOF_JOBS ))" &
     REPORT_PREFETCH_PID=$!
     export ELISA_PROOF_REPORT_CACHE="$REPORT_CACHE" ELISA_PROOF_JOBS

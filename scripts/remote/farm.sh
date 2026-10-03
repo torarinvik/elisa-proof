@@ -103,7 +103,7 @@ for target in "${FARM[@]:1}"; do rsync_from "$target" "$CACHE/" "$WORK/farm-cach
 rsync -az --timeout=120 -e "ssh $(copy_opts "$MAIN")" --exclude=pending/ --exclude=slots/ "$WORK/farm-cache/" "$(host_of "$MAIN"):$CACHE/" || exit 1
 
 step "serial assertions on $(host_of "$MAIN")"
-rssh "$MAIN" "cd ~/work/elisa-proof && export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=\$HOME/work/Elisa-compiler LLVM_CONFIG=/usr/lib/llvm-19/bin/llvm-config PATH=\$HOME/work/Elisa-compiler/tools/linux_shim:\$PATH && rm -rf $CACHE/pending && ELISA_PROOF_SKIP_BUILD=1 ELISA_PROOF_JOBS=${ELISA_FARM_CPUS:-\$(python3 scripts/report_cache.py --cpus)} ELISA_PROOF_REPORT_CACHE=$CACHE ELISA_FULL_AUDIT_TIME_LIMIT=${ELISA_FULL_AUDIT_TIME_LIMIT:-600} bash scripts/test.sh > /tmp/elisa-proof-farm.log 2>&1; echo test=\$? >> /tmp/elisa-proof-farm.log"
+rssh "$MAIN" "cd ~/work/elisa-proof && export ELISA_STAGE1_MAX_RSS_KB=\${ELISA_STAGE1_MAX_RSS_KB:-16777216} GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=\$HOME/work/Elisa-compiler LLVM_CONFIG=/usr/lib/llvm-19/bin/llvm-config PATH=\$HOME/work/Elisa-compiler/tools/linux_shim:\$PATH && rm -rf $CACHE/pending && ELISA_PROOF_SKIP_BUILD=1 ELISA_PROOF_JOBS=${ELISA_FARM_CPUS:-\$(python3 scripts/report_cache.py --cpus)} ELISA_PROOF_REPORT_CACHE=$CACHE ELISA_FULL_AUDIT_TIME_LIMIT=${ELISA_FULL_AUDIT_TIME_LIMIT:-600} bash scripts/test.sh > /tmp/elisa-proof-farm.log 2>&1; echo test=\$? >> /tmp/elisa-proof-farm.log"
 rsync_from "$MAIN" /tmp/elisa-proof-farm.log "$WORK/farm.log"
 step done
 tail -5 "$WORK/farm.log"

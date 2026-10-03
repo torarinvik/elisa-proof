@@ -323,38 +323,38 @@ if [[ "$region_auto_close_probe_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_region_use_after_destroy.elisa" >/tmp/elisa-proof-rejected-region-use.json
+run_json_report "$ROOT_DIR/examples/rejected_region_use_after_destroy.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-region-use.json"
 rejected_region_use_status=$?
 set -e
 if [[ "$rejected_region_use_status" -ne 1 ]]; then
     printf 'proof test matrix failed: use after destroy was accepted\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-region-use.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-use-after-destroy" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-region-use.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-use-after-destroy" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: rejected region use report was incomplete\n' >&2
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_sview_after_region_destroy.elisa" >/tmp/elisa-proof-rejected-sview-region-use.json
+run_json_report "$ROOT_DIR/examples/rejected_sview_after_region_destroy.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-sview-region-use.json"
 rejected_sview_region_use_status=$?
 set -e
 if [[ "$rejected_sview_region_use_status" -ne 1 ]]; then
     printf 'proof test matrix failed: sview use after backing-region destruction was accepted\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-region-use.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-use-after-destroy" or f["kind"] == "region-destroy-live-borrow" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-region-use.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-use-after-destroy" or f["kind"] == "region-destroy-live-borrow" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: rejected sview lifetime report was incomplete\n' >&2
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_sview_destroy_while_live.elisa" >/tmp/elisa-proof-rejected-sview-live-destroy.json
+run_json_report "$ROOT_DIR/examples/rejected_sview_destroy_while_live.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-sview-live-destroy.json"
 rejected_sview_live_destroy_status=$?
 set -e
 if [[ "$rejected_sview_live_destroy_status" -ne 1 ]]; then
     printf 'proof test matrix failed: backing region was destroyed while an sview remained live\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-live-destroy.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-destroy-live-borrow" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-live-destroy.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-destroy-live-borrow" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: live sview destroy report was incomplete\n' >&2
     exit 1
 fi
@@ -364,7 +364,7 @@ run_json_report "$ROOT_DIR/examples/sview_region_return_parameter.elisa" | pytho
 run_json_report "$ROOT_DIR/examples/sview_region_value_parameter.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0'
 run_json_report "$ROOT_DIR/examples/sview_call_return_provenance.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0'
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_sview_call_return_wrong_provenance.elisa" >/tmp/elisa-proof-rejected-sview-call-provenance.json
+run_json_report "$ROOT_DIR/examples/rejected_sview_call_return_wrong_provenance.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-sview-call-provenance.json"
 rejected_sview_call_provenance_status=$?
 set -e
 if [[ "$rejected_sview_call_provenance_status" -ne 1 ]]; then
@@ -372,16 +372,16 @@ if [[ "$rejected_sview_call_provenance_status" -ne 1 ]]; then
     exit 1
 fi
 # Compiler 2678ff10 itself rejects the read of `view` after `second.push` (semantic error 341).
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; semantic=[(d["kind_code"], d["line"], d["name"], d["expected"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(341, 18, "view", "second")], semantic; assert report["summary"]["semantic_errors"] == 1; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; semantic=[(d["kind_code"], d["line"], d["name"], d["expected"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(341, 18, "view", "second")], semantic; assert report["summary"]["semantic_errors"] == 1; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
     printf '%s\n' 'proof test matrix failed: call-return provenance was not replayed to the actual backing argument' >&2
     exit 1
 fi
 run_json_report "$ROOT_DIR/examples/reference_call_return_provenance.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] > 0; assert report["replay"]["gaps"] == 0; nodes=report["kernel"]["nodes"]; assert any(n["kind"] == "resource-region-return" and n["operator"] == "param-call" and n["secondary_name"] == "second" for n in nodes)'
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_reference_call_return_wrong_provenance.elisa" >/tmp/elisa-proof-rejected-reference-call-provenance.json
+run_json_report "$ROOT_DIR/examples/rejected_reference_call_return_wrong_provenance.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-reference-call-provenance.json"
 rejected_reference_call_provenance_status=$?
 set -e
-if [[ "$rejected_reference_call_provenance_status" -ne 1 ]] || ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-reference-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "resource-use-after-move" and f["status"] == "disproved" and f["line"] == 16 for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+if [[ "$rejected_reference_call_provenance_status" -ne 1 ]] || ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-reference-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["summary"]["semantic_errors"] == 0; assert any(f["kind"] == "resource-use-after-move" and f["status"] == "disproved" and f["line"] == 16 for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
     printf '%s\n' 'proof test matrix failed: a write to the reference call-return backing argument was accepted' >&2
     exit 1
 fi
@@ -394,97 +394,97 @@ for rejected_call_return in rejected_regionless_reference_return_mutability_upgr
     rejected_call_return_semantic=""
     [[ "$rejected_call_return_example" == rejected_nested_sview_return_provenance ]] && rejected_call_return_semantic="341:19:view:a"
     set +e
-    run_json_report "$ROOT_DIR/examples/$rejected_call_return_example.elisa" >/tmp/elisa-proof-rejected-call-return.json
+    run_json_report "$ROOT_DIR/examples/$rejected_call_return_example.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-call-return.json"
     rejected_call_return_status=$?
     set -e
-    if [[ "$rejected_call_return_status" -ne 1 ]] || ! REJECTED_KIND="$rejected_call_return_kind" REJECTED_SEMANTIC="$rejected_call_return_semantic" python3 -c 'import json, os; report=json.load(open("/tmp/elisa-proof-rejected-call-return.json")); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; semantic=[":".join(map(str, (d["kind_code"], d["line"], d["name"], d["expected"]))) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [d for d in [os.environ["REJECTED_SEMANTIC"]] if d], semantic; assert report["summary"]["semantic_errors"] == len(semantic); assert any(f["kind"] == os.environ["REJECTED_KIND"] for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+    if [[ "$rejected_call_return_status" -ne 1 ]] || ! REJECTED_KIND="$rejected_call_return_kind" REJECTED_SEMANTIC="$rejected_call_return_semantic" python3 -c 'import json, os; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-call-return.json")); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; semantic=[":".join(map(str, (d["kind_code"], d["line"], d["name"], d["expected"]))) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [d for d in [os.environ["REJECTED_SEMANTIC"]] if d], semantic; assert report["summary"]["semantic_errors"] == len(semantic); assert any(f["kind"] == os.environ["REJECTED_KIND"] for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
         printf 'proof test matrix failed: %s was not refused with %s\n' "$rejected_call_return_example" "$rejected_call_return_kind" >&2
         exit 1
     fi
 done
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_sview_return_after_region_destroy.elisa" >/tmp/elisa-proof-rejected-sview-return-destroy.json
+run_json_report "$ROOT_DIR/examples/rejected_sview_return_after_region_destroy.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-sview-return-destroy.json"
 rejected_sview_return_destroy_status=$?
 set -e
 if [[ "$rejected_sview_return_destroy_status" -ne 1 ]]; then
     printf 'proof test matrix failed: sview returned through a helper outlived its backing region\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-return-destroy.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-destroy-live-borrow" or f["kind"] == "region-use-after-destroy" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-return-destroy.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-destroy-live-borrow" or f["kind"] == "region-use-after-destroy" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: helper-returned sview lifetime report was incomplete\n' >&2
     exit 1
 fi
 for sview_escape_fixture in rejected_sview_alias_region_escape rejected_sview_aggregate_region_escape; do
     set +e
-    run_json_report "$ROOT_DIR/examples/$sview_escape_fixture.elisa" >"/tmp/elisa-proof-$sview_escape_fixture.json"
+    run_json_report "$ROOT_DIR/examples/$sview_escape_fixture.elisa" >"$ELISA_TEST_TMP/elisa-proof-$sview_escape_fixture.json"
     sview_escape_status=$?
     set -e
     if [[ "$sview_escape_status" -ne 1 ]]; then
         printf 'proof test matrix failed: sview lifetime escaped through %s\n' "$sview_escape_fixture" >&2
         exit 1
     fi
-    if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "region-alias-unsupported" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "/tmp/elisa-proof-$sview_escape_fixture.json"; then
+    if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert report["status"] == "failed"; assert any(f["kind"] == "region-alias-unsupported" for f in report["findings"]); assert report["replay"]["gaps"] == 0' "$ELISA_TEST_TMP/elisa-proof-$sview_escape_fixture.json"; then
         printf 'proof test matrix failed: sview escape report was incomplete for %s\n' "$sview_escape_fixture" >&2
         exit 1
     fi
 done
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_sview_region_reference_write.elisa" >/tmp/elisa-proof-rejected-sview-reference-write.json
+run_json_report "$ROOT_DIR/examples/rejected_sview_region_reference_write.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-sview-reference-write.json"
 rejected_sview_reference_write_status=$?
 set -e
 if [[ "$rejected_sview_reference_write_status" -ne 1 ]]; then
     printf 'proof test matrix failed: write through the mutable backing reference was accepted while an sview was live\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-reference-write.json")); assert report["status"] == "failed"; assert any(f["kind"] in {"borrow-write-conflict", "borrow-overlap-unproven"} for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-reference-write.json")); assert report["status"] == "failed"; assert any(f["kind"] in {"borrow-write-conflict", "borrow-overlap-unproven"} for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: rejected sview-backed write report was incomplete\n' >&2
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_sview_region_parameter_write.elisa" >/tmp/elisa-proof-rejected-sview-parameter-write.json
+run_json_report "$ROOT_DIR/examples/rejected_sview_region_parameter_write.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-sview-parameter-write.json"
 rejected_sview_parameter_write_status=$?
 set -e
 if [[ "$rejected_sview_parameter_write_status" -ne 1 ]]; then
     printf 'proof test matrix failed: write in a region borrowed by an sview parameter was accepted\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-sview-parameter-write.json")); assert report["status"] == "failed"; assert any(f["kind"] in {"borrow-write-conflict", "borrow-overlap-unproven"} for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-parameter-write.json")); assert report["status"] == "failed"; assert any(f["kind"] in {"borrow-write-conflict", "borrow-overlap-unproven"} for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: rejected sview parameter write report was incomplete\n' >&2
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_region_call_binding_mismatch.elisa" >/tmp/elisa-proof-rejected-region-call-binding.json
+run_json_report "$ROOT_DIR/examples/rejected_region_call_binding_mismatch.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-region-call-binding.json"
 rejected_region_call_binding_status=$?
 set -e
 if [[ "$rejected_region_call_binding_status" -ne 1 ]]; then
     printf 'proof test matrix failed: a returned reference changed its backing region at binding\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-region-call-binding.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-alias-unsupported" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-region-call-binding.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-alias-unsupported" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0; assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: mismatched reference result lifetime report was incomplete\n' >&2
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_region_generic_unmapped.elisa" >/tmp/elisa-proof-rejected-region-generic.json
+run_json_report "$ROOT_DIR/examples/rejected_region_generic_unmapped.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-region-generic.json"
 rejected_region_generic_status=$?
 set -e
 if [[ "$rejected_region_generic_status" -ne 1 ]]; then
     printf 'proof test matrix failed: unmapped region-polymorphic call was accepted\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-region-generic.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-call-opaque" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-region-generic.json")); assert report["status"] == "failed"; assert any(f["kind"] == "region-call-opaque" for f in report["findings"]); assert report["replay"]["gaps"] == 0'; then
     printf 'proof test matrix failed: unmapped region-polymorphic call report was incomplete\n' >&2
     exit 1
 fi
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >/tmp/elisa-proof-rejected-nested-region-destroy.json
+run_json_report "$ROOT_DIR/examples/rejected_region_destroy_nested_without_binding.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-nested-region-destroy.json"
 rejected_nested_region_destroy_status=$?
 set -e
 if [[ "$rejected_nested_region_destroy_status" -ne 1 ]]; then
     printf 'proof test matrix failed: nested inherited-region destruction was accepted\n' >&2
     exit 1
 fi
-if ! python3 -c 'import json; report=json.load(open("/tmp/elisa-proof-rejected-nested-region-destroy.json")); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert any(f["kind"] == "region-destroy-unsupported" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0'; then
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-nested-region-destroy.json")); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert any(f["kind"] == "region-destroy-unsupported" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0'; then
     printf 'proof test matrix failed: nested inherited-region destruction report was incomplete\n' >&2
     exit 1
 fi
@@ -592,5 +592,5 @@ if [[ "$conditional_probe_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_conditional_proof.elisa" >/tmp/elisa-proof-rejected-conditional.json
+run_json_report "$ROOT_DIR/examples/rejected_conditional_proof.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-conditional.json"
 rejected_conditional_status=$?
