@@ -1,19 +1,61 @@
 extend ElisaProof:
     public:
+        # Validate the entire primitive logical tree before using constant
+        # absorption. No calls, fields, comparisons or unwitnessed atoms.
+        def proof_logical_constant(expression: Ast::Expr, facts: darray[Ast::Expr]&, fuel: mutable usize&, depth: usize = 0) -> (valid: bool, known: bool, value: bool):
+            return (false, false, false) if fuel == 0 or depth >= 64
+            fuel <- fuel - 1
+            match proof_strip_parens(expression):
+                Ast::Expr.BoolLit(value, _):
+                    return (true, true, value)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    return (proof_scalar_term_witnessed(expression, facts, 0), false, false)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    inner = proof_logical_constant(operand, facts, fuel, depth + 1)
+                    return (inner.valid, inner.known, not inner.value)
+                Ast::Expr.Binary(left, candidate, right, _):
+                    return (false, false, false) if candidate != TokenKind.And and candidate != TokenKind.Or
+                    a = proof_logical_constant(left, facts, fuel, depth + 1)
+                    b = proof_logical_constant(right, facts, fuel, depth + 1)
+                    return (false, false, false) if not a.valid or not b.valid
+                    if candidate == TokenKind.And:
+                        return (true, true, false) if (a.known and not a.value) or (b.known and not b.value)
+                        return (true, a.known and b.known, a.value and b.value)
+                    return (true, true, true) if (a.known and a.value) or (b.known and b.value)
+                    return (true, a.known and b.known, a.value or b.value)
+                _:
+                    return (false, false, false)
+
         # Flatten only one logical operator. Preserve every non-identity atom;
         # set comparison implements associativity, commutativity and idempotence.
         def proof_logical_join_atoms(expression: Ast::Expr, operator: TokenKind, facts: darray[Ast::Expr]&, atoms: mutable darray[Ast::Expr]&, fuel: mutable usize&, depth: usize = 0) -> bool:
             return false if fuel == 0 or depth >= 64 or atoms.count >= 64
             fuel <- fuel - 1
             current = proof_strip_parens(expression)
+            constant = proof_logical_constant(current, facts, fuel, depth)
+            return false if not constant.valid
+            if constant.known:
+                return true if (operator == TokenKind.And and constant.value) or (operator == TokenKind.Or and not constant.value)
+                atoms.push(current)
+                return true
             match current:
                 Ast::Expr.Binary(left, candidate, right, _):
-                    return false if candidate != operator
+                    if candidate != operator:
+                        a = proof_logical_constant(left, facts, fuel, depth + 1)
+                        b = proof_logical_constant(right, facts, fuel, depth + 1)
+                        return false if not a.valid or not b.valid
+                        if a.known and ((candidate == TokenKind.And and a.value) or (candidate == TokenKind.Or and not a.value)):
+                            return proof_logical_join_atoms(right, operator, facts, atoms, fuel, depth + 1)
+                        if b.known and ((candidate == TokenKind.And and b.value) or (candidate == TokenKind.Or and not b.value)):
+                            return proof_logical_join_atoms(left, operator, facts, atoms, fuel, depth + 1)
+                        return false
                     return proof_logical_join_atoms(left, operator, facts, atoms, fuel, depth + 1) and proof_logical_join_atoms(right, operator, facts, atoms, fuel, depth + 1)
                 Ast::Expr.BoolLit(value, _):
                     return true if (operator == TokenKind.And and value) or (operator == TokenKind.Or and not value)
                 Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
                     return false if not proof_scalar_term_witnessed(current, facts, 0)
+                Ast::Expr.Unary(TokenKind.Not, _, _):
+                    pass
                 _:
                     return false
             atoms.push(current)
@@ -37,12 +79,22 @@ extend ElisaProof:
                     return false if operator != TokenKind.And and operator != TokenKind.Or
                     a: mutable darray[Ast::Expr] = []
                     b: mutable darray[Ast::Expr] = []
-                    fuel: mutable usize = 128
+                    fuel: mutable usize = 1024
                     return false if not proof_logical_join_atoms(left, operator, facts, a, fuel) or not proof_logical_join_atoms(right, operator, facts, b, fuel)
                     for atom in a:
-                        return false if not any peer in b where proof_expr_equal(atom, peer)
+                        matched: mutable bool = false
+                        atom_constant = proof_logical_constant(atom, facts, fuel)
+                        for peer in b |matched, fuel|:
+                            peer_constant = proof_logical_constant(peer, facts, fuel)
+                            matched <- true if proof_expr_equal(atom, peer) or (atom_constant.valid and atom_constant.known and peer_constant.valid and peer_constant.known and atom_constant.value == peer_constant.value)
+                        return false if not matched
                     for atom in b:
-                        return false if not any peer in a where proof_expr_equal(atom, peer)
+                        matched: mutable bool = false
+                        atom_constant = proof_logical_constant(atom, facts, fuel)
+                        for peer in a |matched, fuel|:
+                            peer_constant = proof_logical_constant(peer, facts, fuel)
+                            matched <- true if proof_expr_equal(atom, peer) or (atom_constant.valid and atom_constant.known and peer_constant.valid and peer_constant.known and atom_constant.value == peer_constant.value)
+                        return false if not matched
                     return true
                 _:
                     return false
