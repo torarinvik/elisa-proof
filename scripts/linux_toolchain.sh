@@ -34,6 +34,10 @@ fail() { log "$*"; exit 1; }
 [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]] || fail "only Linux x86-64 is supported"
 [[ -x "$LLVM_DIR/bin/llvm-config" ]] || fail "missing $LLVM_DIR (install llvm-20-dev and clang-20)"
 command -v go >/dev/null || fail "missing go"
+# stage0 discharges the compiler's own contracts with z3. Without one on PATH it marks the solver
+# unavailable and reports each such contract as unprovable, so the strict stage1 compile fails on
+# elisacore_std/arena.elisa's min/max/clamp for a reason that names no solver.
+command -v z3 >/dev/null || fail "missing z3 (pip install z3-solver, or apt-get install z3)"
 mkdir -p "$TOOLCHAIN"
 export ELISA_HOST_LINUX=1 ELISA_HOST_X86_64=1
 
