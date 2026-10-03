@@ -160,7 +160,11 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
     stage1_root=""
-    if [[ -n "${driver:-}" ]]; then
+    # A bare stage1 binary (scripts/linux_toolchain.sh) names the checkout it was built from, so
+    # the manifest can record that checkout's revision instead of none.
+    if [[ -n "${ELISA_STAGE1_ROOT:-}" ]]; then
+        stage1_root="$ELISA_STAGE1_ROOT"
+    elif [[ -n "${driver:-}" ]]; then
         stage1_root="${driver%/scripts/elisac_stage1.sh}"
     elif [[ -f "${HOME}/.elisac/stage1/SNAPSHOT" ]]; then
         stage1_root="${HOME}/.elisac/stage1"
