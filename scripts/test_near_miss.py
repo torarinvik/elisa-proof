@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Check the near_miss explanation on every unproven goal of the rejected examples (BACKLOG H-03)."""
 import json
-import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from report_cache import json_runs  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BINARY = ROOT / "build/elisa-proof"
@@ -23,10 +25,10 @@ def names(expr, out):
 
 def main():
     checked = 0
-    for example in sorted((ROOT / "examples").glob("rejected*.elisa")):
-        run = subprocess.run([str(BINARY), "--json", str(example)], capture_output=True, text=True, timeout=600)
+    examples = sorted((ROOT / "examples").glob("rejected*.elisa"))
+    for example, (_, stdout) in zip(examples, json_runs(examples, BINARY)):
         try:
-            report = json.loads(run.stdout)
+            report = json.loads(stdout)
         except json.JSONDecodeError:
             continue
         goals = report.get("goals", [])

@@ -121,6 +121,8 @@ extend ElisaProofKernelReplay:
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
             return unknown if not located.known
             node: ElisaProofKernelCore::ProofKernelNode = located.node
+            if node.kind == "unary" and node.operator == "not":
+                return proof_kernel_replay_negated_chain_step(nodes, children, node, anchor, from_lower)
             return unknown if node.kind != "binary"
             return unknown if not proof_kernel_replay_arena_shape_valid(node)
             # Mirror of the producer's equality step: `b == c` is `b <= c` and `c <= b`, so it
@@ -497,15 +499,18 @@ extend ElisaProofKernelReplay:
                 continue if not step.known
                 lower_middles.push(step.middle)
                 lower_operators.push(step.operator)
+            proof_kernel_replay_chain_equal_hops(nodes, children, facts, lower, true, &lower_middles, &lower_operators)
             return false if lower_middles.count == 0
-            upper_middles: mutable darray[usize] = []
-            upper_operators: mutable darray[sview] = []
+            # The upper end is its own middle by `upper <= upper`, as on the producer side.
+            upper_middles: mutable darray[usize] = [upper]
+            upper_operators: mutable darray[sview] = ["<="]
             for fact in facts |nodes, children, upper, upper_middles, upper_operators|:
                 break if upper_middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
                 step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, upper, false)
                 continue if not step.known
                 upper_middles.push(step.middle)
                 upper_operators.push(step.operator)
+            proof_kernel_replay_chain_equal_hops(nodes, children, facts, upper, false, &upper_middles, &upper_operators)
             return false if upper_middles.count == 0
             for first_index in 0..<lower_middles.count |nodes, children, facts, goal_strict, lower_middles, lower_operators, upper_middles, upper_operators|:
                 for second_index in 0..<upper_middles.count |nodes, children, facts, goal_strict, first_index, lower_middles, lower_operators, upper_middles, upper_operators|:
@@ -513,3 +518,55 @@ extend ElisaProofKernelReplay:
                     continue if not proof_kernel_replay_expr_equal(nodes, children, lower_middles[first_index], upper_middles[second_index], 0)
                     return true if proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, lower_middles[first_index], 0)
             return false
+
+        # An endpoint equal to a witnessed scalar takes that term's steps too, one hop deep and
+        # under the same cap as the producer. Equality is non-strict, so a step keeps its operator.
+        def proof_kernel_replay_chain_equal_hops(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], anchor: usize, from_lower: bool, middles: mutable darray[usize]&, operators: mutable darray[sview]&) -> void:
+            for equality in facts |nodes, children, facts, anchor, from_lower, middles, operators|:
+                break if middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
+                other: (known: bool, value: usize) = proof_kernel_replay_chain_equal_other(nodes, children, equality, anchor)
+                continue if not other.known
+                continue if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, other.value, 0)
+                for fact in facts |nodes, children, other, from_lower, middles, operators|:
+                    break if middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
+                    step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, other.value, from_lower)
+                    continue if not step.known
+                    middles.push(step.middle)
+                    operators.push(step.operator)
+
+        def proof_kernel_replay_chain_equal_other(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, fact: usize, anchor: usize) -> (known: bool, value: usize):
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+            return (false, 0) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            return (false, 0) if node.kind != "binary" or node.operator != "=="
+            return (true, node.right) if proof_kernel_replay_expr_equal(nodes, children, node.left, anchor, 0) and not proof_kernel_replay_expr_equal(nodes, children, node.right, anchor, 0)
+            return (true, node.left) if proof_kernel_replay_expr_equal(nodes, children, node.right, anchor, 0) and not proof_kernel_replay_expr_equal(nodes, children, node.left, anchor, 0)
+            return (false, 0)
+
+        # Mirror of the producer's negated step: over witnessed scalars the order is total, so
+        # `not (a < b)` is `b <= a` and `not (a <= b)` is `b < a`. The caller witnesses the anchor
+        # and the middle, as for any other step.
+        def proof_kernel_replay_negated_chain_step(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, node: ElisaProofKernelCore::ProofKernelNode, anchor: usize, from_lower: bool) -> (known: bool, middle: usize, operator: sview):
+            unknown: (known: bool, middle: usize, operator: sview) = (false, 0, "")
+            return unknown if not proof_kernel_replay_arena_shape_valid(node)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return unknown if not located.known
+            inner: ElisaProofKernelCore::ProofKernelNode = located.node
+            return unknown if inner.kind != "binary" or not proof_kernel_replay_arena_shape_valid(inner)
+            low: mutable usize = inner.left
+            high: mutable usize = inner.right
+            strict: mutable bool = false
+            if inner.operator == "<" or inner.operator == "<=":
+                low <- inner.right
+                high <- inner.left
+                strict <- inner.operator == "<="
+            elif inner.operator == ">" or inner.operator == ">=":
+                strict <- inner.operator == ">="
+            else:
+                return unknown
+            operator: sview = "<" if strict else "<="
+            if from_lower:
+                return (true, high, operator) if proof_kernel_replay_expr_equal(nodes, children, low, anchor, 0)
+                return unknown
+            return (true, low, operator) if proof_kernel_replay_expr_equal(nodes, children, high, anchor, 0)
+            return unknown

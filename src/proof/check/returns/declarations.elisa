@@ -12,7 +12,7 @@ extend ElisaProof:
                         _:
                             return (false, "")
                     return (false, "") if root == "" or not proof_current_parameter(names, frame_parameters, root)
-                    function_index: usize = proof_function_index(functions, owner)
+                    function_index: usize = proof_function_index_of_current(functions, owner)
                     return (false, "") if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
                     parameter_start: usize = functions.param_starts[function_index]
                     parameter_count: usize = functions.param_counts[function_index]
@@ -32,6 +32,23 @@ extend ElisaProof:
         def proof_check_return_declarations(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
             match statement:
                 Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                    # `x: T = v.pop()` on the builtin darray pop binds the last element and then
+                    # removes it: the read `v[v.count - 1]` followed by the statement pop. Both
+                    # trap on an empty array, and the pop's own rule records the new count.
+                    pop_receiver: sview = proof_pop_receiver(initializer, names, values, frame_parameters, functions, report, name)
+                    if pop_receiver != "" and pop_receiver != local_name:
+                        last: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(pop_receiver, position), Ast::Expr.Binary(proof_count_place(pop_receiver, position), TokenKind.Minus, Ast::Expr.IntLit(1, position), position), position)
+                        proof_check_return_declarations(Ast::Stmt.VarDecl(local_name, type_expression, last, position), names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, flow)
+                        # The local's value names `v`, which the pop's call boundary forgets;
+                        # state it as a fact first so the pop can carry it over its count.
+                        slot: usize = names.count - 1 if names.count > 0 else 0
+                        if names.count > 0 and slot < values.count and names[slot] == local_name and proof_expr_mentions_name(values[slot], pop_receiver):
+                            proof_add_traced_fact(facts, report, Ast::Expr.Binary(Ast::Expr.Ident(local_name, position), TokenKind.EqEq, values[slot], position), "local-binding", position.line, name)
+                            values[slot] <- Ast::Expr.Ident(local_name, position)
+                        proof_pop_restate_slot(facts, report, pop_receiver, local_name, name, position, annotations)
+                        no_moves: darray[sview] = []
+                        proof_check_return_contracts(Ast::Stmt.Expr(initializer, position), no_moves, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, flow)
+                        return true
                     initializer_has_unmodeled_operator: bool = proof_invalidate_for_unmodeled_operator(initializer, names, values, facts, frame_parameters, report, name, position)
                     value: mutable Ast::Expr = proof_substitute(initializer, names, values)
                     prior_value_count: usize = values.count
@@ -107,7 +124,7 @@ extend ElisaProof:
                     proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if not shadowed and proof_expr_has_call(initializer) and not call_applied and not conversion_only
                     # The type range of the new binding, stated after the purges so a call cannot clear it.
                     proof_add_signed_range_facts(facts, report, Ast::Expr.Ident(local_name, position), signed_width, position.line, name, position) if signed_width > 0
-                    proof_bind_unsigned_symbol(names, values, facts, report, name, prior_value_count, unsigned_width, value, position) if unsigned_width > 0
+                    proof_bind_unsigned_symbol(names, values, facts, report, name, prior_value_count, unsigned_width, value, position, annotations) if unsigned_width > 0
                     # An aggregate local is this call's result under its own symbol, so the call's
                     # summaries are instantiated again with `result` bound to it: `record.count`
                     # then carries the callee's `ensure result.count <= N`.
@@ -173,7 +190,7 @@ extend ElisaProof:
                         # An unsigned local keeps its width by staying symbolic; its new
                         # value becomes an equality fact when it is range-safe.
                         rebound_width: i64 = proof_unsigned_marker_width_for_name(facts, target_name) if target_slot < values.count else 0
-                        proof_bind_unsigned_symbol(names, values, facts, report, name, target_slot, rebound_width, value, position) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and rebound_width > 0
+                        proof_bind_unsigned_symbol(names, values, facts, report, name, target_slot, rebound_width, value, position, annotations) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and rebound_width > 0
                         # A compound assignment still executes its RHS call, but the
                         # resulting value depends on the old target and is not modeled.
                         # Discard all facts after it, including when the RHS call had a

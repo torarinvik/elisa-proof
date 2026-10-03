@@ -41,11 +41,16 @@ extend ElisaProof:
                     _:
                         pass
             for fact in source |source, facts, names, parameters, report, blocked, constant_paths, constant_values|:
-                probe: mutable Ast::Expr = fact
-                for path_index in 0..<constant_paths.count |path_index, probe, constant_paths, constant_values|:
-                    replaced: (changed: bool, value: Ast::Expr) = proof_tactic_replace(probe, constant_paths[path_index], constant_values[path_index])
-                    probe <- replaced.value if replaced.changed
-                continue if not proof_expr_call_stable(probe, source, names, parameters, blocked, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                # Most facts are stable as written; the rewrite copies the tree once per path, so
+                # it runs only for a fact the plain walk refuses.
+                stable: mutable bool = proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                if not stable and constant_paths.count > 0:
+                    probe: mutable Ast::Expr = fact
+                    for path_index in 0..<constant_paths.count |path_index, probe, constant_paths, constant_values|:
+                        replaced: (changed: bool, value: Ast::Expr) = proof_tactic_replace(probe, constant_paths[path_index], constant_values[path_index])
+                        probe <- replaced.value if replaced.changed
+                    stable <- proof_expr_call_stable(probe, source, names, parameters, blocked, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                continue if not stable
                 continue if any existing in facts where proof_expr_equal(existing, fact)
                 facts.push(fact)
 
@@ -99,249 +104,6 @@ extend ElisaProof:
             report.proof_obligation(false)
             proof_add_finding(report, "expression-unsupported", position.line, owner, "source-overloaded operator may mutate proof-visible state without a modeled effect summary")
             return true
-
-        # The roots a body assigns, in every nested statement form. Captured blocks nested in the
-        # body are walked too: their capture lists bound what they can name, but a name they do
-        # assign is still assigned by this body.
-        def proof_collect_assignment_roots(body: darray[Ast::Stmt]&, written: mutable darray[sview]&) -> void:
-            for statement in body |written|:
-                match statement:
-                    Ast::Stmt.Assign(target, _, _, _):
-                        proof_push_aliased(written, proof_place_root_name(target, 0))
-                    Ast::Stmt.Block(_, _, _, block_body, _):
-                        proof_collect_assignment_roots(block_body, written)
-                    Ast::Stmt.If(_, then_body, else_body, _):
-                        proof_collect_assignment_roots(then_body, written)
-                        proof_collect_assignment_roots(else_body, written)
-                    Ast::Stmt.While(_, while_body, _):
-                        proof_collect_assignment_roots(while_body, written)
-                    Ast::Stmt.For(_, _, _, for_body, _):
-                        proof_collect_assignment_roots(for_body, written)
-                    Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |written|:
-                            proof_collect_assignment_roots(arm.body, written)
-                    Ast::Stmt.Expr(expression, _):
-                        match expression:
-                            Ast::Expr.Block(statements, _, _, _):
-                                proof_collect_assignment_roots(statements, written)
-                            _:
-                                pass
-                    _:
-                        pass
-
-        # A root written only through an index keeps its extent. `xs[i] <- v` replaces an element
-        # of a collection that already had one, so `xs.count` is the same afterwards. Every other
-        # write to the root may change it: a whole assignment rebinds it, a field assignment can
-        # replace a nested collection (`h.items <- other`), and a method call or a reference taken
-        # can push or pop. Roots of the second kind are collected separately and disqualify the
-        # name, so one whole write anywhere in the body outweighs any number of element writes.
-        def proof_collect_extent_written_roots(body: darray[Ast::Stmt]&, element: mutable darray[sview]&, whole: mutable darray[sview]&) -> void:
-            for statement in body |element, whole|:
-                match statement:
-                    Ast::Stmt.Assign(target, _, _, _):
-                        root: sview = proof_place_root_name(target, 0)
-                        match target:
-                            Ast::Expr.Index(_, _, _):
-                                proof_push_aliased(element, root)
-                            Ast::Expr.IndexN(_, _, _):
-                                proof_push_aliased(element, root)
-                            _:
-                                proof_push_aliased(whole, root)
-                    Ast::Stmt.Block(_, _, _, block_body, _):
-                        proof_collect_extent_written_roots(block_body, element, whole)
-                    Ast::Stmt.If(_, then_body, else_body, _):
-                        proof_collect_extent_written_roots(then_body, element, whole)
-                        proof_collect_extent_written_roots(else_body, element, whole)
-                    Ast::Stmt.While(_, while_body, _):
-                        proof_collect_extent_written_roots(while_body, element, whole)
-                    Ast::Stmt.For(_, _, _, for_body, _):
-                        proof_collect_extent_written_roots(for_body, element, whole)
-                    Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |element, whole|:
-                            proof_collect_extent_written_roots(arm.body, element, whole)
-                    Ast::Stmt.Expr(expression, _):
-                        match expression:
-                            Ast::Expr.Block(statements, _, _, _):
-                                proof_collect_extent_written_roots(statements, element, whole)
-                            _:
-                                pass
-                    _:
-                        pass
-
-        # Whether any statement in the body evaluates an executable call or an ownership transfer.
-        # Used to decide whether a reference recorded elsewhere in the frame can be exercised
-        # *during* this body: to mutate through a reference the body must either name the binding
-        # holding it -- which the aliasing walk sees -- or hand control to a callee, which this
-        # sees. A body with neither cannot reach anything it does not itself name.
-        def proof_body_has_call(body: darray[Ast::Stmt]&, operator_mask: usize) -> bool:
-            for statement in body |operator_mask|:
-                match statement:
-                    Ast::Stmt.Assign(target, _, value, _):
-                        return true if proof_expr_has_call(target) or proof_expr_has_move(target) or proof_source_expression_has_overloaded_operator(target, operator_mask, 0)
-                        return true if proof_expr_has_call(value) or proof_expr_has_move(value) or proof_source_expression_has_overloaded_operator(value, operator_mask, 0)
-                    Ast::Stmt.VarDecl(_, _, initializer, _):
-                        return true if proof_expr_has_call(initializer) or proof_expr_has_move(initializer) or proof_source_expression_has_overloaded_operator(initializer, operator_mask, 0)
-                    Ast::Stmt.Expr(expression, _):
-                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression) or proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
-                    Ast::Stmt.Block(_, _, _, block_body, _):
-                        return true if proof_body_has_call(block_body, operator_mask)
-                    Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition) or proof_source_expression_has_overloaded_operator(condition, operator_mask, 0)
-                        return true if proof_body_has_call(then_body, operator_mask) or proof_body_has_call(else_body, operator_mask)
-                    Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition) or proof_source_expression_has_overloaded_operator(condition, operator_mask, 0)
-                        return true if proof_body_has_call(while_body, operator_mask)
-                    Ast::Stmt.For(bind, _, iterable, for_body, _):
-                        return true if bind == "parallel"
-                        return true if proof_expr_has_call(iterable) or proof_expr_has_move(iterable) or proof_source_expression_has_overloaded_operator(iterable, operator_mask, 0)
-                        return true if proof_body_has_call(for_body, operator_mask)
-                    Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee) or proof_source_expression_has_overloaded_operator(scrutinee, operator_mask, 0)
-                        for arm in arms:
-                            return true if proof_expr_has_call(arm.guard) or proof_source_expression_has_overloaded_operator(arm.guard, operator_mask, 0) or proof_body_has_call(arm.body, operator_mask)
-                    Ast::Stmt.Return(value, _):
-                        return true if value is returned and (proof_expr_has_call(returned) or proof_expr_has_move(returned) or proof_source_expression_has_overloaded_operator(returned, operator_mask, 0))
-                    Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression) or proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
-                    _:
-                        pass
-            return false
-
-        # A fact that survives an iteration of a body whose only writes to `extent_safe` names are
-        # element writes. Every name it mentions is either untouched by the body, or an
-        # extent-preserved name read exactly as `name.count` -- `xs[i]` and `xs` itself are not
-        # stable under an element write, and only a bare identifier's count is: `h.items.count`
-        # would need `h.items` itself to be the preserved root, which this does not claim.
-        def proof_expr_extent_stable(expression: Ast::Expr, written: darray[sview]&, extent_safe: darray[sview]&, witnesses: darray[Ast::Expr]&, depth: usize) -> bool:
-            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.IntLit(_, _):
-                    return true
-                Ast::Expr.BoolLit(_, _):
-                    return true
-                Ast::Expr.CharLit(_, _):
-                    return true
-                Ast::Expr.Ident(name, _):
-                    return not (any candidate in written where candidate == name)
-                Ast::Expr.Tuple(_, _):
-                    binder: sview = proof_place_root_name(expression, 0)
-                    return false if binder == ""
-                    return not (any candidate in written where candidate == binder)
-                Ast::Expr.Field(object, field_name, _):
-                    if field_name == "count":
-                        # The extent place may be nested: `state.region.count` is the length of a
-                        # collection held in a field. A root the body only writes elements under
-                        # cannot have had any count under it changed -- an element write is an
-                        # element write whichever collection it lands in, and a write to a whole
-                        # field puts the root in `whole` instead, which disqualifies it. Requiring
-                        # the base to be a bare name meant a loop over `state.a.count` writing
-                        # `state.b[i]` lost its own range fact.
-                        base_root: sview = proof_place_root_name(object, 0)
-                        return true if base_root != "" and (any candidate in extent_safe where candidate == base_root)
-                    return proof_expr_extent_stable(object, written, extent_safe, witnesses, depth + 1)
-                Ast::Expr.Paren(inner, _):
-                    return proof_expr_extent_stable(inner, written, extent_safe, witnesses, depth + 1)
-                Ast::Expr.Unary(operator, operand, _):
-                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
-                    return proof_expr_extent_stable(operand, written, extent_safe, witnesses, depth + 1)
-                Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_extent_stable(left, written, extent_safe, witnesses, depth + 1) and proof_expr_extent_stable(right, written, extent_safe, witnesses, depth + 1)
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_expr_extent_stable(condition, written, extent_safe, witnesses, depth + 1) and proof_expr_extent_stable(then_expression, written, extent_safe, witnesses, depth + 1) and proof_expr_extent_stable(else_expression, written, extent_safe, witnesses, depth + 1)
-                Ast::Expr.Call(_, arguments, _, _):
-                    # A scalar-term marker states a term's type, so it is worth what the term's
-                    # identity is worth: the same term over the same values has the same type.
-                    marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
-                    return proof_expr_extent_stable(marker.term, written, extent_safe, witnesses, depth + 1) if marker.known
-                    # An ordinary call term denotes one value when a pure-call witness recorded at
-                    # loop entry says so: the callee is verified total and pure, so its result is
-                    # a function of its arguments alone. If every argument still denotes the same
-                    # value after an iteration, so does the call. This is what carries a guard --
-                    # `range_valid(node.start, node.count, xs.count)` and the summary implied by
-                    # it -- into a loop that only reads `xs`.
-                    return false if not proof_scalar_term_witnessed(expression, witnesses, 0)
-                    for argument in arguments |written, extent_safe, witnesses, depth|:
-                        return false if not proof_expr_extent_stable(argument, written, extent_safe, witnesses, depth + 1)
-                    return true
-                _:
-                    return false
-
-        def proof_restore_extent_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, written: darray[sview]&, extent_safe: darray[sview]&) -> void:
-            return if extent_safe.count == 0
-            for fact in source |fact, facts, written, extent_safe|:
-                continue if not proof_expr_extent_stable(fact, written, extent_safe, source, 0)
-                duplicate: mutable bool = false
-                for existing in facts |existing, fact, duplicate|:
-                    duplicate <- true if proof_expr_equal(existing, fact)
-                facts.push(fact) if not duplicate
-
-        # A loop body is checked once, for an arbitrary iteration, so at its entry every binding
-        # the body may rewrite must be an opaque symbol: its value before the loop is the value
-        # on the first iteration only, and a fact over it holds there only. The bindings a body
-        # may rewrite are the roots it assigns and the places it references -- under `&`,
-        # `mutable` or `move`, as a method receiver, or passed to a reference parameter or an
-        # unknown callee -- and, once it references anything at all, every binding this frame
-        # has ever referenced, since a reference held in another binding may still reach it.
-        # Each such binding is resymbolized: a fresh symbol, every fact over it and every value
-        # recorded in terms of it purged, and only its compiler type facts re-established. With
-        # a lambda anywhere in reach the analysis has no bound and the whole frame is forgotten.
-        def proof_forget_loop_entry(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
-            written: mutable darray[sview] = []
-            proof_collect_aliased_names(body, functions, &written, false)
-            proof_collect_assignment_roots(body, &written)
-            return if written.count == 0
-            unbounded: bool = (any candidate in written where candidate == "*") or (any existing in report.aliased_names where existing == "*")
-            if unbounded:
-                proof_forget_values(names, values, position)
-                proof_clear_facts_keep_type_bounds(facts, names, parameters, report, owner)
-                return
-            for existing in report.escaping_names |written|:
-                proof_push_aliased(written, existing)
-            # A collection the body only writes elements of still has the extent it had at entry,
-            # so the facts that mention it purely as `name.count` -- the binder's own range among
-            # them -- are re-established after the forgetting. A name aliased anywhere, or written
-            # as a whole anywhere, is not eligible: a call or a whole assignment can resize it.
-            element_roots: mutable darray[sview] = []
-            whole_roots: mutable darray[sview] = []
-            proof_collect_extent_written_roots(body, &element_roots, &whole_roots)
-            body_aliased: mutable darray[sview] = []
-            proof_collect_aliased_names(body, functions, &body_aliased, false)
-            # The frame's aliased set is in the disqualifier because a reference to the name may
-            # be held in another binding, and something in the body could mutate through it. That
-            # needs the body either to name the holder -- which puts the holder in the body's own
-            # aliased set -- or to hand control to a callee. A body that does neither, and whose
-            # every write is an element write, cannot reach anything it does not itself name, so
-            # the frame's set says nothing about it.
-            reaches_beyond_itself: bool = body_aliased.count > 0 or whole_roots.count > 0 or proof_body_has_call(body, report.source_primitive_operator_mask)
-            extent_safe: mutable darray[sview] = []
-            for candidate in element_roots |extent_safe, whole_roots, body_aliased, reaches_beyond_itself, report|:
-                continue if candidate == ""
-                continue if any existing in whole_roots where existing == candidate
-                continue if any existing in body_aliased where existing == candidate
-                continue if reaches_beyond_itself and (any existing in report.escaping_names where existing == candidate)
-                proof_push_aliased(&extent_safe, candidate)
-            # A shared borrow's extent is fixed for the borrow's lifetime: nothing may write
-            # through it, and the compiler's borrow rule means no mutable path to the same object
-            # coexists with it. So no statement of the loop body -- element write, whole
-            # assignment or call -- can change `name.count` for a parameter bound by one. This is
-            # the claim the call-stability rule already makes for the same parameters, applied to
-            # an iteration instead of a call, and `shared_extent_names` is already empty for a
-            # program that declares a mutable global, which is the one way a callee could reach
-            # the object by another path. The spelling must still denote that parameter: a local
-            # that shadows it is a different binding with its own extent.
-            if report.aliased_owner == owner and owner != "":
-                for shared in report.shared_extent_names |extent_safe, names, parameters|:
-                    continue if not proof_current_parameter(names, parameters, shared)
-                    proof_push_aliased(&extent_safe, shared)
-            entry_facts: darray[Ast::Expr] = proof_copy_exprs(facts)
-            for target in written |names, values, facts, report, owner, position, parameters, whole_roots|:
-                continue if not (any candidate in names where candidate == target)
-                # A shared-fixed parameter is referenced, never written: the body may lend it to
-                # a callee, but nothing reaches its storage through the lend or any other path.
-                continue if proof_shared_fixed_parameter(report, names, parameters, target) and not (any existing in whole_roots where existing == target)
-                proof_resymbolize_binding(names, values, facts, report, owner, target, position)
-            proof_restore_type_bound_facts(entry_facts, facts, names, report, owner)
-            proof_restore_extent_facts(entry_facts, facts, written, extent_safe)
 
         # The wrapper direction of the same shape: a captured block whose body is exactly one loop
         # statement. The source forms `for x in xs |captures|:` and `while c |captures|:` parse as
@@ -512,13 +274,17 @@ extend ElisaProof:
                 # As at the literal intersection, call-free arms need no call-stability for a
                 # candidate that held before the branch, `forall i in 0..<lo: xs[i] < p` among them.
                 held_before: bool = arms_call_free and (any earlier in prior_facts where proof_expr_equal(earlier, fact))
-                continue if not held_before and not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                # Call-free arms run nothing but their own statements, and each arm proves the
+                # candidate below, so neither a prior fact nor an arm's own needs call-stability.
+                continue if not held_before and not arms_call_free and not proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
                 then_step: Ast::Expr = proof_substitute(fact, names, then_map)
                 else_step: Ast::Expr = proof_substitute(fact, names, else_map)
                 # Both arms stating the fact leave it to the literal intersection only when both
                 # read it unchanged. An arm that rebound a name, `cursor <- cursor + 1`, states it
                 # over the old value; the intersection drops that reading, so it is decided here.
-                continue if proof_expr_equal(then_step, fact) and proof_expr_equal(else_step, fact) and (any other in then_facts where proof_expr_equal(other, fact)) and (any other in else_facts where proof_expr_equal(other, fact))
+                # The intersection takes only a prior or call-stable fact; any other is decided here.
+                intersected: bool = held_before or proof_expr_call_stable(fact, candidates, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                continue if intersected and proof_expr_equal(then_step, fact) and proof_expr_equal(else_step, fact) and (any other in then_facts where proof_expr_equal(other, fact)) and (any other in else_facts where proof_expr_equal(other, fact))
                 # The joined fact is recorded through an arm whose own reading is the fact itself,
                 # so its trace is that arm's kernel-checked step.
                 continue if not proof_expr_equal(then_step, fact) and not proof_expr_equal(else_step, fact)
@@ -565,8 +331,33 @@ extend ElisaProof:
                         continue if not (any name in joined where proof_expr_mentions_name(left, name))
                         wider: Ast::Expr = Ast::Expr.Binary(right, TokenKind.Plus, Ast::Expr.IntLit(1, position), position)
                         candidates.push(Ast::Expr.Binary(left, TokenKind.LtEq, wider, position)) if operator == TokenKind.LtEq
+                    Ast::Expr.Block(_, body, _, _):
+                        # A range grows by one the same way: a bubble step turns the invariant
+                        # `forall i in 0..<k: xs[i] <= m` into `... 0..<k + 1 ...` before `k <- k + 1`.
+                        range: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+                        continue if not range.known
+                        continue if not (any name in joined where proof_expr_mentions_name(body, name) or proof_expr_mentions_name(range.lower, name) or proof_expr_mentions_name(range.upper, name))
+                        grown: (known: bool, value: Ast::Expr) = proof_widened_forall(fact, position)
+                        candidates.push(grown.value) if grown.known
                     _:
                         continue
+
+        # `forall i in a..<b: P` as `forall i in a..<b + 1: P`, keeping the binder's declaration.
+        def proof_widened_forall(fact: Ast::Expr, position: Ast::Pos) -> (known: bool, value: Ast::Expr):
+            range: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+            return (false, Ast::Expr.Invalid) if not range.known
+            wider: Ast::Expr = Ast::Expr.Binary(range.lower, TokenKind.RangeLt, Ast::Expr.Binary(range.upper, TokenKind.Plus, Ast::Expr.IntLit(1, position), position), position)
+            match fact:
+                Ast::Expr.Block(statements, body, captures, block_position):
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, type_expression, _, statement_position):
+                            grown: mutable darray[Ast::Stmt] = []
+                            grown.push(Ast::Stmt.VarDecl(binder, type_expression, wider, statement_position))
+                            return (true, Ast::Expr.Block(grown, body, captures, block_position))
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
 
         # A binding recorded as `b == best` states the arm's other facts over `best`.
         def proof_push_equal_renamings(candidates: mutable darray[Ast::Expr]&, source: darray[Ast::Expr]&, name: sview) -> void:

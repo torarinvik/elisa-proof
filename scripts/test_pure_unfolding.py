@@ -32,6 +32,10 @@ def main():
     example = json.loads(subprocess.run([str(BINARY), "--json", str(ROOT / "examples/pure_unfolding.elisa")], capture_output=True, text=True, timeout=600).stdout)
     assert example["status"] == "proved" and example["replay"]["gaps"] == 0, "example must prove with no gaps"
 
+    # A loop guarded by a helper call cannot claim more than its range gives.
+    rejected = json.loads(subprocess.run([str(BINARY), "--json", str(ROOT / "examples/rejected_helper_guarded_loop.elisa")], capture_output=True, text=True, timeout=600).stdout)
+    assert rejected["status"] != "proved", "rejected_helper_guarded_loop must not prove"
+    assert {finding["line"] for finding in rejected["findings"]} == {9}, "rejected_helper_guarded_loop: findings off the loop"
     helper = "def is_digit(c: i64) -> bool:\n    return c >= 48 and c <= 57\n\n"
     # Adversarial: the unfolded summary is exact, so a claim past it stays unproven.
     check("wrong-bound", helper + "def f(c: i64) -> i64:\n    requires is_digit(c)\n    ensures result <= 8\n    return c - 48\n", [7])

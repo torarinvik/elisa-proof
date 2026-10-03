@@ -18,9 +18,10 @@ extend ElisaProof:
         #
         # A fact survives only when every mention of `xs` is `xs.count`, a traced type marker
         # over `xs`, or a read `xs[e]` whose index is proved distinct from `k` -- below or above
-        # it. Inside a range quantifier `forall i in c..<d`, the read must be exactly `xs[i]`
-        # and the whole range must lie on one side of `k`. Any other shape (a call, a read of
-        # another collection that might alias `xs`, a bare `xs`) drops the fact.
+        # it. Inside a range quantifier `forall i in c..<d`, the read must be `xs[i]` or
+        # `xs[i + e]` for a literal e, and the range shifted by e must lie on one side of `k`. Any
+        # other shape (a call, a read of another collection that might alias `xs`, a bare `xs`)
+        # drops the fact.
         def proof_indexed_write_root(target: Ast::Expr) -> (known: bool, root: sview, index: Ast::Expr):
             match target:
                 Ast::Expr.Index(Ast::Expr.Ident(root, _), index, _):
@@ -58,14 +59,15 @@ extend ElisaProof:
                     return false if object != root
                     return false if not proof_write_preserves(index, root, written, binder, low, high, inclusive, facts, annotations, depth + 1)
                     if binder != "" and proof_expr_mentions_name(index, binder):
-                        match index:
-                            Ast::Expr.Ident(name, _):
-                                return false if name != binder
-                            _:
-                                return false
+                        shift: (known: bool, offset: i64) = proof_binder_offset(index, binder)
+                        return false if not shift.known
+                        reach_high: Ast::Expr = high if shift.offset == 0 else Ast::Expr.Binary(high, TokenKind.Plus, Ast::Expr.IntLit(shift.offset, position), position)
+                        reach_low: Ast::Expr = low if shift.offset == 0 else Ast::Expr.Binary(low, TokenKind.Plus, Ast::Expr.IntLit(shift.offset, position), position)
                         below_operator: TokenKind = TokenKind.Lt if inclusive else TokenKind.LtEq
-                        return true if proof_goal(facts, Ast::Expr.Binary(high, below_operator, written, position), annotations)
-                        return proof_goal(facts, Ast::Expr.Binary(written, TokenKind.Lt, low, position), annotations)
+                        return true if proof_goal(facts, Ast::Expr.Binary(reach_high, below_operator, written, position), annotations)
+                        # A shift is non-negative, so a write below the range start is below every read.
+                        return true if proof_goal(facts, Ast::Expr.Binary(written, TokenKind.Lt, low, position), annotations)
+                        return shift.offset != 0 and proof_goal(facts, Ast::Expr.Binary(written, TokenKind.Lt, reach_low, position), annotations)
                     return proof_index_distinct(index, written, facts, annotations, position)
                 Ast::Expr.Block(statements, body, _, _):
                     return false if binder != "" or statements.count != 1
@@ -80,6 +82,28 @@ extend ElisaProof:
                             return false
                 _:
                     return false
+
+        # A read inside the range is `xs[i]` or `xs[i + e]` for a small literal e, reaching the
+        # range's cells shifted by e; any other index over the binder is refused.
+        def proof_binder_offset(index: Ast::Expr, binder: sview) -> (known: bool, offset: i64):
+            match index:
+                Ast::Expr.Ident(name, _):
+                    return (name == binder, 0)
+                Ast::Expr.Paren(inner, _):
+                    return proof_binder_offset(inner, binder)
+                Ast::Expr.Binary(left, TokenKind.Plus, right, _):
+                    base: (known: bool, offset: i64) = proof_binder_offset(left, binder)
+                    return (false, 0) if not base.known or base.offset != 0
+                    return proof_binder_literal_offset(right)
+                _:
+                    return (false, 0)
+
+        def proof_binder_literal_offset(expression: Ast::Expr) -> (known: bool, offset: i64):
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (value >= 0 and value <= 64, value)
+                _:
+                    return (false, 0)
 
         # A conjunction is restored conjunct by conjunct, so `k < xs.count and xs[k] == 3` keeps
         # its bound when the write lands on `xs[k]`. A split conjunct is derived from the whole
@@ -99,8 +123,45 @@ extend ElisaProof:
                     proof_restore_conjuncts(right, whole, root, written, before, facts, report, annotations, name, line, depth + 1)
                 Ast::Expr.Paren(inner, _):
                     proof_restore_conjuncts(inner, whole, root, written, before, facts, report, annotations, name, line, depth + 1)
+                Ast::Expr.Block(_, _, _, _):
+                    proof_restore_narrowed(fact, root, written, before, facts, report, annotations, name, line)
                 _:
                     return
+
+        # A range fact the write lands in may still hold on the range less its first or last
+        # cell: `forall i in c..<d: P` with `c < d` gives `forall i in c + 1..<d: P` (and
+        # `c..<d - 1`), a cover step replay re-proves from the fact and the pre-write facts. It is
+        # kept only when the narrower range itself survives the write.
+        def proof_restore_narrowed(fact: Ast::Expr, root: sview, written: Ast::Expr, before: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32) -> void:
+            range: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+            return if not range.known
+            position: Ast::Pos = Ast::pos_at_line(line)
+            return if not proof_goal(before, Ast::Expr.Binary(range.lower, TokenKind.Lt, range.upper, position), annotations)
+            one: Ast::Expr = Ast::Expr.IntLit(1, position)
+            raised: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Binary(range.lower, TokenKind.Plus, one, position), TokenKind.RangeLt, range.upper, position)
+            lowered: Ast::Expr = Ast::Expr.Binary(range.lower, TokenKind.RangeLt, Ast::Expr.Binary(range.upper, TokenKind.Minus, one, position), position)
+            narrowings: darray[Ast::Expr] = [raised, lowered]
+            for narrowing in narrowings |narrowing, fact, root, written, before, facts, report, annotations, name, line|:
+                narrowed: (known: bool, value: Ast::Expr) = proof_forall_with_range(fact, narrowing)
+                continue if not narrowed.known
+                continue if any existing in facts where proof_expr_equal(existing, narrowed.value)
+                continue if not proof_write_preserves(narrowed.value, root, written, "", Ast::Expr.Invalid, Ast::Expr.Invalid, false, before, annotations, 0)
+                proof_add_derived_fact_from(facts, report, narrowed.value, before, "proof-step", line, name)
+
+        # `forall i in a..<b: P` with its range replaced, keeping the binder's declaration.
+        def proof_forall_with_range(fact: Ast::Expr, range: Ast::Expr) -> (known: bool, value: Ast::Expr):
+            match fact:
+                Ast::Expr.Block(statements, body, captures, block_position):
+                    return (false, Ast::Expr.Invalid) if statements.count != 1
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, type_expression, _, statement_position):
+                            narrowed: mutable darray[Ast::Stmt] = []
+                            narrowed.push(Ast::Stmt.VarDecl(binder, type_expression, range, statement_position))
+                            return (true, Ast::Expr.Block(narrowed, body, captures, block_position))
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
 
         # The stored value is read before the write. `xs[k] == stored` still holds afterwards
         # when every read of `xs` in it is at an index provably distinct from `k`, or when it is
@@ -132,6 +193,7 @@ extend ElisaProof:
                     for original in before |original, binding, value, alias, root, annotations, carried, premises, budget|:
                         pieces: mutable darray[Ast::Expr] = []
                         proof_conjunct_components(original, pieces)
+                        proof_push_cell_instance(original, value, pieces)
                         for fact in pieces |fact, original, binding, value, alias, root, annotations, carried, premises, budget|:
                             continue if budget == 0
                             replaced: (changed: bool, value: Ast::Expr) = proof_replace_place(fact, value, alias, 0)
@@ -140,6 +202,7 @@ extend ElisaProof:
                             step: mutable darray[Ast::Expr] = proof_marker_facts(before)
                             step.push(binding)
                             step.push(original)
+                            proof_push_unread_facts(before, root, step) if proof_symbolic_range(original).known
                             continue if not proof_goal(step, replaced.value, annotations)
                             budget <- budget - 1
                             carried.push(replaced.value)
@@ -162,7 +225,10 @@ extend ElisaProof:
         # value, `xs[j] == b`, the cell is also recorded as `xs[k] == b` -- a proof step over the
         # cell fact and that fact alone -- so a swap keeps both values.
         def proof_close_written_cell(cell: Ast::Expr, stored: Ast::Expr, root: sview, before: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, annotations: darray[Ast::EnumAnnotation]&, owner: sview, position: Ast::Pos) -> void:
-            return if not proof_expr_mentions_name(stored, root)
+            # A stored local, `xs[j] <- a`, also lends its facts to the cell: `p <= a` is
+            # `p <= xs[j]`, which outlives `a` at the function's exit.
+            stored_local: bool = proof_stored_local(stored)
+            return if not stored_local and not proof_expr_mentions_name(stored, root)
             cell_fact: Ast::Expr = Ast::Expr.Binary(cell, TokenKind.EqEq, stored, position)
             # The facts over the stored value are the pre-write ones: a read the write may
             # alias, `xs[k]` beside a write to `xs[lo]`, is already gone from `facts`.
@@ -209,6 +275,9 @@ extend ElisaProof:
                             continue if proof_expr_equal(original, read)
                             pieces: mutable darray[Ast::Expr] = []
                             proof_conjunct_components(original, pieces)
+                            # A range fact speaks of the cell through its instance at the cell's
+                            # index; the alias instance rule re-proves it from the read and the fact.
+                            proof_push_cell_instance(original, place, pieces)
                             for piece in pieces |piece, original, read, alias, place, root, facts, report, annotations, owner, position, budget|:
                                 continue if budget == 0
                                 renamed: (changed: bool, value: Ast::Expr) = proof_replace_place(piece, place, alias, 0)
@@ -217,11 +286,37 @@ extend ElisaProof:
                                 premises: mutable darray[Ast::Expr] = proof_marker_facts(facts)
                                 premises.push(read)
                                 premises.push(original)
+                                # An instance needs the cell's index inside the range: the scalar
+                                # facts that never read the collection bound it.
+                                proof_push_unread_facts(originals, root, premises) if proof_symbolic_range(original).known
                                 continue if not proof_goal(premises, renamed.value, annotations)
                                 budget <- budget - 1
                                 proof_add_derived_fact_from(facts, report, renamed.value, premises, "proof-step", position.line, owner)
                     _:
                         pass
+
+        def proof_stored_local(stored: Ast::Expr) -> bool:
+            match stored:
+                Ast::Expr.Ident(_, _):
+                    return true
+                _:
+                    return false
+
+        def proof_push_unread_facts(originals: darray[Ast::Expr]&, root: sview, premises: mutable darray[Ast::Expr]&) -> void:
+            for fact in originals |fact, root, premises|:
+                continue if proof_expr_mentions_name(fact, root) or proof_symbolic_range(fact).known
+                premises.push(fact)
+
+        def proof_push_cell_instance(fact: Ast::Expr, place: Ast::Expr, pieces: mutable darray[Ast::Expr]&) -> void:
+            match place:
+                Ast::Expr.Index(_, index, _):
+                    known: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
+                    return if not known.known
+                    names: darray[sview] = [known.binder]
+                    values: darray[Ast::Expr] = [index]
+                    pieces.push(proof_substitute(known.body, names, values))
+                _:
+                    return
 
         # Returns false when the write is not of the modeled shape; the caller then takes the
         # generic invalidation path. On true the caller has already cleared the generic way, and
@@ -256,11 +351,12 @@ extend ElisaProof:
                 whole: darray[Ast::Expr] = [fact]
                 proof_restore_conjuncts(fact, whole, shape.root, written, before, facts, report, annotations, name, position.line, 0)
             proof_transfer_to_place_aliases(shape.root, before, facts, report, annotations, name, position)
-            for carried_index in 0..<carried.count |carried_index, carried, facts, report, name, carried_premises, position, before|:
+            for carried_index in 0..<carried.count |carried_index, carried, facts, report, name, carried_premises, position, before, shape|:
                 continue if any existing in facts where proof_expr_equal(existing, carried[carried_index])
                 step: mutable darray[Ast::Expr] = proof_marker_facts(before)
                 step.push(carried_premises[2 * carried_index])
                 step.push(carried_premises[2 * carried_index + 1])
+                proof_push_unread_facts(before, shape.root, step) if proof_symbolic_range(carried_premises[2 * carried_index + 1]).known
                 proof_add_derived_fact_from(facts, report, carried[carried_index], step, "proof-step", position.line, name)
             return if not proof_stored_reads_survive(stored, shape.root, written, before, annotations)
             return if proof_scalar_element_remaining(Ast::Expr.Ident(shape.root, position), facts, 0) != 1
