@@ -110,7 +110,7 @@ clang -c -O2 -o "$PROFILE_HOOKS_OBJ" "$PROFILE_HOOKS_SOURCE"
 link_native() {
     local output="$1"
     shift
-    clang "${ELISA_DEAD_STRIP_LINK[@]}" -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
+    elisa_link_native "$REPORT_DIR" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$output" "$@" "$PROFILE_HOOKS_OBJ"
 }
 
 # One verifier run of run_probe (run 1, or run 2 for the determinism repeat) into `output`, read
