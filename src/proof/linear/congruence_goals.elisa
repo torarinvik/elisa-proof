@@ -30,9 +30,58 @@ extend ElisaProof:
                 return true if proof_congruence_has_seed(fact, 0)
             return false
 
+        # Whether an equality premise, in the shapes `proof_congruence_has_seed` reads, has the
+        # literal `value` as one side. Parentheses are looked through, which only admits more.
+        def proof_congruence_seed_has_literal(expression: Ast::Expr, value: i64, depth: usize) -> bool:
+            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_congruence_seed_has_literal(inner, value, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    return proof_congruence_literal_side(left, value) or proof_congruence_literal_side(right, value)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_congruence_seed_has_literal(left, value, depth + 1) or proof_congruence_seed_has_literal(right, value, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    match inner:
+                        Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
+                            return proof_congruence_literal_side(left, value) or proof_congruence_literal_side(right, value)
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_congruence_literal_side(side: Ast::Expr, value: i64) -> bool:
+            match proof_strip_parens(side):
+                Ast::Expr.IntLit(literal, _):
+                    return literal == value
+                _:
+                    return false
+            return false
+
+        # The closure merges a leaf only through a premise that names it as one side: the
+        # congruence step relates terms with operands. An integer literal goal side that no
+        # premise names stays alone in its class, so `b == 9` beside the case `b == 32` is
+        # refused here without lowering every fact into a scratch arena.
+        def proof_congruence_literal_side_unseeded(facts: darray[Ast::Expr]&, side: Ast::Expr) -> bool:
+            match side:
+                Ast::Expr.IntLit(value, _):
+                    for fact in facts |fact, value|:
+                        return false if proof_congruence_seed_has_literal(fact, value, 0)
+                    return true
+                _:
+                    return false
+            return false
+
         def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool:
             return false if not proof_kernel_expression_supported(goal)
             return false if not proof_congruence_has_seed_in_facts(facts)
+            match goal:
+                Ast::Expr.Binary(goal_left, TokenKind.EqEq, goal_right, _):
+                    if not proof_expr_equal(goal_left, goal_right):
+                        return false if proof_congruence_literal_side_unseeded(facts, goal_left) or proof_congruence_literal_side_unseeded(facts, goal_right)
+                _:
+                    pass
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             roots: mutable darray[usize] = []
@@ -49,6 +98,15 @@ extend ElisaProof:
             # subgoal still enters its own source-dispatch and machine-range guards.
             match proof_strip_parens(goal):
                 Ast::Expr.Binary(left, TokenKind.Or, _, _):
+                    # A disjunction that is itself a fact, the branch condition `b == 32 or
+                    # b == 9 or ...` a join re-proves in its own arm, is closed by assumption
+                    # here, behind the same operator guard the assumption step below passes.
+                    # Recursing into the left alternative first ran a full failing case split
+                    # over that very fact at every nesting level of the chain. Taking the
+                    # assumption early returns only what the step below would return.
+                    if proof_source_arithmetic_operator_guard(goal, facts, operator_mask):
+                        for fact in facts:
+                            return true if proof_fact_contains(fact, goal)
                     return true if proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, split_depth, exhausted)
                 _:
                     pass
@@ -108,7 +166,10 @@ extend ElisaProof:
                     # both with full splits here first repeated that search.
                     alone_depth: usize = split_depth if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT else PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
                     alone_exhausted: mutable bool = false
-                    return true if proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, alone_depth, &alone_exhausted) or proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, alone_depth, &alone_exhausted)
+                    # At the split limit the left attempt alone is the very call the top of this
+                    # one already made and lost, so it is not repeated.
+                    return true if alone_depth != split_depth and proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, alone_depth, &alone_exhausted)
+                    return true if proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, alone_depth, &alone_exhausted)
                     # `A or B` from `not A => B`: B is evaluated exactly when A is false, so the
                     # right alternative still enters every guard under the added premise. The
                     # symmetric `not B => A` assumes a fact about B that the source may never
@@ -287,7 +348,13 @@ extend ElisaProof:
                     if operator == TokenKind.And:
                         return proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, split_depth, exhausted) and proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, split_depth, exhausted)
                     if operator == TokenKind.Or:
-                        return true if proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, split_depth, exhausted) or proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, split_depth, exhausted)
+                        # The left alternative was already tried at the top of this very call,
+                        # over these facts and this split depth; the shared budget has only
+                        # grown since, so a second attempt cannot succeed. Repeating it doubled
+                        # the search at every level of a left-nested chain `a or b or c or d`.
+                        # At the split limit the right one was tried alone above, with these
+                        # same arguments.
+                        return true if split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT and proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, split_depth, exhausted)
                         # A conditional shared by both disjuncts, `(a if c else b) == a or ... == b`,
                         # is split across the whole disjunction so each branch sees one value.
                         return true if proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)

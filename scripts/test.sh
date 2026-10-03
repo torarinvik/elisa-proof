@@ -176,6 +176,7 @@ run_py_test test_certificate_reuse.py
 run_py_test test_measurements.py
 run_py_test test_source_admission_matrix.py
 run_py_test test_negated_conjunction_fallthrough.py
+run_py_test test_or_chain_loop_update.py
 run_py_test test_parameter_heavy_return_analysis.py
 run_py_test test_numeric_cast_operator.py
 run_py_test test_rejected_numeric_cast_operator.py
