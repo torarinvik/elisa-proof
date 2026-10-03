@@ -21,13 +21,34 @@ esac
 # compiler front end, and its compile now peaks between 3.6 and 4.2 GB (2026-09-28, O0 through
 # O3), so give it headroom unless the caller set a limit.
 export ELISA_STAGE1_MAX_RSS_KB="${ELISA_STAGE1_MAX_RSS_KB:-8388608}"
-PROOF_OUTPUT="${ELISA_PROOF_OUTPUT:-$ROOT_DIR/build/elisa-proof}"
 # The entry point, relative to the repository: `src/replay_main.elisa` builds the portable
 # package checker `elisa-proof-replay` from the same snapshot.
-PROOF_MAIN="${ELISA_PROOF_MAIN:-src/main.elisa}"
-case "$PROOF_MAIN" in
-    src/main.elisa|src/replay_main.elisa) ;;
-    *) printf 'ELISA_PROOF_MAIN must be src/main.elisa or src/replay_main.elisa (got %s)\n' "$PROOF_MAIN" >&2; exit 2 ;;
+# ELISA_PROOF_PRODUCTS=all builds both products, build/elisa-proof and build/elisa-proof-replay,
+# from one snapshot under one lock, compiling the objects the cache lacks side by side
+# (ELISA_PROOF_BUILD_JOBS=1 compiles them one after the other). ELISA_PROOF_MAIN and
+# ELISA_PROOF_OUTPUT then do not apply.
+PRODUCT_MAINS=()
+PRODUCT_OUTPUTS=()
+case "${ELISA_PROOF_PRODUCTS:-one}" in
+    one)
+        PRODUCT_MAINS=("${ELISA_PROOF_MAIN:-src/main.elisa}")
+        PRODUCT_OUTPUTS=("${ELISA_PROOF_OUTPUT:-$ROOT_DIR/build/elisa-proof}")
+        ;;
+    all)
+        PRODUCT_MAINS=(src/main.elisa src/replay_main.elisa)
+        PRODUCT_OUTPUTS=("$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/build/elisa-proof-replay")
+        ;;
+    *) printf 'ELISA_PROOF_PRODUCTS must be one or all (got %s)\n' "$ELISA_PROOF_PRODUCTS" >&2; exit 2 ;;
+esac
+for PROOF_MAIN in "${PRODUCT_MAINS[@]}"; do
+    case "$PROOF_MAIN" in
+        src/main.elisa|src/replay_main.elisa) ;;
+        *) printf 'ELISA_PROOF_MAIN must be src/main.elisa or src/replay_main.elisa (got %s)\n' "$PROOF_MAIN" >&2; exit 2 ;;
+    esac
+done
+BUILD_JOBS="${ELISA_PROOF_BUILD_JOBS:-2}"
+case "$BUILD_JOBS" in
+    ''|*[!0-9]*|0) printf 'ELISA_PROOF_BUILD_JOBS must be a positive integer (got %s)\n' "$BUILD_JOBS" >&2; exit 2 ;;
 esac
 COMPILER="${ELISA_COMPILER_BIN:-}"
 # shellcheck source=scripts/compiler_provenance.sh
@@ -96,7 +117,9 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
 fi
 
 mkdir -p "$ROOT_DIR/build"
-mkdir -p "$(dirname -- "$PROOF_OUTPUT")"
+for PROOF_OUTPUT in "${PRODUCT_OUTPUTS[@]}"; do
+    mkdir -p "$(dirname -- "$PROOF_OUTPUT")"
+done
 BUILD_LOCK="$ROOT_DIR/build/.elisa-proof-build.lock"
 if ! mkdir "$BUILD_LOCK" 2>/dev/null; then
     lock_owner="unknown"
@@ -108,14 +131,23 @@ fi
 printf '%s\n' "$$" >"$BUILD_LOCK/pid"
 
 BUILD_TOKEN="$$"
-STAGE_OBJECT="$ROOT_DIR/build/elisa-proof-stage.$BUILD_TOKEN.o"
-PROOF_BINARY="$ROOT_DIR/build/elisa-proof.$BUILD_TOKEN"
+# Per-product temporaries carry the product's index, so two products never share one.
+stage_object_of() { printf '%s\n' "$ROOT_DIR/build/elisa-proof-stage.$BUILD_TOKEN.$1.o"; }
+proof_binary_of() { printf '%s\n' "$ROOT_DIR/build/elisa-proof.$BUILD_TOKEN.$1"; }
 DEFAULT_PROFILE_HOOKS_OBJ="$ROOT_DIR/build/profile_hooks.o"
 PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$DEFAULT_PROFILE_HOOKS_OBJ}"
 PROFILE_HOOKS_TEMP="$ROOT_DIR/build/profile_hooks.$BUILD_TOKEN.o"
 
+COMPILE_PIDS=()
 cleanup_build() {
-    rm -f "$STAGE_OBJECT" "$PROOF_BINARY" "$PROOF_BINARY.manifest.json" "$PROFILE_HOOKS_TEMP" "$BUILD_LOCK/pid"
+    local pid index
+    for pid in "${COMPILE_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    for index in "${!PRODUCT_MAINS[@]}"; do
+        rm -f "$(stage_object_of "$index")" "$(stage_object_of "$index").log" "$(proof_binary_of "$index")" "$(proof_binary_of "$index").manifest.json"
+    done
+    rm -f "$PROFILE_HOOKS_TEMP" "$BUILD_LOCK/pid"
     rmdir "$BUILD_LOCK" 2>/dev/null || true
 }
 trap cleanup_build EXIT
@@ -156,63 +188,114 @@ fi
 # only the compile; linking, signing and the manifest below run as usual.
 # ELISA_PROOF_OBJECT_CACHE=0 disables it.
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
-object_key=""
+compiler_digest=""
+source_digests=""
 if [[ "$OBJECT_CACHE" != "0" ]]; then
     compiler_digest="$(shasum -a 256 "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER" 2>/dev/null | cut -d' ' -f1 | tr -d '\n')"
-    object_key="$( { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$PROOF_MAIN" "$(uname -m)"
-        (cd "$SNAPSHOT_ROOT" && find src -type f | LC_ALL=C sort | xargs shasum -a 256); } | shasum -a 256 | cut -d' ' -f1)"
+    source_digests="$(cd "$SNAPSHOT_ROOT" && find src -type f | LC_ALL=C sort | xargs shasum -a 256)"
 fi
-if [[ -n "$object_key" && -f "$OBJECT_CACHE/$object_key.o" ]]; then
-    cp "$OBJECT_CACHE/$object_key.o" "$STAGE_OBJECT"
-    printf 'build: reused cached object %s\n' "${object_key:0:12}" >&2
-else
+object_key_of() {
+    [[ "$OBJECT_CACHE" != "0" ]] || return 0
+    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1" "$(uname -m)"
+        printf '%s\n' "$source_digests"; } | shasum -a 256 | cut -d' ' -f1
+}
+compile_object() {
+    local main="$1" object="$2"
     if [[ -n "$CONTRACT_FLAG" ]]; then
-        "$COMPILER" "$CONTRACT_FLAG" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/$PROOF_MAIN"
+        "$COMPILER" "$CONTRACT_FLAG" -emit obj "-$OPT_LEVEL" -o "$object" "$SNAPSHOT_ROOT/$main"
     else
-        "$COMPILER" -emit obj "-$OPT_LEVEL" -o "$STAGE_OBJECT" "$SNAPSHOT_ROOT/$PROOF_MAIN"
+        "$COMPILER" -emit obj "-$OPT_LEVEL" -o "$object" "$SNAPSHOT_ROOT/$main"
     fi
+}
+# Cache hits are copied; misses compile, side by side up to BUILD_JOBS at a time. A compile run
+# in the background keeps its output in a log that is printed, in product order, once it ends.
+OBJECT_KEYS=()
+COMPILE_INDICES=()
+for index in "${!PRODUCT_MAINS[@]}"; do
+    object_key="$(object_key_of "${PRODUCT_MAINS[$index]}")"
+    OBJECT_KEYS+=("$object_key")
+    if [[ -n "$object_key" && -f "$OBJECT_CACHE/$object_key.o" ]]; then
+        cp "$OBJECT_CACHE/$object_key.o" "$(stage_object_of "$index")"
+        printf 'build: reused cached object %s\n' "${object_key:0:12}" >&2
+    else
+        COMPILE_INDICES+=("$index")
+    fi
+done
+compile_status=0
+if [[ "${#COMPILE_INDICES[@]}" -eq 1 || "$BUILD_JOBS" -eq 1 ]]; then
+    for index in "${COMPILE_INDICES[@]}"; do
+        compile_object "${PRODUCT_MAINS[$index]}" "$(stage_object_of "$index")"
+    done
+else
+    waiting=()
+    for index in "${COMPILE_INDICES[@]}"; do
+        if [[ "${#COMPILE_PIDS[@]}" -ge "$BUILD_JOBS" ]]; then
+            wait "${COMPILE_PIDS[0]}" || compile_status=$?
+            COMPILE_PIDS=("${COMPILE_PIDS[@]:1}")
+        fi
+        compile_object "${PRODUCT_MAINS[$index]}" "$(stage_object_of "$index")" >"$(stage_object_of "$index").log" 2>&1 &
+        COMPILE_PIDS+=("$!")
+        waiting+=("$index")
+    done
+    for pid in "${COMPILE_PIDS[@]}"; do
+        wait "$pid" || compile_status=$?
+    done
+    COMPILE_PIDS=()
+    for index in "${waiting[@]}"; do
+        cat "$(stage_object_of "$index").log" >&2
+    done
+fi
+[[ "$compile_status" -eq 0 ]] || exit "$compile_status"
+for index in "${COMPILE_INDICES[@]}"; do
+    object_key="${OBJECT_KEYS[$index]}"
     if [[ -n "$object_key" ]]; then
         mkdir -p "$OBJECT_CACHE"
-        cp "$STAGE_OBJECT" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" && mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
+        cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" && mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
     fi
-fi
-LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
-[[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
-# ELISA_EXTRA_LINK_INPUTS (space-separated objects) lets a host supply symbols the platform's
-# dead stripping would otherwise remove, such as unreachable native-callback entry points.
-[[ -n "${ELISA_EXTRA_LINK_INPUTS:-}" ]] && read -r -a extra_link_inputs <<< "$ELISA_EXTRA_LINK_INPUTS" && LINK_INPUTS+=("${extra_link_inputs[@]}")
-clang "${ELISA_DEAD_STRIP_LINK[@]}" -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
-# Sign before hashing so the manifest digest names the exact executable that runs.
-if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
-    codesign -s - --force "$PROOF_BINARY" 2>/dev/null
-fi
-if [[ "$PROOF_MAIN" == "src/main.elisa" ]]; then
-    mv -f "$STAGE_OBJECT" "$ROOT_DIR/build/elisa-proof-stage.o"
-else
-    rm -f "$STAGE_OBJECT"
-fi
-MANIFEST_TEMP="$PROOF_BINARY.manifest.json"
+done
 COMPILER_PRODUCT="$COMPILER"
 if [[ -n "${stage1_root:-}" && -x "${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}" ]]; then
     COMPILER_PRODUCT="${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}"
 fi
-python3 "$ROOT_DIR/scripts/build_manifest.py" \
-    --binary "$PROOF_BINARY" \
-    --compiler "$COMPILER" \
-    --compiler-product "$COMPILER_PRODUCT" \
-    --compiler-root "${stage1_root:-}" \
-    --stage "$([[ "$COMPILER_IS_STAGE1" -eq 1 ]] && echo stage1 || echo stage0)" \
-    --stage1-revision "${stage1_revision:-}" \
-    --runtime "${RUNTIME_OBJ:-}" \
-    --profile-hooks "$PROFILE_HOOKS_OBJ" \
-    --frontend-repo "$COMPILER_SRC" \
-    --frontend-revision "$RESOLVED_REV" \
-    --proof-root "$ROOT_DIR" \
-    --snapshot-root "$SNAPSHOT_ROOT" \
-    --opt-level "$OPT_LEVEL" \
-    --compile-mode "$COMPILE_MODE" \
-    --contract-flag "$CONTRACT_FLAG" \
-    --installed-as "$PROOF_OUTPUT" \
-    --output "$MANIFEST_TEMP"
-mv -f "$PROOF_BINARY" "$PROOF_OUTPUT"
-mv -f "$MANIFEST_TEMP" "$PROOF_OUTPUT.manifest.json"
+for index in "${!PRODUCT_MAINS[@]}"; do
+    PROOF_MAIN="${PRODUCT_MAINS[$index]}"
+    PROOF_OUTPUT="${PRODUCT_OUTPUTS[$index]}"
+    STAGE_OBJECT="$(stage_object_of "$index")"
+    PROOF_BINARY="$(proof_binary_of "$index")"
+    LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
+    [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
+    # ELISA_EXTRA_LINK_INPUTS (space-separated objects) lets a host supply symbols the platform's
+    # dead stripping would otherwise remove, such as unreachable native-callback entry points.
+    [[ -n "${ELISA_EXTRA_LINK_INPUTS:-}" ]] && read -r -a extra_link_inputs <<< "$ELISA_EXTRA_LINK_INPUTS" && LINK_INPUTS+=("${extra_link_inputs[@]}")
+    clang "${ELISA_DEAD_STRIP_LINK[@]}" -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+    # Sign before hashing so the manifest digest names the exact executable that runs.
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+        codesign -s - --force "$PROOF_BINARY" 2>/dev/null
+    fi
+    if [[ "$PROOF_MAIN" == "src/main.elisa" ]]; then
+        mv -f "$STAGE_OBJECT" "$ROOT_DIR/build/elisa-proof-stage.o"
+    else
+        rm -f "$STAGE_OBJECT"
+    fi
+    MANIFEST_TEMP="$PROOF_BINARY.manifest.json"
+    python3 "$ROOT_DIR/scripts/build_manifest.py" \
+        --binary "$PROOF_BINARY" \
+        --compiler "$COMPILER" \
+        --compiler-product "$COMPILER_PRODUCT" \
+        --compiler-root "${stage1_root:-}" \
+        --stage "$([[ "$COMPILER_IS_STAGE1" -eq 1 ]] && echo stage1 || echo stage0)" \
+        --stage1-revision "${stage1_revision:-}" \
+        --runtime "${RUNTIME_OBJ:-}" \
+        --profile-hooks "$PROFILE_HOOKS_OBJ" \
+        --frontend-repo "$COMPILER_SRC" \
+        --frontend-revision "$RESOLVED_REV" \
+        --proof-root "$ROOT_DIR" \
+        --snapshot-root "$SNAPSHOT_ROOT" \
+        --opt-level "$OPT_LEVEL" \
+        --compile-mode "$COMPILE_MODE" \
+        --contract-flag "$CONTRACT_FLAG" \
+        --installed-as "$PROOF_OUTPUT" \
+        --output "$MANIFEST_TEMP"
+    mv -f "$PROOF_BINARY" "$PROOF_OUTPUT"
+    mv -f "$MANIFEST_TEMP" "$PROOF_OUTPUT.manifest.json"
+done

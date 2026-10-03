@@ -78,11 +78,10 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
     RUNTIME_OBJ="${HOME}/.elisac/elisacore_runtime.o"
 fi
 
-ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" "$ROOT_DIR/scripts/build.sh"
 # The portable checker links only the kernel and the package reader; build it with the same
-# compiler so the self-audit packages below replay outside the tool that produced them.
-ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" ELISA_PROOF_MAIN=src/replay_main.elisa \
-    ELISA_PROOF_OUTPUT="$ROOT_DIR/build/elisa-proof-replay" "$ROOT_DIR/scripts/build.sh"
+# compiler, in the same call, so the self-audit packages below replay outside the tool that
+# produced them.
+ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" ELISA_PROOF_PRODUCTS=all "$ROOT_DIR/scripts/build.sh"
 # build.sh has just refreshed the snapshot; the executable harnesses below that
 # include compiler sources must compile from the same pinned export.
 # shellcheck source=scripts/compiler_snapshot.sh
