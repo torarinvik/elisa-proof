@@ -191,7 +191,12 @@ OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
 compiler_digest=""
 source_digests=""
 if [[ "$OBJECT_CACHE" != "0" ]]; then
-    compiler_digest="$(shasum -a 256 "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER" 2>/dev/null | cut -d' ' -f1 | tr -d '\n')"
+    # Without a stage1 checkout (a bare elisac-stage1 binary) there is no product beside the
+    # wrapper to hash; an empty path made shasum fail and, under pipefail, stopped the build.
+    compiler_files=("$COMPILER")
+    stage1_product="${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}"
+    [[ -n "$stage1_product" ]] && compiler_files=("$stage1_product" "$COMPILER")
+    compiler_digest="$(shasum -a 256 "${compiler_files[@]}" 2>/dev/null | cut -d' ' -f1 | tr -d '\n')"
     source_digests="$(cd "$SNAPSHOT_ROOT" && find src -type f | LC_ALL=C sort | xargs shasum -a 256)"
 fi
 object_key_of() {
