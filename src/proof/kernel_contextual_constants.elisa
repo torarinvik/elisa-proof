@@ -1,0 +1,78 @@
+# Closed unsigned constant replay with checked context for unsuffixed literals.
+# Explicit sorts never change. Wholly untyped subtrees must not wrap or become
+# negative: a surrounding typed comparison does not retroactively type them.
+extend ElisaProofKernelCore:
+    private:
+        const CONTEXTUAL_CONSTANT_WORK_BUDGET: usize = 4096
+
+        def contextual_constant_shape(node: ProofKernelNode) -> bool:
+            return false if node.auxiliary != 0 or node.children_start != 0 or node.children_count != 0 or node.secondary_name != ""
+            if node.kind == "binary":
+                return node.value == 0 and node.name == "" and (node.operator == "+" or node.operator == "-")
+            return false if node.operator != "" or node.left != 0 or node.right != 0
+            return node.kind == "typed-int" or (node.kind == "int" and node.name == "" and node.value >= 0)
+
+        def contextual_constant_sort(nodes: darray[ProofKernelNode]&, root: usize, depth: usize, work: mutable usize&) -> (known: bool, sort: sview):
+            requires depth <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return (false, "") if depth >= PROOF_KERNEL_REPLAY_DEPTH_LIMIT or work == 0 or root >= nodes.count
+            work <- work - 1
+            node: ProofKernelNode = nodes[root]
+            return (false, "") if not contextual_constant_shape(node)
+            if node.kind == "typed-int":
+                value = typed_literal_value(node)
+                return (value.known and value.unsigned, node.name)
+            return (true, "") if node.kind == "int"
+            left = contextual_constant_sort(nodes, node.left, depth + 1, work)
+            return (false, "") if not left.known
+            right = contextual_constant_sort(nodes, node.right, depth + 1, work)
+            return (false, "") if not right.known
+            return (false, "") if left.sort != "" and right.sort != "" and left.sort != right.sort
+            return (true, left.sort if left.sort != "" else right.sort)
+
+        def contextual_constant_value(nodes: darray[ProofKernelNode]&, root: usize, sort: sview, depth: usize, work: mutable usize&) -> (known: bool, node: ProofKernelNode, explicit: bool):
+            requires depth <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            empty: ProofKernelNode = ProofKernelNode{kind: "unsupported", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
+            return (false, empty, false) if depth >= PROOF_KERNEL_REPLAY_DEPTH_LIMIT or work == 0 or root >= nodes.count
+            work <- work - 1
+            node: ProofKernelNode = nodes[root]
+            return (false, empty, false) if not contextual_constant_shape(node)
+            if node.kind == "typed-int":
+                value = typed_literal_value(node)
+                return (value.known and value.unsigned and node.name == sort, node, true)
+            if node.kind == "int":
+                literal: ProofKernelNode = ProofKernelNode{kind: "typed-int", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: node.value, name: sort, secondary_name: ""}
+                value = typed_literal_value(literal)
+                return (value.known and value.unsigned, literal, false)
+            left = contextual_constant_value(nodes, node.left, sort, depth + 1, work)
+            return (false, empty, false) if not left.known
+            right = contextual_constant_value(nodes, node.right, sort, depth + 1, work)
+            return (false, empty, false) if not right.known
+            a = typed_literal_value(left.node)
+            b = typed_literal_value(right.node)
+            explicit: bool = left.explicit or right.explicit
+            if not explicit:
+                maximum: u64 = 255 if a.width == 8 else 65535 if a.width == 16 else 4294967295 if a.width == 32 else 9223372036854775807u64
+                return (false, empty, false) if node.operator == "+" and a.bits > maximum - b.bits
+                return (false, empty, false) if node.operator == "-" and a.bits < b.bits
+            value = typed_unsigned_add_sub(left.node, node.operator, right.node)
+            return (false, empty, false) if not value.known
+            result: ProofKernelNode = ProofKernelNode{kind: "typed-int", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: value.bits.i64(), name: sort, secondary_name: ""}
+            return (true, result, explicit)
+
+    public:
+        def contextual_unsigned_constant_comparison(nodes: darray[ProofKernelNode]&, left: usize, operator: sview, right: usize) -> (known: bool, value: bool):
+            work: mutable usize = CONTEXTUAL_CONSTANT_WORK_BUDGET
+            a_sort = contextual_constant_sort(nodes, left, 0, &work)
+            return (false, false) if not a_sort.known
+            b_sort = contextual_constant_sort(nodes, right, 0, &work)
+            return (false, false) if not b_sort.known
+            return (false, false) if a_sort.sort != "" and b_sort.sort != "" and a_sort.sort != b_sort.sort
+            sort: sview = a_sort.sort if a_sort.sort != "" else b_sort.sort
+            return (false, false) if sort == ""
+            a = contextual_constant_value(nodes, left, sort, 0, &work)
+            return (false, false) if not a.known
+            b = contextual_constant_value(nodes, right, sort, 0, &work)
+            return (false, false) if not b.known
+            return typed_literal_comparison(a.node, operator, b.node)
