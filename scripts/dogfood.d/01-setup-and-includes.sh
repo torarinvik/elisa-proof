@@ -89,7 +89,9 @@ source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 
 REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-dogfood.XXXXXX")"
 PROBE_PREFETCH_PID=""
-trap '[[ -n "$PROBE_PREFETCH_PID" ]] && kill "$PROBE_PREFETCH_PID" 2>/dev/null; rm -rf "$REPORT_DIR"' EXIT
+# The prefetcher has usually finished by now; a failed kill must not end the trap under set -e,
+# which would skip the cleanup and turn a passing run into exit status 1.
+trap 'if [[ -n "$PROBE_PREFETCH_PID" ]]; then kill "$PROBE_PREFETCH_PID" 2>/dev/null || true; fi; rm -rf "$REPORT_DIR"' EXIT
 # ELISA_PROOF_JOBS>1 runs both verifier runs of every literal run_probe line in parallel first;
 # run_probe then reads those stored runs in its usual order (scripts/prefetch_probes.py).
 PROBE_CACHE=""
