@@ -1,4 +1,4 @@
-# Root-level refutation for AST term equality.
+# Cheap refutation for AST term equality, at the root and a few levels below it.
 #
 # `proof_expr_equal` admits both whole terms (two full kernel-support walks) before comparing
 # them, and fact-membership scans call it once per fact, so nearly every call compares two terms
@@ -12,6 +12,8 @@ extend ElisaProof:
         # Outer parentheses the refutation strips before giving up. Deeper chains fall back to the
         # full path, whose support walk rejects them at the kernel depth bound anyway.
         const PROOF_EXPR_HEAD_PAREN_LIMIT: usize = 32
+        # Term levels the refutation descends through matching roots.
+        const PROOF_EXPR_HEAD_DEPTH_LIMIT: usize = 4
 
         def proof_expr_head_unparenthesized(expression: Ast::Expr) -> (known: bool, value: Ast::Expr):
             current: mutable Ast::Expr = expression
@@ -23,9 +25,18 @@ extend ElisaProof:
                         return (true, current)
             return (false, current)
 
-        # True only when the structural comparator is certain to return false for this pair at
-        # its root. False means "not decided here", never "equal".
+        # True only when the structural comparator is certain to return false for this pair.
+        # False means "not decided here", never "equal".
         def proof_expr_heads_differ(left_term: Ast::Expr, right_term: Ast::Expr) -> bool:
+            return proof_expr_terms_differ(left_term, right_term, 0)
+
+        # When two roots agree, the comparator requires each child pair below to be equal, so a
+        # refuted child pair refutes the parent as well. A few levels reach the operand that
+        # tells apart facts of one shape, such as two marker calls on different names.
+        def proof_expr_children_differ(left: Ast::Expr, right: Ast::Expr, depth: usize) -> bool:
+            return depth + 1 < PROOF_EXPR_HEAD_DEPTH_LIMIT and proof_expr_terms_differ(left, right, depth + 1)
+
+        def proof_expr_terms_differ(left_term: Ast::Expr, right_term: Ast::Expr, depth: usize) -> bool:
             left_head: (known: bool, value: Ast::Expr) = proof_expr_head_unparenthesized(left_term)
             right_head: (known: bool, value: Ast::Expr) = proof_expr_head_unparenthesized(right_term)
             return false if not left_head.known or not right_head.known
@@ -56,34 +67,39 @@ extend ElisaProof:
                             return name != other
                         _:
                             return true
-                Ast::Expr.Unary(operator, _, _):
+                Ast::Expr.Unary(operator, operand, _):
                     match right:
-                        Ast::Expr.Unary(other, _, _):
-                            return operator != other
+                        Ast::Expr.Unary(other, other_operand, _):
+                            return operator != other or proof_expr_children_differ(operand, other_operand, depth)
                         _:
                             return true
-                Ast::Expr.Binary(_, operator, _, _):
+                Ast::Expr.Binary(left_operand, operator, right_operand, _):
                     match right:
-                        Ast::Expr.Binary(_, other, _, _):
-                            return operator != other
+                        Ast::Expr.Binary(other_left, other, other_right, _):
+                            return true if operator != other
+                            return proof_expr_children_differ(left_operand, other_left, depth) or proof_expr_children_differ(right_operand, other_right, depth)
                         _:
                             return true
-                Ast::Expr.Call(_, arguments, _, _):
+                Ast::Expr.Call(callee, arguments, _, _):
                     match right:
-                        Ast::Expr.Call(_, other_arguments, _, _):
-                            return arguments.count != other_arguments.count
-                        _:
-                            return true
-                Ast::Expr.Field(_, field, _):
-                    match right:
-                        Ast::Expr.Field(_, other, _):
-                            return field != other
-                        _:
-                            return true
-                Ast::Expr.Index(_, _, _):
-                    match right:
-                        Ast::Expr.Index(_, _, _):
+                        Ast::Expr.Call(other_callee, other_arguments, _, _):
+                            return true if arguments.count != other_arguments.count
+                            return true if proof_expr_children_differ(callee, other_callee, depth)
+                            for index in 0..<arguments.count |arguments, other_arguments, depth|:
+                                return true if proof_expr_children_differ(arguments[index], other_arguments[index], depth)
                             return false
+                        _:
+                            return true
+                Ast::Expr.Field(object, field, _):
+                    match right:
+                        Ast::Expr.Field(other_object, other, _):
+                            return field != other or proof_expr_children_differ(object, other_object, depth)
+                        _:
+                            return true
+                Ast::Expr.Index(object, index, _):
+                    match right:
+                        Ast::Expr.Index(other_object, other_index, _):
+                            return proof_expr_children_differ(object, other_object, depth) or proof_expr_children_differ(index, other_index, depth)
                         _:
                             return true
                 _:
