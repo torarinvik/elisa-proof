@@ -65,7 +65,11 @@ extend ElisaProof:
             match proof_strip_parens(expression):
                 Ast::Expr.If(condition, then_value, else_value, position):
                     admitted_as_term: bool = proof_expr_calls_are_conversions(condition, 0) and proof_expr_calls_are_conversions(then_value, 0) and proof_expr_calls_are_conversions(else_value, 0)
-                    return (true, condition, then_value, else_value, position) if not admitted_as_term
+                    # An index in an arm is a memory-safety obligation that only holds under the
+                    # arm's condition (`flags[i] if i < flags.count else false`). As a term its
+                    # bound is checked with no branch fact, so it is split too.
+                    arm_indexes: bool = proof_conditional_arm_indexes(then_value, 0) or proof_conditional_arm_indexes(else_value, 0)
+                    return (true, condition, then_value, else_value, position) if not admitted_as_term or arm_indexes
                 _:
                     pass
             return proof_nested_conditional_value(expression, 0)
@@ -87,7 +91,7 @@ extend ElisaProof:
             match expression:
                 Ast::Expr.If(condition, then_value, else_value, position):
                     return none if not proof_expr_calls_are_conversions(condition, 0)
-                    return none if proof_expr_calls_are_conversions(then_value, 0) and proof_expr_calls_are_conversions(else_value, 0)
+                    return none if proof_expr_calls_are_conversions(then_value, 0) and proof_expr_calls_are_conversions(else_value, 0) and not proof_conditional_arm_indexes(then_value, 0) and not proof_conditional_arm_indexes(else_value, 0)
                     return (true, condition, then_value, else_value, position)
                 Ast::Expr.Paren(inner, position):
                     found: (known: bool, condition: Ast::Expr, then_value: Ast::Expr, else_value: Ast::Expr, position: Ast::Pos) = proof_nested_conditional_value(inner, depth + 1)
@@ -144,3 +148,37 @@ extend ElisaProof:
 
         def proof_nested_conditional_strict_operator(operator: TokenKind) -> bool:
             return operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.EqEq or operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.Gt or operator == TokenKind.LtEq or operator == TokenKind.GtEq or operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret or operator == TokenKind.LShift or operator == TokenKind.RShift
+
+        # Whether a term reads an element anywhere: an index, a multi-index or a slice. Type
+        # applications (`x.cast[T]`) are not element reads.
+        def proof_conditional_arm_indexes(expression: Ast::Expr, depth: usize) -> bool:
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Index(object, index, _):
+                    return true if not proof_is_type_cast_index(object)
+                    return proof_conditional_arm_indexes(index, depth + 1)
+                Ast::Expr.IndexN(_, _, _):
+                    return true
+                Ast::Expr.Slice(_, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_conditional_arm_indexes(inner, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_conditional_arm_indexes(operand, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_conditional_arm_indexes(left, depth + 1) or proof_conditional_arm_indexes(right, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_conditional_arm_indexes(object, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_conditional_arm_indexes(callee, depth + 1)
+                    for argument in arguments |depth|:
+                        return true if proof_conditional_arm_indexes(argument, depth + 1)
+                    return false
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return proof_conditional_arm_indexes(condition, depth + 1) or proof_conditional_arm_indexes(then_value, depth + 1) or proof_conditional_arm_indexes(else_value, depth + 1)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |depth|:
+                        return true if proof_conditional_arm_indexes(element, depth + 1)
+                    return false
+                _:
+                    return false
