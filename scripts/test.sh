@@ -3416,11 +3416,31 @@ if [[ "$conditional_conversions_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_conditional_conversions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("counted", "expression-unsupported"), ("widened_bound", "ensure-unproven")}'
+run_json_report "$ROOT_DIR/examples/rejected_conditional_conversions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("widened_bound", "ensure-unproven")}'
 rejected_conditional_conversions_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_conditional_conversions_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a conditional arm admitted a state-changing call or assumed a conversion value\n' >&2
+    printf 'proof test matrix failed: a conditional arm assumed a conversion value\n' >&2
+    exit 1
+fi
+
+# A call in an if-expression arm of a declaration, rebind or return is checked as the `if` it
+# denotes: its precondition under the arm's condition, its summary only on its own path.
+set +e
+run_json_report "$ROOT_DIR/examples/conditional_call_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+conditional_call_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$conditional_call_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a call in a conditional arm was refused\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_conditional_call_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("wrong_guard", "call-requires-unproven") in owners; assert ("skipped_arm", "ensure-unproven") in owners; assert ("nested_arm", "expression-unsupported") in owners; assert not any(name in ("halve",) for name, _ in owners)'
+rejected_conditional_call_arms_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_conditional_call_arms_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a conditional call arm lent facts across arms or skipped a precondition\n' >&2
     exit 1
 fi
 
