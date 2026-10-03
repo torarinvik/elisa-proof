@@ -20,7 +20,7 @@ def invoke(*arguments):
 code, report = invoke("--json", SOURCE)
 assert code == 1 and report["summary"]["semantic_errors"] == 0
 assert report["replay"]["gaps"] == 0 and not report["trust"]["trusted_assumptions"]
-names = ("typed_u8_identity_positive", "typed_u8_identity_negative",
+names = ("typed_u8_identity_positive", "typed_u64_identity_positive", "typed_u16_identity_positive", "typed_u8_identity_negative",
          "typed_u16_identity_negative", "typed_u64_high_bit_negative")
 fingerprints = {}
 with tempfile.TemporaryDirectory(prefix="elisa-typed-goal-identity-") as directory:
@@ -35,20 +35,30 @@ with tempfile.TemporaryDirectory(prefix="elisa-typed-goal-identity-") as directo
         fingerprints[name] = fingerprint
         target = {"goal_id": goal["goal_id"], "goal_fingerprint": fingerprint}
         script.write_text(json.dumps({"format": "elisa-proof-tactics-v1", "target": target,
-                                      "actions": [{"action": "simp" if name.endswith("positive") else "decide"}]}))
+                                      "actions": [{"action": "decide"}]}))
         code, result = invoke("--tactics", script, SOURCE)
         assert result["source_goal_binding"]["fingerprint_match"] is True, name
         assert result["source_goal_binding"]["goal_fingerprint"]["value"] == fingerprint
-        # The current JSON AST mirror erases typed-literal sorts. Exact arena matching
-        # must refuse that lossy import, including a true proposition, until the
-        # typed tactic transport is implemented. Identity alone never admits a proof.
-        assert code == 1 and not result["tactic"]["valid"] and not result["tactic"]["solved"]
-        assert result["tactic"]["reason"] == "invalid source-bound proof script", name
+        if name.endswith("positive"):
+            assert code == 0 and result["tactic"]["valid"] and result["tactic"]["solved"], result
+            assert result["tactic"]["certificate_replayed"], result
+        else:
+            assert code == 1 and not result["tactic"]["solved"], result
+            assert result["tactic"]["reason"] != "invalid source-bound proof script", result
         target["goal_fingerprint"] = (fingerprint + 1) % 2**32
         script.write_text(json.dumps({"format": "elisa-proof-tactics-v1", "target": target,
                                       "actions": [{"action": "decide"}]}))
         code, changed = invoke("--tactics", script, SOURCE)
         assert code == 1 and not changed["tactic"]["valid"]
         assert changed["source_goal_binding"]["fingerprint_match"] is False
+    # Portable JSON must not silently truncate or coerce forged location keys.
+    for column in (-1, 2**32, "12", None, True):
+        literal = {"kind": "int", "value": 7, "line": 1, "column": column}
+        script.write_text(json.dumps({"format": "elisa-proof-tactics-v1",
+            "initial": {"facts": [], "goal": {"kind": "binary", "operator": "==",
+                        "left": literal, "right": literal}},
+            "actions": [{"action": "decide"}]}))
+        code, malformed = invoke("--tactics", script, ROOT / "examples/verified.elisa")
+        assert code == 1 and not malformed["tactic"]["valid"], malformed
 assert fingerprints["typed_u8_identity_negative"] != fingerprints["typed_u16_identity_negative"]
-print("typed identities bind widths/high bits; lossy tactic imports and changed fingerprints fail closed")
+print("typed literal transport binds sorts/high bits; positive certificate replays; false goals and changed fingerprints reject")

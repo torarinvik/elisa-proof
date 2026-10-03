@@ -42,5 +42,6 @@ for fixture, goal, fingerprint in (
     assert binding["goal_fingerprint"]["value"] == fingerprint, negative
     assert negative["tactic"]["valid"] is False, negative
     assert negative["tactic"]["solved"] is False, negative
+    assert negative["tactic"]["reason"] != "invalid source-bound proof script", negative
 
-print("constant replay: safe simplification replayed; three typed claims bound but lossy imports refused")
+print("constant replay: safe simplification replayed; three bound machine-invalid tactic claims refused after import")
