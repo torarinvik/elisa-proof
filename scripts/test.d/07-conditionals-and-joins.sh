@@ -426,6 +426,14 @@ fi
 # A call in a loop condition has no statement boundary either, and an opaque condition leaves the
 # loop with no post-state claim at all. Binding the call before the loop keeps the condition.
 set +e
+# A conditional join must not overclaim: one arm leaves the bound false, and a condition
+# that reads a rebound binding cannot vouch for the value after the branch (G75).
+run_json_report "$ROOT_DIR/examples/rejected_conditional_join.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["replay"]["gaps"] == 0; assert report["summary"]["proven"] < report["summary"]["obligations"]; assert sorted((f["kind"], f["line"]) for f in report["findings"]) == [("ensure-unproven", 14), ("ensure-unproven", 25)]'
+rejected_conditional_join_status=${PIPESTATUS[1]}
+if [[ "$rejected_conditional_join_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a conditional join proved a false bound\n' >&2
+    exit 1
+fi
 run_json_report "$ROOT_DIR/examples/bound_loop_condition.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"loop-invariant-missing"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_bound_limit_leaves_the_condition_readable"] == "contract-verified-widened-state"'
 bound_loop_condition_status=${PIPESTATUS[1]}
 set -e

@@ -1,0 +1,94 @@
+extend ElisaProof:
+    private:
+        # A goal over `T = a if c else b` (G75: a while-loop invariant over a binding an if/else
+        # joined as a conditional) is decided in three kernel-checked steps rather than one
+        # deep case split. First `not c or G[a]` and `c or G[b]`, each from the current facts:
+        # the solver assumes one side of `c`, so a guarded arm fact `not c or F` resolves without
+        # a split. Then `G` itself from the facts plus those two, a conditional over two
+        # disjunctions the kernel decides within its split depth. Each step is an ordinary
+        # certified goal, so replay re-derives all three.
+        # Only called once the goal failed as a whole; the final step, whose facts are exactly
+        # the two cases, does not split again.
+        def proof_certify_conditional_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            conditionals: mutable darray[Ast::Expr] = []
+            proof_goal_conditional_terms(goal, &conditionals, 0)
+            return false if conditionals.count != 1
+            match conditionals[0]:
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    then_goal: (changed: bool, value: Ast::Expr) = proof_replace_place(goal, conditionals[0], then_expression, 0)
+                    else_goal: (changed: bool, value: Ast::Expr) = proof_replace_place(goal, conditionals[0], else_expression, 0)
+                    return false if not then_goal.changed or not else_goal.changed
+                    then_case: Ast::Expr = Ast::Expr.Binary(proof_branch_negation(condition, position), TokenKind.Or, then_goal.value, position)
+                    else_case: Ast::Expr = Ast::Expr.Binary(condition, TokenKind.Or, else_goal.value, position)
+                    # The final step's facts end with the two cases.
+                    return false if facts.count >= 2 and proof_expr_equal(facts[facts.count - 2], then_case) and proof_expr_equal(facts[facts.count - 1], else_case)
+                    # Never nested: a case's own goal can unfold into a conditional again (a
+                    # callee body inlined), and each level would split anew.
+                    return false if report.conditional_split_active
+                    report.conditional_split_active <- true
+                    mark: (attempts: usize, certificates: usize, facts: usize, kernel_facts: usize) = proof_goal_record_mark(report)
+                    proven: bool = proof_certify_conditional_cases(facts, goal, then_case, else_case, report, line, name, annotations)
+                    report.conditional_split_active <- false
+                    # A split that did not prove the goal leaves no record: its case attempts are
+                    # not obligations, and the caller records the goal's own failure.
+                    proof_goal_record_rollback(report, mark) if not proven
+                    return proven
+                _:
+                    return false
+
+        # The conditional terms of a goal, at most two, outside other conditionals.
+        def proof_goal_conditional_terms(expression: Ast::Expr, terms: mutable darray[Ast::Expr]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or terms.count >= 2
+            match expression:
+                Ast::Expr.If(_, _, _, _):
+                    terms.push(expression) if not (any existing in terms where proof_expr_equal(existing, expression))
+                Ast::Expr.Paren(inner, _):
+                    proof_goal_conditional_terms(inner, terms, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_goal_conditional_terms(operand, terms, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_goal_conditional_terms(left, terms, depth + 1)
+                    proof_goal_conditional_terms(right, terms, depth + 1)
+                _:
+                    return
+
+        def proof_certify_conditional_cases(facts: darray[Ast::Expr]&, goal: Ast::Expr, then_case: Ast::Expr, else_case: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            # The facts the solver cannot split: bounds, markers, equalities. A case proved from
+            # these alone needs no split, so its certificate and trace replay cheaply; the other
+            # disjunctions are kept out of the final step for the same reason.
+            plain: mutable darray[Ast::Expr] = []
+            for fact in facts |plain|:
+                split: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(fact)
+                plain.push(fact) if not split.known
+            cases: mutable darray[Ast::Expr] = proof_copy_exprs(plain)
+            return false if not proof_stage_conditional_case(facts, plain, then_case, &cases, report, line, name, annotations)
+            return false if not proof_stage_conditional_case(facts, plain, else_case, &cases, report, line, name, annotations)
+            return proof_certify_goal_with_rule(cases, goal, report, line, name, annotations, "")
+
+        # Prove one case and add it to the final step's facts with the smallest premise set
+        # that worked. A case that is already a fact (a guarded arm fact the join imported)
+        # keeps its own trace.
+        def proof_stage_conditional_case(facts: darray[Ast::Expr]&, plain: darray[Ast::Expr]&, case: Ast::Expr, cases: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            if any fact in facts where proof_expr_equal(fact, case):
+                cases.push(case)
+                return true
+            before: usize = cases.count
+            mark: (attempts: usize, certificates: usize, facts: usize, kernel_facts: usize) = proof_goal_record_mark(report)
+            if proof_certify_goal_with_rule(plain, case, report, line, name, annotations, ""):
+                proof_add_derived_fact_from(cases, report, case, plain, "proof-step", line, name)
+            else:
+                # The cheaper attempt's failure is not an obligation either.
+                proof_goal_record_rollback(report, mark)
+                proof_add_derived_fact_from(cases, report, case, facts, "proof-step", line, name) if proof_certify_goal_with_rule(facts, case, report, line, name, annotations, "")
+            return cases.count > before
+
+        def proof_goal_record_mark(report: ProofReport&) -> (attempts: usize, certificates: usize, facts: usize, kernel_facts: usize):
+            return (report.goal_attempts.count, report.certificates.count, report.certificate_facts.count, report.kernel_certificate_facts.count)
+
+        # Drop the goal attempts and certificates recorded since `mark`. Fact traces and kernel
+        # nodes they introduced stay: an unreferenced trace is inert.
+        def proof_goal_record_rollback(report: mutable ProofReport&, mark: (attempts: usize, certificates: usize, facts: usize, kernel_facts: usize)) -> void:
+            report.goal_attempts <- report.goal_attempts.truncate(mark.attempts) if report.goal_attempts.count > mark.attempts
+            report.certificates <- report.certificates.truncate(mark.certificates) if report.certificates.count > mark.certificates
+            report.certificate_facts <- report.certificate_facts.truncate(mark.facts) if report.certificate_facts.count > mark.facts
+            report.kernel_certificate_facts <- report.kernel_certificate_facts.truncate(mark.kernel_facts) if report.kernel_certificate_facts.count > mark.kernel_facts

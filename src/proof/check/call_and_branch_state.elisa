@@ -300,6 +300,167 @@ extend ElisaProof:
                 else_held: bool = any existing in else_facts where proof_expr_equal(existing, else_steps[index])
                 facts.push(accepted[index]) if then_held and else_held
 
+        # Join a binding both arms rebind to different values as `then if c else other`, where `c`
+        # is the condition read before the branch (G75): `if c: t <- a` / `else: t <- b` leaves
+        # `t` as `a if c else b` rather than a fresh atom with no facts, and the kernel reasons
+        # over the conditional directly. Facts an arm states over its value enter guarded by the
+        # path, `not c or F` and `c or G`: each holds on both paths, and each replays from its
+        # arm's own traced fact, so no trust is added. `c` may read only scalars neither arm
+        # rebinds, through plain operators, so it means the same at the join as at the fork.
+        def proof_join_conditional_values(condition: Ast::Expr, then_body: darray[Ast::Stmt]&, else_body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, prior_values: darray[Ast::Expr]&, values: mutable darray[Ast::Expr]&, names: darray[sview]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, then_facts: darray[Ast::Expr]&, else_facts: darray[Ast::Expr]&, then_names: darray[sview]&, else_names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            return if not analyzed
+            return if not proof_join_condition_plain(condition, 0) or not proof_kernel_expression_supported(condition)
+            capped: mutable usize = limit if limit < values.count else values.count
+            capped <- names.count if names.count < capped
+            capped <- prior_values.count if prior_values.count < capped
+            capped <- then_values.count if then_values.count < capped
+            capped <- else_values.count if else_values.count < capped
+            # What each arm writes, as at a loop entry. An arm that writes a binding and leaves
+            # it as its own atom has reused that atom for a new value inside the arm.
+            then_written: mutable darray[sview] = []
+            proof_collect_aliased_names(then_body, functions, &then_written, false)
+            proof_collect_assignment_roots(then_body, &then_written)
+            else_written: mutable darray[sview] = []
+            proof_collect_aliased_names(else_body, functions, &else_written, false)
+            proof_collect_assignment_roots(else_body, &else_written)
+            return if (any name in then_written where name == "*") or (any name in else_written where name == "*")
+            reused: mutable darray[sview] = []
+            for index in 0..<capped |index, names, then_values, else_values, then_written, else_written, reused|:
+                then_reused: bool = (any name in then_written where name == names[index]) and proof_ident_name(then_values[index]) == names[index]
+                else_reused: bool = (any name in else_written where name == names[index]) and proof_ident_name(else_values[index]) == names[index]
+                reused.push(names[index]) if then_reused or else_reused
+            # The bindings that could join as a conditional.
+            chosen: mutable darray[bool] = []
+            for index in 0..<capped |index, names, values, then_values, else_values, then_names, else_names, then_facts, else_facts, parameters, report, chosen|:
+                then_value: Ast::Expr = then_values[index]
+                else_value: Ast::Expr = else_values[index]
+                eligible: bool = proof_ident_name(values[index]) == names[index] and not proof_expr_equal(then_value, else_value) and not proof_expr_mentions_arm_local(then_value, then_names, names.count) and not proof_expr_mentions_arm_local(else_value, else_names, names.count) and proof_kernel_expression_supported(then_value) and proof_kernel_expression_supported(else_value) and proof_expr_call_stable(then_value, then_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0) and proof_expr_call_stable(else_value, else_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                chosen.push(eligible)
+            # An atom keeps its meaning across the join unless the join reuses it: a binding an
+            # arm rebound that stays forgotten here names a new value under its old atom. A
+            # binding that joins as a conditional leaves its atom to the old value. Dropping a
+            # binding from the conditionals can make it such a name, so settle to a fixed point.
+            changing: mutable darray[sview] = []
+            for _ in 0..<capped + 1 |capped, names, values, prior_values, then_values, else_values, chosen, changing, condition, reused, then_written, else_written|:
+                changing.clear()
+                changing.extend(reused)
+                for index in 0..<capped |index, names, values, prior_values, then_values, else_values, chosen, changing, then_written, else_written|:
+                    rebound: bool = not proof_expr_equal(prior_values[index], then_values[index]) or not proof_expr_equal(prior_values[index], else_values[index]) or (any name in then_written where name == names[index]) or (any name in else_written where name == names[index])
+                    changing.push(names[index]) if rebound and proof_ident_name(values[index]) == names[index] and not chosen[index]
+                dropped: mutable bool = false
+                for index in 0..<capped |index, then_values, else_values, chosen, changing, dropped|:
+                    continue if not chosen[index]
+                    if any name in changing where proof_expr_mentions_name(then_values[index], name) or proof_expr_mentions_name(else_values[index], name):
+                        chosen[index] <- false
+                        dropped <- true
+                break if not dropped
+            return if any name in changing where proof_expr_mentions_name(condition, name)
+            then_terms: mutable darray[Ast::Expr] = []
+            else_terms: mutable darray[Ast::Expr] = []
+            for index in 0..<capped |index, values, then_values, else_values, chosen, condition, position, then_terms, else_terms|:
+                continue if not chosen[index]
+                values[index] <- Ast::Expr.If(condition, then_values[index], else_values[index], position)
+                then_terms.push(then_values[index])
+                else_terms.push(else_values[index])
+            return if then_terms.count == 0
+            rebound: darray[sview] = changing
+            negated: Ast::Expr = proof_branch_negation(condition, position)
+            proof_join_guarded_facts(then_facts, else_facts, then_terms, negated, then_names, names, rebound, facts, parameters, report, owner, position)
+            proof_join_guarded_facts(else_facts, then_facts, else_terms, condition, else_names, names, rebound, facts, parameters, report, owner, position)
+
+        # The arm facts over an arm's joined values, each as `other_path or F`. A fact the other
+        # arm states too is left to the literal intersection.
+        def proof_join_guarded_facts(arm_facts: darray[Ast::Expr]&, other_facts: darray[Ast::Expr]&, terms: darray[Ast::Expr]&, other_path: Ast::Expr, arm_names: darray[sview]&, names: darray[sview]&, rebound: darray[sview]&, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            term_names: mutable darray[sview] = []
+            for term in terms |term_names|:
+                proof_collect_plain_idents(term, &term_names, 0)
+            # The arm's own path condition and its conjuncts are trivial under the guard and
+            # would only cost case splits.
+            path_parts: mutable darray[Ast::Expr] = []
+            proof_conjunct_components(proof_branch_negation(other_path, position), &path_parts)
+            path_parts.push(proof_branch_negation(other_path, position))
+            imported: mutable usize = 0
+            for fact in arm_facts |arm_facts, other_facts, term_names, path_parts, other_path, arm_names, names, rebound, facts, parameters, report, owner, position, imported|:
+                break if imported >= PROOF_JOIN_GUARDED_FACT_LIMIT
+                continue if not (any name in term_names where proof_expr_mentions_name(fact, name))
+                continue if any part in path_parts where proof_expr_equal(part, fact)
+                continue if any other in other_facts where proof_expr_equal(other, fact)
+                continue if proof_expr_mentions_arm_local(fact, arm_names, names.count)
+                continue if any name in rebound where proof_expr_mentions_name(fact, name)
+                continue if not proof_expr_call_stable(fact, arm_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, 0)
+                # A type marker states a term's static type, which no path changes: it joins
+                # unguarded, under the arm's own type-bound trace.
+                if proof_join_type_marker(fact):
+                    facts.push(fact) if not (any existing in facts where proof_expr_equal(existing, fact))
+                    continue
+                guarded: Ast::Expr = Ast::Expr.Binary(other_path, TokenKind.Or, fact, position)
+                continue if any existing in facts where proof_expr_equal(existing, guarded)
+                premises: darray[Ast::Expr] = [fact]
+                before: usize = facts.count
+                proof_add_derived_fact_from(facts, report, guarded, premises, "branch-join", position.line, owner)
+                imported <- imported + 1 if facts.count > before
+
+        def proof_join_type_marker(fact: Ast::Expr) -> bool:
+            match fact:
+                Ast::Expr.Call(Ast::Expr.Ident(callee, _), _, _, _):
+                    return proof_name_is_reserved_internal(callee)
+                _:
+                    return false
+
+        # A condition over scalars and literals through plain operators only: no call, index,
+        # field or other place whose value an arm could change behind a name.
+        def proof_join_condition_plain(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return name != ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_join_condition_plain(inner, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_join_condition_plain(operand, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_join_condition_plain(left, depth + 1) and proof_join_condition_plain(right, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    # A recorded call term, `step(t)` over an atom, names one fixed result: the
+                    # checker substitutes it only once a summary made it a value.
+                    match callee:
+                        Ast::Expr.Ident(_, _):
+                            pass
+                        Ast::Expr.Scope(_, _, _):
+                            pass
+                        _:
+                            return false
+                    for argument in arguments |depth|:
+                        return false if not proof_join_condition_plain(argument, depth + 1)
+                    return true
+                _:
+                    return false
+
+        # The identifiers a term reads, where it is plain enough to walk; anything else adds
+        # nothing, which only narrows the facts imported for it.
+        def proof_collect_plain_idents(expression: Ast::Expr, names: mutable darray[sview]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    names.push(name) if name != "" and not (any existing in names where existing == name)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_plain_idents(inner, names, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_plain_idents(operand, names, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_plain_idents(left, names, depth + 1)
+                    proof_collect_plain_idents(right, names, depth + 1)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |names, depth|:
+                        proof_collect_plain_idents(argument, names, depth + 1)
+                _:
+                    return
+
         # An arm's names are the outer ones followed by the locals it declared. Its state joins
         # the outer one only when no local shadows an outer name, which would make a fact over
         # that name ambiguous.
