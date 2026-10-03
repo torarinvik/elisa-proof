@@ -580,17 +580,17 @@ if [[ "$rejected_converted_index_status" -ne 0 ]]; then
     exit 1
 fi
 
-# The then arm of an if-expression is range-checked under its own condition.
+# An index in an if-expression arm is bounds-checked under that arm's condition.
 set +e
-run_json_report "$ROOT_DIR/examples/guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
-guarded_conditional_arms_status=${PIPESTATUS[1]}
+run_json_report "$ROOT_DIR/examples/guarded_arm_indexes.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]'
+guarded_arm_index_status=${PIPESTATUS[1]}
 set -e
-if [[ "$guarded_conditional_arms_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: a subtraction guarded by its if-expression condition was refused\n' >&2
+if [[ "$guarded_arm_index_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a guarded index in a conditional arm was not proven\n' >&2
     exit 1
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_guarded_conditional_arms.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert owners == {("wrong_arm", "ensure-unproven"), ("weak_guard", "ensure-unproven")}'
-rejected_guarded_conditional_arms_status=${PIPESTATUS[1]}
+run_json_report "$ROOT_DIR/examples/rejected_guarded_arm_indexes.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; owners = {(finding["name"], finding["kind"]) for finding in report["findings"]}; assert ("other_guard", "index-upper-unproven") in owners; assert ("else_arm", "index-upper-unproven") in owners'
+rejected_guarded_arm_index_status=${PIPESTATUS[1]}
 set -e

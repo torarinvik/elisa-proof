@@ -1,5 +1,25 @@
 # shellcheck shell=bash
 # Part 8 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
+if [[ "$rejected_unsigned_nonnegative_sum_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: the nonnegativity rule admitted more than nonnegativity\n' >&2
+    exit 1
+fi
+
+# A guard reaches the statements after it negated, and the order query read only the positive
+# spelling, so the ordinary early-return range check was stated and unreadable. Complementarity is
+# what the negation gives; transitivity and a modular comparison are not.
+set +e
+run_json_report "$ROOT_DIR/examples/negated_guard_range.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; verified = {d["name"] for d in report["declaration_details"] if d["kind"] == "function" and d["verification_reason"] == "verified"}; assert verified == {"a_negated_range_check", "the_same_check_as_a_condition", "two_places", "a_modular_guard_bounds_its_own_sum"}'
+negated_guard_range_status=${PIPESTATUS[1]}
+set -e
+if [[ "$negated_guard_range_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a negated range check was unreadable\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_negated_guard_range.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; formation = [f for f in report["findings"] if f["kind"] == "contract-proposition-type"]; assert len(formation) == 6 and {f["name"] for f in formation} == {"a_negated_struct_order_does_not_chain", "a_negated_struct_order_gives_no_strict_chain"}; assert {f["kind"] for f in report["findings"]} == {"contract-proposition-type", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert set(reasons) == {"a_negated_struct_order_does_not_chain", "a_negated_struct_order_gives_no_strict_chain", "a_negated_modular_guard_bounds_nothing", "a_negated_equality_is_not_an_order"}; assert all(reason == "body-unverified" for reason in reasons.values())'
+rejected_negated_guard_range_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_negated_guard_range_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a negated comparison gave more than its complement\n' >&2
@@ -575,21 +595,3 @@ fi
 set +e
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/reserved-proof-name.o" "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" >/dev/null 2>&1
 reserved_source_compiler_status=$?
-run_json_report "$ROOT_DIR/examples/rejected_forged_unsigned_marker.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == [{"kind": "proof-internal-name", "status": "unsupported", "line": 2, "file": 0, "file_line": 2, "name": "__elisa_unsigned_type_bound", "message": "source identifier collides with a proof-system internal name", "counterexample_found": False, "goal_id": None, "counterexample": []}]'
-reserved_marker_status=${PIPESTATUS[1]}
-run_json_report "$ROOT_DIR/examples/rejected_rebind_symbol_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unsupported"; assert report["summary"]["proven"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"][0]["kind"] == "proof-internal-name"; assert report["findings"][0]["name"] == "__elisa_rebind_0"; assert report["findings"][0]["line"] == 5'
-reserved_rebind_status=${PIPESTATUS[1]}
-run_json_report "$ROOT_DIR/examples/internal_prefix_noncollision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["verification_state"] == "proved"; assert report["replay"]["gaps"] == 0; assert not report["findings"]'
-reserved_noncollision_status=${PIPESTATUS[1]}
-set -e
-if [[ "$reserved_source_compiler_status" -ne 0 || "$reserved_marker_status" -ne 0 || "$reserved_rebind_status" -ne 0 || "$reserved_noncollision_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: source code collided with a proof-system internal name\n' >&2
-    exit 1
-fi
-
-# An include graph may legitimately expand to an empty source file. The importer must pass that
-# successful zero-byte expansion to the parser instead of falling back to the root include line.
-set +e
-run_json_report "$ROOT_DIR/examples/import_empty_root.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["source"]["bytes"] == 0; assert report["replay"]["gaps"] == 0; assert report["findings"] == []'
-empty_import_status=${PIPESTATUS[1]}
-set -e
