@@ -11,6 +11,8 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 REPLAY = ROOT / "src/proof/kernel_replay"
+if not __debug__:
+    raise SystemExit("run without Python -O; operation-count assertions are acceptance checks")
 
 
 def function_body(path: Path, name: str) -> str:
