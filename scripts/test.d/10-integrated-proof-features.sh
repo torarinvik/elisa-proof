@@ -13,6 +13,7 @@ run_py_test test_disjunctive_syllogism.py
 run_py_test test_false_left_search.py
 run_py_test test_extern_effect_containment.py
 run_py_test test_quantifier_dispatch.py
+run_py_test test_quantifier_endpoint_sorts.py
 run_py_test test_local_call_result_binding.py
 run_py_test test_capture_result_alias.py
 run_py_test test_integer_unit_refutation.py
