@@ -9,6 +9,39 @@ else
     ELISA_DEAD_STRIP_LINK=(-no-pie -Wl,--gc-sections -Wl,--no-as-needed -lm)
 fi
 
+# Honor the same explicit LLVM tools as the compiler wrapper. Linux provisioned
+# toolchains need not be installed globally or added to the login shell's PATH.
+elisa_resolve_clang() {
+    local selected="${ELISA_CLANG:-}" config="${LLVM_CONFIG:-}"
+    if [[ -z "$selected" && -n "${ELISA_LLVM_BIN_DIR:-}" ]]; then
+        selected="$ELISA_LLVM_BIN_DIR/clang"
+    fi
+    if [[ -z "$selected" && -n "$config" ]]; then
+        if [[ "$config" != */* ]]; then config="$(command -v "$config" || true)"; fi
+        if [[ -z "$config" || ! -x "$config" ]]; then
+            printf 'LLVM_CONFIG is not executable: %s\n' "${LLVM_CONFIG}" >&2
+            return 2
+        fi
+        selected="$(dirname -- "$config")/clang"
+    fi
+    if [[ -z "$selected" ]]; then
+        selected="$(command -v clang || true)"
+    elif [[ "$selected" != */* ]]; then
+        selected="$(command -v "$selected" || true)"
+    fi
+    if [[ -z "$selected" || ! -f "$selected" || ! -x "$selected" ]]; then
+        printf 'clang is required; set ELISA_CLANG or LLVM_CONFIG to an executable toolchain\n' >&2
+        return 2
+    fi
+    printf '%s\n' "$selected"
+}
+
+elisa_clang() {
+    local tool
+    tool="$(elisa_resolve_clang)" || return $?
+    "$tool" "$@"
+}
+
 # Link with clang; on GNU ld, retry once with aborting stubs when the only undefined symbols are
 # the runtime's optional native-callback and varargs entry points. Apple's -dead_strip removes
 # those unreachable references; --gc-sections does not, because the runtime object keeps them in
@@ -18,7 +51,7 @@ elisa_link_native() {
     local stub_dir="$1" log stub undefined symbol index=0
     shift
     log="$stub_dir/link.$$.log"
-    if clang "$@" 2>"$log"; then
+    if elisa_clang "$@" 2>"$log"; then
         rm -f "$log"
         return 0
     fi
@@ -42,5 +75,5 @@ elisa_link_native() {
         printf 'void elisa_unreachable_%d(void) __asm__("%s");\nvoid elisa_unreachable_%d(void) { abort(); }\n' "$index" "$symbol" "$index" >>"$stub"
     done
     rm -f "$log"
-    clang "$@" "$stub"
+    elisa_clang "$@" "$stub"
 }

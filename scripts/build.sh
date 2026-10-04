@@ -122,10 +122,7 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" ]]; then
     exit 2
 fi
 
-if ! command -v clang >/dev/null 2>&1; then
-    printf 'clang is required to link the generated Elisa object.\n' >&2
-    exit 2
-fi
+CLANG_TOOL="$(elisa_resolve_clang)" || exit $?
 
 mkdir -p "$ROOT_DIR/build"
 for PROOF_OUTPUT in "${PRODUCT_OUTPUTS[@]}"; do
@@ -197,9 +194,9 @@ fi
 # The stamp names the clang that built the hook object, so switching toolchains rebuilds it
 # instead of linking an object from the previous clang.
 PROFILE_HOOKS_STAMP="$PROFILE_HOOKS_OBJ.clang"
-profile_hooks_clang="$(clang --version | head -1) $PROFILE_HOOKS_SOURCE"
+profile_hooks_clang="$CLANG_TOOL $("$CLANG_TOOL" --version | head -1) $PROFILE_HOOKS_SOURCE"
 if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_OBJ" || ! -f "$PROFILE_HOOKS_STAMP" || "$(<"$PROFILE_HOOKS_STAMP")" != "$profile_hooks_clang" ]]; then
-    clang -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
+    "$CLANG_TOOL" -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
     printf '%s\n' "$profile_hooks_clang" > "$PROFILE_HOOKS_STAMP"
 fi
@@ -303,7 +300,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
     # ELISA_EXTRA_LINK_INPUTS (space-separated objects) lets a host supply symbols the platform's
     # dead stripping would otherwise remove, such as unreachable native-callback entry points.
     [[ -n "${ELISA_EXTRA_LINK_INPUTS:-}" ]] && read -r -a extra_link_inputs <<< "$ELISA_EXTRA_LINK_INPUTS" && LINK_INPUTS+=("${extra_link_inputs[@]}")
-    clang "${ELISA_DEAD_STRIP_LINK[@]}" -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+    "$CLANG_TOOL" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
     # Sign before hashing so the manifest digest names the exact executable that runs.
     if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
         codesign -s - --force "$PROOF_BINARY" 2>/dev/null
