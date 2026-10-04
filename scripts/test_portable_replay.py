@@ -28,6 +28,7 @@ POSITIVE = {
     "implicit_structural_decreases": {"structural-safety"},
     "early_return_index_guard": {"index-lower", "index-upper"},
     "fixed_array_slice_bounds": {"slice-lower", "slice-upper", "slice-order"},
+    "pure_unfolding": {"goal"},
 }
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
@@ -283,6 +284,33 @@ base = packages["verified"]
 assumption = next(t for t in base["theorems"] if t["rule"] == "goal" and t["conclusion"] in t["hypotheses"])
 code, result = replay(with_theorem(base, assumption), "assumption")
 assert code == 0, result
+
+# Exact compound excluded middle is checked by the portable kernel, not a
+# producer truth flag. Reseal a false near-match so identity checks cannot hide it.
+excluded = copy.deepcopy(base)
+excluded["kernel"] = {"nodes": [], "children": []}
+subject = append_node(excluded, "ident", name="c")
+scalar = marker_call(excluded, "__elisa_primitive_scalar_type", [subject])
+values = [append_node(excluded, "int", value=str(value)) for value in (32, 9, 14)]
+atoms = [append_node(excluded, "binary", "==", subject, value) for value in values]
+predicate = append_node(excluded, "binary", "or", atoms[0], atoms[1])
+different = append_node(excluded, "binary", "or", atoms[0], atoms[2])
+negated = append_node(excluded, "unary", "not", predicate)
+conclusion = append_node(excluded, "binary", "or", predicate, negated)
+claim = copy.deepcopy(assumption)
+claim.update(hypotheses=[scalar], hypothesis_origins=[{"kind": "forged"}], conclusion=conclusion)
+excluded["theorems"] = [reseal(excluded, claim)]
+code, result = replay(excluded, "compound-excluded-middle")
+assert code == 0 and result["status"] == "replayed", result
+near_match = copy.deepcopy(excluded)
+near_match["kernel"]["nodes"][negated]["left"] = different
+near_match["theorems"] = [reseal(near_match, near_match["theorems"][0])]
+refused(near_match, "compound-not-complement", "rejected", "kernel-rejected")
+double_negative = copy.deepcopy(excluded)
+twice_negated = append_node(double_negative, "unary", "not", negated)
+double_negative["theorems"][0]["conclusion"] = append_node(double_negative, "binary", "or", predicate, twice_negated)
+double_negative["theorems"] = [reseal(double_negative, double_negative["theorems"][0])]
+refused(double_negative, "compound-double-negation-is-not-complement", "rejected", "kernel-rejected")
 
 # Consistent forgeries: the kernel itself must refuse them.
 dropped = copy.deepcopy(assumption)

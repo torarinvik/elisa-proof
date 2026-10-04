@@ -32,6 +32,17 @@ def main():
     example = json.loads(subprocess.run([str(BINARY), "--json", str(ROOT / "examples/pure_unfolding.elisa")], capture_output=True, text=True, timeout=600).stdout)
     assert example["status"] == "proved" and example["replay"]["gaps"] == 0, "example must prove with no gaps"
 
+    # Exact compound excluded middle must replay without exhausting case splits.
+    predicate = "(c == 32 or c == 9 or c == 13)"
+    for goal in (f"{predicate} or not {predicate}", f"not {predicate} or {predicate}"):
+        check("compound-excluded-middle", f"def f(c: usize) -> usize:\n    ensures {goal}\n    return c\n", [])
+    # Similar-looking alternatives are not complements. A failed helper cannot
+    # lend a trusted summary to its caller.
+    check("non-complement", f"def f(c: usize) -> usize:\n    ensures {predicate} or not (c == 32 or c == 9 or c == 14)\n    return c\n", [3])
+    unverified = report("def bad(c: usize) -> bool:\n    ensures result\n    return c == 32\n\ndef caller(c: usize) -> usize:\n    requires bad(c)\n    ensures c == 32\n    return c\n")
+    assert {goal["name"] for goal in unverified["goals"] if not goal["proven"]} == {"bad", "caller"}, "unverified helper summary became trusted"
+    assert unverified["replay"]["gaps"] == 0
+
     # A loop guarded by a helper call cannot claim more than its range gives.
     rejected = json.loads(subprocess.run([str(BINARY), "--json", str(ROOT / "examples/rejected_helper_guarded_loop.elisa")], capture_output=True, text=True, timeout=600).stdout)
     assert rejected["status"] != "proved", "rejected_helper_guarded_loop must not prove"
