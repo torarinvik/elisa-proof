@@ -39,3 +39,8 @@ if ! python3 "$ROOT_DIR/test/validate_kernel_replay_standalone.py" \
     printf 'proof test matrix failed: standalone replay audit coverage or trust boundary regressed\n' >&2
     exit 1
 fi
+if ! ELISA_PROOF_BIN="$ROOT_DIR/build/elisa-proof" \
+    python3 "$ROOT_DIR/scripts/test_typed_literal_summary_coverage.py"; then
+    printf 'proof test matrix failed: typed-literal admission summary coverage regressed\n' >&2
+    exit 1
+fi
