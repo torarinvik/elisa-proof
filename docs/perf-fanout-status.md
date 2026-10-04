@@ -1,4 +1,65 @@
-# Performance fan-out status (2026-10-03)
+# Performance fan-out status
+
+## Current six-Luna batch (2026-10-04)
+
+The current baseline is `778e53d`; reviewed optimization commit `ff1768c` is on `main`.
+Six GPT-6 Luna agents worked on disjoint source/checker/kernel, benchmark, and profiler lanes.
+Agent reasoning runs in Codex; the Linux build and validation work runs over SSH on the
+user-supplied Vast instance. No remote API credentials or local binary products were copied.
+
+The Linux toolchain was bootstrapped with the repository pins, LLVM 20.1.2, and z3.
+Both baseline and candidate main/replay products compiled successfully. Candidate checks passed:
+
+- Linear certificate search, replay, forged-certificate, and budget controls.
+- Symbolic quantifiers, including sorting/partition, adversarial, malformed, and budget cases.
+- Chained pure calls and the bounded GCD producer fixture.
+- Native kernel congruence, interval/arena-preservation, and quantifier-instance probes.
+
+The patch reduces unused annotation scans, repeated index AST walks, congruence scratch arrays,
+and GCD provenance scanning. The GCD shortcut still scans all signed coefficients and the
+constant, preserving the existing minimum-integer edge behavior.
+
+`scripts/perf_luna_benchmark.py` compares proof, package, and standalone replay outputs, including
+exit status and stderr, before reporting bounded repeated wall-time/RSS measurements. Its
+process-group timeout cleanup self-test passes with normal Python and Python optimization enabled.
+The three-round Linux comparison passed on all six fixtures with byte-identical outputs, exit
+codes, and stderr across baseline/candidate/rounds. Raw evidence was copied off-box to ignored
+`build/luna-remote-20261004/benchmark.json`.
+
+Observed proof-check medians (seconds):
+
+| Workload | Baseline | Candidate |
+|---|---:|---:|
+| Symbolic quantifier | 1.5886 | 1.5829 |
+| Rejected symbolic quantifier | 0.6139 | 0.6117 |
+| Congruence | 0.0175 | 0.0170 |
+| Rejected congruence | 0.0194 | 0.0175 |
+
+These are small changes, several at millisecond scale, with only three repetitions and no
+statistical confidence claim. RSS was essentially unchanged; no broad speedup is established.
+The most useful result is a verified comparison baseline and removal of avoidable work. Targeted
+profiling is still needed before another performance batch. This is not a full matrix pass.
+
+Two pre-existing blockers remain distinct from these optimizations:
+
+1. `test_pure_unfolding.py` fails identically in baseline and candidate: `is_space` line 29 has an
+   open connective-shaped ensure, and `first_space` line 38 cannot use its unverified summary.
+   Both reports have 22 obligations, 20 proved, and zero replay gaps.
+   The historical congruence matrix also expects `call_congruence` to be refused, but current
+   verified `pure_identity` summaries reduce its goal to the existing `a == b` premise in both
+   baseline and candidate. Its certificate replays; this is summary unfolding, not admission of
+   arbitrary calls as congruent formers. The new benchmark retains it as a positive control.
+2. The native profiler compiles on Linux after an explicit Boolean-reference value read
+   (`elisa-profiler` commit `6547adb`), but capture is not Linux-ready. Its native file-open and
+   clock constants are Darwin-specific; target linking also assumes Apple dead-stripping and
+   underscore-prefixed entry symbols. Do not use instrumented measurements until platform I/O,
+   clock, symbol rewriting, collector execution, and timeout controls pass on Linux.
+   `scripts/perf_luna_profile.sh` therefore refuses unsupported hosts before expensive work.
+
+The instance workspace is not a persistent volume. Keep source gains committed locally and copy
+important evidence off-box before recycling/destroying it. Builds/caches are not repository gains.
+
+## Historical snapshot (2026-10-03; not the current branch inventory)
 
 Six cloud agents worked on compiler and proof-assistant performance, each on its own branch, plus
 one session that drops stage0's legacy `rewrite` keyword. None of this work is merged into any
