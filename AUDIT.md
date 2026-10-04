@@ -57,6 +57,25 @@ coverage checks, stale expectations, and one full-source standalone-audit replay
 gap; these are not all classified and no full-suite pass is claimed. The replay
 gap is a priority investigation separate from these indexed-fragment fixes.
 
+## 2026-10-04 checkpoint: identical-slot equality shape validation
+
+The reviewed Luna node-equality change validates a node shape once, not twice,
+when both checked indices address the same immutable arena slot. Callers compute
+this condition from exact index equality; no serialized assertion supplies it.
+The depth, kind, operator, node validity, child traversal and worklist limits are
+unchanged, so an identical index does not bypass recursive graph validation.
+
+Two independent five-round uninstrumented Linux A/B runs preserve exact outputs
+for six proof/export/replay fixtures. Symbolic replay medians improve from
+0.531070 to 0.519248 seconds and from 0.531847 to 0.520193 seconds (about 2.2%).
+Proof/export times stay essentially flat; smaller-case timings are noisy and
+do not support a general throughput claim. Reports are copied off the ephemeral
+host into ignored `build/luna-nodeeq-20261004/`. Strict local O2 checker/replay
+products build; measurement/arena, safe constant replay, all thirteen portable
+packages and forgery controls, and indexed Boolean denial gates pass. The wider
+audit remains incomplete, including the independently reproduced typed `usize`
+literal replay mismatch. Performance evidence does not supersede those blockers.
+
 ## 2026-09-19 checkpoint: constants refactor must preserve the verification frontier
 
 The committed constants cleanups (`03aa2ea`, `8d18da4`, and `d622b03`) preserve the proof
