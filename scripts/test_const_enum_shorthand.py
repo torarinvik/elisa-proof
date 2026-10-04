@@ -33,7 +33,7 @@ def source_false_unique_variant(option: AuditOption) -> bool:
     requires option == .None
     ensure result == true
     return option == .Some
-""", "source_false_unique_variant", True),
+""", "source_false_unique_variant", "Some", True),
     "cross-owner-variant-collision": ("""const enum AuditOption of i64:
     None = 0
     Some = 1
@@ -45,7 +45,7 @@ def source_false_owner_collision(option: AuditOption) -> bool:
     requires option == .None
     ensure result == true
     return option == .Some
-""", "source_false_owner_collision", True),
+""", "source_false_owner_collision", "Some", True),
     "payload-enum-type-collision": ("""const enum AuditOption of i64:
     None = 0
     Some = 1
@@ -57,7 +57,7 @@ def source_false_payload_collision(option: AuditOption) -> bool:
     requires option == .None
     ensure result == true
     return option == .Some
-""", "source_false_payload_collision", True),
+""", "source_false_payload_collision", "Some", True),
     "foreign-owner-wrong-type-proof-refusal": ("""const enum AuditOption of i64:
     None = 0
     Some = 1
@@ -69,7 +69,7 @@ def source_false_foreign_variant(option: AuditOption) -> bool:
     requires option == .None
     ensure result == true
     return option == .Foreign
-""", "source_false_foreign_variant", False),
+""", "source_false_foreign_variant", "Foreign", False),
 }
 
 # Keep this portable identity encoder aligned with test_portable_replay.py. Forgery
@@ -323,9 +323,9 @@ def marker_sensitivity_symmetry(option: MarkerSensitivityOption) -> bool:
     # Source-bound attacks use the compiler-imported declarations and exact source goal,
     # unlike portable packages whose hypothesis provenance is adapter-authenticated. Each
     # source deliberately makes a false guarantee; its false target must remain open and be
-    # omitted from --package. A source-bound `have` then tries the false `.Some` fact under
-    # the real `.None` precondition. The kernel must replay the rejection of that step.
-    for case, (source_text, target, require_semantic_clean) in SOURCE_FALSE_CLAIMS.items():
+    # omitted from --package. A source-bound `have` then tries the corresponding false fact
+    # under the source precondition. The kernel must replay the rejection of that step.
+    for case, (source_text, target, proposed_variant, require_semantic_clean) in SOURCE_FALSE_CLAIMS.items():
         source = scratch / ("source-audit-" + case + ".elisa")
         source.write_text(source_text)
         _, report = run_json([str(PROOF), "--json", str(source)])
@@ -339,10 +339,15 @@ def marker_sensitivity_symmetry(option: MarkerSensitivityOption) -> bool:
         if require_semantic_clean:
             assert semantic_errors == 0 and semantic_diagnostics == 0, (case, report["summary"])
             assert report["semantic_diagnostics"] == [], (case, report["semantic_diagnostics"])
+        else:
+            assert any(finding.get("kind") == "expression-unsupported"
+                       and finding.get("status") == "unsupported"
+                       for finding in report["findings"]), (case, report["findings"])
         print("source diagnostics:", case,
               "semantic_errors=", semantic_errors,
               "semantic_diagnostics=", semantic_diagnostics,
-              "details=", report["semantic_diagnostics"])
+              "details=", report["semantic_diagnostics"],
+              "findings=", report["findings"] if not require_semantic_clean else [])
 
         _, package = run_json([str(PROOF), "--package", str(source)])
         assert package["source"]["admissible"] is True
@@ -363,7 +368,7 @@ def marker_sensitivity_symmetry(option: MarkerSensitivityOption) -> bool:
                 "argument": {
                     "kind": "binary", "operator": "==",
                     "left": {"kind": "ident", "name": "option"},
-                    "right": {"kind": "shorthand_member", "parts": ["Some"]},
+                    "right": {"kind": "shorthand_member", "parts": [proposed_variant]},
                 },
                 "accepted": False,
             }],
