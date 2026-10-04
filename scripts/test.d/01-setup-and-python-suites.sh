@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # Part 1 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
 python3 "$ROOT_DIR/scripts/check_source_length.py"
+python3 "$ROOT_DIR/scripts/test_keep_going.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 # ELISA_PROOF_SKIP_BUILD=1 tests prebuilt binaries (for example on a remote runner).
 if [[ "${ELISA_PROOF_SKIP_BUILD:-0}" != "1" ]]; then
