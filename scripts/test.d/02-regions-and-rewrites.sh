@@ -371,8 +371,9 @@ if [[ "$rejected_sview_call_provenance_status" -ne 1 ]]; then
     printf '%s\n' 'proof test matrix failed: a write to the sview backing argument was accepted' >&2
     exit 1
 fi
-# Compiler 2678ff10 itself rejects the read of `view` after `second.push` (semantic error 341).
-if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; semantic=[(d["kind_code"], d["line"], d["name"], d["expected"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(341, 18, "view", "second")], semantic; assert report["summary"]["semantic_errors"] == 1; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
+# Pinned compiler 74d24269 rejects the read after second.push as
+# StorageDependencyInvalidated (ordinal 352 in this compiler revision).
+if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-sview-call-provenance.json")); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; semantic=[(d["kind_code"], d["line"], d["name"], d["expected"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(352, 18, "view", "second")], semantic; assert report["summary"]["semantic_errors"] == 1; assert any(f["kind"] == "borrow-write-conflict" and f["status"] == "disproved" for f in report["findings"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'; then
     printf '%s\n' 'proof test matrix failed: call-return provenance was not replayed to the actual backing argument' >&2
     exit 1
 fi
@@ -390,9 +391,9 @@ run_json_report "$ROOT_DIR/examples/regionless_reference_call_return_provenance.
 for rejected_call_return in rejected_regionless_reference_return_mutability_upgrade:region-return-witness-unsupported rejected_reference_call_return_region_mismatch:region-return-escape rejected_reference_call_return_mutability_upgrade:region-return-witness-unsupported rejected_nested_reference_return_provenance:region-return-witness-unsupported rejected_nested_sview_return_provenance:region-return-witness-unsupported; do
     rejected_call_return_example="${rejected_call_return%%:*}"
     rejected_call_return_kind="${rejected_call_return##*:}"
-    # Compiler 2678ff10 itself rejects the read of `view` after `a.push` (semantic error 341).
+    # Pinned compiler 74d24269 rejects the read after a.push (ordinal 352).
     rejected_call_return_semantic=""
-    [[ "$rejected_call_return_example" == rejected_nested_sview_return_provenance ]] && rejected_call_return_semantic="341:19:view:a"
+    [[ "$rejected_call_return_example" == rejected_nested_sview_return_provenance ]] && rejected_call_return_semantic="352:19:view:a"
     set +e
     run_json_report "$ROOT_DIR/examples/$rejected_call_return_example.elisa" >"$ELISA_TEST_TMP/elisa-proof-rejected-call-return.json"
     rejected_call_return_status=$?
