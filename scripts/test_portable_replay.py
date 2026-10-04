@@ -12,6 +12,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+if not __debug__:
+    raise SystemExit("portable replay checks must run without Python -O")
+
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
@@ -20,6 +23,7 @@ WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-portable-"))
 # One example per kernel rule family, each small enough to keep the suite quick.
 POSITIVE = {
     "global_constant_module": {"goal", "resource-safety"},
+    "module_negative_i64_constant_contract": {"goal", "resource-safety"},
     "verified": {"goal"},
     "collection_quantifier": {"quantifier-forall", "quantifier-exists"},
     "checked_index_fallback": {"checked-index"},

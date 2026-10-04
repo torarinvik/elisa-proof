@@ -17,8 +17,14 @@ def findings(fixture):
     )
     assert run.returncode == 1, (fixture, run.returncode, run.stderr)
     report = json.loads(run.stdout)
+    # A deliberately false contract may also be refused by the compiler. No
+    # unrelated parse/type error may make the diagnostic model checks vacuous.
+    assert all(row["kind_code"] == 322 for row in report["semantic_diagnostics"]), fixture
     assert report["replay"]["gaps"] == 0, fixture
     assert report["replay"]["certificates"] == report["replay"]["replayed"], fixture
+    if fixture == "counterexample_unsigned_boundaries.elisa":
+        functions = {row["name"]: row for row in report["declaration_details"] if row["kind"] == "function"}
+        assert functions["byte_domain_ceiling"]["verified"], functions
     return {row["name"]: row for row in report["findings"] if row["kind"] == "ensure-unproven"}
 
 
@@ -41,4 +47,12 @@ assert exact["counterexample"][0]["right"]["value"] == 0, exact
 wrapped = integer["narrow_wrap_is_not_a_counterexample"]
 assert wrapped["status"] == "unknown" and not wrapped["counterexample_found"], wrapped
 assert wrapped["counterexample"] == [], wrapped
+boundaries = findings("counterexample_unsigned_boundaries.elisa")
+for name, expected in (("byte_boundary", 255), ("delay_boundary", 86400001)):
+    row = boundaries[name]
+    assert row["status"] == "disproved" and row["counterexample_found"], row
+    assert len(row["counterexample"]) == 1, row
+    assert row["counterexample"][0]["right"]["kind"] == "int", row
+    assert row["counterexample"][0]["right"]["value"] == expected, row
+assert "byte_domain_ceiling" not in boundaries, boundaries
 print("counterexample domains: typed Boolean/integer models retained; ambiguous and wrapping models refused")
