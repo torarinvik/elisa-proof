@@ -76,6 +76,15 @@ packages and forgery controls, and indexed Boolean denial gates pass. The wider
 audit remains incomplete, including the independently reproduced typed `usize`
 literal replay mismatch. Performance evidence does not supersede those blockers.
 
+The rejected-congruence matrix incorrectly expected `call_congruence` to remain
+open after verified pure result summaries became supported. Its identity helper
+now supplies exactly the argument as each call result. The gate retains all ten
+genuine refusal cases and strengthens the positive control: every call-equality
+goal must replay, depend specifically on the verified `pure_identity` summary,
+and leave zero certificate gaps. The actual embedded gate was run successfully
+against the current strict product; this is a corrected expectation, not a new
+general-purpose functional congruence axiom.
+
 ## 2026-09-19 checkpoint: constants refactor must preserve the verification frontier
 
 The committed constants cleanups (`03aa2ea`, `8d18da4`, and `d622b03`) preserve the proof

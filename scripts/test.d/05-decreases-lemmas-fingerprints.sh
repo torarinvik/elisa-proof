@@ -257,7 +257,23 @@ if [[ "$congruence_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "local_struct_equality_premise", "constructed_aggregate", "call_congruence", "cross_width", "wrapping_operand"}; claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}; assert not (refused & claimed); assert refused <= {finding["name"] for finding in report["findings"]}; assert "indexed_element" in claimed'
+run_json_report "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c '
+import json, sys
+report = json.load(sys.stdin)
+assert report["status"] == "failed"
+assert report["summary"]["semantic_errors"] == 0
+assert report["replay"]["gaps"] == 0
+assert report["replay"]["certificates"] == report["replay"]["replayed"]
+refused = {"disequality_premise", "order_premise", "disjunctive_premise", "unrelated_operand", "distinct_former", "struct_equality_premise", "local_struct_equality_premise", "constructed_aggregate", "cross_width", "wrapping_operand"}
+claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}
+assert not (refused & claimed)
+assert refused <= {finding["name"] for finding in report["findings"]}
+assert {"indexed_element", "call_congruence"} <= claimed
+calls = [goal for goal in report["goals"] if goal["name"] == "call_congruence" and goal["rule"] == "goal"]
+assert calls and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in calls)
+assert all(any(dependency["kind"] == "function-summary" and dependency["name"] == "pure_identity" for dependency in goal["dependencies"]) for goal in calls)
+assert next(decl for decl in report["declaration_details"] if decl["name"] == "pure_identity")["verified"]
+'
 rejected_congruence_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_congruence_status" -ne 0 ]]; then
