@@ -1,0 +1,94 @@
+# Recover only an exact, source-header coercion to a bare u64 parameter.
+# This does not reinterpret untyped payloads globally or infer arithmetic widths.
+def proof_push_source_int_types(file: mutable Ast::File&, tokens: darray[Token]&, source: darray[u8]&, source_bytes: usize) -> void:
+    proof_push_int_type_annotations(&file.enum_annotations, tokens, source, source_bytes)
+    proof_push_contextual_int_types(&file.top_decls, &file.enum_annotations, 0)
+    proof_push_contextual_numeric_sorts(&file.enum_annotations, tokens, source, source_bytes)
+
+def proof_push_contextual_numeric_sorts(annotations: mutable darray[Ast::EnumAnnotation]&, tokens: darray[Token]&, source: darray[u8]&, source_bytes: usize) -> void:
+    return if source_bytes == 0 or source_bytes > source.count
+    for token in tokens |annotations, source, source_bytes|:
+        continue if token.kind != TokenKind.IntLit and token.kind != TokenKind.HexLit
+        continue if token.flags.has_suffix
+        marked: mutable bool = false
+        for annotation in annotations |token, marked|:
+            marked <- true if annotation.owner == PROOF_INT_TYPE_ANNOTATION_OWNER and annotation.name == "u64" and annotation.line == token.line and annotation.offset == token.start
+        continue if not marked
+        start: usize = token.start.usize()
+        length: usize = token.length.usize()
+        continue if start >= source_bytes or length == 0 or length > source_bytes - start
+        spelling: sview = Lexer::source_view_or_empty(&source[0], source_bytes, start, start + length)
+        annotations.push(Ast::EnumAnnotation{owner: "__numeric_literal_sort", name: "u64", line: token.line})
+        annotations.push(Ast::EnumAnnotation{owner: "__numeric_literal_sort_column", name: "u64", line: token.column})
+        annotations.push(Ast::EnumAnnotation{owner: "__numeric_literal_sort_text", name: spelling, line: token.line})
+
+def proof_contextual_u64_parameter(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, depth: usize = 0) -> bool:
+    return false if depth >= 96
+    match expression:
+        Ast::Expr.Paren(inner, _):
+            return proof_contextual_u64_parameter(inner, parameters, depth + 1)
+        Ast::Expr.Ident(name, _):
+            matches: mutable usize = 0
+            valid: mutable bool = false
+            for parameter in parameters |name, matches, valid|:
+                if parameter.name == name:
+                    matches <- matches + 1
+                    match parameter.type_expression:
+                        Ast::Expr.Ident(type_name, _):
+                            valid <- type_name == "u64"
+                        _:
+                            valid <- false
+            return matches == 1 and valid
+        _:
+            return false
+
+def proof_contextual_u64_literal(expression: Ast::Expr, annotations: mutable darray[Ast::EnumAnnotation]&, depth: usize = 0) -> void:
+    return if depth >= 96
+    match expression:
+        Ast::Expr.Paren(inner, _):
+            proof_contextual_u64_literal(inner, annotations, depth + 1)
+        Ast::Expr.IntLit(value, position):
+            return if value >= 0 or position.offset == 0
+            for index in 0..<annotations.count |annotations, position|:
+                annotation: Ast::EnumAnnotation = annotations[index]
+                return if annotation.owner == PROOF_INT_TYPE_ANNOTATION_OWNER and annotation.line == position.line and annotation.offset == position.offset
+                if annotation.owner == "__numeric_literal_sort" and annotation.line == position.line and index + 1 < annotations.count:
+                    column: Ast::EnumAnnotation = annotations[index + 1]
+                    # Explicit suffixes keep their own sort, even if malformed.
+                    return if column.owner == "__numeric_literal_sort_column" and column.line == position.column
+            annotations.push(Ast::EnumAnnotation{owner: PROOF_INT_TYPE_ANNOTATION_OWNER, name: "u64", line: position.line, offset: position.offset})
+        _:
+            pass
+
+def proof_contextual_u64_contract(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, annotations: mutable darray[Ast::EnumAnnotation]&, depth: usize) -> void:
+    return if depth >= 96
+    match expression:
+        Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+            proof_contextual_u64_contract(inner, parameters, annotations, depth + 1)
+        Ast::Expr.Binary(left, operator, right, _):
+            comparison: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq or operator == TokenKind.Lt or operator == TokenKind.LtEq or operator == TokenKind.Gt or operator == TokenKind.GtEq
+            if comparison:
+                proof_contextual_u64_literal(right, annotations) if proof_contextual_u64_parameter(left, parameters)
+                proof_contextual_u64_literal(left, annotations) if proof_contextual_u64_parameter(right, parameters)
+            elif operator == TokenKind.And or operator == TokenKind.Or or operator == TokenKind.FatArrow:
+                proof_contextual_u64_contract(left, parameters, annotations, depth + 1)
+                proof_contextual_u64_contract(right, parameters, annotations, depth + 1)
+        _:
+            pass
+
+def proof_push_contextual_int_types(declarations: darray[Ast::Decl]&, annotations: mutable darray[Ast::EnumAnnotation]&, depth: usize) -> void:
+    return if depth >= 96
+    for declaration in declarations |annotations, depth|:
+        match declaration:
+            Ast::Decl.Func(_, parameters, _, body, _, _, _):
+                # Stop before executable statements can rebind or shadow a parameter.
+                for statement in body |parameters, annotations|:
+                    match statement:
+                        Ast::Stmt.Contract(_, expression, _):
+                            proof_contextual_u64_contract(expression, &parameters, annotations, 0)
+                        _:
+                            break
+            Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                proof_push_contextual_int_types(&body, annotations, depth + 1)
+            _:
+                pass
