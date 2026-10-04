@@ -116,6 +116,17 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" && -f "${HOME}/.elisac/el
     RUNTIME_OBJ="${HOME}/.elisac/elisacore_runtime.o"
 fi
 
+# Resolve link inputs before compiling either product. A misspelled override
+# must not consume a full compiler run or silently select another runtime.
+if [[ -n "$RUNTIME_OBJ" && ! -f "$RUNTIME_OBJ" ]]; then
+    printf 'Elisa runtime object not found: %s\n' "$RUNTIME_OBJ" >&2
+    exit 2
+fi
+if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" ]]; then
+    printf 'Stage1 requires its matching runtime object; set ELISA_RUNTIME_OBJ\n' >&2
+    exit 2
+fi
+
 mkdir -p "$ROOT_DIR/build"
 for PROOF_OUTPUT in "${PRODUCT_OUTPUTS[@]}"; do
     mkdir -p "$(dirname -- "$PROOF_OUTPUT")"
