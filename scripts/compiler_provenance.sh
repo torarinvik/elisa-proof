@@ -13,12 +13,17 @@ elisa_compiler_is_stage0() {
 
 elisa_default_stage1() {
     local root_dir="$1"
-    local compiler_root="${ELISA_COMPILER_ROOT:-$root_dir/../Elisa-compiler}"
+    local compiler_root="${ELISA_COMPILER_ROOT:-${ELISA_COMPILER_SRC:-$root_dir/../Elisa-compiler}}"
     local wrapper
     if [[ -x "$compiler_root/scripts/elisac_stage1.sh" ]]; then
         wrapper="$(cd "$compiler_root" && pwd -P)/scripts/elisac_stage1.sh"
         printf '%s\n' "$wrapper"
         return 0
+    fi
+    # An explicit checkout must not silently select an unrelated PATH product.
+    if [[ -n "${ELISA_COMPILER_ROOT:-${ELISA_COMPILER_SRC:-}}" ]]; then
+        printf 'Stage1 wrapper not executable: %s/scripts/elisac_stage1.sh\n' "$compiler_root" >&2
+        return 2
     fi
     command -v elisac-stage1 2>/dev/null || return 1
 }
