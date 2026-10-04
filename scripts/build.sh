@@ -84,11 +84,6 @@ if [[ "$COMPILER_IS_STAGE0" -eq 1 ]]; then
     elisa_verify_stage0_provenance "$COMPILER" "$ROOT_DIR" || exit $?
 fi
 
-if ! command -v clang >/dev/null 2>&1; then
-    printf 'clang is required to link the generated Elisa object.\n' >&2
-    exit 2
-fi
-
 # stage0 emits an object that links on its own; a stage1 object references the
 # Elisa runtime (arena_alloc, the AoS store entry points, the sview helpers) and
 # needs elisacore_runtime.o on the link line. Set ELISA_RUNTIME_OBJ to override;
@@ -124,6 +119,11 @@ if [[ -n "$RUNTIME_OBJ" && ! -f "$RUNTIME_OBJ" ]]; then
 fi
 if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" ]]; then
     printf 'Stage1 requires its matching runtime object; set ELISA_RUNTIME_OBJ\n' >&2
+    exit 2
+fi
+
+if ! command -v clang >/dev/null 2>&1; then
+    printf 'clang is required to link the generated Elisa object.\n' >&2
     exit 2
 fi
 
