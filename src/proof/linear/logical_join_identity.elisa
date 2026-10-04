@@ -1,5 +1,71 @@
 extend ElisaProof:
     public:
+        struct ProofLogicalSignedAtom:
+            expression: Ast::Expr
+            negated: bool
+            constant: bool
+            value: bool
+
+        def proof_logical_signed_operator(expression: Ast::Expr, negated: bool = false, depth: usize = 0) -> TokenKind:
+            return TokenKind.Eof if depth >= 64
+            match proof_strip_parens(expression):
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_logical_signed_operator(inner, not negated, depth + 1)
+                Ast::Expr.Binary(_, operator, _, _):
+                    return TokenKind.Eof if operator != TokenKind.And and operator != TokenKind.Or
+                    return (TokenKind.Or if operator == TokenKind.And else TokenKind.And) if negated else operator
+                _:
+                    return TokenKind.Eof
+
+        # Negation-normal form without distribution or synthetic premise facts.
+        def proof_logical_signed_atoms(expression: Ast::Expr, operator: TokenKind, negated: bool, facts: darray[Ast::Expr]&, atoms: mutable darray[ProofLogicalSignedAtom]&, fuel: mutable usize&, depth: usize = 0) -> bool:
+            return false if fuel == 0 or depth >= 64 or atoms.count >= 64
+            fuel <- fuel - 1
+            current = proof_strip_parens(expression)
+            folded = proof_logical_constant(current, facts, fuel, depth)
+            return false if not folded.valid
+            if folded.known:
+                value = not folded.value if negated else folded.value
+                return true if (operator == TokenKind.And and value) or (operator == TokenKind.Or and not value)
+                atoms.push(ProofLogicalSignedAtom{expression: current, negated: false, constant: true, value: value})
+                return true
+            match current:
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_logical_signed_atoms(inner, operator, not negated, facts, atoms, fuel, depth + 1)
+                Ast::Expr.Binary(left, candidate, right, _):
+                    effective = (TokenKind.Or if candidate == TokenKind.And else TokenKind.And) if negated else candidate
+                    return false if effective != operator
+                    return proof_logical_signed_atoms(left, operator, negated, facts, atoms, fuel, depth + 1) and proof_logical_signed_atoms(right, operator, negated, facts, atoms, fuel, depth + 1)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    atoms.push(ProofLogicalSignedAtom{expression: current, negated: negated, constant: false, value: false})
+                    return true
+                _:
+                    return false
+
+        def proof_logical_signed_identity(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    first = proof_logical_signed_operator(left)
+                    second = proof_logical_signed_operator(right)
+                    operator = first if first != TokenKind.Eof else second if second != TokenKind.Eof else TokenKind.And
+                    a: mutable darray[ProofLogicalSignedAtom] = []
+                    b: mutable darray[ProofLogicalSignedAtom] = []
+                    fuel: mutable usize = 1024
+                    return false if not proof_logical_signed_atoms(left, operator, false, facts, a, fuel) or not proof_logical_signed_atoms(right, operator, false, facts, b, fuel)
+                    for atom in a:
+                        matched: mutable bool = false
+                        for peer in b |matched|:
+                            matched <- true if (atom.constant and peer.constant and atom.value == peer.value) or (not atom.constant and not peer.constant and atom.negated == peer.negated and proof_expr_equal(atom.expression, peer.expression))
+                        return false if not matched
+                    for atom in b:
+                        matched: mutable bool = false
+                        for peer in a |matched|:
+                            matched <- true if (atom.constant and peer.constant and atom.value == peer.value) or (not atom.constant and not peer.constant and atom.negated == peer.negated and proof_expr_equal(atom.expression, peer.expression))
+                        return false if not matched
+                    return true
+                _:
+                    return false
+
         # Validate the entire primitive logical tree before using constant
         # absorption. No calls, fields, comparisons or unwitnessed atoms.
         def proof_logical_constant(expression: Ast::Expr, facts: darray[Ast::Expr]&, fuel: mutable usize&, depth: usize = 0) -> (valid: bool, known: bool, value: bool):
@@ -62,6 +128,7 @@ extend ElisaProof:
             return true
 
         def proof_logical_join_identity(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            return true if proof_logical_signed_identity(facts, goal)
             match proof_strip_parens(goal):
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                     operator: mutable TokenKind = TokenKind.Eof
