@@ -26,6 +26,11 @@ assert data["status"] == "failed" and data["replay"]["gaps"] == 0
 failures = sorted((finding["kind"], finding["line"]) for finding in data["findings"])
 assert failures == [("ensure-unproven", line) for line in (5, 9, 14, 19, 23, 27, 31, 41, 43)], failures
 
+data = run(ROOT / "examples/rejected_collection_push_stale_count.elisa")
+assert data["status"] == "failed" and data["summary"]["semantic_errors"] == 0
+assert data["replay"]["gaps"] == 0 and data["replay"]["certificates"] == data["replay"]["replayed"], data["replay"]
+assert [(finding["name"], finding["kind"]) for finding in data["findings"]] == [("stale_count_after_push", "ensure-unproven")], data["findings"]
+
 data = run(ROOT / "examples/rejected_collection_push_user_method.elisa")
 assert data["status"] == "failed" and data["replay"]["gaps"] == 0
 goals = [goal for goal in data["goals"] if goal["name"] == "shadowed" and goal["rule"] == "goal"]
