@@ -131,7 +131,15 @@ extend ElisaProof:
                     # Classify against the source initializer: substitution can replace a
                     # match-bound cast receiver with its branch symbol, which is useful for
                     # its width witness but must not make the original builtin cast opaque.
-                    conversion_only: bool = proof_expr_has_call(initializer) and proof_expr_calls_are_conversions(initializer, functions, 0)
+                    conversion_only: mutable bool = false
+                    match initializer:
+                        Ast::Expr.Call(callee, arguments, _, _):
+                            conversion: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, arguments.count, functions)
+                            # The effect scan deliberately treats reserved casts as call-free,
+                            # so detect this direct conversion from its AST shape instead.
+                            conversion_only <- conversion.known and proof_conversion_receiver_is_place(conversion.receiver, 0)
+                        _:
+                            pass
                     # The generic operator audit does not classify method-shaped numeric casts;
                     # the conversion recognizer above does, after checking the builtin target
                     # and receiver place. Do not erase its type/range facts as if it were an
@@ -239,6 +247,23 @@ extend ElisaProof:
                     # the binding so later arithmetic can use the receiver's checked type range.
                     # Matching the declared and conversion target types prevents an implicit
                     # narrowing or additional conversion from entering this path.
+                    # A conversion local is a snapshot, not a live alias of its receiver. Keep
+                    # its own symbol so a later write to a field such as `values.count` cannot
+                    # rewrite the local to the collection's new count. When the declared type
+                    # exactly matches the reserved conversion target, record the initializer
+                    # equality; mutation invalidation will remove it if the receiver changes.
+                    if local_scalar_kind == 1 and unsigned_width <= 0 and not shadowed and conversion_only:
+                        match initializer:
+                            Ast::Expr.Call(callee, arguments, _, _):
+                                conversion: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, arguments.count, functions)
+                                if conversion.known:
+                                    values[prior_value_count] <- Ast::Expr.Ident(local_name, position)
+                                    conversion_target: sview = proof_cast_target_name(callee)
+                                    if conversion_target != "" and proof_ident_name(type_expression) == conversion_target and not proof_expr_is_invalid(value) and not proof_expr_has_move(value):
+                                        binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(local_name, position), TokenKind.EqEq, value, position)
+                                        proof_add_traced_fact(facts, report, binding, "local-binding", position.line, name)
+                            _:
+                                pass
                     if local_scalar_kind == 1 and unsigned_width <= 0 and not shadowed:
                         # Keep the source initializer's cast shape, but resolve its receiver to
                         # the branch-local SSA name before looking up the width marker. Substituting

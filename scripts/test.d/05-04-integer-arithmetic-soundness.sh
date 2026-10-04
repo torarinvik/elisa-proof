@@ -95,3 +95,14 @@ typed_goal_fingerprint() {
 }
 # Goal 1 is `0xFFFFFFFFFFFFFFFFu64 > 0u64` (true), goal 9 is `... < 0u64` (false). The
 # script names the literal only by its source offset; the type comes from the source table.
+
+# A captured collection count is a snapshot. After `pop`, its old bound must not justify a new
+# index into the smaller collection.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_converted_index_after_pop.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert ("stale_count_after_pop", "index-upper-unproven") in {(finding["name"], finding["kind"]) for finding in report["findings"]}'
+rejected_converted_index_after_pop_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_converted_index_after_pop_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a pre-pop converted count justified an index after shrinking the collection\n' >&2
+    exit 1
+fi
