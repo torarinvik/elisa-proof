@@ -38,7 +38,7 @@ Observed proof-check medians (seconds):
 These are small changes, several at millisecond scale, with only three repetitions and no
 statistical confidence claim. RSS was essentially unchanged; no broad speedup is established.
 The most useful result is a verified comparison baseline and removal of avoidable work. Targeted
-profiling is still needed before another performance batch. This is not a full matrix pass.
+profiling has now supplied the next batch's targets. This is not a full matrix pass.
 
 The proof baseline limitation and resolved platform follow-up are distinct from these optimizations:
 
@@ -61,10 +61,35 @@ The first full-checker instrumented O2 build exceeded the profiler's default fiv
 bound before target execution. The follow-up capture explicitly raises the still-capped tool bound
 to 1200 seconds, independently of the 120-second target bound, with a per-command 1800-second outer
 bound. Its per-run target cache avoids compiling the same checker separately for all three workloads.
+The diagnostic retention bound is explicitly 16 MiB; an optional `ELISA_PROFILE_BUILD_CACHE`
+reuses a validated target cache across runs. Profiler follow-ups `07f0be0` and `0fe5acc` add bounded
+tool execution, allocation/sample schema checks, bounded streaming diagnostic reads, and flushing
+buffered target output before capture finalization. This retention bound does not cap target disk
+writes during execution.
+
+All three final captures are retained under ignored `build/luna-linux-20261004/`: symbolic
+quantifier, congruence, and congruence refusal. Each completed three repetitions with untruncated
+stdout, zero missed/dropped samples, and zero replay gaps. Independent comparisons found every
+instrumented proof report byte-identical to its uninstrumented baseline (including the expected
+refusal exit status). The symbolic capture has 35,064 CPU samples; certificate replay appears in
+66.1% of stacks. The two smaller captures have 181 and 232 samples.
+
 Captures are instrumented CPU stack occupancy, not instruction-pointer samples or uninstrumented
-speedup evidence. A second six-Luna pass has disjoint quantifier, intern, linear-producer, checker,
-trusted-replay, and profile-summary lanes; algorithm edits require measured hotspots and exact
-proof/package/portable-replay comparison. No second-pass speedup is established yet.
+speedup evidence. Tiny helper callbacks can be disproportionately expensive under instrumentation.
+Sample-mode captures omit source-definition records; name-level rankings are not unique source
+attribution. `scripts/perf_luna_profile_summary.py` explicitly separates sample completeness from
+proof verification and withholds ambiguous definition attribution; its ten synthetic tests pass.
+
+The second six-Luna pass targets replay witnesses, marker decoding, quantified replay, and trace
+hook linkage. Three experiments were reverted because uninstrumented comparisons did not show
+repeatable gains. A bare-identifier witness scan optimization is under final review; no second-pass
+speedup is accepted yet. Algorithm edits require focused adversarial/budget gates and exact
+proof/package/portable-replay comparison.
+
+The broader profiler regression matrix remains non-green: Linux full-mode collection growth hits
+a compiler-generated suffixed trace-hook symbol, now assigned to a compiler lane. The macOS arena
+reuse workload also has a baseline exit-status mismatch. These are not concealed by the successful
+sampling gates. Compiler pins remain unchanged while the trace-hook fix is validated.
 
 The instance workspace is not a persistent volume. Keep source gains committed locally and copy
 important evidence off-box before recycling/destroying it. Builds/caches are not repository gains.

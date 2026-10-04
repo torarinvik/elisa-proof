@@ -12,6 +12,7 @@ OUT_ROOT="${ELISA_PROFILE_OUT:-$ROOT/build/luna-profile}"
 # The proof checker includes the compiler frontend; its instrumented O2 compile
 # exceeds the profiler's normal five-minute tool bound on the Linux host.
 export ELISA_PROFILER_TOOL_TIMEOUT_SECONDS="${ELISA_PROFILER_TOOL_TIMEOUT_SECONDS:-1200}"
+export ELISA_PROFILER_MAX_PROGRAM_OUTPUT_BYTES="${ELISA_PROFILER_MAX_PROGRAM_OUTPUT_BYTES:-16777216}"
 
 fail() {
     printf 'luna profile: %s\n' "$1" >&2
@@ -41,6 +42,7 @@ REV="$(git -C "$ROOT" rev-parse --verify HEAD)"
 REV_SHORT="${REV:0:12}"
 mkdir -p "$OUT_ROOT"
 RUN_DIR="$(mktemp -d "$OUT_ROOT/luna-$REV_SHORT.XXXXXX")"
+BUILD_CACHE="${ELISA_PROFILE_BUILD_CACHE:-$RUN_DIR/build-cache}"
 
 {
     printf 'purpose=source-aware profiling of elisa-proof CLI\n'
@@ -55,6 +57,8 @@ RUN_DIR="$(mktemp -d "$OUT_ROOT/luna-$REV_SHORT.XXXXXX")"
     printf 'collection_mode=sample\nsample_period_us=1000\noptimization_level=-O2\n'
     printf 'repetitions=3\nwarmups=0\ntarget_timeout_seconds=120\noverall_timeout_seconds=1800\n'
     printf 'tool_timeout_seconds=%s\n' "$ELISA_PROFILER_TOOL_TIMEOUT_SECONDS"
+    printf 'program_output_byte_limit=%s\n' "$ELISA_PROFILER_MAX_PROGRAM_OUTPUT_BYTES"
+    printf 'build_cache=%s\n' "$BUILD_CACHE"
     printf 'target_instrumentation=profiler compiles the Elisa target with function tracing and debug source information\n'
     printf 'sampling_caveat=CPU samples retain instrumented Elisa call stacks; they are not native instruction-pointer samples or exact invocation counts\n'
     printf 'attribution_caveat=runtime, foreign, and optimized-away frames are not unwound; their work can be charged to an instrumented Elisa caller\n'
@@ -86,7 +90,7 @@ profile_case() {
             --repeat 3 --warmup 0 -O2 \
             --timeout 120 --max-capture-bytes 67108864 \
             --max-artifact-bytes 134217728 \
-            --cache-dir "$RUN_DIR/build-cache" \
+            --cache-dir "$BUILD_CACHE" \
             --path-map "$ROOT=elisa-proof" \
             --format json --output "$report" \
             -- --json "$workload"
