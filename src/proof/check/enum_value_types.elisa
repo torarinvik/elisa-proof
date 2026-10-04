@@ -47,6 +47,104 @@ extend ElisaProof:
                         pass
             return (enums, const_enums, structs)
 
+        # A shorthand member is safe to classify without its local typing context only when its
+        # spelling identifies exactly one enum member in the complete imported program, and that
+        # member belongs to one uniquely named const enum. Ambiguous spellings remain unknown;
+        # replay still performs the contextual owner check for every admitted proposition.
+        def proof_count_enum_member_spellings(declarations: darray[Ast::Decl]&, wanted: sview, depth: usize) -> (matches: usize, const_matches: usize, owner: sview):
+            return (2, 2, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            matches: mutable usize = 0
+            const_matches: mutable usize = 0
+            owner: mutable sview = ""
+            for declaration in declarations |wanted, depth, matches, const_matches, owner|:
+                match declaration:
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        for variant in variants |wanted, enum_name, is_const, matches, const_matches, owner|:
+                            if variant.name == wanted:
+                                matches <- matches + 1
+                                if is_const:
+                                    const_matches <- const_matches + 1
+                                    owner <- enum_name
+                    Ast::Decl.Module(_, body, _):
+                        nested: (matches: usize, const_matches: usize, owner: sview) = proof_count_enum_member_spellings(body, wanted, depth + 1)
+                        matches <- matches + nested.matches
+                        const_matches <- const_matches + nested.const_matches
+                        owner <- nested.owner if nested.const_matches > 0
+                    Ast::Decl.Scoped(body, _):
+                        nested: (matches: usize, const_matches: usize, owner: sview) = proof_count_enum_member_spellings(body, wanted, depth + 1)
+                        matches <- matches + nested.matches
+                        const_matches <- const_matches + nested.const_matches
+                        owner <- nested.owner if nested.const_matches > 0
+                    _:
+                        pass
+            return (matches, const_matches, owner)
+
+        def proof_unique_const_enum_member_owner(name: sview, declarations: darray[Ast::Decl]&) -> (known: bool, owner: sview):
+            return (false, "") if name == ""
+            member: (matches: usize, const_matches: usize, owner: sview) = proof_count_enum_member_spellings(declarations, name, 0)
+            return (false, "") if member.matches != 1 or member.const_matches != 1 or member.owner == ""
+            aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, member.owner, 0)
+            return (false, "") if aggregates.enums != 0 or aggregates.const_enums != 1 or aggregates.structs != 0
+            top_level_owner: mutable bool = false
+            for declaration in declarations |member, top_level_owner|:
+                match declaration:
+                    Ast::Decl.Enum(enum_name, _, is_const, _, _):
+                        top_level_owner <- true if enum_name == member.owner and is_const
+                    _:
+                        pass
+            return (false, "") if not top_level_owner
+            alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, member.owner, 0)
+            return (false, "") if alias.count != 0
+            return (true, member.owner)
+
+        # State invalidation may retain this fact only when it is the exact marker shape the
+        # producer creates for a unique const-enum member with no source operator overrides.
+        # The marker is immutable and has no place root, so ordinary name-based type-fact
+        # retention would otherwise discard it even though it remains valid across every write.
+        def proof_unique_builtin_const_enum_member_witness(expression: Ast::Expr, report: ProofReport&) -> bool:
+            marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+            return false if not marker.known
+            match marker.term:
+                Ast::Expr.ShorthandMember(parts, _):
+                    return false if parts.count != 1
+                    member: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(parts[0], report.source_declarations)
+                    return false if not member.known
+                    protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+                    for protocol in protocols |report, member|:
+                        return false if proof_report_builtin_operator_impl_exists(report, member.owner, protocol)
+                    return true
+                _:
+                    return false
+
+        # Record scalar witnesses for the unique members of a declared const enum when the
+        # function has a value of that enum type. This lets congruence reason about comparisons
+        # that contain `.Variant` without treating arbitrary shorthand or overloaded Eq as
+        # primitive. If any value operator is implemented for the enum, no member is witnessed.
+        def proof_add_const_enum_member_scalar_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos) -> void:
+            enum_name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
+            return if enum_name == ""
+            aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(report.source_declarations, enum_name, 0)
+            return if aggregates.enums != 0 or aggregates.const_enums != 1 or aggregates.structs != 0
+            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+            for protocol in protocols |report, enum_name|:
+                return if proof_report_builtin_operator_impl_exists(report, enum_name, protocol)
+            markers: mutable darray[Ast::Expr] = []
+            for declaration in report.source_declarations |enum_name, report, position|:
+                match declaration:
+                    Ast::Decl.Enum(declared_name, variants, is_const, _, _):
+                        if declared_name == enum_name and is_const:
+                            for variant in variants |markers, enum_name, report, position|:
+                                member: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(variant.name, report.source_declarations)
+                                if member.known:
+                                    shorthand: Ast::Expr = Ast::Expr.ShorthandMember([variant.name], position)
+                                    marker: Ast::Expr = proof_scalar_term_marker(shorthand, position)
+                                    if member.owner == enum_name:
+                                        markers.push(marker)
+                    _:
+                        pass
+            for marker in markers |facts, report, line, owner|:
+                proof_add_scalar_type_witness(facts, report, marker, line, owner)
+
         # Whether every payload field of the one payload enum named `name` is a plain value.
         # `visiting` already holds `name`, so a recursive mention is admitted coinductively.
         def proof_enum_payloads_plain(declarations: darray[Ast::Decl]&, all: darray[Ast::Decl]&, name: sview, annotations: darray[Ast::EnumAnnotation]&, visiting: darray[sview]&, depth: usize) -> bool:
