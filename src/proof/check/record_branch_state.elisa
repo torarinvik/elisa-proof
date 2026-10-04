@@ -4,7 +4,8 @@ extend ElisaProof:
         # A closed direct-write body with one reference parameter has no other
         # alias or call through which its entry record can change. Its update
         # history therefore keeps the original root as an immutable entry term.
-        # All other bodies retain the opaque aggregate entry-state marker.
+        # Only old-fields untouched by every path use this root. Changed old-fields
+        # and all other bodies retain the opaque aggregate entry-state marker.
         def proof_seed_closed_record_entry(body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, names: darray[sview]&, frame_parameters: darray[sview]&, old_values: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: ProofReport&, owner: sview, position: Ast::Pos) -> void:
             references: mutable usize = 0
             for parameter in parameters |references|:
@@ -12,8 +13,49 @@ extend ElisaProof:
             return if references != 1 or not proof_record_branch_body_closed(body, names, frame_parameters, functions, report, owner, 0)
             for index in 0..<parameters.count |index, parameters, names, frame_parameters, old_values, functions, report, owner, position|:
                 continue if index >= old_values.count
-                if proof_record_branch_parameter(parameters[index].name, names, frame_parameters, functions, report, owner):
+                if proof_record_branch_parameter(parameters[index].name, names, frame_parameters, functions, report, owner) and proof_record_entry_contracts_preserved(body, body, parameters[index].name, 0):
                     old_values[index] <- Ast::Expr.Ident(parameters[index].name, position)
+
+        def proof_record_entry_field_written(body: darray[Ast::Stmt]&, root: sview, field: sview, depth: usize) -> bool:
+            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for statement in body |root, field, depth|:
+                match statement:
+                    Ast::Stmt.Assign(Ast::Expr.Field(Ast::Expr.Ident(name, _), member, _), _, _, _):
+                        return true if name == root and member == field
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        return true if proof_record_entry_field_written(&then_body, root, field, depth + 1) or proof_record_entry_field_written(&else_body, root, field, depth + 1)
+                    _:
+                        pass
+            return false
+
+        def proof_record_entry_expression_preserved(expression: Ast::Expr, body: darray[Ast::Stmt]&, root: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if proof_callable_name(callee) != "old" or arguments.count != 1
+                    match arguments[0]:
+                        Ast::Expr.Field(Ast::Expr.Ident(name, _), field, _):
+                            return name != root or not proof_record_entry_field_written(body, root, field, 0)
+                        _:
+                            return false
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_record_entry_expression_preserved(left, body, root, depth + 1) and proof_record_entry_expression_preserved(right, body, root, depth + 1)
+                Ast::Expr.Unary(_, inner, _) | Ast::Expr.Paren(inner, _):
+                    return proof_record_entry_expression_preserved(inner, body, root, depth + 1)
+                _:
+                    return true
+
+        def proof_record_entry_contracts_preserved(statements: darray[Ast::Stmt]&, body: darray[Ast::Stmt]&, root: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for statement in statements |body, root, depth|:
+                match statement:
+                    Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_record_entry_expression_preserved(expression, body, root, 0)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        return false if not proof_record_entry_contracts_preserved(&then_body, body, root, depth + 1) or not proof_record_entry_contracts_preserved(&else_body, body, root, depth + 1)
+                    _:
+                        pass
+            return true
 
         # Only direct record fields are modeled; no deep heap frame is inferred.
         def proof_record_branch_expression_closed(expression: Ast::Expr, contract: bool, depth: usize) -> bool:
