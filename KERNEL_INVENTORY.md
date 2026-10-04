@@ -249,6 +249,30 @@ claims marked "(checked)".
 | Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | ~5k | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
 | Presentation | `app/*` except repair | ~2.8k | Output and CLI. Fingerprints are binding guards only (limitation 2). |
 
+## Guarded arithmetic completeness rules
+
+These rules reuse the ordinary `goal` certificate; they add no trusted fact or arena kind.
+
+- **Linear disequality by denial.** After the premises and primitive goal pass machine-wrap
+  guards, the producer temporarily assumes the equality complement of `a != b`. The existing
+  linear disequality-refutation procedure must contradict an actual premise. Kernel replay
+  independently constructs that complement and repeats the refutation, including goal safety.
+  It does not accept the producer's contradiction flag or reinterpret wrapping arithmetic.
+  `scripts/test_correlated_disjunction.py` covers correlated cases, a false stronger goal,
+  a missing premise, and a wrapping goal. Portable controls reseal identities before checking
+  that a genuine claim replays and a false wrapping claim is rejected.
+- **Closed width-uniform OR goals.** `kernel_replay/closed_width_formulas.elisa` independently
+  evaluates literal ring terms (`+`, `-`, `*`, unary sign) and Boolean comparisons at signed and
+  unsigned widths 8, 16, 32, and 64. It accepts only truth at every width. Exact intermediate
+  arithmetic must fit i64; typed literals, unknown terms, and ambiguous negative plain-literal
+  payloads are excluded. A shared 512-visit budget covers all width evaluations and shared DAG
+  paths; exhaustion refuses the rule. This is a closed-formula rule, not general modular
+  arithmetic or a substitute for source typing. `scripts/test_closed_width_formulas.py` and the
+  portable suite cover true uniform formulas and a resealed width-dependent false near-match.
+
+The shared AST helpers listed below remain source-adapter dependencies; independent arena
+evaluation does not remove their existing source-correspondence limitation.
+
 ## Known limitations
 
 1. **Shared helpers.** Replay calls exactly the functions below that are defined outside
