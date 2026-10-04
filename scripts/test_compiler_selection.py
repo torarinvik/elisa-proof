@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix="elisa-compiler-selection-") as director
         wrapper.chmod(0o755)
         checkouts.append(checkout)
     environment = {key: value for key, value in os.environ.items()
-                   if key not in ("ELISA_COMPILER_ROOT", "ELISA_COMPILER_SRC")}
+                   if key not in ("ELISA_COMPILER_ROOT", "ELISA_COMPILER_SRC", "ELISA_COMPILER_BIN")}
     environment["PATH"] = str(path_bin)
     def select(overrides):
         return subprocess.run(
@@ -44,4 +44,13 @@ with tempfile.TemporaryDirectory(prefix="elisa-compiler-selection-") as director
         refused = select({variable: str(missing)})
         assert refused.returncode == 2 and refused.stdout == "", refused
         assert refused.stderr == "Stage1 wrapper not executable: %s/scripts/elisac_stage1.sh\n" % missing, refused
+        # Exercise callers too: losing status 2 would let them continue with a PATH
+        # compiler or bootstrap despite the explicit checkout being unavailable.
+        caller_environment = dict(environment, **{variable: str(missing)})
+        caller_environment["PATH"] = str(path_bin) + os.pathsep + os.environ.get("PATH", "")
+        for caller in ("build.sh", "dogfood.sh"):
+            result = subprocess.run([BASH, str(ROOT / "scripts" / caller)], cwd=ROOT,
+                                    env=caller_environment, capture_output=True, text=True, timeout=15)
+            assert result.returncode == 2 and result.stdout == "", (caller, result)
+            assert result.stderr == refused.stderr, (caller, result)
 print("compiler selection: checkout overrides honored; missing explicit checkout cannot fall back to PATH")
