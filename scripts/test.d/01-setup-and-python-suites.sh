@@ -3,6 +3,7 @@
 python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/scripts/test_keep_going.py"
 python3 "$ROOT_DIR/scripts/test_clang_resolution.py"
+python3 "$ROOT_DIR/scripts/test_compiler_selection.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 # ELISA_PROOF_SKIP_BUILD=1 tests prebuilt binaries (for example on a remote runner).
 if [[ "${ELISA_PROOF_SKIP_BUILD:-0}" != "1" ]]; then
@@ -254,7 +255,9 @@ SELF_HOST_COMPILER="${ELISA_COMPILER_BIN:-}"
 if [[ -z "$SELF_HOST_COMPILER" ]]; then
     # The standalone probes should use the same freshest compiler selection as
     # build.sh, with the checked-out stage1 wrapper preferred over PATH snapshots.
-    SELF_HOST_COMPILER="$(elisa_default_stage1 "$ROOT_DIR" || true)"
+    compiler_selection_status=0
+    SELF_HOST_COMPILER="$(elisa_default_stage1 "$ROOT_DIR")" || compiler_selection_status=$?
+    [[ "$compiler_selection_status" -ne 2 ]] || exit 2
     if [[ -z "$SELF_HOST_COMPILER" ]]; then
         SELF_HOST_COMPILER="$(elisa_default_stage0 "$ROOT_DIR" || true)"
     fi

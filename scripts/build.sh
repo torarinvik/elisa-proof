@@ -59,7 +59,9 @@ source "$ROOT_DIR/scripts/link_flags.sh"
 if [[ -z "$COMPILER" ]]; then
     # Prefer the source checkout's freshness-guarded stage1 wrapper over an
     # installed snapshot, then use the pinned/current Go bootstrap as fallback.
-    COMPILER="$(elisa_default_stage1 "$ROOT_DIR" || true)"
+    compiler_selection_status=0
+    COMPILER="$(elisa_default_stage1 "$ROOT_DIR")" || compiler_selection_status=$?
+    [[ "$compiler_selection_status" -ne 2 ]] || exit 2
     if [[ -z "$COMPILER" ]]; then
         COMPILER="$(elisa_default_stage0 "$ROOT_DIR" || true)"
     fi

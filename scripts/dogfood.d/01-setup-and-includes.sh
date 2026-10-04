@@ -6,7 +6,9 @@ source "$ROOT_DIR/scripts/compiler_provenance.sh"
 if [[ -z "$COMPILER" ]]; then
     # Prefer the current source checkout's freshness-guarded stage1 wrapper;
     # installed stage1 snapshots can lag compiler changes in the sibling checkout.
-    COMPILER="$(elisa_default_stage1 "$ROOT_DIR" || true)"
+    compiler_selection_status=0
+    COMPILER="$(elisa_default_stage1 "$ROOT_DIR")" || compiler_selection_status=$?
+    [[ "$compiler_selection_status" -ne 2 ]] || exit 2
     if [[ -z "$COMPILER" ]]; then
         COMPILER="$(elisa_default_stage0 "$ROOT_DIR" || true)"
     fi
