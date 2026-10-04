@@ -7,8 +7,9 @@ import tempfile
 if not __debug__:
     raise SystemExit("runtime input checks must run without Python -O")
 ROOT = Path(__file__).resolve().parents[1]
+compiler_source = Path(os.environ.get("ELISA_COMPILER_SRC", ROOT.parent / "Elisa-compiler"))
 compiler = Path(os.environ.get("ELISA_COMPILER_BIN",
-                              ROOT.parent / "Elisa-compiler/scripts/elisac_stage1.sh"))
+                              compiler_source / "scripts/elisac_stage1.sh"))
 assert compiler.is_file() and os.access(compiler, os.X_OK), compiler
 with tempfile.TemporaryDirectory(prefix="elisa-runtime-input-") as directory:
     missing = Path(directory) / "missing-runtime.o"
