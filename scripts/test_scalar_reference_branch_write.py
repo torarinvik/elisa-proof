@@ -38,6 +38,7 @@ assert forged["verification_state"] == "unsupported", forged
 assert forged["replay"]["gaps"] == 0, forged["replay"]
 assert forged["findings"] == [{
     "kind": "proof-internal-name", "status": "unsupported", "line": 2,
+    "file": 0, "file_line": 2,
     "name": "__elisa_proof_scalar_reference_state",
     "message": "source identifier collides with a proof-system internal name",
     "counterexample_found": False, "goal_id": None, "counterexample": []
