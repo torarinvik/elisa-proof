@@ -268,11 +268,20 @@ if [[ "$loop_entry_state_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; goals = [goal for goal in report["goals"] if goal["rule"] != "resource-safety"]; assert goals and all(goal["proven"] for goal in goals); assert {"source_times", "pushed_times"} <= {goal["name"] for goal in goals}; assert report["findings"] == []'
+run_json_report "$ROOT_DIR/examples/while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] >= 34; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; goals = report["goals"]; assert goals and all(goal["proven"] for goal in goals); assert {"source_times", "pushed_times", "pushed_times_return_region"} <= {goal["name"] for goal in goals}; assert report["findings"] == []; declarations = {decl["name"]: decl for decl in report["declaration_details"] if decl["kind"] == "function"}; assert declarations["pushed_times"]["verified"] and declarations["pushed_times_return_region"]["verified"]'
 while_loop_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$while_loop_facts_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a while loop dropped a guard or a fact over a binding it does not write (G75)\n' >&2
+    exit 1
+fi
+
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_local_darray_return.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; errors = [(d["kind_code"], d["name"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert errors == [(596, "local_values")], errors'
+rejected_local_darray_return_status=${PIPESTATUS[1]}
+set -e
+if [[ "$rejected_local_darray_return_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a moved inferred-region collection escaped its function\n' >&2
     exit 1
 fi
 

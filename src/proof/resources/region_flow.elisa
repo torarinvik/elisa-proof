@@ -47,6 +47,8 @@ extend ElisaProof:
                     return proof_resource_binding_region(state, slot) if slot < state.binding_names.count and proof_resource_binding_region_is_live(state, slot)
                 Ast::Expr.Paren(inner, _):
                     return proof_resource_expr_region(inner, state)
+                Ast::Expr.Move(inner, _):
+                    return proof_resource_expr_region(inner, state)
                 Ast::Expr.Field(object, _, _):
                     return proof_resource_expr_region(object, state)
                 Ast::Expr.Scope(base, _, _):
@@ -61,6 +63,35 @@ extend ElisaProof:
                     return ""
             return ""
 
+        # The first by-value region-call rule is deliberately narrow: a dynamic array whose
+        # elements are scalar values. Containers of references and nested/opaque element types
+        # need their own provenance model and stay unsupported.
+        def proof_resource_region_collection_type_tag(expression: Ast::Expr, functions: ProofFunctionTable&) -> sview:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_region_collection_type_tag(inner, functions)
+                Ast::Expr.Unary(TokenKind.Mutable, inner, _):
+                    return proof_resource_region_collection_type_tag(inner, functions)
+                Ast::Expr.Index(head, element, _):
+                    element_name: sview = proof_ident_name(element)
+                    return "__elisa_darray_i8" if proof_ident_name(head) == "darray" and element_name == "i8"
+                    return "__elisa_darray_i16" if proof_ident_name(head) == "darray" and element_name == "i16"
+                    return "__elisa_darray_i32" if proof_ident_name(head) == "darray" and element_name == "i32"
+                    return "__elisa_darray_i64" if proof_ident_name(head) == "darray" and element_name == "i64"
+                    return "__elisa_darray_u8" if proof_ident_name(head) == "darray" and element_name == "u8"
+                    return "__elisa_darray_u16" if proof_ident_name(head) == "darray" and element_name == "u16"
+                    return "__elisa_darray_u32" if proof_ident_name(head) == "darray" and element_name == "u32"
+                    return "__elisa_darray_u64" if proof_ident_name(head) == "darray" and element_name == "u64"
+                    return "__elisa_darray_usize" if proof_ident_name(head) == "darray" and element_name == "usize"
+                    return "__elisa_darray_bool" if proof_ident_name(head) == "darray" and element_name == "bool"
+                    return "__elisa_darray_char" if proof_ident_name(head) == "darray" and element_name == "char"
+                _:
+                    pass
+            return ""
+
+        def proof_resource_region_collection_value_type(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            return proof_resource_region_collection_type_tag(expression, functions) != ""
+
         # A call returning `T& @r` or `sview @r` carries the caller's concrete region only when
         # the callee has a verified resource summary and its explicit `@r` witness is mapped at
         # this call site. By-value sviews additionally need a matching return marker in that
@@ -72,11 +103,14 @@ extend ElisaProof:
                     function_index: usize = proof_resource_function_index(functions, callee_name)
                     is_reference_result: mutable bool = false
                     is_sview_result: mutable bool = false
+                    is_region_value_result: mutable bool = false
                     if function_index < functions.return_references.count:
                         is_reference_result <- functions.return_references[function_index]
                     if function_index < functions.return_sviews.count:
                         is_sview_result <- functions.return_sviews[function_index]
-                    return "" if not is_reference_result and not is_sview_result
+                    if function_index < functions.return_types.count:
+                        is_region_value_result <- not is_reference_result and not is_sview_result and proof_resource_region_collection_value_type(functions.return_types[function_index], functions)
+                    return "" if not is_reference_result and not is_sview_result and not is_region_value_result
                     return_region: sview = proof_resource_function_return_region(functions, function_index)
                     return "" if return_region == ""
                     region_count: usize = proof_resource_function_region_param_count(functions, function_index)
@@ -96,6 +130,12 @@ extend ElisaProof:
                         for marker_root in sview_markers |marker_root, report, return_region|:
                             marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[marker_root]
                             return "" if (marker.operator != "sview" and marker.operator != "sview-call") or marker.name != return_region
+                    if is_region_value_result:
+                        value_markers: darray[usize] = []
+                        return "" if not proof_resource_summary_return_markers(report, summary_root, &value_markers) or value_markers.count == 0
+                        for marker_root in value_markers |marker_root, report, return_region|:
+                            marker: ElisaProofKernelCore::ProofKernelNode = report.kernel_nodes[marker_root]
+                            return "" if marker.operator != "value-param" or marker.name != return_region or marker.right >= report.kernel_nodes.count
                     mapped: mutable darray[Ast::Expr] = []
                     return "" if not proof_resource_map_call_arguments(functions, function_index, arguments, argument_names, &mapped)
                     formal_regions: mutable darray[sview] = []
@@ -233,6 +273,8 @@ extend ElisaProof:
                     # witness until a later source pass materializes the direct call.
                     return ""
                 Ast::Expr.Paren(inner, _):
+                    return proof_resource_expr_result_region(inner, state, functions, report)
+                Ast::Expr.Move(inner, _):
                     return proof_resource_expr_result_region(inner, state, functions, report)
                 Ast::Expr.Field(object, _, _):
                     return proof_resource_expr_result_region(object, state, functions, report)
