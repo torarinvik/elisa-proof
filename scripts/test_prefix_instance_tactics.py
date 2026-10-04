@@ -57,5 +57,8 @@ with tempfile.TemporaryDirectory(prefix="elisa-prefix-fingerprint-") as temporar
     assert refused.returncode == 1 and control["status"] == "failed", control
     assert control["source_goal_binding"]["bound"], control
     assert not control["source_goal_binding"]["fingerprint_match"], control
-    assert not control["tactic"]["valid"] and not control["tactic"]["solved"], control
+    # Actions may solve the imported goal, but a mismatched binding must never
+    # admit that result as the source-bound proof requested by the script.
+    assert not control["tactic"]["valid"] and control["tactic"]["status"] == "failed", control
+    assert "goal_fingerprint" in control["tactic"]["reason"], control
 print("row-instance and explicit prefix-preservation proofs replay; false controls reject; complete length-prefix loop proves automatically")
