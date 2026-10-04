@@ -22,6 +22,8 @@ for source, names, expected in (
         if expected == 0:
             assert report["status"] == "proved" and report["findings"] == []
         else:
-            expected_kind = "contract-expression-unsupported" if name == "rejected_float_conversion" else "ensure-unproven"
+            # Source formation accepts numeric equality, including floats; the
+            # unsupported conversion must still leave its ensure unproved.
+            expected_kind = "ensure-unproven"
             assert any(f["kind"] == expected_kind and f["name"] == name for f in report["findings"])
 print("unsigned place widening replays; narrowing, signedness, float and wrong bounds reject")
