@@ -1,87 +1,32 @@
 extend ElisaProofKernelReplay:
     private:
+
         const PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT: usize = 4
 
-        def proof_kernel_replay_congruence_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, exhausted: mutable bool&) -> bool:
-            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
-            return false if not located.known
-            goal: ElisaProofKernelCore::ProofKernelNode = located.node
-            return false if not proof_kernel_replay_arena_shape_valid(goal)
-            # The conclusion of this rule is always an equality. Order and disequality goals are
-            # left to the arithmetic tiers; congruence establishes identity, not comparison.
-            return false if goal.kind != "binary" or goal.operator != "=="
-            return false if facts.count == 0
-            return false if not proof_kernel_replay_congruence_has_seed_in_facts(nodes, facts)
-            terms: mutable darray[usize] = []
-            # The conclusion must lie entirely inside the primitive scalar fragment.
-            return false if not proof_kernel_replay_congruence_collect(nodes, children, facts, goal_root, &terms, exhausted, 0)
-            # Premises contribute on a best-effort basis: one outside the fragment, such as a
-            # type marker or an aggregate comparison, simply adds no equality.
-            for fact in facts |fact, nodes, children, terms, exhausted|:
-                collected: bool = proof_kernel_replay_congruence_collect(nodes, children, facts, fact, &terms, exhausted, 0)
-                continue if not collected
-            parent: mutable darray[usize] = []
-            for index in 0..<terms.count |index, parent|:
-                parent.push(index)
-            seeded: mutable bool = false
-            for fact in facts |fact, nodes, children, terms, parent, seeded|:
-                return false if not proof_kernel_replay_congruence_seed(nodes, children, terms, &parent, fact, 0, &seeded)
-            # Without a non-trivial equality premise this rule degenerates to structural
-            # equality, which earlier tiers already decided.
-            return false if not seeded
-            proof_kernel_replay_congruence_saturate(nodes, children, terms, &parent, exhausted)
-            left_class: (known: bool, index: usize) = proof_kernel_replay_congruence_class(nodes, children, terms, &parent, goal.left)
-            right_class: (known: bool, index: usize) = proof_kernel_replay_congruence_class(nodes, children, terms, &parent, goal.right)
-            return false if not left_class.known or not right_class.known
-            return left_class.index == right_class.index
-
-        # --- Declared effect containment ----------------------------------------------------
-        #
-        # The producer resolves each direct call in a function body to a declared callee and
-        # records that callee's declared `can[...]` row beside the caller's own. This rule
-        # re-derives the containment: every effect named by a call entry must appear in the
-        # declaring row. It is a statement about declared rows only. What a body performs
-        # without a call, and whether a row faithfully describes a body, are the compiler's
-        # effect checker's business, and the report says so rather than implying otherwise.
-        #
-        # An unresolved callee, an abstract row, or a row the producer could not compare never
-        # reaches here: the producer emits a diagnostic and no certificate at all.
-
-        def proof_kernel_replay_effect_row_contains(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, row_root: usize, effect: sview) -> bool:
-            return false if effect == "" or row_root >= nodes.count or nodes[row_root].kind != "effect-row"
-            row: ElisaProofKernelCore::ProofKernelNode = nodes[row_root]
-            return false if not proof_kernel_replay_child_range_valid(row.children_start, row.children_count, children.count)
-            for offset in 0..<row.children_count |offset, row, children, nodes, effect|:
-                member: (known: bool, value: usize) = proof_kernel_replay_index_at(children, row.children_start + offset)
-                continue if not member.known
-                continue if member.value >= nodes.count or nodes[member.value].kind != "effect"
-                return true if nodes[member.value].name == effect
+        def proof_kernel_replay_comparison_from_equality_literal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left_root: usize, operator: sview, right_root: usize) -> bool:
+            return false if not proof_kernel_replay_negation_supported(operator)
+            left_constant: ProofKernelReplayInt = proof_kernel_replay_small_nonnegative_constant(nodes, left_root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
+            right_constant: ProofKernelReplayInt = proof_kernel_replay_small_nonnegative_constant(nodes, right_root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
+            return proof_kernel_replay_constant_comparison(nodes, left_root, operator, right_root) if left_constant.known and right_constant.known
+            return false if left_constant.known == right_constant.known
+            term_root: usize = right_root if left_constant.known else left_root
+            goal_constant: i64 = left_constant.value if left_constant.known else right_constant.value
+            term_is_left: bool = not left_constant.known
+            for fact_root in facts |fact_root, nodes, children, facts, term_root, operator, goal_constant, term_is_left|:
+                continue if fact_root >= nodes.count or not proof_kernel_replay_valid(nodes, fact_root)
+                fact: ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
+                continue if fact.kind != "binary" or fact.operator != "=="
+                right_literal: ProofKernelReplayInt = proof_kernel_replay_small_nonnegative_constant(nodes, fact.right, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
+                if right_literal.known and proof_kernel_replay_expr_equal(nodes, children, fact.left, term_root, 0):
+                    continue if not proof_kernel_replay_primitive_comparison(nodes, children, facts, left_root, right_root) or not proof_kernel_replay_primitive_comparison(nodes, children, facts, fact.left, fact.right)
+                    return proof_kernel_replay_constant_comparison(nodes, fact.right, operator, right_root) if term_is_left
+                    return proof_kernel_replay_constant_comparison(nodes, left_root, operator, fact.right)
+                left_literal: ProofKernelReplayInt = proof_kernel_replay_small_nonnegative_constant(nodes, fact.left, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
+                if left_literal.known and proof_kernel_replay_expr_equal(nodes, children, fact.right, term_root, 0):
+                    continue if not proof_kernel_replay_primitive_comparison(nodes, children, facts, left_root, right_root) or not proof_kernel_replay_primitive_comparison(nodes, children, facts, fact.left, fact.right)
+                    return proof_kernel_replay_constant_comparison(nodes, fact.left, operator, right_root) if term_is_left
+                    return proof_kernel_replay_constant_comparison(nodes, left_root, operator, fact.left)
             return false
-
-        def proof_kernel_replay_effect_row_within(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, inner_root: usize, outer_root: usize) -> bool:
-            return false if inner_root >= nodes.count or nodes[inner_root].kind != "effect-row"
-            inner: ElisaProofKernelCore::ProofKernelNode = nodes[inner_root]
-            return false if not proof_kernel_replay_child_range_valid(inner.children_start, inner.children_count, children.count)
-            for offset in 0..<inner.children_count |offset, inner, children, nodes, outer_root|:
-                member: (known: bool, value: usize) = proof_kernel_replay_index_at(children, inner.children_start + offset)
-                return false if not member.known
-                return false if member.value >= nodes.count or nodes[member.value].kind != "effect"
-                return false if not proof_kernel_replay_effect_row_contains(nodes, children, outer_root, nodes[member.value].name)
-            return true
-
-        def proof_kernel_replay_effect_goal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, goal_root: usize) -> bool:
-            return false if goal_root >= nodes.count or nodes[goal_root].kind != "effect-containment"
-            root: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
-            return false if not proof_kernel_replay_arena_shape_valid(root)
-            declared_row: usize = root.left
-            return false if declared_row >= nodes.count or nodes[declared_row].kind != "effect-row"
-            return false if not proof_kernel_replay_child_range_valid(root.children_start, root.children_count, children.count)
-            for offset in 0..<root.children_count |offset, root, children, nodes, declared_row|:
-                entry: (known: bool, value: usize) = proof_kernel_replay_index_at(children, root.children_start + offset)
-                return false if not entry.known
-                return false if entry.value >= nodes.count or nodes[entry.value].kind != "effect-call"
-                return false if not proof_kernel_replay_effect_row_within(nodes, children, nodes[entry.value].left, declared_row)
-            return true
 
         def proof_kernel_replay_goal_depth(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
@@ -96,6 +41,7 @@ extend ElisaProofKernelReplay:
             return false if not ElisaProofKernelCore::depth_valid(depth)
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return false if not proof_kernel_replay_valid(nodes, goal_root)
+            return true if proof_kernel_replay_enum_variant_disjoint_from_facts(nodes, children, facts, goal_root)
             for fact in facts |fact, nodes, children, goal_root|:
                 return true if proof_kernel_replay_fact_contains(nodes, children, fact, goal_root, depth + 1)
             return true if remaining > 1 and proof_kernel_replay_symbolic_instance(nodes, children, facts, goal_root, depth + 1, remaining: remaining - 1)
@@ -105,6 +51,53 @@ extend ElisaProofKernelReplay:
             return true if remaining > 1 and proof_kernel_replay_division_goal(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
             return true if remaining > 1 and proof_kernel_replay_negated_name_goal(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
             goal_identity: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
+            if remaining > 1:
+                reduced: mutable darray[usize] = []
+                removed: mutable bool = false
+                for fact in facts |reduced, removed, nodes|:
+                    if proof_kernel_replay_valid(nodes, fact) and nodes[fact].kind == "quantifier":
+                        removed <- true
+                    else:
+                        reduced.push(fact)
+                if removed:
+                    return true if proof_kernel_replay_goal_depth_remaining(nodes, children, reduced, goal_root, split_depth, depth + 1, remaining: remaining - 1)
+            if remaining > 1:
+                return true if proof_kernel_replay_finite_universal_premise(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
+            return true if proof_kernel_replay_unsigned_nonzero_lower_bound(nodes, children, facts, goal_root)
+            if remaining > 1:
+                return true if proof_kernel_replay_negated_boolean_goal(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
+            return true if goal_identity.kind == "binary" and goal_identity.operator == "or" and proof_kernel_replay_disjunction_direct_branch(nodes, children, goal_root, facts, 0)
+            if goal_identity.kind == "binary" and goal_identity.operator == "or":
+                literal_left: mutable (known: bool, value: bool) = proof_kernel_replay_constant_bool(nodes, goal_identity.left, 0)
+                if goal_identity.left < nodes.count:
+                    left: ElisaProofKernelCore::ProofKernelNode = nodes[goal_identity.left]
+                    if left.kind == "binary" and left.operator == "!=" and left.left < nodes.count and left.right < nodes.count:
+                        a: ElisaProofKernelCore::ProofKernelNode = nodes[left.left]
+                        b: ElisaProofKernelCore::ProofKernelNode = nodes[left.right]
+                        literal_left <- (true, false) if a.kind == "int" and b.kind == "int" and a.value == b.value
+                if literal_left.known and not literal_left.value:
+                    return false if remaining <= 1
+                    return proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal_identity.right, split_depth, depth + 1, remaining: remaining - 1)
+                for fact in facts:
+                    return true if proof_kernel_replay_disjunction_entails_goal(nodes, children, facts, fact, goal_root, 0)
+            # Disjunctive syllogism shrinks a premise rather than making two
+            # branches. Spend ordinary recursion fuel, not case-split depth.
+            if remaining > 1:
+                for index in 0..<facts.count |index, facts, nodes, children, goal_root, split_depth, depth, remaining|:
+                    candidate: (known: bool, left: usize, right: usize) = proof_kernel_replay_find_disjunction(nodes, facts[index], depth)
+                    continue if not candidate.known
+                    left_refuted: bool = proof_kernel_replay_disjunct_refuted(nodes, children, candidate.left, facts, 0)
+                    right_refuted: bool = proof_kernel_replay_disjunct_refuted(nodes, children, candidate.right, facts, 0)
+                    continue if not left_refuted and not right_refuted
+                    reduced: mutable darray[usize] = []
+                    reduced.extend(facts)
+                    reduced[index] <- candidate.right if left_refuted else candidate.left
+                    return proof_kernel_replay_goal_depth_remaining(nodes, children, reduced, goal_root, split_depth, depth + 1, remaining: remaining - 1)
+            if goal_identity.kind == "binary" and goal_identity.operator == "==":
+                return true if proof_kernel_replay_logical_join_identity(nodes, children, facts, goal_root)
+                if remaining > 1:
+                    return true if proof_kernel_replay_index_read_equality(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
+                return true if proof_kernel_replay_ident_name(nodes, goal_identity.left) == "null" and proof_kernel_replay_ident_name(nodes, goal_identity.right) == "null"
             # Parentheses do not alter proposition semantics and may enclose an OR whose left
             # branch is already closed, so unwrap them before unsigned-range guards run.
             if goal_identity.kind == "paren":
@@ -119,42 +112,72 @@ extend ElisaProofKernelReplay:
                 if negated.kind == "binary" and converse != "":
                     flipped: usize = ElisaProofKernelCore::add_node(nodes, "binary", converse, negated.right, negated.left, 0, 0, 0, 0, "", "")
                     return true if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, flipped, split_depth, depth + 1, remaining: remaining - 1)
-            # A true Boolean literal is independent of fixed-width premises. A false one falls
-            # through, since contradictory facts must still be able to close it.
+            # A true Boolean literal is independent of fixed-width premises. It is admitted here
+            # only after the source-bound producer chose this disjunction alternative.
             return true if goal_identity.kind == "bool" and goal_identity.value != 0
-            # Independently introduce a disjunction from either proved alternative. Numeric
-            # safety is checked recursively only for the alternative consumed. When neither
-            # alternative holds alone, fall through: the case split below still proves `A or B`
-            # as `not A => B`.
-            if goal_identity.kind == "binary" and goal_identity.operator == "or" and remaining > 1:
-                # Mirror: each alternative alone first opens no fact disjunction; the attempt
-                # with full splits runs last, after `not A => B`, as the producer's late Or case.
-                alone_depth: usize = split_depth if split_depth >= PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT else PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT
-                return true if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal_identity.left, alone_depth, depth + 1, remaining: remaining - 1) or proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal_identity.right, alone_depth, depth + 1, remaining: remaining - 1)
-                # Mirror: `not A => B`, and `not B => A` only for an arithmetic-free B, each under
-                # `proof_kernel_replay_disjunct_premises` and then its rewritten goal. Witnessed
-                # places are generalized first, before that step spends a split level.
-                if split_depth == 0 and remaining > 2:
-                    or_facts: mutable bool = false
-                    for fact in facts |fact, nodes, or_facts|:
-                        or_facts <- true if proof_kernel_replay_linear_is_or(nodes, fact)
-                    return true if or_facts and proof_kernel_replay_field_place_goal(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
-                if split_depth < PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT and remaining > 2:
-                    for side in 0..<2 |side, nodes, children, facts, goal_identity, split_depth, depth, remaining|:
-                        first: usize = goal_identity.left if side == 0 else goal_identity.right
-                        second: usize = goal_identity.right if side == 0 else goal_identity.left
-                        break if side == 1 and not proof_kernel_replay_disjunct_arithmetic_free(nodes, goal_identity.right, 0)
-                        negation: (known: bool, root: usize) = proof_kernel_replay_disjunct_negation(nodes, children, facts, first)
-                        if negation.known:
-                            premises: darray[usize] = proof_kernel_replay_disjunct_premises(nodes, children, facts, negation.root)
-                            return true if proof_kernel_replay_goal_depth_remaining(nodes, children, premises, second, split_depth + 1, depth + 1, remaining: remaining - 1)
-                            rewritten: (known: bool, root: usize) = proof_kernel_replay_disjunct_rewritten_goal(nodes, children, second, negation.root)
-                            return true if rewritten.known and proof_kernel_replay_goal_depth_remaining(nodes, children, premises, rewritten.root, split_depth + 1, depth + 1, remaining: remaining - 1)
-                if split_depth < PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT:
-                    return true if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal_identity.left, split_depth, depth + 1, remaining: remaining - 1) or proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal_identity.right, split_depth, depth + 1, remaining: remaining - 1)
+            # A predicate equation may rewrite a negated call to a negated
+            # primitive comparison. Recompute its exact Boolean complement;
+            # the recursive goal still applies ordinary machine-range guards.
+            if remaining > 1 and goal_identity.kind == "unary" and goal_identity.operator == "not" and goal_identity.left < nodes.count:
+                comparison: ElisaProofKernelCore::ProofKernelNode = nodes[goal_identity.left]
+                if comparison.kind == "binary" and proof_kernel_replay_negation_supported(comparison.operator) and proof_kernel_replay_primitive_comparison(nodes, children, facts, comparison.left, comparison.right):
+                    complemented: usize = ElisaProofKernelCore::add_node(nodes, "binary", proof_kernel_replay_negation(comparison.operator), comparison.left, comparison.right, 0, 0, 0, 0, "", "")
+                    return true if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, complemented, split_depth, depth + 1, remaining: remaining - 1)
+            # Independently eliminate a primitive Boolean call's exact equality.
+            # The other side still needs a proof under the same premises/fuel.
+            predicate_root: mutable usize = goal_root
+            predicate_negated: bool = goal_identity.kind == "unary" and goal_identity.operator == "not"
+            predicate_root <- goal_identity.left if predicate_negated
+            if remaining > 1 and predicate_root < nodes.count and nodes[predicate_root].kind == "call" and proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, predicate_root, 0):
+                for fact_root in facts |fact_root, nodes, children, facts, predicate_root, predicate_negated, goal_root, split_depth, depth, remaining|:
+                    continue if fact_root >= nodes.count
+                    equation: ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
+                    continue if equation.kind != "binary" or equation.operator != "=="
+                    replacement: mutable usize = nodes.count
+                    replacement <- equation.right if proof_kernel_replay_expr_equal(nodes, children, equation.left, predicate_root, 0)
+                    replacement <- equation.left if proof_kernel_replay_expr_equal(nodes, children, equation.right, predicate_root, 0)
+                    continue if replacement >= nodes.count or proof_kernel_replay_expr_equal(nodes, children, replacement, predicate_root, 0)
+                    continue if not proof_kernel_replay_primitive_comparison(nodes, children, facts, equation.left, equation.right)
+                    rewritten: mutable usize = replacement
+                    rewritten <- ElisaProofKernelCore::add_node(nodes, "unary", "not", replacement, 0, 0, 0, 0, 0, "", "") if predicate_negated
+                    return true if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, rewritten, split_depth, depth + 1, remaining: remaining - 1)
+            # Independently introduce a disjunction from either proved alternative.
+            # Numeric safety is checked recursively only for the alternative consumed.
+            if goal_identity.kind == "binary" and goal_identity.operator == "or":
+                return true if proof_kernel_replay_signed_distinct_disequality_disjunction(nodes, children, facts, goal_root)
+                return true if proof_kernel_replay_unsigned_distinct_disequality_disjunction(nodes, children, facts, goal_root)
+                return true if proof_kernel_replay_facts_propositionally_inconsistent(nodes, children, facts, depth + 1)
+                # Mirror the producer: split a disjunctive premise before choosing
+                # one disjunct of the goal, so correlations in De Morgan cases survive.
+                candidate: (known: bool, index: usize, left: usize, right: usize) = proof_kernel_replay_find_goal_disjunction(nodes, children, facts, goal_root, depth)
+                if candidate.known and split_depth < PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT:
+                    return false if remaining <= 1
+                    left_facts: mutable darray[usize] = []
+                    right_facts: mutable darray[usize] = []
+                    for fact_index in 0..<facts.count |fact_index, facts, candidate, left_facts, right_facts|:
+                        if fact_index == candidate.index:
+                            left_facts.push(candidate.left)
+                            right_facts.push(candidate.right)
+                        else:
+                            left_facts.push(facts[fact_index])
+                            right_facts.push(facts[fact_index])
+                    return true if proof_kernel_replay_goal_depth_remaining(nodes, children, left_facts, goal_root, split_depth + 1, depth + 1, remaining: remaining - 1) and proof_kernel_replay_goal_depth_remaining(nodes, children, right_facts, goal_root, split_depth + 1, depth + 1, remaining: remaining - 1)
+                return false if remaining <= 1
+                return true if proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal_identity.left, split_depth, depth + 1, remaining: remaining - 1) or proof_kernel_replay_goal_depth_remaining(nodes, children, facts, goal_identity.right, split_depth, depth + 1, remaining: remaining - 1)
+                return false if split_depth >= PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT
+                denied_facts: mutable darray[usize] = []
+                denied_facts.extend(facts)
+                return false if not proof_kernel_replay_push_disjunction_denial(nodes, children, goal_identity.left, &denied_facts, facts, facts.count + PROOF_KERNEL_DISJUNCTION_DENIAL_FACT_LIMIT, 0)
+                return proof_kernel_replay_goal_depth_remaining(nodes, children, denied_facts, goal_identity.right, split_depth + 1, depth + 1, remaining: remaining - 1)
             if goal_identity.kind == "binary":
+                return true if proof_kernel_replay_strict_order_fact_implies_disequality(nodes, children, facts, goal_root)
+                if remaining > 1:
+                    return true if proof_kernel_replay_strict_order_consequence(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
+                return true if proof_kernel_replay_signed_disequality_from_equality_fact(nodes, children, facts, goal_root)
+                return true if proof_kernel_replay_unsigned_disequality_from_equality_fact(nodes, children, facts, goal_root)
                 return true if proof_kernel_replay_direct_literal_comparison(nodes, goal_identity.left, goal_identity.operator, goal_identity.right)
                 return true if proof_kernel_replay_constant_comparison(nodes, goal_identity.left, goal_identity.operator, goal_identity.right)
+                return true if proof_kernel_replay_comparison_from_equality_literal(nodes, children, facts, goal_identity.left, goal_identity.operator, goal_identity.right)
             # Quantifier goals are already finite, self-contained proof obligations. Dispatch
             # them before arithmetic/model tiers inspect the erased block representation; those
             # tiers deliberately do not know how to interpret a quantifier range.
@@ -172,6 +195,48 @@ extend ElisaProofKernelReplay:
                 if remainder_width > 0:
                     return true if proof_kernel_replay_unsigned_remainder_upper(nodes, children, facts, goal_identity.left, goal_identity.operator, goal_identity.right)
             return true if proof_kernel_replay_unsigned_unit_increment_order_shape(nodes, children, facts, goal_root)
+            widened: usize = proof_kernel_replay_unsigned_widening_comparison(nodes, children, facts, goal_root)
+            if widened != goal_root:
+                return false if remaining <= 1
+                return proof_kernel_replay_goal_depth_remaining(nodes, children, facts, widened, split_depth, depth + 1, remaining: remaining - 1)
+            if remaining > 1:
+                boolean = proof_kernel_replay_comparison_boolean_equation_plan(nodes, children, facts, goal_root)
+                if boolean.known:
+                    return proof_kernel_replay_goal_depth_remaining(nodes, children, facts, boolean.goal, split_depth, depth + 1, remaining: remaining - 1)
+            if remaining > 1:
+                pinned = proof_kernel_replay_pinned_premise_plan(nodes, children, facts)
+                return true if pinned.known and pinned.contradiction
+                if pinned.known:
+                    return proof_kernel_replay_goal_depth_remaining(nodes, children, pinned.facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
+            if remaining > 1:
+                subtraction = proof_kernel_replay_subtraction_alias_plan(nodes, children, facts, goal_root)
+                if subtraction.known:
+                    return proof_kernel_replay_goal_depth_remaining(nodes, children, facts, subtraction.goal, split_depth, depth + 1, remaining: remaining - 1)
+            return true if proof_kernel_replay_unsigned_pinned_comparison(nodes, children, facts, goal_root)
+            if remaining > 1 and split_depth < PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT:
+                alias = proof_kernel_replay_conditional_alias_plan(nodes, children, facts, goal_root)
+                if alias.known:
+                    then_facts: mutable darray[usize] = []
+                    else_facts: mutable darray[usize] = []
+                    then_facts.extend(facts)
+                    else_facts.extend(facts)
+                    then_facts[alias.index] <- alias.then_fact
+                    else_facts[alias.index] <- alias.else_fact
+                    then_facts.push(alias.condition)
+                    negated: usize = ElisaProofKernelCore::add_node(nodes, "unary", "not", alias.condition, 0, 0, 0, 0, 0, "", "")
+                    else_facts.push(negated)
+                    return true if (alias.then_refuted or proof_kernel_replay_goal_depth_remaining(nodes, children, then_facts, goal_root, split_depth + 1, depth + 1, remaining: remaining - 1)) and (alias.else_refuted or proof_kernel_replay_goal_depth_remaining(nodes, children, else_facts, goal_root, split_depth + 1, depth + 1, remaining: remaining - 1))
+            if remaining > 1 and split_depth < PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT:
+                conditional = proof_kernel_replay_conditional_comparison_plan(nodes, children, facts, goal_root)
+                if conditional.known:
+                    then_facts: mutable darray[usize] = []
+                    else_facts: mutable darray[usize] = []
+                    then_facts.extend(facts)
+                    else_facts.extend(facts)
+                    then_facts.push(conditional.condition)
+                    negated: usize = ElisaProofKernelCore::add_node(nodes, "unary", "not", conditional.condition, 0, 0, 0, 0, 0, "", "")
+                    else_facts.push(negated)
+                    return true if (conditional.then_refuted or proof_kernel_replay_goal_depth_remaining(nodes, children, then_facts, conditional.then_goal, split_depth + 1, depth + 1, remaining: remaining - 1)) and (conditional.else_refuted or proof_kernel_replay_goal_depth_remaining(nodes, children, else_facts, conditional.else_goal, split_depth + 1, depth + 1, remaining: remaining - 1))
             return true if proof_kernel_replay_unsigned_scaled_product_upper_shape(nodes, children, facts, goal_root)
             if remaining > 1:
                 return true if proof_kernel_replay_monotone_order_goal(nodes, children, facts, goal_root, split_depth, depth, remaining: remaining - 1)
@@ -240,8 +305,8 @@ extend ElisaProofKernelReplay:
                         return proof_kernel_replay_goal_depth_remaining(nodes, children, left_facts, goal_root, split_depth + 1, depth + 1, remaining: remaining - 1) and proof_kernel_replay_goal_depth_remaining(nodes, children, right_facts, goal_root, split_depth + 1, depth + 1, remaining: remaining - 1)
             # Mirror: nonnegativity holds under both readings of a fixed-width term and reads no
             # premise, only the traced type markers, so it runs before the fixed-width guards.
-            return true if proof_kernel_replay_unsigned_nonnegative_shape(nodes, children, facts, goal_root)
-            return true if proof_kernel_replay_unsigned_subtraction_upper_shape(nodes, children, facts, goal_root)
+            return true if proof_kernel_replay_unsigned_nonnegative_shape(nodes, children, facts, goal_root) or proof_kernel_replay_unsigned_strict_progress_shape(nodes, children, facts, goal_root) or proof_kernel_replay_unsigned_literal_progress(nodes, children, facts, goal_root) or proof_kernel_replay_unsigned_maximum_equality(nodes, children, facts, goal_root)
+            return true if proof_kernel_replay_unsigned_span_descent(nodes, children, facts, goal_root) or proof_kernel_replay_unsigned_subtraction_upper_shape(nodes, children, facts, goal_root) or proof_kernel_replay_unsigned_span_cursor_bound(nodes, children, facts, goal_root)
             # Mirror the producer's guarded unsigned-sum upper-bound rule before the generic
             # arithmetic safety walk encounters the addition it is proving safe. Restrict the
             # early replay path to a positively witnessed unsigned result width; signed sums
@@ -280,12 +345,16 @@ extend ElisaProofKernelReplay:
                 proof_kernel_replay_collect_differences(nodes, fact, signed_bounds, children, facts, &signed_constraints, 0)
             if signed_constraints.count <= PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS:
                 proof_kernel_replay_close_bounds_through_differences(signed_constraints, &signed_bounds)
-            # A primitive comparison and its explicitly negated complement are exact
-            # propositional complements, whatever the arithmetic reading of their operands, so
-            # this runs before the fixed-width range rejection below. Only operators with a
-            # defined complement over operands witnessed as primitive scalars qualify.
-            if goal_identity.kind == "binary" and proof_kernel_replay_negation_supported(goal_identity.operator) and proof_kernel_replay_primitive_comparison(nodes, children, facts, goal_identity.left, goal_identity.right):
-                for fact in facts |fact, nodes, children, facts, goal_identity, depth|:
+            # A primitive comparison and its explicitly negated counterpart are exact
+            # propositional complements, independent of the arithmetic representation of
+            # their operands. Replay this before fixed-width range rejection, but only for
+            # operators with a defined complement and operands witnessed as primitive scalars.
+            # Typed proposition admission permits null equality only against a nullable
+            # reference. Replay the exact equality complement independently of scalar
+            # arithmetic; no pointer ordering or integer conversion follows from this rule.
+            null_equality: bool = goal_identity.kind == "binary" and (goal_identity.operator == "==" or goal_identity.operator == "!=") and ((goal_identity.left < nodes.count and nodes[goal_identity.left].kind == "ident" and nodes[goal_identity.left].name == "null") or (goal_identity.right < nodes.count and nodes[goal_identity.right].kind == "ident" and nodes[goal_identity.right].name == "null"))
+            if goal_identity.kind == "binary" and proof_kernel_replay_negation_supported(goal_identity.operator) and (proof_kernel_replay_primitive_comparison(nodes, children, facts, goal_identity.left, goal_identity.right) or null_equality):
+                for fact in facts |fact, nodes, children, goal_identity, depth|:
                     return true if proof_kernel_replay_negative_fact(nodes, children, facts, fact, goal_identity.left, goal_identity.operator, goal_identity.right, depth + 1)
             facts_safe: mutable bool = true
             for fact in facts |fact, nodes, children, facts, unsigned_bounds, signed_bounds, facts_safe|:
@@ -309,12 +378,40 @@ extend ElisaProofKernelReplay:
                     kept.push(fact) if readable
                 return false if kept.count == facts.count
                 return proof_kernel_replay_goal_depth_remaining(nodes, children, kept, goal_root, split_depth, depth + 1, remaining: remaining - 1)
+            # Mirror the producer's interval contradiction rule only after every
+            # premise passes the fixed-width safety guards. Bounds are derived
+            # independently from primitive comparisons and equality closure;
+            # no inconsistent interval is accepted from a producer certificate.
+            for bound in unsigned_bounds:
+                return true if bound.has_lower and bound.has_upper and bound.lower > bound.upper
             return true if proof_kernel_replay_facts_inconsistent(nodes, facts, depth + 1)
             # Only a case split can introduce a refuted branch; the front end already rejects
             # contradictory preconditions, so top-level goals skip the per-fact search.
             return true if split_depth > 0 and proof_kernel_replay_facts_arithmetically_inconsistent(nodes, children, facts)
             return true if proof_kernel_replay_linear_disequality_refuted(nodes, children, facts)
             return true if proof_kernel_replay_fact_proves_call_summary(nodes, children, facts, goal_root)
+            # Independently derive exact summary consequences before using
+            # them in congruence. Existing depth/fuel bounds still apply.
+            if remaining > 1:
+                derived: mutable darray[usize] = []
+                for fact_root in facts |fact_root, facts, nodes, children, derived|:
+                    continue if fact_root >= nodes.count
+                    equation: ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
+                    continue if equation.kind != "binary" or equation.operator != "=="
+                    continue if not proof_kernel_replay_primitive_comparison(nodes, children, facts, equation.left, equation.right)
+                    for orientation in 0..<2 |orientation, equation, facts, nodes, children, derived|:
+                        consequence: usize = equation.right if orientation == 0 else equation.left
+                        continue if consequence >= nodes.count or nodes[consequence].kind == "call"
+                        present: mutable bool = false
+                        for premise in facts |premise, consequence, present, nodes, children|:
+                            present <- true if proof_kernel_replay_fact_contains(nodes, children, premise, consequence, 0)
+                        continue if present or not proof_kernel_replay_fact_proves_call_summary(nodes, children, facts, consequence)
+                        derived.push(consequence)
+                if derived.count > 0:
+                    enriched: mutable darray[usize] = []
+                    enriched.extend(facts)
+                    enriched.extend(&derived)
+                    return true if proof_kernel_replay_goal_depth_remaining(nodes, children, enriched, goal_root, split_depth, depth + 1, remaining: remaining - 1)
             # Keep the source-neutral kernel from applying its signed arithmetic/model rules to a
             # fixed-width unsigned term unless every arithmetic subterm has a finite, in-range
             # interval under the traced width marker.
@@ -328,6 +425,8 @@ extend ElisaProofKernelReplay:
                 return proof_kernel_replay_nested_conditional_goal(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
             return true if proof_kernel_replay_linear_certificate_goal(nodes, children, facts, goal_root)
             return true if proof_kernel_replay_bounded_model_goal(nodes, children, facts, goal_root)
+            if remaining > 1:
+                return true if proof_kernel_replay_comparison_transport(nodes, children, facts, goal_root, split_depth, depth + 1, remaining: remaining - 1)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
             if node.kind == "bool":
                 return node.value != 0
@@ -426,3 +525,5 @@ extend ElisaProofKernelReplay:
                 congruence_exhausted: mutable bool = false
                 return true if proof_kernel_replay_congruence_goal(nodes, children, facts, goal_root, &congruence_exhausted)
             return false
+
+include "./resource_model_integrated_helpers.elisa"

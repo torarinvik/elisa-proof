@@ -1,0 +1,36 @@
+# shellcheck shell=bash
+# Branch integration regressions; sourced after the primary matrix helpers.
+run_py_test test_field_store_poststate.py
+run_py_test test_function_focus.py
+run_py_test test_field_null_guard.py
+run_py_test test_local_record_field.py
+run_py_test test_layout_query.py
+run_py_test test_required_reference_store.py
+run_py_test test_record_branch_state.py
+run_py_test test_disjunction_denial.py
+run_py_test test_integer_disjunction_denial.py
+run_py_test test_disjunctive_syllogism.py
+run_py_test test_false_left_search.py
+run_py_test test_extern_effect_containment.py
+run_py_test test_quantifier_dispatch.py
+run_py_test test_local_call_result_binding.py
+run_py_test test_capture_result_alias.py
+run_py_test test_integer_unit_refutation.py
+run_py_test test_null_store_identity.py
+run_py_test test_global_constant_relevance.py
+bash "$ROOT_DIR/scripts/test_predicate_summary_matrix.sh"
+run_py_test test_safe_constant_replay.py
+run_py_test test_scalar_reference_branch_write.py
+run_py_test test_unsigned_widening.py
+run_py_test test_loop_stride_width.py
+run_py_test test_bounded_u8_conversion.py
+run_py_test test_signed_distinct_constants.py
+run_py_test test_pure_call_result_bound.py
+run_py_test test_ambiguous_name_purity.py
+run_py_test test_disjunction_domain.py
+run_py_test test_qualified_constant_call_domain.py
+run_py_test test_qualified_constant_pins.py
+run_py_test test_strict_order_disequality.py
+run_py_test test_compact_mutating_call_summary.py
+run_py_test test_effect_loop_control.py
+run_py_test test_string_literal_comparison.py

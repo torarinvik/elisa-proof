@@ -1,0 +1,143 @@
+# Factored helpers retained by the branch integration.
+extend ElisaProof:
+    public:
+        def proof_unsigned_span_cursor_bound(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            for fact in facts |fact, facts, goal|:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(step, relation, span, _):
+                        continue if relation != TokenKind.LtEq
+                        parts: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_difference_operands(span)
+                        continue if not parts.known
+                        end: Ast::Expr = parts.left
+                        start: Ast::Expr = parts.right
+                        position: Ast::Pos = Ast::expr_pos(span)
+                        continue if proof_ident_name(start) == "" or proof_ident_name(end) == "" or proof_ident_name(step) == ""
+                        width: i64 = proof_unsigned_width_in_expression(start, facts)
+                        continue if width == 0 or proof_unsigned_width_in_expression(end, facts) != width or proof_unsigned_width_in_expression(step, facts) != width
+                        continue if not proof_has_order_fact(start, end, false, facts)
+                        sum: Ast::Expr = Ast::Expr.Binary(start, TokenKind.Plus, step, position)
+                        difference: Ast::Expr = Ast::Expr.Binary(end, TokenKind.Minus, step, position)
+                        match proof_strip_parens(goal):
+                            Ast::Expr.Binary(left, operator, right, _):
+                                continue if operator != TokenKind.LtEq and operator != TokenKind.GtEq
+                                low: Ast::Expr = right if operator == TokenKind.GtEq else left
+                                high: Ast::Expr = left if operator == TokenKind.GtEq else right
+                                return true if proof_expr_equal(low, sum) and proof_expr_equal(high, end)
+                                return true if proof_expr_equal(low, start) and proof_expr_equal(high, sum)
+                                return true if proof_expr_equal(low, difference) and proof_expr_equal(high, end)
+                                return true if proof_expr_equal(low, start) and proof_expr_equal(high, difference)
+                            _:
+                                pass
+                    _:
+                        pass
+            return false
+
+        # For equally typed unsigned names, b <= a makes a - b non-wrapping,
+        # hence a - b <= a. Read only this direct order premise; no arithmetic
+        # assumptions are reinterpreted through the signed interval solver.
+        def proof_unsigned_subtraction_upper_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(difference, TokenKind.LtEq, bound, _):
+                    match proof_strip_parens(difference):
+                        Ast::Expr.Binary(first, TokenKind.Minus, second, _):
+                            return false if proof_ident_name(first) == "" or proof_ident_name(second) == ""
+                            return false if not proof_expr_equal(first, bound)
+                            width: i64 = proof_unsigned_width_in_expression(first, facts)
+                            return false if width == 0 or proof_unsigned_width_in_expression(second, facts) != width
+                            return proof_has_order_fact(second, first, false, facts)
+                        _:
+                            return false
+                _:
+                    return false
+
+        # A witnessed unsigned sum can be proved below a same-width bound when the facts give
+        # `second <= bound - first` and separately establish `first <= bound`. The subtraction
+        # and peer-width checks make that witness a non-wrapping proof of the sum itself, so run
+        # this shape before the generic unsigned-goal guard rejects the very addition being
+        # justified. Signed sums stay on the ordinary fully range-checked path.
+        def proof_unsigned_sum_upper_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(sum, operator, bound, _):
+                    return false if operator != TokenKind.Lt and operator != TokenKind.LtEq
+                    operands: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_sum_operands(sum)
+                    return false if not operands.known or proof_unsigned_width_in_expression(sum, facts) == 0
+                    return proof_sum_bound_goal(sum, operator, bound, facts)
+                _:
+                    return false
+
+        # An unsigned unit successor is strictly above its base when the addition is proved
+        # non-wrapping. Keep this rule structural: one side must be exactly the other's `+ 1`
+        # (in either operand order), both must have the same witnessed unsigned width, and the
+        # existing expression-safety checker must establish the successor is in range.
+        def proof_unsigned_unit_increment_order_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.LtEq and operator != TokenKind.GtEq
+                    increment: mutable Ast::Expr = left
+                    base: mutable Ast::Expr = right
+                    if operator == TokenKind.LtEq:
+                        increment <- right
+                        base <- left
+                    shifted: (known: bool, base: Ast::Expr) = proof_shifted_unit_base(increment)
+                    return false if not shifted.known or not proof_expr_equal(shifted.base, base)
+                    width: i64 = proof_unsigned_width_in_expression(increment, facts)
+                    return false if width == 0 or proof_unsigned_width_in_expression(base, facts) != width
+                    return proof_unsigned_expression_safe(increment, facts)
+                _:
+                    return false
+
+        # If `base <= ceiling / k` for a positive same-width unsigned constant k, then
+        # `base * k <= ceiling`. Return only the exact structural witness; division by a
+        # different factor, a signed term, or a mismatched-width ceiling cannot close it.
+        def proof_unsigned_scaled_product_witness(product: Ast::Expr, facts: darray[Ast::Expr]&, strict_required: bool) -> (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) can[Memory.Allocate, Abort.Panic]:
+            unknown: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = (false, Ast::Expr.Invalid, Ast::Expr.Invalid, 0)
+            match proof_strip_parens(product):
+                Ast::Expr.Binary(left, TokenKind.Star, right, _):
+                    right_constant: (known: bool, value: i64) = proof_constant_int(right)
+                    base: mutable Ast::Expr = left
+                    factor_expression: mutable Ast::Expr = right
+                    factor: mutable i64 = right_constant.value
+                    if not right_constant.known or right_constant.value <= 0:
+                        left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                        return unknown if not left_constant.known or left_constant.value <= 0
+                        base <- right
+                        factor_expression <- left
+                        factor <- left_constant.value
+                    width: i64 = proof_unsigned_width_in_expression(product, facts)
+                    return unknown if width == 0 or proof_unsigned_width_in_expression(base, facts) != width
+                    return unknown if not proof_unsigned_constants_fit(factor_expression, width, 0)
+                    conjuncts: darray[Ast::Expr] = proof_conjunct_facts(facts)
+                    for fact in conjuncts |fact, base, factor_expression, factor, width|:
+                        order: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_readable_order(fact, facts)
+                        continue if not order.known
+                        quotient: mutable Ast::Expr = Ast::Expr.Invalid
+                        if (order.operator == TokenKind.Lt or (not strict_required and order.operator == TokenKind.LtEq)) and proof_expr_equal(order.left, base):
+                            quotient <- order.right
+                        elif (order.operator == TokenKind.Gt or (not strict_required and order.operator == TokenKind.GtEq)) and proof_expr_equal(order.right, base):
+                            quotient <- order.left
+                        else:
+                            continue
+                        match proof_strip_parens(quotient):
+                            Ast::Expr.Binary(ceiling, TokenKind.Slash, divisor, _):
+                                divisor_constant: (known: bool, value: i64) = proof_constant_int(divisor)
+                                continue if not divisor_constant.known or divisor_constant.value != factor
+                                continue if not proof_expr_equal(divisor, factor_expression)
+                                continue if proof_unsigned_width_in_expression(ceiling, facts) != width
+                                return (true, base, ceiling, factor)
+                            _:
+                                continue
+                    return unknown
+                _:
+                    return unknown
+
+        def proof_unsigned_scaled_product_upper_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(product, operator, bound, _):
+                    return false if operator != TokenKind.LtEq and operator != TokenKind.Lt
+                    witness: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = proof_unsigned_scaled_product_witness(product, facts, operator == TokenKind.Lt)
+                    return witness.known and proof_expr_equal(witness.bound, bound)
+                _:
+                    return false
+
+        # The nonnegativity rule addressed by the whole goal rather than by its operands, so it
+        # can be tried before the wrap guards that would otherwise refuse the goal outright.

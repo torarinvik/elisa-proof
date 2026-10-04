@@ -1,0 +1,65 @@
+# Independent source-metadata reconstruction. Do not call the checker decoder or
+# trust ProofExternSignature.effects_complete/effects at this replay boundary.
+extend ElisaProof:
+    private:
+        def proof_replay_extern_row_space(byte: u8) -> bool:
+            return byte == 32 or byte == 9 or byte == 10 or byte == 13
+
+        def proof_replay_extern_row_start(byte: u8) -> bool:
+            return byte == 95 or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+
+        def proof_replay_extern_row_continue(byte: u8) -> bool:
+            return proof_replay_extern_row_start(byte) or (byte >= 48 and byte <= 57)
+
+        def proof_replay_extern_effect_row_matches(annotations: darray[Ast::EnumAnnotation]&, owner: sview, line: u32, members: darray[sview]&) -> bool:
+            return false if owner == "" or members.count > 128
+            markers: mutable usize = 0
+            rows: mutable usize = 0
+            text: mutable sview = ""
+            for annotation in annotations:
+                continue if annotation.line != line
+                markers <- markers + 1 if annotation.owner == owner and annotation.name == "__extern_effect_row_complete"
+                if annotation.owner == "__extern_effect_row_text":
+                    rows <- rows + 1
+                    text <- annotation.name
+            return false if markers != 1 or rows != 1
+            size: usize = sview_len(text)
+            return false if size > 4096
+            expected: mutable darray[sview] = []
+            cursor: mutable usize = 0
+            while cursor < size and proof_replay_extern_row_space(sview_at(text, cursor)):
+                cursor <- cursor + 1
+            while cursor < size:
+                return false if expected.count >= 128 or not proof_replay_extern_row_start(sview_at(text, cursor))
+                first: usize = cursor
+                cursor <- cursor + 1
+                while cursor < size and proof_replay_extern_row_continue(sview_at(text, cursor)):
+                    cursor <- cursor + 1
+                while cursor < size and sview_at(text, cursor) == 46:
+                    cursor <- cursor + 1
+                    return false if cursor == size or not proof_replay_extern_row_start(sview_at(text, cursor))
+                    cursor <- cursor + 1
+                    while cursor < size and proof_replay_extern_row_continue(sview_at(text, cursor)):
+                        cursor <- cursor + 1
+                name: sview = string_view_slice(text, first.i64(), cursor.i64())
+                expected.push(name) if not (any previous in expected where previous == name)
+                while cursor < size and proof_replay_extern_row_space(sview_at(text, cursor)):
+                    cursor <- cursor + 1
+                break if cursor == size
+                return false if sview_at(text, cursor) != 44
+                cursor <- cursor + 1
+                while cursor < size and proof_replay_extern_row_space(sview_at(text, cursor)):
+                    cursor <- cursor + 1
+                return false if cursor == size
+            # Compare exact sets, rejecting extra/missing/duplicated certificate members.
+            return false if expected.count != members.count
+            for index in 0..<members.count |index, members, expected|:
+                return false if not (any name in expected where name == members[index])
+                for earlier in 0..<index |earlier, index, members|:
+                    return false if members[earlier] == members[index]
+            # Implicit declarations are part of the source boundary too, even when
+            # the explicit row omits them. Such an incomplete row must fail closed.
+            for annotation in annotations:
+                continue if annotation.line != line or annotation.owner != "__extern_effect_ref"
+                return false if not (any name in expected where name == annotation.name)
+            return true

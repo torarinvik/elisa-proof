@@ -1,9 +1,61 @@
 const PROOF_LINEAR_MAX_MODEL_BIT_WIDTH: usize = 4096
+include "unsigned_span_descent.elisa"
 const PROOF_LINEAR_MAX_MODEL_ENUMERATION: usize = 65536
 const PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT: usize = 4
 
 extend ElisaProof:
     private:
+        # `x != a or x != b` is true for an unsigned primitive x when a and b
+        # are distinct values representable at x's width. Keep this rule narrow:
+        # both comparisons must name the exact same witnessed term, both constants
+        # must fit its declared width, and the source-operator guard must already
+        # have admitted the primitive comparisons.
+        def proof_unsigned_disequality_constant(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, term: Ast::Expr, value: i64):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(term, TokenKind.BangEq, constant, _):
+                    width: i64 = proof_unsigned_width_in_expression(term, facts)
+                    parsed: (known: bool, value: i64) = proof_constant_int(constant)
+                    return (false, Ast::Expr.Invalid, 0) if width == 0 or not parsed.known or not proof_unsigned_constants_fit(constant, width, 0)
+                    return (false, Ast::Expr.Invalid, 0) if not proof_primitive_comparison(term, constant, facts)
+                    return (true, term, parsed.value)
+                _:
+                    return (false, Ast::Expr.Invalid, 0)
+
+        def proof_unsigned_distinct_disequality_disjunction(goal: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    first: (known: bool, term: Ast::Expr, value: i64) = proof_unsigned_disequality_constant(left, facts)
+                    second: (known: bool, term: Ast::Expr, value: i64) = proof_unsigned_disequality_constant(right, facts)
+                    return false if not first.known or not second.known or first.value == second.value
+                    return proof_expr_equal(first.term, second.term)
+                _:
+                    return false
+
+        # A witnessed unsigned term equal to one in-range constant cannot equal a
+        # different in-range constant. Match the exact term and require both sides
+        # to use primitive comparisons before deriving this disequality.
+        def proof_unsigned_disequality_from_equality_fact(goal: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(term, TokenKind.BangEq, constant, _):
+                    width: i64 = proof_unsigned_width_in_expression(term, facts)
+                    target: (known: bool, value: i64) = proof_constant_int(constant)
+                    return false if width == 0 or not target.known or not proof_unsigned_constants_fit(constant, width, 0)
+                    return false if not proof_primitive_comparison(term, constant, facts)
+                    for fact in facts |fact, term, width, target|:
+                        match proof_strip_parens(fact):
+                            Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                                if proof_expr_equal(term, left) and proof_primitive_comparison(left, right, facts):
+                                    known_value: (known: bool, value: i64) = proof_constant_int(right)
+                                    return true if known_value.known and proof_unsigned_constants_fit(right, width, 0) and known_value.value != target.value
+                                if proof_expr_equal(term, right) and proof_primitive_comparison(left, right, facts):
+                                    known_value: (known: bool, value: i64) = proof_constant_int(left)
+                                    return true if known_value.known and proof_unsigned_constants_fit(left, width, 0) and known_value.value != target.value
+                            _:
+                                pass
+                _:
+                    pass
+            return false
+
     public:
         def proof_bounded_model_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
@@ -40,13 +92,13 @@ extend ElisaProof:
                 budget <- budget - 1
                 facts_hold: mutable bool = true
                 for fact in facts |fact, names, values, all_known, facts_hold|:
-                    fact_value: (known: bool, value: bool) = proof_counterexample_bool(fact, names, values)
+                    fact_value: (known: bool, value: bool) = proof_counterexample_bool(fact, names, values, facts)
                     if not fact_value.known:
                         all_known <- false
                         return
                     facts_hold <- false if not fact_value.value
                 return if not facts_hold
-                goal_value: (known: bool, value: bool) = proof_counterexample_bool(goal, names, values)
+                goal_value: (known: bool, value: bool) = proof_counterexample_bool(goal, names, values, facts)
                 if not goal_value.known:
                     all_known <- false
                     return
@@ -74,8 +126,8 @@ extend ElisaProof:
                 return false if not proof_bounded_model_fragment(fact, facts, 0)
             names: mutable darray[sview] = []
             for fact in facts |names|:
-                proof_counterexample_collect_names(fact, &names)
-            proof_counterexample_collect_names(goal, &names)
+                proof_counterexample_collect_names(fact, &names, facts)
+            proof_counterexample_collect_names(goal, &names, facts)
             return false if names.count == 0 or names.count > ElisaProofKernelCore::PROOF_KERNEL_FINITE_MODEL_SYMBOL_LIMIT
             bounds: mutable darray[ProofBound] = []
             proof_collect_fact_bounds(facts, &bounds)
@@ -108,54 +160,6 @@ extend ElisaProof:
             holds: mutable bool = true
             proof_bounded_model_visit(0, names, &values, lowers, widths, facts, goal, &budget, &all_known, &holds, exhausted)
             return all_known and holds
-
-        # The integer a fact set pins to a term. A literal denotes itself; a bare name denotes
-        # the value of an imported literal constant, whose `NAME == <literal>` fact the boundary
-        # importer records and replay re-derives from the declaration itself. Reading a term
-        # through those pins consumes a premise that is already present in the fact set, so it
-        # states nothing the facts do not.
-        def proof_constant_pin_of_fact(fact: Ast::Expr, name: sview) -> (known: bool, value: i64):
-            match fact:
-                Ast::Expr.Binary(pin_left, TokenKind.EqEq, pin_right, _):
-                    match pin_left:
-                        Ast::Expr.Ident(pin_name, _):
-                            return (false, 0) if pin_name != name
-                            match pin_right:
-                                Ast::Expr.IntLit(pinned_value, _):
-                                    return (true, pinned_value)
-                                _:
-                                    return (false, 0)
-                        _:
-                            return (false, 0)
-                _:
-                    return (false, 0)
-
-        def proof_pinned_constant_value(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, value: i64):
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_pinned_constant_value(inner, facts)
-                Ast::Expr.IntLit(literal_value, _):
-                    return (true, literal_value)
-                Ast::Expr.Ident(constant_name, _):
-                    for fact in facts:
-                        pinned: (known: bool, value: i64) = proof_constant_pin_of_fact(fact, constant_name)
-                        return pinned if pinned.known
-                    return (false, 0)
-                _:
-                    return (false, 0)
-
-        # Two operands denote the same value when they are structurally equal, or when the fact
-        # set pins both to the same integer. The second reading is what a place term needs: the
-        # interval and difference tiers key their bounds by a bare name, so a comparison whose
-        # subject is a field selection is left to the structural rule below, and a callee
-        # contract that spells its bound as a named constant would otherwise fail to meet the
-        # branch fact that already folded that constant to a literal.
-        def proof_operand_matches_through_pins(fact_operand: Ast::Expr, goal_operand: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
-            return true if proof_expr_equal(fact_operand, goal_operand)
-            fact_constant: (known: bool, value: i64) = proof_pinned_constant_value(fact_operand, facts)
-            return false if not fact_constant.known
-            goal_constant: (known: bool, value: i64) = proof_pinned_constant_value(goal_operand, facts)
-            return goal_constant.known and goal_constant.value == fact_constant.value
 
         # A false branch carries `not condition`. Recognize the exact logical complement of a
         # comparison so branch-sensitive checking can prove facts such as `not (x < 0) |- x >= 0`

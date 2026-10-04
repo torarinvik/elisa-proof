@@ -1,0 +1,142 @@
+# Factored helpers retained by the branch integration.
+extend ElisaProof:
+    private:
+        def proof_contract_numeric_cast_target(target: sview) -> bool:
+            return target == "i8" or target == "i16" or target == "i32" or target == "i64" or target == "int" or target == "isize" or target == "u8" or target == "u16" or target == "u32" or target == "u64" or target == "usize" or target == "uintptr" or target == "f32" or target == "f64"
+
+        def proof_contract_numeric_cast_receiver(callee: Ast::Expr, arguments: darray[Ast::Expr]&) -> (known: bool, receiver: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if arguments.count != 0
+            match callee:
+                Ast::Expr.Field(receiver, target, _):
+                    return (proof_contract_numeric_cast_target(target), receiver)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_contract_calls_are_pure(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            return proof_contract_calls_are_pure_depth(expression, functions, 0)
+
+        def proof_contract_calls_are_pure_depth(expression: Ast::Expr, functions: ProofFunctionTable&, depth: usize) -> bool:
+            # Contract-call admission is a trusted boundary. If traversal stops, reject the
+            # expression rather than allowing an unvisited effectful call to look pure.
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Absent:
+                    return true
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.FloatLit(_, _):
+                    return true
+                Ast::Expr.StringLit(_, _):
+                    return true
+                Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.ShorthandMember(parts, _):
+                    # A compiler-resolved one-segment const-enum member is a closed value. A
+                    # qualified path is not source-neutral here because the certificate term does
+                    # not carry its owner identity.
+                    return parts.count == 1 and parts[0] != ""
+                Ast::Expr.Call(callee, arguments, _, _):
+                    if proof_ident_name(callee) == "old" and arguments.count == 1:
+                        return proof_contract_calls_are_pure_depth(arguments[0], functions, depth + 1)
+                    numeric_cast: (known: bool, receiver: Ast::Expr) = proof_contract_numeric_cast_receiver(callee, arguments)
+                    return proof_contract_calls_are_pure_depth(numeric_cast.receiver, functions, depth + 1) if numeric_cast.known
+                    called: sview = proof_callable_name(callee)
+                    called_index: usize = proof_function_index_for_callee(functions, callee)
+                    return false if called == "" or called_index >= functions.pure.count or not functions.pure[called_index]
+                    # Purity is a syntactic/fixed-point classification, not a proof result.
+                    # A function whose body failed verification must not be smuggled into a
+                    # logical contract merely because it has the right effect shape.
+                    return false if called_index >= functions.verified.count or not functions.verified[called_index]
+                    return false if not proof_contract_calls_are_pure_depth(callee, functions, depth + 1)
+                    for argument in arguments |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(argument, functions, depth + 1)
+                    return true
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    return proof_contract_calls_are_pure_depth(lowered.call, functions, depth + 1) if lowered.known
+                    return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_contract_calls_are_pure_depth(inner, functions, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_contract_calls_are_pure_depth(operand, functions, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_contract_calls_are_pure_depth(left, functions, depth + 1) and proof_contract_calls_are_pure_depth(right, functions, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_contract_calls_are_pure_depth(object, functions, depth + 1)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_contract_calls_are_pure_depth(base, functions, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_contract_calls_are_pure_depth(object, functions, depth + 1) and proof_contract_calls_are_pure_depth(index, functions, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_contract_calls_are_pure_depth(object, functions, depth + 1) and proof_contract_calls_are_pure_depth(low, functions, depth + 1) and proof_contract_calls_are_pure_depth(high, functions, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_contract_calls_are_pure_depth(object, functions, depth + 1)
+                    for argument in arguments |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(argument, functions, depth + 1)
+                    return true
+                Ast::Expr.Move(operand, _):
+                    return proof_contract_calls_are_pure_depth(operand, functions, depth + 1)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_contract_calls_are_pure_depth(operand, functions, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(element, functions, depth + 1)
+                    return true
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(element, functions, depth + 1)
+                    return true
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(element, functions, depth + 1)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(entry.key, functions, depth + 1) or not proof_contract_calls_are_pure_depth(entry.value, functions, depth + 1)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(field.value, functions, depth + 1)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_contract_calls_are_pure_depth(base, functions, depth + 1)
+                    for field in fields |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(field.value, functions, depth + 1)
+                    return true
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_contract_calls_are_pure_depth(condition, functions, depth + 1) and proof_contract_calls_are_pure_depth(then_expr, functions, depth + 1) and proof_contract_calls_are_pure_depth(else_expr, functions, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return false if not proof_contract_calls_are_pure_depth(scrutinee, functions, depth + 1)
+                    for arm in arms |functions|:
+                        return false if not proof_contract_calls_are_pure_depth(arm.guard, functions, depth + 1)
+                        return false if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return false if not proof_contract_calls_are_pure_depth(value, functions, depth + 1)
+                            _:
+                                return false
+                    return true
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_contract_calls_are_pure_depth(iterable, functions, depth + 1) and proof_contract_calls_are_pure_depth(condition, functions, depth + 1) and proof_contract_calls_are_pure_depth(body, functions, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_contract_calls_are_pure_depth(base, functions, depth + 1) and proof_contract_calls_are_pure_depth(predicate, functions, depth + 1)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return false if not proof_contract_calls_are_pure_depth(initializer, functions, depth + 1)
+                            _:
+                                return false
+                    return proof_contract_calls_are_pure_depth(value, functions, depth + 1)
+                _:
+                    return false
+
+        # A fact produced by a runtime assertion may outlive the expression evaluation. A
+        # substituted call term is therefore safe to publish only when it denotes a certified pure
+        # value; an unresolved/effectful call may have a different result on its next execution.

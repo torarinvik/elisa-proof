@@ -1,0 +1,183 @@
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_logical_constant_value(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize = 0) -> (known: bool, value: bool):
+            return (false, false) if depth >= 64 or not proof_kernel_replay_valid(nodes, root)
+            node = nodes[root]
+            return (false, false) if not proof_kernel_replay_arena_shape_valid(node)
+            if node.kind == "bool":
+                return (node.value == 0 or node.value == 1, node.value == 1)
+            if node.kind == "unary" and node.operator == "not":
+                inner = proof_kernel_replay_logical_constant_value(nodes, node.left, depth + 1)
+                return (inner.known, not inner.value)
+            if node.kind == "binary" and (node.operator == "and" or node.operator == "or"):
+                a = proof_kernel_replay_logical_constant_value(nodes, node.left, depth + 1)
+                b = proof_kernel_replay_logical_constant_value(nodes, node.right, depth + 1)
+                if node.operator == "and":
+                    return (true, false) if (a.known and not a.value) or (b.known and not b.value)
+                    return (a.known and b.known, a.value and b.value)
+                return (true, true) if (a.known and a.value) or (b.known and b.value)
+                return (a.known and b.known, a.value or b.value)
+            return (false, false)
+
+        def proof_kernel_replay_logical_context_value(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, fuel: mutable usize&, depth: usize = 0) -> (known: bool, value: bool):
+            return (false, false) if depth >= 64 or fuel == 0 or not proof_kernel_replay_valid(nodes, root)
+            fuel <- fuel - 1
+            node = nodes[root]
+            return (false, false) if not proof_kernel_replay_arena_shape_valid(node)
+            if node.kind == "bool":
+                return (node.value == 0 or node.value == 1, node.value == 1)
+            if node.kind == "unary" and node.operator == "not":
+                result = proof_kernel_replay_logical_context_value(nodes, children, facts, node.left, fuel, depth + 1)
+                return (result.known, not result.value)
+            if node.kind == "binary":
+                if node.operator == "and" or node.operator == "or":
+                    a = proof_kernel_replay_logical_context_value(nodes, children, facts, node.left, fuel, depth + 1)
+                    b = proof_kernel_replay_logical_context_value(nodes, children, facts, node.right, fuel, depth + 1)
+                    if node.operator == "and":
+                        return (true, false) if (a.known and not a.value) or (b.known and not b.value)
+                        return (a.known and b.known, a.value and b.value)
+                    return (true, true) if (a.known and a.value) or (b.known and b.value)
+                    return (a.known and b.known, a.value or b.value)
+                return (false, false) if not proof_kernel_replay_negation_supported(node.operator) or not proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
+                for fact_root in facts |fact_root, nodes, children, facts, node|:
+                    continue if not proof_kernel_replay_valid(nodes, fact_root)
+                    fact = nodes[fact_root]
+                    continue if fact.kind != "binary" or not proof_kernel_replay_arena_shape_valid(fact) or not proof_kernel_replay_negation_supported(fact.operator)
+                    continue if not proof_kernel_replay_primitive_comparison(nodes, children, facts, fact.left, fact.right)
+                    continue if not proof_kernel_replay_expr_equal(nodes, children, fact.left, node.left, 0) or not proof_kernel_replay_expr_equal(nodes, children, fact.right, node.right, 0)
+                    return (true, true) if fact.operator == node.operator
+                    return (true, false) if fact.operator == proof_kernel_replay_negation(node.operator)
+            return (false, false)
+
+        def proof_kernel_replay_logical_equation_form(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, depth: usize = 0) -> bool:
+            return false if depth >= 64 or not proof_kernel_replay_valid(nodes, root)
+            node = nodes[root]
+            return false if not proof_kernel_replay_arena_shape_valid(node)
+            if node.kind == "bool":
+                return node.value == 0 or node.value == 1
+            if node.kind == "ident" or node.kind == "scope" or node.kind == "call":
+                return proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, root, 0)
+            if node.kind == "unary" and node.operator == "not":
+                return proof_kernel_replay_logical_equation_form(nodes, children, facts, node.left, depth + 1)
+            if node.kind == "binary":
+                if node.operator == "and" or node.operator == "or":
+                    return proof_kernel_replay_logical_equation_form(nodes, children, facts, node.left, depth + 1) and proof_kernel_replay_logical_equation_form(nodes, children, facts, node.right, depth + 1)
+                return proof_kernel_replay_negation_supported(node.operator) and proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
+            return false
+
+        def proof_kernel_replay_comparison_boolean_equation_plan(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> (known: bool, goal: usize):
+            return (false, root) if not proof_kernel_replay_valid(nodes, root)
+            goal = nodes[root]
+            return (false, root) if goal.kind != "binary" or not proof_kernel_replay_arena_shape_valid(goal) or (goal.operator != "==" and goal.operator != "!=")
+            return (false, root) if not proof_kernel_replay_valid(nodes, goal.left) or not proof_kernel_replay_valid(nodes, goal.right)
+            mirrored: bool = nodes[goal.left].kind == "bool"
+            literal = nodes[goal.left] if mirrored else nodes[goal.right]
+            comparison_root: usize = goal.right if mirrored else goal.left
+            comparison = nodes[comparison_root]
+            return (false, root) if literal.kind != "bool" or not proof_kernel_replay_arena_shape_valid(literal) or (literal.value != 0 and literal.value != 1)
+            positive: bool = literal.value == 1 if goal.operator == "==" else literal.value == 0
+            logical: bool = (comparison.kind == "binary" and (comparison.operator == "and" or comparison.operator == "or")) or (comparison.kind == "unary" and comparison.operator == "not")
+            if logical:
+                return (false, root) if not proof_kernel_replay_logical_equation_form(nodes, children, facts, comparison_root)
+                fuel: mutable usize = 128
+                constant = proof_kernel_replay_logical_context_value(nodes, children, facts, comparison_root, fuel)
+                if constant.known:
+                    truth: i64 = 1 if constant.value == positive else 0
+                    reduced: usize = ElisaProofKernelCore::add_node(nodes, "bool", "", 0, 0, 0, 0, 0, truth, "", "")
+                    return (true, reduced)
+                return (true, comparison_root) if positive
+                negated: usize = ElisaProofKernelCore::add_node(nodes, "unary", "not", comparison_root, 0, 0, 0, 0, 0, "", "")
+                return (true, negated)
+            return (false, root) if comparison.kind != "binary" or not proof_kernel_replay_arena_shape_valid(comparison) or not proof_kernel_replay_negation_supported(comparison.operator)
+            return (false, root) if not proof_kernel_replay_primitive_comparison(nodes, children, facts, comparison.left, comparison.right)
+            return (true, comparison_root) if positive
+            complemented: usize = ElisaProofKernelCore::add_node(nodes, "binary", proof_kernel_replay_negation(comparison.operator), comparison.left, comparison.right, 0, 0, 0, 0, "", "")
+            return (true, complemented)
+
+        # Only discharge premises decided by the independently checked typed pin rule.
+        # Unknown comparisons remain intact; no diagnostic model is proof evidence.
+        def proof_kernel_replay_pinned_premise_plan(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize]) -> (known: bool, contradiction: bool, facts: darray[usize]):
+            for index in 0..<facts.count |index, nodes, children, facts|:
+                root: usize = facts[index]
+                continue if not proof_kernel_replay_valid(nodes, root)
+                premise = nodes[root]
+                continue if not proof_kernel_replay_arena_shape_valid(premise)
+                negated: bool = premise.kind == "unary" and premise.operator == "not"
+                comparison_root: usize = premise.left if negated else root
+                continue if not proof_kernel_replay_valid(nodes, comparison_root)
+                comparison = nodes[comparison_root]
+                continue if comparison.kind != "binary" or not proof_kernel_replay_arena_shape_valid(comparison) or not proof_kernel_replay_negation_supported(comparison.operator)
+                continue if comparison.operator == "=="
+                complement: usize = ElisaProofKernelCore::add_node(nodes, "binary", proof_kernel_replay_negation(comparison.operator), comparison.left, comparison.right, 0, 0, 0, 0, "", "")
+                positive: bool = proof_kernel_replay_unsigned_pinned_comparison(nodes, children, facts, comparison_root)
+                negative: bool = proof_kernel_replay_unsigned_pinned_comparison(nodes, children, facts, complement)
+                continue if not positive and not negative
+                return (true, true, facts) if (positive and negated) or (negative and not negated)
+                reduced: mutable darray[usize] = []
+                for other in 0..<facts.count |other, index, facts, reduced|:
+                    reduced.push(facts[other]) if other != index
+                return (true, false, reduced)
+            return (false, false, facts)
+
+        # Substitute an exact scalar literal equality, then compare machine bits.
+        # Neither explicit signed literals nor mismatched widths are contextualized.
+        def proof_kernel_replay_unsigned_pinned_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, root)
+            goal = nodes[root]
+            return false if goal.kind != "binary" or not proof_kernel_replay_arena_shape_valid(goal) or not proof_kernel_replay_negation_supported(goal.operator)
+            return false if not proof_kernel_replay_valid(nodes, goal.left) or not proof_kernel_replay_valid(nodes, goal.right)
+            on_left: bool = nodes[goal.left].kind == "ident"
+            alias: usize = goal.left if on_left else goal.right
+            cap: usize = goal.right if on_left else goal.left
+            return false if nodes[alias].kind != "ident" or not proof_kernel_replay_arena_shape_valid(nodes[alias])
+            width: i64 = proof_kernel_replay_peer_unsigned_width(nodes, children, alias, facts)
+            return false if width != 8 and width != 16 and width != 32 and width != 64
+            if nodes[cap].kind == "ident" and (goal.operator == "<=" or goal.operator == ">="):
+                zero: usize = goal.left if goal.operator == "<=" else goal.right
+                peer: usize = goal.right if goal.operator == "<=" else goal.left
+                return false if not proof_kernel_replay_primitive_comparison(nodes, children, facts, zero, peer)
+                return false if proof_kernel_replay_peer_unsigned_width(nodes, children, zero, facts) != width or proof_kernel_replay_peer_unsigned_width(nodes, children, peer, facts) != width
+                for fact_root in facts |fact_root, nodes, children, facts, zero, width|:
+                    continue if not proof_kernel_replay_valid(nodes, fact_root)
+                    fact = nodes[fact_root]
+                    continue if fact.kind != "binary" or fact.operator != "==" or not proof_kernel_replay_arena_shape_valid(fact)
+                    continue if not proof_kernel_replay_valid(nodes, fact.left) or not proof_kernel_replay_valid(nodes, fact.right)
+                    pinned: usize = fact.right if proof_kernel_replay_expr_equal(nodes, children, fact.left, zero, 0) else fact.left if proof_kernel_replay_expr_equal(nodes, children, fact.right, zero, 0) else nodes.count
+                    continue if not proof_kernel_replay_valid(nodes, pinned) or not proof_kernel_replay_primitive_comparison(nodes, children, facts, fact.left, fact.right)
+                    literal = nodes[pinned]
+                    continue if not proof_kernel_replay_arena_shape_valid(literal)
+                    return true if literal.kind == "int" and literal.value == 0
+                    typed = ElisaProofKernelCore::typed_literal_value(literal)
+                    return true if typed.known and typed.unsigned and typed.width == width and typed.bits == 0
+                return false
+            target = ElisaProofKernelCore::typed_literal_value(nodes[cap])
+            return false if not target.known or not target.unsigned or target.width != width
+            return false if not proof_kernel_replay_primitive_comparison(nodes, children, facts, goal.left, goal.right)
+            for fact_root in facts |fact_root, nodes, children, facts, alias, target, width, on_left, goal|:
+                continue if not proof_kernel_replay_valid(nodes, fact_root)
+                fact = nodes[fact_root]
+                continue if fact.kind != "binary" or fact.operator != "==" or not proof_kernel_replay_arena_shape_valid(fact)
+                continue if not proof_kernel_replay_valid(nodes, fact.left) or not proof_kernel_replay_valid(nodes, fact.right)
+                known_root: usize = fact.right if proof_kernel_replay_expr_equal(nodes, children, fact.left, alias, 0) else fact.left if proof_kernel_replay_expr_equal(nodes, children, fact.right, alias, 0) else nodes.count
+                continue if not proof_kernel_replay_valid(nodes, known_root) or not proof_kernel_replay_primitive_comparison(nodes, children, facts, fact.left, fact.right)
+                literal = nodes[known_root]
+                bits: mutable u64 = 0
+                if literal.kind == "typed-int":
+                    typed = ElisaProofKernelCore::typed_literal_value(literal)
+                    continue if not typed.known or not typed.unsigned or typed.width != width
+                    bits <- typed.bits
+                elif literal.kind == "int":
+                    continue if not proof_kernel_replay_arena_shape_valid(literal) or literal.value < 0
+                    continue if width != 64 and literal.value > proof_kernel_replay_unsigned_width_max(width)
+                    bits <- literal.value.u64()
+                else:
+                    continue
+                a: u64 = bits if on_left else target.bits
+                b: u64 = target.bits if on_left else bits
+                return a == b if goal.operator == "=="
+                return a != b if goal.operator == "!="
+                return a < b if goal.operator == "<"
+                return a <= b if goal.operator == "<="
+                return a > b if goal.operator == ">"
+                return a >= b
+            return false

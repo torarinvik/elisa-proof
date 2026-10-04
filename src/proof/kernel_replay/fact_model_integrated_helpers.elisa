@@ -1,0 +1,145 @@
+# Factored helpers retained by the branch integration.
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_fact_contains(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, goal_root: usize, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return true if proof_kernel_replay_expr_equal(nodes, children, root, goal_root, 0)
+            return proof_kernel_replay_fact_contains_signed(nodes, children, root, goal_root, false, depth)
+
+        def proof_kernel_replay_fact_contains_negated(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, target_root: usize, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth)
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return false if root >= nodes.count
+            return false if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "unary" and node.operator == "not":
+                return true if proof_kernel_replay_expr_equal(nodes, children, node.left, target_root, 0)
+            if node.kind == "binary" and node.operator == "and":
+                return proof_kernel_replay_fact_contains_negated(nodes, children, node.left, target_root, depth + 1) or proof_kernel_replay_fact_contains_negated(nodes, children, node.right, target_root, depth + 1)
+            return false
+
+        # A function-summary fact equates a call term with its postcondition. If the same Boolean
+        # call (or its negation) is present in the branch context, equality substitution justifies
+        # the corresponding postcondition. This is intentionally independent of the producer's
+        # implementation and remains limited to exact canonical call roots.
+        def proof_kernel_replay_fact_proves_call_summary(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, goal_root)
+            goal: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
+            for summary_root in facts |summary_root, nodes, children, facts, goal_root, goal|:
+                return false if not proof_kernel_replay_valid(nodes, summary_root)
+                summary_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, summary_root)
+                continue if not summary_located.known
+                summary: ElisaProofKernelCore::ProofKernelNode = summary_located.node
+                continue if summary.kind != "binary" or summary.operator != "=="
+                continue if not proof_kernel_replay_valid(nodes, summary.left) or not proof_kernel_replay_valid(nodes, summary.right)
+                left: ElisaProofKernelCore::ProofKernelNode = nodes[summary.left]
+                right: ElisaProofKernelCore::ProofKernelNode = nodes[summary.right]
+                left_is_call: bool = left.kind == "call"
+                right_is_call: bool = right.kind == "call"
+                for fact_root in facts |fact_root, nodes, children, summary, goal_root, left_is_call, right_is_call, goal|:
+                    if left_is_call and proof_kernel_replay_fact_contains(nodes, children, fact_root, summary.left, 0):
+                        return true if proof_kernel_replay_expr_equal(nodes, children, summary.right, goal_root, 0)
+                    if left_is_call and goal.kind == "unary" and goal.operator == "not" and proof_kernel_replay_valid(nodes, goal.left):
+                        return true if proof_kernel_replay_expr_equal(nodes, children, summary.right, goal.left, 0) and proof_kernel_replay_fact_contains_negated(nodes, children, fact_root, summary.left, 0)
+                    if right_is_call and proof_kernel_replay_fact_contains(nodes, children, fact_root, summary.right, 0):
+                        return true if proof_kernel_replay_expr_equal(nodes, children, summary.left, goal_root, 0)
+                    if right_is_call and goal.kind == "unary" and goal.operator == "not" and proof_kernel_replay_valid(nodes, goal.left):
+                        return true if proof_kernel_replay_expr_equal(nodes, children, summary.left, goal.left, 0) and proof_kernel_replay_fact_contains_negated(nodes, children, fact_root, summary.right, 0)
+            return false
+
+        # Mirror of the producer's constant pins. A structurally exact identifier or qualified
+        # name equality to a literal in this certificate's premise set makes the reading
+        # available; source-boundary replay separately validates imported constant traces.
+        def proof_kernel_replay_integer_literal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, value: i64):
+            return (false, 0) if root >= nodes.count
+            match nodes[root].kind:
+                "int":
+                    return (false, 0) if proof_kernel_replay_int_tagged(nodes[root])
+                    return (true, nodes[root].value)
+                _:
+                    return (false, 0)
+
+        def proof_kernel_replay_term_pin(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, term_root: usize) -> (known: bool, value: i64):
+            return (false, 0) if root >= nodes.count
+            return (false, 0) if term_root >= nodes.count
+            return (false, 0) if not proof_kernel_replay_valid(nodes, term_root)
+            return (false, 0) if nodes[term_root].kind != "ident" and nodes[term_root].kind != "scope"
+            return (false, 0) if not proof_kernel_replay_valid(nodes, root)
+            match nodes[root].kind:
+                "binary":
+                    return (false, 0) if nodes[root].operator != "=="
+                    pin_left: usize = nodes[root].left
+                    return (false, 0) if pin_left >= nodes.count
+                    return (false, 0) if not proof_kernel_replay_valid(nodes, pin_left)
+                    return (false, 0) if nodes[pin_left].kind != "ident" and nodes[pin_left].kind != "scope"
+                    return (false, 0) if not proof_kernel_replay_expr_equal(nodes, children, pin_left, term_root, 0)
+                    pin_right: usize = nodes[root].right
+                    return (false, 0) if pin_right >= nodes.count
+                    return proof_kernel_replay_integer_literal(nodes, pin_right)
+                _:
+                    return (false, 0)
+
+        def proof_kernel_replay_pinned_constant(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> (known: bool, value: i64):
+            literal: (known: bool, value: i64) = proof_kernel_replay_integer_literal(nodes, root)
+            return literal if literal.known
+            return (false, 0) if root >= nodes.count
+            return (false, 0) if not proof_kernel_replay_valid(nodes, root)
+            return (false, 0) if nodes[root].kind != "ident" and nodes[root].kind != "scope"
+            for fact in facts:
+                pin: (known: bool, value: i64) = proof_kernel_replay_term_pin(nodes, children, fact, root)
+                return pin if pin.known
+            return (false, 0)
+
+        # Snapshot qualified literal premises once per bounded-model proof.
+        # The model visits many candidate assignments, so avoid rescanning the
+        # entire fact set and rebuilding the same expression worklists there.
+        def proof_kernel_replay_collect_constant_pins(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], roots: mutable darray[usize]&, values: mutable darray[i64]&) -> void:
+            for fact in facts |fact, nodes, children, roots, values|:
+                continue if fact >= nodes.count or not proof_kernel_replay_valid(nodes, fact)
+                continue if nodes[fact].kind != "binary" or nodes[fact].operator != "=="
+                term: usize = nodes[fact].left
+                continue if term >= nodes.count or not proof_kernel_replay_valid(nodes, term) or nodes[term].kind != "scope"
+                pin: (known: bool, value: i64) = proof_kernel_replay_term_pin(nodes, children, fact, term)
+                continue if not pin.known
+                roots.push(term)
+                values.push(pin.value)
+
+        def proof_kernel_replay_cached_pinned_constant(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, roots: darray[usize], values: darray[i64]&, root: usize) -> (known: bool, value: i64):
+            return (false, 0) if root >= nodes.count or not proof_kernel_replay_valid(nodes, root) or nodes[root].kind != "scope"
+            for index in 0..<roots.count |index, nodes, children, roots, values, root|:
+                return (false, 0) if index >= values.count or roots[index] >= nodes.count
+                return (true, values[index]) if proof_kernel_replay_expr_equal(nodes, children, roots[index], root, 0)
+            return (false, 0)
+
+        # Resolve only a qualified name whose exact source expression is pinned to a
+        # literal in this certificate. Bare identifiers remain model variables.
+        def proof_kernel_replay_constant_int_with_pins(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> ProofKernelReplayInt:
+            literal: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, root, 0)
+            return literal if literal.known
+            return ProofKernelReplayInt{known: false, value: 0} if root >= nodes.count or nodes[root].kind != "scope"
+            pinned: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, children, facts, root)
+            return ProofKernelReplayInt{known: pinned.known, value: pinned.value}
+
+        def proof_kernel_replay_operand_matches_through_pins(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact_root: usize, goal_root: usize) -> bool:
+            return true if proof_kernel_replay_expr_equal(nodes, children, fact_root, goal_root, 0)
+            fact_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, children, facts, fact_root)
+            return false if not fact_constant.known
+            goal_constant: (known: bool, value: i64) = proof_kernel_replay_pinned_constant(nodes, children, facts, goal_root)
+            return goal_constant.known and goal_constant.value == fact_constant.value
+
+        def proof_kernel_replay_negative_fact(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, left_root: usize, operator: sview, right_root: usize, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth)
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return false if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "binary" and node.operator == "and":
+                return proof_kernel_replay_negative_fact(nodes, children, facts, node.left, left_root, operator, right_root, depth + 1) or proof_kernel_replay_negative_fact(nodes, children, facts, node.right, left_root, operator, right_root, depth + 1)
+            if node.kind == "unary" and node.operator == "not":
+                return false if node.left >= nodes.count or nodes[node.left].kind != "binary"
+                inner: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
+                return inner.operator == proof_kernel_replay_negation(operator) and proof_kernel_replay_operand_matches_through_pins(nodes, children, facts, inner.left, left_root) and proof_kernel_replay_operand_matches_through_pins(nodes, children, facts, inner.right, right_root)
+            return false

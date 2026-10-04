@@ -1,0 +1,58 @@
+# Qualified immutable integer constants may be arguments to pure scalar calls.
+# Import only their declared type, not a guessed value or a bare-name alias.
+extend ElisaProof:
+    private:
+        def proof_qualified_constant_root(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Scope(base, _, _):
+                    return proof_qualified_constant_root(base, depth + 1)
+                _:
+                    return ""
+
+        def proof_qualified_constant_type(declarations: darray[Ast::Decl]&, expression: Ast::Expr, scope: darray[sview]&, depth: usize) -> (count: usize, type_expression: Ast::Expr):
+            return (2, Ast::Expr.Absent) if depth >= PROOF_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            count: mutable usize = 0
+            selected: mutable Ast::Expr = Ast::Expr.Absent
+            for declaration in declarations |expression, scope, depth, count, selected|:
+                match declaration:
+                    Ast::Decl.Const(name, declared_type, _, mutable_constant, position):
+                        reference: Ast::Expr = proof_global_constant_reference(scope, name, position)
+                        if scope.count > 0 and proof_expr_equal(expression, reference):
+                            count <- count + 1
+                            selected <- Ast::Expr.Absent if mutable_constant else declared_type
+                    Ast::Decl.Module(name, body, _):
+                        nested_scope: mutable darray[sview] = []
+                        nested_scope.extend(scope)
+                        nested_scope.push(name)
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type(body, expression, &nested_scope, depth + 1)
+                        count <- count + nested.count
+                        selected <- nested.type_expression if nested.count == 1
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type(body, expression, scope, depth + 1)
+                        count <- count + nested.count
+                        selected <- nested.type_expression if nested.count == 1
+                    _:
+                        pass
+            return (count, selected)
+
+        def proof_add_qualified_constant_witness(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void:
+            root: sview = proof_qualified_constant_root(expression, 0)
+            owner_index: usize = proof_function_index(functions, owner)
+            return if root == "" or owner_index >= functions.param_starts.count or owner_index >= functions.param_counts.count
+            start: usize = functions.param_starts[owner_index]
+            count: usize = functions.param_counts[owner_index]
+            return if start > functions.all_params.count or count > functions.all_params.count - start
+            for index in 0..<count |functions, start, root|:
+                return if functions.all_params[start + index] == root
+            root_scope: darray[sview] = []
+            declared: (count: usize, type_expression: Ast::Expr) = proof_qualified_constant_type(report.source_declarations, expression, root_scope, 0)
+            return if declared.count != 1 or proof_resource_is_reference_type(declared.type_expression)
+            unsigned_width: i64 = proof_unsigned_primitive_width(declared.type_expression)
+            signed_width: i64 = proof_signed_primitive_width(declared.type_expression)
+            return if unsigned_width <= 0 and signed_width <= 0
+            proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(expression, position), line, owner)
+            proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(expression, unsigned_width, position), line, owner) if unsigned_width > 0
+            proof_add_scalar_type_witness(facts, report, proof_signed_type_marker(expression, signed_width, position), line, owner) if signed_width > 0

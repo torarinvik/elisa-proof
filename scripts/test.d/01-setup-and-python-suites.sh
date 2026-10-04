@@ -312,6 +312,7 @@ if [[ -z "$kernel_runtime_obj" ]] && elisa_compiler_is_stage0 "$SELF_HOST_COMPIL
     fi
 fi
 [[ -n "$kernel_runtime_obj" ]] && kernel_runtime_inputs+=("$kernel_runtime_obj")
+source "$ROOT_DIR/scripts/test_integrated_kernel_runtimes.sh"
 # This AST-level test uses the same immutable frontend export as the proof build.
 # Stage0's frontend-linked object already contains the runtime definitions.
 field_runtime_inputs=()

@@ -1,8 +1,27 @@
 # Private statement-transition submodule for the checker.
+include "local_record_field_types.elisa"
 extend ElisaProof:
     private:
+        # Primitive numeric casts are total reserved conversions. A user-defined call
+        # may also be retained as the exact scalar written here, but only when its
+        # verified executable summary proves it pure and scalar-valued. The statement
+        # transition will separately apply that summary and independent replay checks
+        # the resulting fact; this predicate does not itself grant a postcondition.
+        def proof_scalar_reference_write_value_supported(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
+            return true if not proof_expr_has_call(expression)
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    cast: (known: bool, receiver: Ast::Expr) = proof_expr_numeric_cast_receiver(callee, arguments)
+                    if cast.known:
+                        return not proof_expr_has_call(cast.receiver) and proof_expr_supported(cast.receiver)
+                    called: sview = proof_callable_name(callee)
+                    called_index: usize = proof_function_index(functions, called)
+                    return called != "" and called_index < functions.return_scalar.count and functions.return_scalar[called_index] and proof_contract_calls_are_pure(expression, functions)
+                _:
+                    return false
+
         def proof_scalar_reference_write_target(target: Ast::Expr, operator: TokenKind, initializer: Ast::Expr, names: darray[sview]&, frame_parameters: darray[sview]&, functions: ProofFunctionTable&, declarations: darray[Ast::Decl]&, owner: sview) -> (known: bool, name: sview):
-            return (false, "") if operator != TokenKind.LArrow or proof_expr_has_call(initializer) or proof_expr_has_move(initializer) or not proof_expr_supported(initializer)
+            return (false, "") if operator != TokenKind.LArrow or not proof_scalar_reference_write_value_supported(initializer, functions) or proof_expr_has_move(initializer) or not proof_expr_supported(initializer)
             match target:
                 Ast::Expr.Index(object, index, _):
                     root: sview = proof_ident_name(object)
@@ -28,6 +47,58 @@ extend ElisaProof:
                     return (true, root)
                 _:
                     return (false, "")
+
+        def proof_mutable_reference_parameter(owner: sview, root: sview, functions: ProofFunctionTable&) -> bool:
+            return false if root == ""
+            function_index: usize = proof_function_index_of_current(functions, owner)
+            return false if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
+            parameter_start: usize = functions.param_starts[function_index]
+            parameter_count: usize = functions.param_counts[function_index]
+            return false if parameter_start > functions.all_params.count or parameter_count > functions.all_params.count - parameter_start
+            for parameter_index in parameter_start..<parameter_start + parameter_count |parameter_index, functions, root|:
+                if functions.all_params[parameter_index] == root:
+                    return parameter_index < functions.all_parameter_mutable_references.count and functions.all_parameter_mutable_references[parameter_index]
+            return false
+
+        # Track a direct store through a mutable-reference parameter as an immutable record-update
+        # term. This versions the field without recursively substituting the receiver into itself.
+        # Nested places, compound writes, calls and ownership transfers are deliberately opaque;
+        # they poison the receiver's post-state instead of preserving a stale pre-state field.
+        def proof_track_mutable_parameter_field_write(target: Ast::Expr, operator: TokenKind, initializer: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, frame_parameters: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: ProofFunctionTable&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos) -> bool:
+            place: (known: bool, place: ProofFramePlace) = proof_frame_place(target)
+            return false if not place.known or place.place.depth == 0
+            parameter_write: bool = proof_current_parameter(names, frame_parameters, place.place.root) and proof_mutable_reference_parameter(owner, place.place.root, functions)
+            local_write: bool = proof_unaliased_local_record_field(target, names, frame_parameters, report, owner)
+            return false if not parameter_write and not local_write
+            proof_check_direct_frame_write(target, names, frame_parameters, changes, preserves, report, owner, position.line)
+            root_slot: mutable usize = names.count
+            while root_slot > 0 |root_slot, names, place|:
+                root_slot <- root_slot - 1
+                break if names[root_slot] == place.place.root
+            direct_field: mutable bool = false
+            field_name: mutable sview = ""
+            match target:
+                Ast::Expr.Field(Ast::Expr.Ident(root, _), field, _):
+                    direct_field <- root == place.place.root and field != "" and place.place.depth == 1
+                    field_name <- field
+                _:
+                    pass
+            if direct_field and (operator == TokenKind.LArrow or operator == TokenKind.Assign) and not proof_expr_has_call(initializer) and not proof_expr_has_move(initializer) and proof_expr_supported(initializer) and root_slot < values.count:
+                field_value: Ast::Expr = proof_substitute(initializer, names, values)
+                match field_value:
+                    Ast::Expr.Invalid:
+                        values[root_slot] <- Ast::Expr.Invalid
+                    _:
+                        updates: darray[Ast::FieldInit] = [Ast::FieldInit{name: field_name, value: field_value}]
+                        values[root_slot] <- Ast::Expr.RecordUpdate(values[root_slot], updates, position)
+                proof_clear_facts_for_mutated_root(facts, place.place.root, report, owner)
+                return true
+            if proof_expr_has_call(initializer):
+                proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, owner, annotations)
+                proof_forget_values_after_call(names, values, facts, frame_parameters, report, owner, values.count, values.count, position)
+            values[root_slot] <- Ast::Expr.Invalid if root_slot < values.count
+            proof_clear_facts_after_call(facts, names, frame_parameters, report, owner)
+            return true
 
         def proof_check_return_declarations(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
             match statement:
@@ -60,11 +131,28 @@ extend ElisaProof:
                     # summary to apply and no state it can change, so the local keeps the term.
                     conversion_only: bool = proof_expr_has_call(value) and proof_expr_calls_are_conversions(value, functions, 0)
                     match value:
-                        Ast::Expr.Call(_, _, _, _):
+                        Ast::Expr.Call(callee, _, _, _):
                             if not conversion_only:
                                 proof_check_frame_call_children(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
-                                call_applied <- proof_apply_function(proof_call_source(initializer, value), value, facts, functions, names, values, frame_parameters, changes, preserves, report, name, annotations)
-                                proof_check_opaque_call_frame(value, names, frame_parameters, changes, preserves, functions, report, name) if not call_applied
+                                # Store this invocation's non-total-pure result under
+                                # a reserved SSA name, not a repeatable call expression.
+                                # The local has not entered scope and may shadow an
+                                # initializer argument, so do not use its source name.
+                                call_width: i64 = proof_unsigned_type_width_index(type_expression, functions.type_audit_index, 0)
+                                call_return: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(report.source_declarations, proof_callable_name(callee), 0)
+                                same_width: bool = call_return.count == 1 and call_width > 0 and proof_unsigned_type_width_index(call_return.type_expression, functions.type_audit_index, 0) == call_width
+                                result_symbol: sview = proof_rebind_symbol(report) if same_width and not proof_contract_calls_are_pure(value, functions) else ""
+                                result_value: Ast::Expr = Ast::Expr.Ident(result_symbol, position) if result_symbol != "" else value
+                                call_applied <- proof_apply_function(proof_call_source(initializer, value), result_value, facts, functions, names, values, frame_parameters, changes, preserves, report, name, annotations)
+                                proof_check_opaque_call_frame(value, facts, names, frame_parameters, changes, preserves, functions, report, name) if not call_applied
+                                if call_applied and result_symbol != "":
+                                    proof_add_unsigned_binding_facts(facts, report, result_symbol, call_width, position.line, name, position)
+                                    value <- result_value
+                                # A no-summary Boolean result is one opaque local value,
+                                # not a repeatable non-pure call in later branch facts.
+                                called_index: usize = proof_function_index(functions, proof_callable_name(callee))
+                                opaque_boolean: bool = proof_ident_name(type_expression) == "bool" and call_return.count == 1 and proof_ident_name(call_return.type_expression) == "bool" and called_index < functions.ensure_counts.count and functions.ensure_counts[called_index] == 0
+                                value <- Ast::Expr.Invalid if call_applied and opaque_boolean and not proof_contract_calls_are_pure(value, functions)
                                 value <- Ast::Expr.Invalid if not call_applied
                         _:
                             proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if proof_expr_has_call(initializer)
@@ -172,7 +260,7 @@ extend ElisaProof:
                             Ast::Expr.Call(_, _, _, _):
                                 proof_check_frame_call_children(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if operator == TokenKind.LArrow or operator == TokenKind.Assign
                                 call_applied <- proof_apply_function(proof_call_source(initializer, value), value, facts, functions, names, values, frame_parameters, changes, preserves, report, name, annotations) if operator == TokenKind.LArrow or operator == TokenKind.Assign
-                                proof_check_opaque_call_frame(value, names, frame_parameters, changes, preserves, functions, report, name) if not call_applied
+                                proof_check_opaque_call_frame(value, facts, names, frame_parameters, changes, preserves, functions, report, name) if not call_applied
                                 value <- Ast::Expr.Invalid if not call_applied
                                 proof_check_frame_calls_in_expression(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) if operator != TokenKind.LArrow and operator != TokenKind.Assign
                                 value <- proof_substitute(initializer, names, values) if operator != TokenKind.LArrow and operator != TokenKind.Assign
@@ -206,26 +294,40 @@ extend ElisaProof:
                         proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name)
                         proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
                     else:
-                        # A mutable scalar reference's exact zero element is one primitive
-                        # storage cell. Version that pointee in the same substitution state used
-                        # for direct mutable variables; the reference handle itself remains the
-                        # original binding. Every broader indexed/field mutation retains the
-                        # conservative invalidation path below.
-                        reference_target: (known: bool, name: sview) = proof_scalar_reference_write_target(target, operator, initializer, names, frame_parameters, functions, report.source_declarations, name)
-                        proof_check_direct_frame_write(target, names, frame_parameters, changes, preserves, report, name, position.line)
-                        if reference_target.known:
-                            value: Ast::Expr = proof_substitute(initializer, names, values)
-                            target_slot: mutable usize = names.count
-                            while target_slot > 0 |target_slot, names, reference_target|:
-                                target_slot <- target_slot - 1
-                                if names[target_slot] == reference_target.name:
-                                    values[target_slot] <- proof_scalar_reference_state_marker(value, position)
-                                    break
-                        else:
-                            proof_resolve_disjunctive_facts(facts, report, position.line, name)
-                            before_write: darray[Ast::Expr] = proof_copy_exprs(facts)
-                            proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
-                            proof_apply_indexed_write(target, operator, initializer, before_write, facts, names, values, report, name, annotations, position) if not initializer_has_unmodeled_operator
+                        field_write_tracked: bool = proof_track_mutable_parameter_field_write(target, operator, initializer, names, values, facts, frame_parameters, changes, preserves, functions, report, name, annotations, position)
+                        if not field_write_tracked:
+                            # A mutable scalar reference's exact zero element is one primitive
+                            # storage cell. Version that pointee in the same substitution state
+                            # used for direct mutable variables; broader writes remain opaque.
+                            reference_target: (known: bool, name: sview) = proof_scalar_reference_write_target(target, operator, initializer, names, frame_parameters, functions, report.source_declarations, name)
+                            proof_check_direct_frame_write(target, names, frame_parameters, changes, preserves, report, name, position.line)
+                            if reference_target.known:
+                                value: mutable Ast::Expr = proof_substitute(initializer, names, values)
+                                match value:
+                                    Ast::Expr.Call(callee, arguments, _, _):
+                                        # Primitive numeric casts use the call-shaped AST but
+                                        # are total conversions, not executable function calls.
+                                        # Preserve their exact symbolic value; only user calls
+                                        # need an executable summary and call-frame check.
+                                        numeric_cast: (known: bool, receiver: Ast::Expr) = proof_expr_numeric_cast_receiver(callee, arguments)
+                                        if not numeric_cast.known:
+                                            proof_check_frame_call_children(initializer, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
+                                            call_applied: bool = proof_apply_function(proof_call_source(initializer, value), value, facts, functions, names, values, frame_parameters, changes, preserves, report, name, annotations)
+                                            proof_check_opaque_call_frame(value, facts, names, frame_parameters, changes, preserves, functions, report, name) if not call_applied
+                                            value <- Ast::Expr.Invalid if not call_applied
+                                    _:
+                                        pass
+                                target_slot: mutable usize = names.count
+                                while target_slot > 0 |target_slot, names, reference_target|:
+                                    target_slot <- target_slot - 1
+                                    if names[target_slot] == reference_target.name:
+                                        values[target_slot] <- proof_scalar_reference_state_marker(value, position)
+                                        break
+                            else:
+                                proof_resolve_disjunctive_facts(facts, report, position.line, name)
+                                before_write: darray[Ast::Expr] = proof_copy_exprs(facts)
+                                proof_clear_facts_after_call(facts, names, frame_parameters, report, name)
+                                proof_apply_indexed_write(target, operator, initializer, before_write, facts, names, values, report, name, annotations, position) if not initializer_has_unmodeled_operator
                     if initializer_has_unmodeled_operator:
                         # Assignment summaries and symbolic RHS values are not reusable after
                         # an operator with arbitrary source effects has executed.

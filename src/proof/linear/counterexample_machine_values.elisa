@@ -1,0 +1,107 @@
+# Diagnostic evaluation only: no proof-search or kernel admission rule lives here.
+# i64 stores raw bits; declared unsigned values must be compared as u64.
+extend ElisaProof:
+    public:
+        def proof_counterexample_machine_int(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> (known: bool, value: i64, unsigned: bool, width: i64):
+            return (false, 0, false, 0) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_machine_int(inner, names, values, facts, annotations, depth + 1)
+                Ast::Expr.IntLit(value, position):
+                    literal = proof_replay_numeric_literal_sort(annotations, position.line, position.column, value)
+                    return (true, value, literal.unsigned, literal.width) if literal.known
+                    # Do not reinterpret a failed explicit-sort decode as an untyped literal.
+                    for index in 0..<annotations.count |index, annotations, position|:
+                        row: Ast::EnumAnnotation = annotations[index]
+                        continue if row.owner != "__numeric_literal_sort" or row.line != position.line
+                        return (false, 0, false, 0) if index + 1 >= annotations.count
+                        column: Ast::EnumAnnotation = annotations[index + 1]
+                        return (false, 0, false, 0) if column.owner != "__numeric_literal_sort_column" or column.line == position.column
+                    return (value >= 0, value, false, 0)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    width: i64 = proof_unsigned_width_in_expression(expression, facts)
+                    # Preserve the original literal's sort when resolving an exact alias.
+                    for fact in facts |fact, expression, names, values, facts, annotations, depth, width|:
+                        match proof_strip_parens(fact):
+                            Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                                candidate: Ast::Expr = right if proof_expr_equal(left, expression) else left if proof_expr_equal(right, expression) else Ast::Expr.Invalid
+                                match proof_strip_parens(candidate):
+                                    Ast::Expr.IntLit(_, _):
+                                        literal = proof_counterexample_machine_int(candidate, names, values, facts, annotations, depth + 1)
+                                        return literal if width == 0
+                                        return (false, 0, false, 0) if not literal.known or (literal.width != 0 and (not literal.unsigned or literal.width != width))
+                                        return (false, 0, false, 0) if width != 64 and (literal.value < 0 or literal.value > proof_unsigned_width_max(width))
+                                        return (true, literal.value, true, width)
+                                    _:
+                                        pass
+                            _:
+                                pass
+                    value = proof_counterexample_int(expression, names, values, facts)
+                    return (false, 0, false, 0) if not value.known
+                    return (false, 0, false, 0) if width != 0 and width != 64 and (value.value < 0 or value.value > proof_unsigned_width_max(width))
+                    return (true, value.value, width != 0, width)
+                Ast::Expr.Unary(operator, operand, _):
+                    return (false, 0, false, 0) if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    inner = proof_counterexample_machine_int(operand, names, values, facts, annotations, depth + 1)
+                    return (false, 0, false, 0) if not inner.known or inner.unsigned
+                    return inner if operator == TokenKind.Plus
+                    return (false, 0, false, 0) if inner.value == proof_i64_min()
+                    return (true, 0 - inner.value, false, inner.width)
+                _:
+                    return (false, 0, false, 0)
+
+        def proof_counterexample_unsigned_operand(expression: Ast::Expr, known: bool, value: i64, unsigned: bool, width: i64, target_width: i64) -> bool:
+            return false if not known
+            return width == target_width if unsigned
+            # Only an untyped literal may be contextualized; an untyped name or
+            # explicitly signed literal cannot borrow its peer's unsigned sort.
+            return false if width != 0
+            match proof_strip_parens(expression):
+                Ast::Expr.IntLit(_, _):
+                    return value >= 0 and (target_width == 64 or value <= proof_unsigned_width_max(target_width))
+                _:
+                    return false
+
+        def proof_counterexample_machine_bool(expression: Ast::Expr, names: darray[sview]&, values: darray[i64]&, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> (known: bool, value: bool):
+            return (false, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return (true, true) if proof_type_marker_callee(expression)
+            match expression:
+                Ast::Expr.BoolLit(value, _):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_counterexample_machine_bool(inner, names, values, facts, annotations, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    inner = proof_counterexample_machine_bool(operand, names, values, facts, annotations, depth + 1)
+                    return (inner.known, not inner.value)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        a = proof_counterexample_machine_bool(left, names, values, facts, annotations, depth + 1)
+                        b = proof_counterexample_machine_bool(right, names, values, facts, annotations, depth + 1)
+                        return (false, false) if not a.known or not b.known
+                        return (true, a.value and b.value) if operator == TokenKind.And
+                        return (true, a.value or b.value)
+                    return (false, false) if not proof_is_comparison(operator)
+                    a = proof_counterexample_machine_int(left, names, values, facts, annotations, depth + 1)
+                    b = proof_counterexample_machine_int(right, names, values, facts, annotations, depth + 1)
+                    if a.known and b.known:
+                        if a.unsigned or b.unsigned:
+                            width: i64 = a.width if a.unsigned else b.width
+                            return (false, false) if not proof_counterexample_unsigned_operand(left, a.known, a.value, a.unsigned, a.width, width) or not proof_counterexample_unsigned_operand(right, b.known, b.value, b.unsigned, b.width, width)
+                            x: u64 = a.value.u64()
+                            y: u64 = b.value.u64()
+                            return (true, x == y) if operator == TokenKind.EqEq
+                            return (true, x != y) if operator == TokenKind.BangEq
+                            return (true, x < y) if operator == TokenKind.Lt
+                            return (true, x <= y) if operator == TokenKind.LtEq
+                            return (true, x > y) if operator == TokenKind.Gt
+                            return (true, x >= y)
+                        return (true, proof_small_comparison_value(a.value, operator, b.value))
+                    if operator == TokenKind.EqEq or operator == TokenKind.BangEq:
+                        a_bool = proof_counterexample_machine_bool(left, names, values, facts, annotations, depth + 1)
+                        b_bool = proof_counterexample_machine_bool(right, names, values, facts, annotations, depth + 1)
+                        if a_bool.known and b_bool.known:
+                            equal: bool = a_bool.value == b_bool.value
+                            return (true, equal if operator == TokenKind.EqEq else not equal)
+                _:
+                    pass
+            return (false, false)

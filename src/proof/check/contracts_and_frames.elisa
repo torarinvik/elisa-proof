@@ -11,145 +11,6 @@ extend ElisaProof:
         # `status.usize()`. The compiler reserves these primitive selectors, so unlike an
         # ordinary method call they are total value conversions, not user-dispatched effects.
         # Keep this list aligned with the frontend's numeric-cast selector set.
-        def proof_contract_numeric_cast_target(target: sview) -> bool:
-            return target == "i8" or target == "i16" or target == "i32" or target == "i64" or target == "int" or target == "isize" or target == "u8" or target == "u16" or target == "u32" or target == "u64" or target == "usize" or target == "uintptr" or target == "f32" or target == "f64"
-
-        def proof_contract_numeric_cast_receiver(callee: Ast::Expr, arguments: darray[Ast::Expr]&) -> (known: bool, receiver: Ast::Expr):
-            return (false, Ast::Expr.Invalid) if arguments.count != 0
-            match callee:
-                Ast::Expr.Field(receiver, target, _):
-                    return (proof_contract_numeric_cast_target(target), receiver)
-                _:
-                    return (false, Ast::Expr.Invalid)
-
-        def proof_contract_calls_are_pure(expression: Ast::Expr, functions: ProofFunctionTable&) -> bool:
-            return proof_contract_calls_are_pure_depth(expression, functions, 0)
-
-        def proof_contract_calls_are_pure_depth(expression: Ast::Expr, functions: ProofFunctionTable&, depth: usize) -> bool:
-            # Contract-call admission is a trusted boundary. If traversal stops, reject the
-            # expression rather than allowing an unvisited effectful call to look pure.
-            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Invalid:
-                    return false
-                Ast::Expr.Absent:
-                    return true
-                Ast::Expr.IntLit(_, _):
-                    return true
-                Ast::Expr.FloatLit(_, _):
-                    return true
-                Ast::Expr.StringLit(_, _):
-                    return true
-                Ast::Expr.CharLit(_, _):
-                    return true
-                Ast::Expr.BoolLit(_, _):
-                    return true
-                Ast::Expr.Ident(_, _):
-                    return true
-                Ast::Expr.ShorthandMember(parts, _):
-                    # A compiler-resolved one-segment const-enum member is a closed value. A
-                    # qualified path is not source-neutral here because the certificate term does
-                    # not carry its owner identity.
-                    return parts.count == 1 and parts[0] != ""
-                Ast::Expr.Call(callee, arguments, _, _):
-                    if proof_ident_name(callee) == "old" and arguments.count == 1:
-                        return proof_contract_calls_are_pure_depth(arguments[0], functions, depth + 1)
-                    numeric_cast: (known: bool, receiver: Ast::Expr) = proof_contract_numeric_cast_receiver(callee, arguments)
-                    return proof_contract_calls_are_pure_depth(numeric_cast.receiver, functions, depth + 1) if numeric_cast.known
-                    called: sview = proof_callable_name(callee)
-                    called_index: usize = proof_function_index_for_callee(functions, callee)
-                    return false if called == "" or called_index >= functions.pure.count or not functions.pure[called_index]
-                    # Purity is a syntactic/fixed-point classification, not a proof result.
-                    # A function whose body failed verification must not be smuggled into a
-                    # logical contract merely because it has the right effect shape.
-                    return false if called_index >= functions.verified.count or not functions.verified[called_index]
-                    return false if not proof_contract_calls_are_pure_depth(callee, functions, depth + 1)
-                    for argument in arguments |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(argument, functions, depth + 1)
-                    return true
-                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
-                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
-                    return proof_contract_calls_are_pure_depth(lowered.call, functions, depth + 1) if lowered.known
-                    return false
-                Ast::Expr.Paren(inner, _):
-                    return proof_contract_calls_are_pure_depth(inner, functions, depth + 1)
-                Ast::Expr.Unary(_, operand, _):
-                    return proof_contract_calls_are_pure_depth(operand, functions, depth + 1)
-                Ast::Expr.Binary(left, _, right, _):
-                    return proof_contract_calls_are_pure_depth(left, functions, depth + 1) and proof_contract_calls_are_pure_depth(right, functions, depth + 1)
-                Ast::Expr.Field(object, _, _):
-                    return proof_contract_calls_are_pure_depth(object, functions, depth + 1)
-                Ast::Expr.Scope(base, _, _):
-                    return proof_contract_calls_are_pure_depth(base, functions, depth + 1)
-                Ast::Expr.Index(object, index, _):
-                    return proof_contract_calls_are_pure_depth(object, functions, depth + 1) and proof_contract_calls_are_pure_depth(index, functions, depth + 1)
-                Ast::Expr.Slice(object, low, high, _):
-                    return proof_contract_calls_are_pure_depth(object, functions, depth + 1) and proof_contract_calls_are_pure_depth(low, functions, depth + 1) and proof_contract_calls_are_pure_depth(high, functions, depth + 1)
-                Ast::Expr.IndexN(object, arguments, _):
-                    return false if not proof_contract_calls_are_pure_depth(object, functions, depth + 1)
-                    for argument in arguments |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(argument, functions, depth + 1)
-                    return true
-                Ast::Expr.Move(operand, _):
-                    return proof_contract_calls_are_pure_depth(operand, functions, depth + 1)
-                Ast::Expr.RegionNew(operand, _, _):
-                    return proof_contract_calls_are_pure_depth(operand, functions, depth + 1)
-                Ast::Expr.Array(elements, _):
-                    for element in elements |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(element, functions, depth + 1)
-                    return true
-                Ast::Expr.Tuple(elements, _):
-                    for element in elements |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(element, functions, depth + 1)
-                    return true
-                Ast::Expr.SetLit(elements, _):
-                    for element in elements |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(element, functions, depth + 1)
-                    return true
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(entry.key, functions, depth + 1) or not proof_contract_calls_are_pure_depth(entry.value, functions, depth + 1)
-                    return true
-                Ast::Expr.Construct(_, fields, _):
-                    for field in fields |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(field.value, functions, depth + 1)
-                    return true
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    return false if not proof_contract_calls_are_pure_depth(base, functions, depth + 1)
-                    for field in fields |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(field.value, functions, depth + 1)
-                    return true
-                Ast::Expr.If(condition, then_expr, else_expr, _):
-                    return proof_contract_calls_are_pure_depth(condition, functions, depth + 1) and proof_contract_calls_are_pure_depth(then_expr, functions, depth + 1) and proof_contract_calls_are_pure_depth(else_expr, functions, depth + 1)
-                Ast::Expr.Match(scrutinee, arms, _):
-                    return false if not proof_contract_calls_are_pure_depth(scrutinee, functions, depth + 1)
-                    for arm in arms |functions|:
-                        return false if not proof_contract_calls_are_pure_depth(arm.guard, functions, depth + 1)
-                        return false if arm.body.count != 1
-                        match arm.body[0]:
-                            Ast::Stmt.Expr(value, _):
-                                return false if not proof_contract_calls_are_pure_depth(value, functions, depth + 1)
-                            _:
-                                return false
-                    return true
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_contract_calls_are_pure_depth(iterable, functions, depth + 1) and proof_contract_calls_are_pure_depth(condition, functions, depth + 1) and proof_contract_calls_are_pure_depth(body, functions, depth + 1)
-                Ast::Expr.Refinement(base, predicate, _):
-                    return proof_contract_calls_are_pure_depth(base, functions, depth + 1) and proof_contract_calls_are_pure_depth(predicate, functions, depth + 1)
-                Ast::Expr.Block(statements, value, _, _):
-                    for statement in statements:
-                        match statement:
-                            Ast::Stmt.VarDecl(_, _, initializer, _):
-                                return false if not proof_contract_calls_are_pure_depth(initializer, functions, depth + 1)
-                            _:
-                                return false
-                    return proof_contract_calls_are_pure_depth(value, functions, depth + 1)
-                _:
-                    return false
-
-        # A fact produced by a runtime assertion may outlive the expression evaluation. A
-        # substituted call term is therefore safe to publish only when it denotes a certified pure
-        # value; an unresolved/effectful call may have a different result on its next execution.
         def proof_runtime_fact_is_stable(expression: Ast::Expr, functions: ProofFunctionTable&, operator_mask: usize) -> bool:
             return false if proof_expr_has_old(expression)
             # Runtime assertions become reusable proof facts. Do not publish a proposition whose
@@ -173,17 +34,18 @@ extend ElisaProof:
                 Ast::Expr.Call(_, _, _, _):
                     return (false, Ast::Expr.Invalid) if proof_field_callee_call(expression)
                 _:
-                    return (false, Ast::Expr.Invalid)
-            return (false, Ast::Expr.Invalid) if proof_expr_has_old(expression)
+                    return (false, expression)
+            return (false, expression) if proof_expr_has_old(expression)
             for fact in facts |expression|:
                 match fact:
                     Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
-                        candidate: Ast::Expr = right if proof_expr_equal(left, expression) else (left if proof_expr_equal(right, expression) else Ast::Expr.Invalid)
+                        continue if not proof_expr_equal(left, expression) and not proof_expr_equal(right, expression)
+                        candidate: Ast::Expr = right if proof_expr_equal(left, expression) else left
                         if not proof_expr_is_invalid(candidate) and proof_expr_supported(candidate) and not proof_expr_has_old(candidate) and not proof_expr_has_move(candidate):
                             return (true, candidate)
                     _:
                         pass
-            return (false, Ast::Expr.Invalid)
+            return (false, expression)
 
         def proof_term_occurs_in(term: Ast::Expr, expression: Ast::Expr, depth: usize) -> bool:
             return false if depth > PROOF_TERM_OCCURS_DEPTH_LIMIT
@@ -244,7 +106,45 @@ extend ElisaProof:
                 _:
                     return expression
 
-        def proof_check_logical_contract_calls(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview) -> void:
+        # Only parser-identified integer quantifiers may contain predicate calls.
+        # This is syntax admission, not purity or truth: the verified-function
+        # gate below and independent quantifier replay still check both.
+        def proof_logical_contract_supported(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> bool:
+            return proof_logical_contract_supported_depth(expression, annotations, functions, 0)
+
+        def proof_logical_contract_supported_depth(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            # Preserve the existing call-free collection/block fragment. The
+            # annotation-aware extension is needed only for rejected syntax.
+            return true if proof_expr_supported(expression)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_logical_contract_supported_depth(inner, annotations, functions, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_logical_contract_supported_depth(operand, annotations, functions, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_logical_contract_supported_depth(left, annotations, functions, depth + 1) and proof_logical_contract_supported_depth(right, annotations, functions, depth + 1)
+                Ast::Expr.Block(statements, value, captures, _):
+                    return proof_expr_supported(expression) if proof_quantifier_kind(expression, annotations) == ""
+                    return false if captures.count != 0 or statements.count != 1
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(binder, binder_type, iterable, _):
+                            return false if binder == "" or proof_ident_name(binder_type) != "i64"
+                            # A quantified variable must not shadow a resolved callable.
+                            return false if proof_function_index(functions, binder) < functions.names.count
+                            match iterable:
+                                Ast::Expr.Binary(_, operator, _, _):
+                                    return false if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe and operator != TokenKind.RangeGt
+                                _:
+                                    return false
+                            return false if proof_expr_has_call(iterable) or not proof_expr_supported(iterable)
+                            return proof_logical_contract_supported_depth(value, annotations, functions, depth + 1)
+                        _:
+                            return false
+                _:
+                    return proof_expr_supported(expression)
+
+        def proof_check_logical_contract_calls(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void:
             for statement in body |functions, report, name|:
                 match statement:
                     Ast::Stmt.Contract(kind, expression, position):
@@ -253,7 +153,7 @@ extend ElisaProof:
                             if proof_expr_has_move(expression):
                                 report.proof_obligation(false)
                                 proof_add_finding(report, "contract-resource-unsupported", position.line, name, "logical contracts may not perform ownership transfers")
-                            elif not proof_expr_supported(expression):
+                            elif not proof_logical_contract_supported(expression, annotations, functions):
                                 report.proof_obligation(false)
                                 proof_add_finding(report, "contract-expression-unsupported", position.line, name, "logical contract uses an unsupported expression form")
                             else:
@@ -261,21 +161,21 @@ extend ElisaProof:
                                     report.proof_obligation(false)
                                     proof_add_finding(report, "contract-call-unsupported", position.line, name, "logical contracts may use old(...) or calls to verified total pure functions")
                     Ast::Stmt.If(_, then_body, else_body, _):
-                        proof_check_logical_contract_calls(then_body, functions, report, name)
-                        proof_check_logical_contract_calls(else_body, functions, report, name)
+                        proof_check_logical_contract_calls(then_body, functions, report, name, annotations)
+                        proof_check_logical_contract_calls(else_body, functions, report, name, annotations)
                     Ast::Stmt.While(_, while_body, _):
-                        proof_check_logical_contract_calls(while_body, functions, report, name)
+                        proof_check_logical_contract_calls(while_body, functions, report, name, annotations)
                     Ast::Stmt.For(_, _, _, for_body, _):
-                        proof_check_logical_contract_calls(for_body, functions, report, name)
+                        proof_check_logical_contract_calls(for_body, functions, report, name, annotations)
                     Ast::Stmt.Match(_, arms, _):
                         for arm in arms |functions, report, name|:
-                            proof_check_logical_contract_calls(arm.body, functions, report, name)
+                            proof_check_logical_contract_calls(arm.body, functions, report, name, annotations)
                     Ast::Stmt.Block(_, _, _, block_body, _):
-                        proof_check_logical_contract_calls(block_body, functions, report, name)
+                        proof_check_logical_contract_calls(block_body, functions, report, name, annotations)
                     Ast::Stmt.Expr(_, _):
                         # A loop with a capture list reaches here wrapped in a captured block.
                         captured: (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) = proof_captured_block_statement(statement)
-                        proof_check_logical_contract_calls(captured.body, functions, report, name) if captured.known
+                        proof_check_logical_contract_calls(captured.body, functions, report, name, annotations) if captured.known
                     _:
                         pass
 
@@ -498,12 +398,41 @@ extend ElisaProof:
         # overlapping selector and a bare use of its root (the latter may be an alias); unrelated
         # sibling fields remain available for modular proofs.
         def proof_expr_mentions_frame_place(expression: Ast::Expr, place: ProofFramePlace) -> bool:
+            # A typed bare reference's null test observes the handle, not a
+            # pointee field. Whole-root changes still overlap. The source and
+            # kernel proposition checks admit null tests only for nullable
+            # references; this does not grant stability to arbitrary root reads.
+            if place.root != "" and place.depth > 0:
+                match proof_strip_parens(expression):
+                    Ast::Expr.Binary(left, operator, right, _):
+                        if operator == TokenKind.EqEq or operator == TokenKind.BangEq:
+                            a: sview = proof_ident_name(left)
+                            b: sview = proof_ident_name(right)
+                            return false if (a == place.root and b == "null") or (b == place.root and a == "null")
+                    _:
+                        pass
             decoded: (known: bool, place: ProofFramePlace) = proof_frame_place(expression)
             if decoded.known:
                 if place.root == "":
                     return decoded.place.field == place.field and decoded.place.field2 == place.field2 and decoded.place.field3 == place.field3 and decoded.place.depth == place.depth
                 return proof_frame_places_overlap(decoded.place, place)
             match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.Block(statements, body, _, _):
+                    return true if statements.count != 1 or proof_expr_has_call(body) or proof_expr_has_move(body)
+                    return true if not proof_kernel_expression_supported(expression)
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(_, _, initializer, _):
+                            match initializer:
+                                Ast::Expr.Binary(_, operator, _, _):
+                                    return true if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe
+                                    return true if proof_expr_has_call(initializer) or proof_expr_has_move(initializer)
+                                    return proof_expr_mentions_frame_place(initializer, place) or proof_expr_mentions_frame_place(body, place)
+                                _:
+                                    return true
+                        _:
+                            return true
                 Ast::Expr.Field(object, field, _):
                     return proof_expr_mentions_frame_place(object, place)
                 Ast::Expr.Paren(inner, _):
@@ -567,3 +496,5 @@ extend ElisaProof:
         # Whether a root expression may denote a reference whose storage identity is not
         # represented in the AST fragment. Calls, indexes, slices, and unsupported forms are
         # opaque reference candidates; literal constructors and scalar expressions are not.
+
+include "./contracts_and_frames_integrated_helpers.elisa"

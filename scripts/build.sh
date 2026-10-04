@@ -141,7 +141,7 @@ PROFILE_HOOKS_TEMP="$ROOT_DIR/build/profile_hooks.$BUILD_TOKEN.o"
 COMPILE_PIDS=()
 cleanup_build() {
     local pid index
-    for pid in "${COMPILE_PIDS[@]}"; do
+    for pid in ${COMPILE_PIDS[@]+"${COMPILE_PIDS[@]}"}; do
         kill "$pid" 2>/dev/null || true
     done
     for index in "${!PRODUCT_MAINS[@]}"; do

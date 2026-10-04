@@ -37,6 +37,7 @@ extend ElisaProof:
         def proof_unsigned_expression_safe_with_bounds(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&) -> bool:
             width: i64 = proof_unsigned_width_in_expression(expression, facts)
             return false if width == ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS and proof_expression_has_negative_integer_bit_pattern(expression, 0)
+            return true if proof_unsigned_conditional_difference_safe(expression, facts)
             match expression:
                 Ast::Expr.Paren(inner, _):
                     return proof_unsigned_expression_safe_with_bounds(inner, facts, bounds)
@@ -81,7 +82,7 @@ extend ElisaProof:
                         if sum_witness.known and proof_peer_is_nameable(sum_witness.bound):
                             return true if proof_peer_unsigned_width(sum_witness.bound, facts) == width
                     if operator == TokenKind.Star:
-                        scaled_witness: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = proof_unsigned_scaled_product_witness(expression, facts)
+                        scaled_witness: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = proof_unsigned_scaled_product_witness(expression, facts, false)
                         return true if scaled_witness.known
                     if operator == TokenKind.Minus:
                         orders: mutable darray[Ast::Expr] = []
@@ -186,10 +187,26 @@ extend ElisaProof:
         # a typed declaration or return boundary must check them explicitly. Unknown leaves remain
         # for the ordinary fact-based guard, while every closed subtree must fit before it may be
         # folded into a signed `i64` proof term.
+        def proof_unsigned_negative_integer_literal(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return value < 0
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_negative_integer_literal(inner, depth + 1)
+                _:
+                    return false
+
         def proof_unsigned_constants_fit(expression: Ast::Expr, width: i64, depth: usize) -> bool:
             return false if width <= 0 or depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             constant: (known: bool, value: i64) = proof_constant_int(expression)
-            return constant.value >= 0 and constant.value <= proof_unsigned_width_max(width) if constant.known
+            if constant.known:
+                return constant.value <= proof_unsigned_width_max(width) if constant.value >= 0
+                # The parser stores a positive u64 literal with its high bit set as
+                # the corresponding negative i64 bit pattern. Admit that spelling
+                # only as an integer literal in u64 context; unary negative
+                # arithmetic remains outside this range proof.
+                return width == 64 and proof_unsigned_negative_integer_literal(expression, 0)
             match expression:
                 Ast::Expr.Paren(inner, _):
                     return proof_unsigned_constants_fit(inner, width, depth + 1)
@@ -218,8 +235,14 @@ extend ElisaProof:
         def proof_scalar_witnessed(facts: darray[Ast::Expr]&, name: sview) -> bool:
             return false if name == ""
             for fact in facts:
-                return true if proof_scalar_marker_name(fact) == name
-                return true if proof_unsigned_marker_name(fact) == name
+                # Only these two marker kinds can witness a bare scalar name.
+                # Dispatch once; the full parsers retain arity/name/width checks.
+                marker_name: sview = proof_marker_callee_name(fact)
+                if marker_name == "__elisa_primitive_scalar_type":
+                    argument: (known: bool, term: Ast::Expr) = proof_marker_argument(fact, marker_name)
+                    return true if argument.known and proof_ident_name(argument.term) == name
+                elif marker_name == "__elisa_unsigned_type_bound":
+                    return true if proof_unsigned_marker_name(fact) == name
             return false
 
         # Ground congruence and the identity tiers admit only the language's own operators; a
@@ -331,15 +354,8 @@ extend ElisaProof:
             for untrusted_term in facts.untrusted_terms |expression|:
                 return false if proof_scalar_untrusted_operator_applies(expression, untrusted_term, depth + 1)
             match expression:
-                Ast::Expr.IntLit(_, _):
-                    return true
-                Ast::Expr.BoolLit(_, _):
-                    return true
-                Ast::Expr.CharLit(_, _):
-                    return true
-                Ast::Expr.ShorthandMember(parts, _):
-                    # A one-segment leading-dot value is a `const enum` member: an integer.
-                    return parts.count == 1 and parts[0] != ""
+                Ast::Expr.ShorthandMember(_, _):
+                    return false
                 _:
                     pass
             for scalar_term in facts.scalar_terms |expression|:
@@ -446,6 +462,8 @@ extend ElisaProof:
         def proof_interval(expression: Ast::Expr, bounds: darray[ProofBound]&) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
             constant: (known: bool, value: i64) = proof_constant_int(expression)
             return (true, constant.value, constant.value, true, true) if constant.known
+            term_bound: ProofBound = proof_bound_for_term(bounds, expression)
+            return (term_bound.has_lower and term_bound.has_upper, term_bound.lower, term_bound.upper, term_bound.has_lower, term_bound.has_upper) if term_bound.term_key
             match expression:
                 Ast::Expr.Paren(inner, _):
                     return proof_interval(inner, bounds)

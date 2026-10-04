@@ -1,119 +1,5 @@
 extend ElisaProof:
     private:
-        def proof_add_lemma_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
-            return if not proof_kernel_expression_supported(expression)
-            return if not proof_kernel_report_append_allowed(report, facts.count, 1, name)
-            return if parameter_names.count != argument_values.count
-            return if not proof_kernel_report_append_allowed(report, report.fact_traces.count, 1, name)
-            return if not proof_kernel_report_append_allowed(report, report.fact_trace_summary_names.count, parameter_names.count, name)
-            return if not proof_kernel_report_append_allowed(report, report.fact_trace_summary_values.count, argument_values.count, name)
-            return if not proof_kernel_report_append_allowed(report, report.fact_trace_summary_require_goal_ids.count, require_goal_ids.count, name)
-            encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(expression, report, name)
-            return if not encoded.known
-            facts.push(expression)
-            bindings_start: usize = report.fact_trace_summary_names.count
-            report.fact_trace_summary_names.extend(parameter_names)
-            report.fact_trace_summary_values.extend(argument_values)
-            requires_start: usize = report.fact_trace_summary_require_goal_ids.count
-            report.fact_trace_summary_require_goal_ids.extend(require_goal_ids)
-            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "lemma-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index, owner_line: 0})
-
-        def proof_type_bound_name(expression: Ast::Expr) -> sview:
-            marker_name: sview = proof_unsigned_marker_name(expression)
-            return marker_name if marker_name != ""
-            match proof_marker_callee_name(expression):
-                "__elisa_signed_type_bound":
-                    signed_marker = proof_signed_marker_info(expression)
-                    return proof_place_root_name(signed_marker.term, 0) if signed_marker.known
-                "__elisa_builtin_operator_type":
-                    builtin_marker = proof_builtin_operator_marker_info(expression)
-                    return proof_place_root_name(builtin_marker.term, 0) if builtin_marker.known
-                "__elisa_untrusted_operator_type":
-                    untrusted_marker = proof_untrusted_operator_marker_info(expression)
-                    return proof_place_root_name(untrusted_marker.term, 0) if untrusted_marker.known
-                "__elisa_builtin_index_type":
-                    index_marker = proof_builtin_index_marker_info(expression)
-                    return proof_place_root_name(index_marker.term, 0) if index_marker.known
-                _:
-                    pass
-            # A type witness may be keyed by a place rather than a name. Retention follows the
-            # root symbol of that place, so `h.part`'s witness lives and dies with `h`.
-            root_name: sview = proof_type_marker_root_name(expression)
-            return root_name if root_name != ""
-            match expression:
-                Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
-                    match left:
-                        Ast::Expr.IntLit(value, _):
-                            match right:
-                                Ast::Expr.Ident(name, _):
-                                    return name if value == 0
-                                _:
-                                    pass
-                        _:
-                            pass
-                    match right:
-                        Ast::Expr.IntLit(_, _):
-                            match left:
-                                Ast::Expr.Ident(name, _):
-                                    return name
-                                _:
-                                    pass
-                        _:
-                            pass
-                _:
-                    pass
-            return ""
-
-        def proof_fact_is_type_bound(report: ProofReport&, expression: Ast::Expr, owner: sview) -> bool:
-            return false if proof_type_bound_name(expression) == ""
-            return false if report.type_bound_owner != owner
-            # Equal terms hash alike, so an entry with another hash cannot match.
-            hash: u32 = proof_expr_shape_hash(expression, 0)
-            indexed: bool = report.type_bound_seen_hashes.count == report.type_bound_seen.count
-            for index in 0..<report.type_bound_seen.count |index, report, expression, hash, indexed|:
-                continue if indexed and report.type_bound_seen_hashes[index] != hash
-                return true if proof_expr_equal(report.type_bound_seen[index], expression)
-            return false
-
-        # Type bounds come from the compiler's variable type, not from mutable program state.
-        # Preserve only those explicitly traced facts across an opaque/recursive call, and only
-        # while their lexical binding is still live. Move-containing calls are excluded because
-        # ownership invalidation can remove the binding itself at the statement boundary.
-        def proof_restore_type_bound_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, report: ProofReport&, owner: sview) -> void:
-            hashes: mutable darray[u32] = []
-            hashed: mutable bool = false
-            for fact in source |fact, facts, names, report, owner, hashes, hashed|:
-                bound_name: sview = proof_type_bound_name(fact)
-                continue if bound_name == "" or not (any candidate in names where candidate == bound_name)
-                continue if not proof_fact_is_type_bound(report, fact, owner)
-                # The duplicate check reads the target's hashes, taken once on first need.
-                if not hashed:
-                    hashes <- proof_fact_list_shape_hashes(facts)
-                    hashed <- true
-                hash: u32 = proof_expr_shape_hash(fact, 0)
-                if not proof_fact_list_contains_hashed(facts, hashes, fact, hash):
-                    facts.push(fact)
-                    hashes.push(hash)
-
-        # An imported qualified constant, `Limits::TOP == 8`, names an immutable declaration, so a
-        # call cannot falsify it; its path is no binding the stability scan can read, so it is
-        # restored by its trace, with the scalar witness of the same path.
-        def proof_restore_global_constant_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: ProofReport&, owner: sview) -> void:
-            for fact in source |fact, source, facts, report, owner|:
-                continue if not proof_fact_is_global_constant(report, fact, owner)
-                match fact:
-                    Ast::Expr.Binary(left, TokenKind.EqEq, _, position):
-                        continue if proof_ident_name(left) != ""
-                        facts.push(fact) if not (any existing in facts where proof_expr_equal(existing, fact))
-                        witness: Ast::Expr = proof_scalar_term_marker(left, position)
-                        if any candidate in source where proof_expr_equal(candidate, witness):
-                            facts.push(witness) if not (any existing in facts where proof_expr_equal(existing, witness))
-                    _:
-                        pass
-
-        # A loop or pattern binder can shadow a name while the proof state still uses source
-        # spellings. Remove inherited type facts for those spellings before entering the child
-        # state; otherwise an outer `0 <= i` could be applied to an unrelated signed binder.
         def proof_remove_type_bound_facts_for_names(facts: mutable darray[Ast::Expr]&, names: darray[sview]&) -> void:
             # Compact in place. A temporary AST value in a fresh darray would acquire the
             # inferred auto region of this helper; stage1 correctly rejects storing that value
@@ -411,7 +297,7 @@ extend ElisaProof:
         # its caller's state only through references and globals, so such a fact holds after
         # the call exactly as before it. Anything else — a field, an element, a container, a
         # call, a name the body may reference — is not stable.
-        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, shared_fixed: darray[sview]&, local_extents: darray[sview]&, depth: usize) -> bool:
+        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, shared_fixed: darray[sview]&, local_extents: darray[sview]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(_, _):
@@ -437,6 +323,8 @@ extend ElisaProof:
                     # value survives a structural recursive call on the other.
                     return true if payload_symbol
                     return proof_scalar_witnessed(facts, name)
+                Ast::Expr.Scope(_, _, _):
+                    return proof_source_global_constant_term(report, expression, owner)
                 Ast::Expr.Tuple(_, _):
                     # A loop binder's atom `(name, offset)`: the binder is a local of this body.
                     binder: sview = proof_place_root_name(expression, 0)
@@ -475,15 +363,15 @@ extend ElisaProof:
                     # makes `[]` hold something else, so a binding recorded as one keeps that
                     # record -- subject to the same reachability test on the binding itself that
                     # every other retained value passes.
-                    for element in elements |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth|:
-                        return false if not proof_expr_call_stable(element, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
+                    for element in elements |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth|:
+                        return false if not proof_expr_call_stable(element, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
                     return true
                 Ast::Expr.Call(_, arguments, _, _):
                     # A scalar-term marker is a statement about a term's *type*, so it is worth
                     # exactly what the term's identity is worth: if the term still denotes the same
                     # value after the call, the type statement about it still holds.
                     marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
-                    return proof_expr_call_stable(marker.term, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1) if marker.known
+                    return proof_expr_call_stable(marker.term, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) if marker.known
                     # A width marker is the same kind of type statement, with a literal width.
                     width_marker_name: sview = proof_marker_callee_name(expression)
                     # A place width marker over a call result, `f(x)` typed from its declared return,
@@ -491,28 +379,44 @@ extend ElisaProof:
                     if (width_marker_name == "__elisa_unsigned_type_bound" or width_marker_name == "__elisa_signed_type_bound" or width_marker_name == "__elisa_signed_place_type_bound") and arguments.count == 2:
                         match arguments[1]:
                             Ast::Expr.IntLit(_, _):
-                                return proof_expr_call_stable(arguments[0], facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
+                                return proof_expr_call_stable(arguments[0], facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
                             _:
                                 return false
+                    # A tracked scalar-reference state is a private symbolic binding, not an
+                    # executable call. Branch joins may carry it only when its frozen scalar
+                    # payload is independently stable. Calls that can reach the reference clear
+                    # its binding in proof_forget_values_after_call before this restoration runs.
+                    reference_state: (known: bool, value: Ast::Expr) = proof_scalar_reference_state_value(expression)
+                    return proof_expr_call_stable(reference_state.value, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) if reference_state.known
                     # An ordinary call term keeps its value across another call when a pure-call
                     # witness says it denotes one value, and its arguments are themselves stable
                     # so the same text still names the same arguments. This is what carries a
                     # callee's summary -- `not f(...) or p` -- past the next call in the body,
                     # together with the witness recorded beside that fact when it is built.
                     return false if not proof_scalar_term_witnessed(expression, facts, 0)
-                    for argument in arguments |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth|:
+                    for argument in arguments |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth|:
                         continue if proof_value_argument_stable(argument, names, parameters, aliased, local_extents, 0)
-                        return false if not proof_expr_call_stable(argument, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
+                        return false if not proof_expr_call_stable(argument, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
+                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
                 Ast::Expr.Unary(operator, operand, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
-                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
-                Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
+                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    # A formed nullable value's null test is not a scalar
+                    # pointee read. Keep only a bare live binding that no call
+                    # can reach; aliased/lent roots remain invalidated. Source
+                    # proposition formation and replay check null-test typing.
+                    if operator == TokenKind.EqEq or operator == TokenKind.BangEq:
+                        a: sview = proof_ident_name(left)
+                        b: sview = proof_ident_name(right)
+                        tested: sview = b if a == "null" else a
+                        if (a == "null" or b == "null") and tested != "" and tested != "null":
+                            return not (any blocked in aliased where blocked == tested) and ((any live in names where live == tested) or (any parameter in parameters where parameter == tested))
+                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, depth + 1)
+                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
                 _:
                     return false
 
@@ -559,3 +463,5 @@ extend ElisaProof:
         # call and nothing afterwards, so the call performing it is the one place its binding has
         # to be treated as reachable. Collected without the confinement refinement, which is the
         # point: this is the lend itself.
+
+include "./alias_stability_integrated_helpers.elisa"

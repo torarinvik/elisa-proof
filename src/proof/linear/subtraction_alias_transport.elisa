@@ -1,0 +1,81 @@
+extend ElisaProof:
+    public:
+        # Pure same-width subtraction has a well-defined machine value even
+        # when it wraps. Recording its equality does not assert an integer range.
+        def proof_unsigned_named_subtraction_value(value: Ast::Expr, width: i64, facts: darray[Ast::Expr]&) -> bool:
+            return false if width != 8 and width != 16 and width != 32 and width != 64
+            match value:
+                Ast::Expr.Binary(a, TokenKind.Minus, b, _):
+                    return proof_ident_name(a) != "" and proof_ident_name(b) != "" and proof_peer_unsigned_width(a, facts) == width and proof_peer_unsigned_width(b, facts) == width and proof_primitive_comparison(a, b, facts)
+                _:
+                    return false
+
+        def proof_subtraction_alias_rewrite(expression: Ast::Expr, term: Ast::Expr, alias: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> Ast::Expr:
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS:
+                exhausted <- true
+                return Ast::Expr.Invalid
+            budget <- budget + 1
+            return alias if proof_expr_equal(expression, term)
+            match expression:
+                Ast::Expr.Paren(inner, position):
+                    rewritten = proof_subtraction_alias_rewrite(inner, term, alias, depth + 1, budget, exhausted)
+                    return expression if proof_expr_equal(inner, rewritten)
+                    return Ast::Expr.Paren(rewritten, position)
+                Ast::Expr.Unary(operator, inner, position):
+                    rewritten = proof_subtraction_alias_rewrite(inner, term, alias, depth + 1, budget, exhausted)
+                    return expression if proof_expr_equal(inner, rewritten)
+                    return Ast::Expr.Unary(operator, rewritten, position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    a = proof_subtraction_alias_rewrite(left, term, alias, depth + 1, budget, exhausted)
+                    b = proof_subtraction_alias_rewrite(right, term, alias, depth + 1, budget, exhausted)
+                    return expression if proof_expr_equal(left, a) and proof_expr_equal(right, b)
+                    return Ast::Expr.Binary(a, operator, b, position)
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    c = proof_subtraction_alias_rewrite(condition, term, alias, depth + 1, budget, exhausted)
+                    a = proof_subtraction_alias_rewrite(then_expression, term, alias, depth + 1, budget, exhausted)
+                    b = proof_subtraction_alias_rewrite(else_expression, term, alias, depth + 1, budget, exhausted)
+                    return expression if proof_expr_equal(condition, c) and proof_expr_equal(then_expression, a) and proof_expr_equal(else_expression, b)
+                    return Ast::Expr.If(c, a, b, position)
+                _:
+                    # No traversal through binders, calls or resource places.
+                    return expression
+
+        def proof_subtraction_alias_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            # Subtracting a source-pinned zero is an exact machine identity,
+            # including at u64::MAX. Do not reinterpret arbitrary subtraction
+            # as unbounded signed arithmetic or rewrite overloaded operators.
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, position):
+                    for orientation in 0..<2 |orientation, left, right, position, facts, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                        term: Ast::Expr = right if orientation == 0 else left
+                        peer: Ast::Expr = left if orientation == 0 else right
+                        match proof_strip_parens(term):
+                            Ast::Expr.Binary(base, TokenKind.Minus, zero, _):
+                                width: i64 = proof_peer_unsigned_width(base, facts)
+                                continue if width != 8 and width != 16 and width != 32 and width != 64
+                                continue if proof_ident_name(base) == "" or proof_ident_name(zero) == "" or proof_peer_unsigned_width(zero, facts) != width
+                                continue if not proof_primitive_comparison(peer, term, facts)
+                                pin = proof_pinned_constant_value(zero, facts)
+                                continue if not pin.known or pin.value != 0
+                                rewritten = Ast::Expr.Binary(peer, TokenKind.EqEq, base, position)
+                                return proof_goal_depth(facts, rewritten, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                            _:
+                                pass
+                _:
+                    pass
+            for fact in facts |fact, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        alias: Ast::Expr = left if proof_ident_name(left) != "" else right
+                        term: Ast::Expr = right if proof_ident_name(left) != "" else left
+                        name: sview = proof_ident_name(alias)
+                        continue if name == "" or proof_expr_mentions_name(term, name)
+                        width: i64 = proof_peer_unsigned_width(alias, facts)
+                        continue if not proof_unsigned_named_subtraction_value(term, width, facts) or not proof_primitive_comparison(alias, term, facts)
+                        rewritten = proof_subtraction_alias_rewrite(goal, term, alias, 0, budget, exhausted)
+                        return false if exhausted == true
+                        continue if proof_expr_equal(goal, rewritten)
+                        return proof_goal_depth(facts, rewritten, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                    _:
+                        pass
+            return false

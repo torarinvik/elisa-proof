@@ -255,7 +255,7 @@ extend ElisaProof:
                                 applied_lemma <- proof_apply_lemma(substituted_expression, facts, lemmas, names, values, report, name, annotations) if lemma_steps
                                 if not applied_lemma:
                                     applied_function: bool = proof_apply_function(proof_call_source(expression, substituted_expression), Ast::Expr.Absent, facts, functions, names, values, frame_parameters, changes, preserves, report, name, annotations)
-                                    proof_check_opaque_call_frame(substituted_expression, names, frame_parameters, changes, preserves, functions, report, name) if not applied_function
+                                    proof_check_opaque_call_frame(substituted_expression, facts, names, frame_parameters, changes, preserves, functions, report, name) if not applied_function
                                     # A statement call has no result binding to carry forward;
                                     # even a framed summary may have changed an untracked local
                                     # alias, so forget symbolic values at the call boundary.
@@ -326,7 +326,7 @@ extend ElisaProof:
                                 if not proof_expr_calls_are_conversions(return_value, functions, 0):
                                     proof_check_frame_call_children(returned, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
                                     return_call_applied <- proof_apply_function(return_value, return_value, facts, functions, names, values, frame_parameters, changes, preserves, report, name, annotations)
-                                    proof_check_opaque_call_frame(return_value, names, frame_parameters, changes, preserves, functions, report, name) if not return_call_applied
+                                    proof_check_opaque_call_frame(return_value, facts, names, frame_parameters, changes, preserves, functions, report, name) if not return_call_applied
                                     return_value <- Ast::Expr.Invalid if not return_call_applied
                             Ast::Expr.GetElse(guarded, _, _):
                                 # A GetElse is transparent only after its recovery has been
@@ -338,7 +338,7 @@ extend ElisaProof:
                                     Ast::Expr.Call(_, _, _, _):
                                         proof_check_frame_call_children(guarded, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations)
                                         return_call_applied <- proof_apply_function(return_value, return_value, facts, functions, names, values, frame_parameters, changes, preserves, report, name, annotations)
-                                        proof_check_opaque_call_frame(return_value, names, frame_parameters, changes, preserves, functions, report, name) if not return_call_applied
+                                        proof_check_opaque_call_frame(return_value, facts, names, frame_parameters, changes, preserves, functions, report, name) if not return_call_applied
                                         return_value <- Ast::Expr.Invalid if not return_call_applied
                                     _:
                                         pass
@@ -362,6 +362,7 @@ extend ElisaProof:
                         for ensure in ensures |report, name, facts, result_name, result_value, position, typed_symbol|:
                             current_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
                             goal: mutable Ast::Expr = proof_substitute(current_goal, result_name, result_value)
+                            proof_add_quantified_call_summaries(goal, facts, functions, annotations, report, name) if proof_expr_has_call(goal)
                             projected_goal: (known: bool, value: Ast::Expr) = proof_project_tuple_result(current_goal, return_value, functions, name)
                             goal <- projected_goal.value if projected_goal.known
                             typed_goal: bool = not projected_goal.known and proof_typed_return_constant_needed(current_goal, goal, return_value, facts, report)
@@ -391,13 +392,14 @@ extend ElisaProof:
                         # postconditions. There is no result binding to substitute, so a
                         # result-dependent ensure fails closed rather than disappearing.
                         for ensure in ensures |report, name, facts, names, values, frame_parameters, old_values, annotations, position|:
-                            goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
+                            goal: mutable Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
                             proven: mutable bool = false
                             if proof_expr_mentions_name(goal, "result"):
                                 failed_rule: mutable sview = proof_quantifier_rule(ensure, annotations)
                                 failed_rule <- "goal" if failed_rule == ""
                                 proof_add_goal_attempt(report, facts, goal, position.line, name, failed_rule, false)
                             else:
+                                goal <- proof_rewrite_pure_call_summaries(goal, facts, functions, 0) if proof_expr_has_call(goal)
                                 proven <- proof_certify_goal_with_rule(facts, goal, report, position.line, name, annotations, proof_quantifier_rule(ensure, annotations))
                             report.proof_obligation(proven)
                             proof_add_goal_failure(report, "ensure-unproven", position.line, name, "void return does not establish ensure", facts, goal) if not proven
@@ -419,6 +421,7 @@ extend ElisaProof:
                     condition_may_mutate_state: bool = condition_has_overloaded_operator or (condition_has_call and not condition_facts_stable)
                     proof_forget_values_after_call(names, values, facts, frame_parameters, report, name, values.count, values.count, position) if condition_may_mutate_state
                     branch_value_count: usize = values.count
+                    branch_entry_values: darray[Ast::Expr] = proof_copy_exprs(values)
                     then_names: mutable darray[sview] = proof_copy_names(names)
                     then_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
                     then_facts: mutable darray[Ast::Expr] @r = proof_copy_exprs(facts)
@@ -519,6 +522,15 @@ extend ElisaProof:
                         # rebound it to a fresh symbol still uses for the old value.
                         then_joined: mutable darray[Ast::Expr] = proof_join_reads(then_facts, values, names, then_values, branch_value_count)
                         else_joined: mutable darray[Ast::Expr] = proof_join_reads(else_facts, values, names, else_values, branch_value_count)
+                        record_join_closed: bool = not condition_has_call and proof_record_branch_expression_closed(condition, false, 0) and (all ensure in ensures where proof_record_branch_expression_closed(ensure, true, 0)) and proof_record_branch_body_closed(then_body, names, frame_parameters, functions, report, name, 0) and proof_record_branch_body_closed(else_body, names, frame_parameters, functions, report, name, 0)
+                        record_then_reaches: bool = then_falls_through and then_names.count == names.count
+                        record_else_reaches: bool = else_falls_through and else_names.count == names.count
+                        if record_join_closed and (not then_falls_through or record_then_reaches) and (not else_falls_through or record_else_reaches):
+                            proof_restore_record_branch_values(values, names, branch_entry_values, then_values, else_values, record_then_reaches, record_else_reaches, condition_value, frame_parameters, functions, report, name, position)
+                            if record_then_reaches:
+                                proof_restore_record_branch_reference_facts(then_facts, else_facts, facts, record_else_reaches, report, name)
+                            elif record_else_reaches:
+                                proof_restore_record_branch_reference_facts(else_facts, then_facts, facts, false, report, name)
                         if then_falls_through and else_falls_through:
                             # A binding both arms rebind joins as a conditional over the
                             # branch condition, before the facts below are restored over it.

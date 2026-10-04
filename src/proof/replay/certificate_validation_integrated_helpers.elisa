@@ -1,0 +1,160 @@
+# Factored helpers retained by the branch integration.
+extend ElisaProof:
+    private:
+        def proof_replay_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            return proof_replay_goal_depth(facts, goal, 0)
+
+        def proof_replay_trace_range_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return trace.premises_start <= report.fact_trace_premises.count and trace.premises_count <= report.fact_trace_premises.count - trace.premises_start
+
+        def proof_replay_dependency_in_stack(names: darray[sview]&, dependency: sview) -> bool:
+            return any existing in names where existing == dependency
+
+        # Dependency names describe declaration-level SCCs, but several obligations can belong
+        # to one declaration. Track the exact certificate index as well: a summary may use an SCC
+        # induction edge, while direct validation of the same obligation must never re-enter that
+        # certificate and consume the native stack.
+        def proof_replay_certificate_in_stack(certificates: darray[usize]&, certificate_index: usize) -> bool:
+            return any existing in certificates where existing == certificate_index
+
+        # Certificate rules are a closed kernel protocol. An unknown label must not fall through
+        # to ordinary proposition replay: doing so would let a future or malformed specialized
+        # certificate claim the generic rule merely because its goal happens to be provable.
+        def proof_replay_certificate_rule_valid(rule: sview) -> bool:
+            match rule:
+                "goal":
+                    return true
+                "index-lower":
+                    return true
+                "index-upper":
+                    return true
+                "slice-lower":
+                    return true
+                "slice-upper":
+                    return true
+                "slice-order":
+                    return true
+                "checked-index":
+                    return true
+                "checked-get":
+                    return true
+                "quantifier-forall":
+                    return true
+                "quantifier-exists":
+                    return true
+                "resource-safety":
+                    return true
+                "structural-safety":
+                    return true
+                "effect-containment":
+                    return true
+                _:
+                    return false
+
+        # The producer's `proof_finding_only_widens_state`, restated here rather than called.
+        # Replay is a second opinion on the same report and shares no code with the checker that
+        # produced it; a predicate imported from `check.elisa` would make the two agree by
+        # construction. Both list the same two kinds, and they must be kept in step by hand -- the
+        # same arrangement the scalar-term witness already has on both sides of this boundary.
+        def proof_replay_finding_only_widens_state(kind: sview) -> bool:
+            return true if kind == "captured-block-unsupported"
+            return kind == "loop-invariant-missing"
+
+        # Replay every certificate owned by a modular dependency before allowing its summary to
+        # support a caller. A dependency already on the stack is an SCC induction edge: the main
+        # checker must have supplied the corresponding termination proof, while replay stops at
+        # that fixed-point boundary instead of recursing forever. Acyclic summary chains therefore
+        # receive full replay, and cyclic summaries remain visibly tied to the main termination
+        # checker rather than being mistaken for ordinary facts.
+        # Whether a record at `line` belongs to the declaration row of `dependency` at
+        # `owner_line`. An unattributable record matches only when `unknown_matches` (findings
+        # fail closed by vetoing; goals and certificates fail closed by not vouching).
+        def proof_replay_dependency_row_matches(report: ProofReport&, dependency: sview, line: u32, owner_line: u32, unknown_matches: bool) -> bool:
+            return true if owner_line == 0
+            row: mutable u32 = 0
+            proof_replay_owner_function_line(report.source_declarations, dependency, line, &row, 0)
+            return unknown_matches if row == 0
+            return row == owner_line
+
+        def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, owner_line: u32, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
+            return false if dependency == ""
+            found_goal: mutable bool = false
+            all_goals_proven: mutable bool = true
+            # A function-summary dependency names one declaration row (`owner_line`, the callee's
+            # declaration line). Same-named functions of other modules are different rows: their
+            # goals, findings, and certificates neither vouch for nor veto this callee. 0 keeps
+            # the name-wide check (lemma summaries, whose names are unique).
+            for attempt in report.goal_attempts |found_goal, all_goals_proven, dependency, owner_line|:
+                if attempt.name == dependency and proof_replay_dependency_row_matches(report, dependency, attempt.line, owner_line, false):
+                    found_goal <- true
+                    all_goals_proven <- false if not attempt.proven
+            # Same filter the scheduler applies: a finding that only records a construct whose
+            # effect was over-approximated did not enter this dependency's contract derivation,
+            # and the two conditions that carry the weight here are untouched -- every goal the
+            # dependency recorded must be proven, and every certificate it owns must replay.
+            for finding in report.findings:
+                continue if finding.name != dependency or not proof_replay_dependency_row_matches(report, dependency, finding.line, owner_line, true)
+                return false if not proof_replay_finding_only_widens_state(finding.kind)
+            return false if not found_goal or not all_goals_proven
+            return true if proof_replay_dependency_in_stack(dependency_stack, dependency)
+            return false if dependency_depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            next_stack: mutable darray[sview] = []
+            next_stack.extend(dependency_stack)
+            next_stack.push(dependency)
+            found_certificate: mutable bool = false
+            for certificate_index in 0..<report.certificates.count |certificate_index, report, next_stack, dependency_depth, found_certificate, active_certificates, dependency, validation_workspace|:
+                certificate: ProofGoalCertificate = report.certificates[certificate_index]
+                if certificate.name == dependency and proof_replay_dependency_row_matches(report, dependency, certificate.line, owner_line, false):
+                    found_certificate <- true
+                    return false if not proof_replay_certificate_with_stack(report, certificate, certificate_index, next_stack, dependency_depth + 1, active_certificates, validation_workspace)
+            return found_certificate
+
+        # A reusable lemma fact is valid only when it is the recorded postcondition instance for
+        # the exact normalized arguments and every instantiated precondition is tied to a caller
+        # certificate. Merely finding some replayable certificate with the same lemma name is not
+        # enough: that would allow a buggy elaborator to manufacture an unrelated summary fact.
+        def proof_replay_lemma_summary_is_valid[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
+            return false if trace.kind != "lemma-summary" or trace.dependency == ""
+            return false if trace.summary_bindings_start > report.fact_trace_summary_names.count or trace.summary_bindings_count > report.fact_trace_summary_names.count - trace.summary_bindings_start
+            return false if trace.summary_bindings_start > report.fact_trace_summary_values.count or trace.summary_bindings_count > report.fact_trace_summary_values.count - trace.summary_bindings_start
+            return false if trace.summary_requires_start > report.fact_trace_summary_require_goal_ids.count or trace.summary_requires_count > report.fact_trace_summary_require_goal_ids.count - trace.summary_requires_start
+            theorem_found: mutable bool = false
+            theorem: mutable ProofTheoremSummary = ProofTheoremSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, decreases_start: 0, decreases_count: 0, proof_goals_start: 0, proof_goals_count: 0, recursive: false, verified: false, verification_reason: ""}
+            for candidate in report.theorem_summaries |candidate, trace, theorem_found, theorem|:
+                if candidate.name == trace.dependency:
+                    return false if theorem_found
+                    theorem_found <- true
+                    theorem <- candidate
+            return false if not theorem_found or not theorem.verified
+            return false if theorem.parameters_start > report.theorem_parameters.count or theorem.parameters_count > report.theorem_parameters.count - theorem.parameters_start
+            return false if theorem.requires_start > report.theorem_requires.count or theorem.requires_count > report.theorem_requires.count - theorem.requires_start
+            return false if theorem.ensures_start > report.theorem_ensures.count or theorem.ensures_count > report.theorem_ensures.count - theorem.ensures_start
+            return false if trace.summary_bindings_count != theorem.parameters_count or trace.summary_requires_count != theorem.requires_count or trace.summary_ensure_index >= theorem.ensures_count
+            instance: mutable Ast::Expr = report.theorem_ensures[theorem.ensures_start + trace.summary_ensure_index]
+            substitution_names: mutable darray[sview] = []
+            substitution_values: mutable darray[Ast::Expr] = []
+            for index in 0..<theorem.parameters_count |index, theorem, report, trace, substitution_names, substitution_values|:
+                expected_name: sview = report.theorem_parameters[theorem.parameters_start + index]
+                actual_name: sview = report.fact_trace_summary_names[trace.summary_bindings_start + index]
+                return false if expected_name != actual_name
+                substitution_names.push(expected_name)
+                substitution_values.push(report.fact_trace_summary_values[trace.summary_bindings_start + index])
+            instance <- proof_replay_substitute_many(instance, substitution_names, substitution_values)
+            return false if not proof_replay_expr_equal(instance, trace.expression)
+            for require_index in 0..<theorem.requires_count |require_index, theorem, report, trace, dependency_stack, dependency_depth, validation_workspace|:
+                required: mutable Ast::Expr = report.theorem_requires[theorem.requires_start + require_index]
+                for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, trace, required|:
+                    required <- proof_replay_substitute(required, report.theorem_parameters[theorem.parameters_start + parameter_index], report.fact_trace_summary_values[trace.summary_bindings_start + parameter_index])
+                goal_id: usize = report.fact_trace_summary_require_goal_ids[trace.summary_requires_start + require_index]
+                return false if goal_id >= report.goal_attempts.count
+                attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+                return false if attempt.name != trace.name or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
+                return false if not proof_replay_expr_equal(attempt.goal, required)
+                return false if not proof_replay_certificate_with_stack(report, report.certificates[attempt.certificate_index], attempt.certificate_index, dependency_stack, dependency_depth + 1, active_certificates, validation_workspace)
+            return true
+
+        # The innermost module that declares function `name` at `line`, counted over the whole
+        # source tree so a repeated declaration line cannot pick between two owners.
+        # A nested module may be recorded under its qualified spelling (`Outer::Inner`), while a
+        # qualified callee keeps only its innermost segment, so the owner matches when it is the
+        # segment or ends in `::segment`. Kept local so replay does not borrow checker code.

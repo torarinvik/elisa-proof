@@ -1,0 +1,249 @@
+# Exercise independent replay, including claims rejected by producer search.
+include "../src/proof/kernel_core.elisa"
+include "../src/proof/kernel_replay.elisa"
+using ElisaProofKernelCore
+using ElisaProofKernelReplay
+
+extend ElisaProofKernelReplay:
+    public:
+        def literal_sum_cap_control(nodes: mutable darray[ProofKernelNode]&) -> bool:
+            four: usize = add_node(nodes, "int", "", 0, 0, 0, 0, 0, 4, "", "")
+            byte_max: usize = add_node(nodes, "int", "", 0, 0, 0, 0, 0, 255, "", "")
+            too_large: usize = add_node(nodes, "int", "", 0, 0, 0, 0, 0, 256, "", "")
+            negative: usize = add_node(nodes, "int", "", 0, 0, 0, 0, 0, -1, "", "")
+            signed_four: usize = add_node(nodes, "typed-int", "", 0, 0, 0, 0, 0, 4, "i64", "")
+            malformed_four: usize = add_node(nodes, "int", "+", four, four, 0, 0, 0, 4, "", "")
+            return false if not proof_kernel_replay_unsigned_literal_bound_fits(nodes, four, 8)
+            return false if not proof_kernel_replay_unsigned_literal_bound_fits(nodes, four, 64)
+            return false if not proof_kernel_replay_unsigned_literal_bound_fits(nodes, byte_max, 8)
+            return false if proof_kernel_replay_unsigned_literal_bound_fits(nodes, too_large, 8)
+            return false if proof_kernel_replay_unsigned_literal_bound_fits(nodes, negative, 64)
+            return false if proof_kernel_replay_unsigned_literal_bound_fits(nodes, signed_four, 64)
+            return false if proof_kernel_replay_unsigned_literal_bound_fits(nodes, malformed_four, 64)
+            return false if proof_kernel_replay_unsigned_literal_bound_fits(nodes, four, 0)
+            return false if proof_kernel_replay_unsigned_literal_bound_fits(nodes, four, 65)
+            return not proof_kernel_replay_unsigned_literal_bound_fits(nodes, nodes.count, 64)
+
+        def typed_literal_sort_control(nodes: mutable darray[ProofKernelNode]&, children: mutable darray[usize]&) -> bool:
+            environment: ProofKernelTypeEnvironment = ProofKernelTypeEnvironment{global_bindings: [], bindings: []}
+            typing_index: ProofKernelReplayTypingIndex = proof_kernel_replay_empty_typing_index()
+            sorts: darray[sview] = ["u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64"]
+            facts: darray[usize] = []
+            for sort in sorts |sort, nodes, children, environment, typing_index|:
+                root: usize = add_node(nodes, "typed-int", "", 0, 0, 0, 0, 0, 0, sort, "")
+                work: mutable usize = 0
+                inferred: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, typing_index, root, 0, &work)
+                return false if not inferred.known or inferred.family != "integer" or inferred.name != sort
+            widths: darray[i64] = [8, 8, 16, 16, 32, 32, 64, 64]
+            for index in 0..<sorts.count |index, sorts, widths, nodes, children, facts|:
+                root: usize = add_node(nodes, "typed-int", "", 0, 0, 0, 0, 0, 0, sorts[index], "")
+                unsigned_width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, 0)
+                signed_width: i64 = proof_kernel_replay_signed_width_in_expression(nodes, children, facts, root, 0)
+                return false if unsigned_width != (widths[index] if index % 2 == 0 else 0)
+                return false if signed_width != (0 if index % 2 == 0 else widths[index])
+            invalid: usize = add_node(nodes, "typed-int", "", 0, 0, 0, 0, 0, 128, "i8", "")
+            high_unsigned: usize = add_node(nodes, "typed-int", "", 0, 0, 0, 0, 0, -1, "u64", "")
+            zero_unsigned: usize = add_node(nodes, "typed-int", "", 0, 0, 0, 0, 0, 0, "u64", "")
+            zero_signed: usize = add_node(nodes, "typed-int", "", 0, 0, 0, 0, 0, 0, "i64", "")
+            return false if not proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, high_unsigned, 0)
+            return false if proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, zero_unsigned, 0) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, zero_signed, 0)
+            work: mutable usize = 0
+            return not proof_kernel_replay_term_sort(nodes, children, environment, typing_index, invalid, 0, &work).known
+
+        # Harness-only access to the private rewrites; do not expand the replay API.
+        def typed_literal_substitution_control(nodes: mutable darray[ProofKernelNode]&, children: mutable darray[usize]&, maximum: usize, zero: usize, signed_zero: usize, malformed: usize) -> bool:
+            return false if proof_kernel_replay_substitute(nodes, children, maximum, "x", zero, 0) != maximum
+            variable: usize = add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+            before: usize = add_node(nodes, "binary", "<", variable, maximum, 0, 0, 0, 0, "", "")
+            after: usize = proof_kernel_replay_substitute(nodes, children, before, "x", zero, 0)
+            expected: usize = add_node(nodes, "binary", "<", zero, maximum, 0, 0, 0, 0, "", "")
+            return false if not proof_kernel_replay_expr_equal(nodes, children, after, expected, 0)
+            bad: usize = proof_kernel_replay_substitute(nodes, children, malformed, "x", zero, 0)
+            return false if nodes[bad].kind != "unsupported"
+            preserved = proof_kernel_replay_replace_exact(nodes, children, maximum, zero, signed_zero, 0)
+            return false if preserved.changed or preserved.value != maximum
+            replaced = proof_kernel_replay_replace_exact(nodes, children, maximum, maximum, zero, 0)
+            return replaced.changed and replaced.value == zero
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    nodes: mutable darray[ProofKernelNode] = []
+    children: mutable darray[usize] = []
+    return 147 if not literal_sum_cap_control(&nodes)
+    return 118 if not typed_literal_sort_control(&nodes, &children)
+    typed_max: usize = add_node(&nodes, "typed-int", "", 0, 0, 0, 0, 0, -1, "u64", "")
+    typed_max_copy: usize = add_node(&nodes, "typed-int", "", 0, 0, 0, 0, 0, -1, "u64", "")
+    typed_zero: usize = add_node(&nodes, "typed-int", "", 0, 0, 0, 0, 0, 0, "u64", "")
+    signed_zero: usize = add_node(&nodes, "typed-int", "", 0, 0, 0, 0, 0, 0, "i64", "")
+    untyped_bits: usize = add_node(&nodes, "int", "", 0, 0, 0, 0, 0, -1, "", "")
+    malformed_typed: usize = add_node(&nodes, "typed-int", "", 0, 0, 64, 0, 0, -1, "u64", "")
+    overflow_typed: usize = add_node(&nodes, "typed-int", "", 0, 0, 0, 0, 0, 256, "u8", "")
+    return 113 if not typed_literal_substitution_control(&nodes, &children, typed_max, typed_zero, signed_zero, malformed_typed)
+    return 100 if not proof_kernel_replay_expr_equal_public(&nodes, &children, typed_max, typed_max_copy, 0)
+    return 101 if proof_kernel_replay_expr_equal_public(&nodes, &children, typed_max, untyped_bits, 0)
+    return 102 if proof_kernel_replay_expr_equal_public(&nodes, &children, typed_zero, signed_zero, 0)
+    return 103 if proof_kernel_replay_expr_equal_public(&nodes, &children, malformed_typed, malformed_typed, 0)
+    return 104 if proof_kernel_replay_expr_equal_public(&nodes, &children, overflow_typed, overflow_typed, 0)
+    typed_sum: usize = add_node(&nodes, "binary", "+", typed_max, typed_zero, 0, 0, 0, 0, "", "")
+    typed_sum_copy: usize = add_node(&nodes, "binary", "+", typed_max_copy, typed_zero, 0, 0, 0, 0, "", "")
+    signed_sum: usize = add_node(&nodes, "binary", "+", typed_max_copy, signed_zero, 0, 0, 0, 0, "", "")
+    return 105 if not proof_kernel_replay_expr_equal_public(&nodes, &children, typed_sum, typed_sum_copy, 0)
+    return 106 if proof_kernel_replay_expr_equal_public(&nodes, &children, typed_sum, signed_sum, 0)
+    operators: darray[sview] = ["==", "!=", "<", "<=", ">", ">="]
+    expected: darray[bool] = [false, true, true, true, false, false]
+    empty_facts: darray[usize] = []
+    empty_environment: ProofKernelTypeEnvironment = ProofKernelTypeEnvironment{global_bindings: [], bindings: []}
+    typed_one: usize = add_node(&nodes, "typed-int", "", 0, 0, 0, 0, 0, 1, "u64", "")
+    wrapped: usize = add_node(&nodes, "binary", "+", typed_max, typed_one, 0, 0, 0, 0, "", "")
+    wrap_goal: usize = add_node(&nodes, "binary", "==", wrapped, typed_zero, 0, 0, 0, 0, "", "")
+    false_wrap_goal: usize = add_node(&nodes, "binary", ">", wrapped, typed_max, 0, 0, 0, 0, "", "")
+    return 119 if not proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, wrap_goal)
+    return 120 if proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, false_wrap_goal)
+    wrap_negation: usize = add_node(&nodes, "unary", "not", wrap_goal, 0, 0, 0, 0, 0, "", "")
+    false_order_negation: usize = add_node(&nodes, "unary", "not", false_wrap_goal, 0, 0, 0, 0, 0, "", "")
+    return 125 if proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, wrap_negation)
+    return 126 if not proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, false_order_negation)
+    underflow: usize = add_node(&nodes, "binary", "-", typed_zero, typed_one, 0, 0, 0, 0, "", "")
+    underflow_goal: usize = add_node(&nodes, "binary", "==", underflow, typed_max, 0, 0, 0, 0, "", "")
+    return 121 if not proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, underflow_goal)
+    nested: usize = add_node(&nodes, "binary", "+", underflow, typed_one, 0, 0, 0, 0, "", "")
+    nested_goal: usize = add_node(&nodes, "binary", "==", nested, typed_zero, 0, 0, 0, 0, "", "")
+    return 122 if not proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, nested_goal)
+    # A small shared DAG must not trigger exponential trusted evaluation.
+    shared: mutable usize = typed_zero
+    for index in 0..<14 |index, nodes, shared|:
+        shared <- add_node(&nodes, "binary", "+", shared, shared, 0, 0, 0, 0, "", "")
+    return 123 if typed_constant_expression_comparison(&nodes, shared, "==", typed_zero).known
+    cyclic_constant: usize = nodes.count
+    cycle_constant: usize = add_node(&nodes, "binary", "+", cyclic_constant, typed_zero, 0, 0, 0, 0, "", "")
+    return 124 if typed_constant_expression_comparison(&nodes, cycle_constant, "==", typed_zero).known
+    malformed_constant: usize = add_node(&nodes, "binary", "+", typed_max, typed_one, 64, 0, 0, 0, "", "")
+    return 127 if typed_constant_expression_comparison(&nodes, malformed_constant, "==", typed_zero).known
+    mixed_constant: usize = add_node(&nodes, "binary", "+", typed_zero, signed_zero, 0, 0, 0, 0, "", "")
+    return 128 if typed_constant_expression_comparison(&nodes, mixed_constant, "==", typed_zero).known
+    return 114 if proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, typed_max)
+    for index in 0..<operators.count |index, operators, expected, nodes, children, typed_zero, typed_max, empty_facts, empty_environment|:
+        comparison: usize = add_node(&nodes, "binary", operators[index], typed_zero, typed_max, 0, 0, 0, 0, "", "")
+        admitted: bool = proof_kernel_replay_goal_report(&nodes, &children, empty_facts, comparison)
+        return 107 if admitted != expected[index]
+        typed_admitted: bool = proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, comparison)
+        return 115 if typed_admitted != expected[index]
+        negated: usize = add_node(&nodes, "unary", "not", comparison, 0, 0, 0, 0, 0, "", "")
+        denied: bool = proof_kernel_replay_goal_report(&nodes, &children, empty_facts, negated)
+        return 110 if denied == expected[index]
+        return 116 if proof_kernel_replay_goal_report_typed(&nodes, &children, empty_environment, empty_facts, negated) == expected[index]
+    typed_high_bit: usize = add_node(&nodes, "typed-int", "", 0, 0, 0, 0, 0, 0 - 9223372036854775807 - 1, "u64", "")
+    typed_signed_max: usize = add_node(&nodes, "typed-int", "", 0, 0, 0, 0, 0, 9223372036854775807, "u64", "")
+    high_bit_above: usize = add_node(&nodes, "binary", ">", typed_high_bit, typed_signed_max, 0, 0, 0, 0, "", "")
+    high_bit_below: usize = add_node(&nodes, "binary", "<", typed_high_bit, typed_signed_max, 0, 0, 0, 0, "", "")
+    return 108 if not proof_kernel_replay_goal_report(&nodes, &children, empty_facts, high_bit_above)
+    return 109 if proof_kernel_replay_goal_report(&nodes, &children, empty_facts, high_bit_below)
+    closed_false_leaf: usize = add_node(&nodes, "bool", "", 0, 0, 0, 0, 0, 0, "", "")
+    high_bit_clause: usize = add_node(&nodes, "binary", "or", high_bit_above, closed_false_leaf, 0, 0, 0, 0, "", "")
+    false_high_bit_clause: usize = add_node(&nodes, "binary", "or", high_bit_below, closed_false_leaf, 0, 0, 0, 0, "", "")
+    return 111 if not proof_kernel_replay_goal_report(&nodes, &children, empty_facts, high_bit_clause)
+    return 112 if proof_kernel_replay_goal_report(&nodes, &children, empty_facts, false_high_bit_clause)
+    numeric_boolean: usize = add_node(&nodes, "binary", "or", typed_max, closed_false_leaf, 0, 0, 0, 0, "", "")
+    return 117 if proof_kernel_replay_proposition_formation_report(&nodes, &children, empty_environment, empty_facts, numeric_boolean)
+    x: usize = add_node(&nodes, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
+    zero: usize = add_node(&nodes, "int", "", 0, 0, 0, 0, 0, 0, "", "")
+    one: usize = add_node(&nodes, "int", "", 0, 0, 0, 0, 0, 1, "", "")
+    three: usize = add_node(&nodes, "int", "", 0, 0, 0, 0, 0, 3, "", "")
+    four: usize = add_node(&nodes, "int", "", 0, 0, 0, 0, 0, 4, "", "")
+    width: usize = add_node(&nodes, "int", "", 0, 0, 0, 0, 0, 8, "", "")
+    maximum: usize = add_node(&nodes, "int", "", 0, 0, 0, 0, 0, 255, "", "")
+    return 8 if not proof_kernel_replay_expr_equal_public(&nodes, &children, zero, zero, 0)
+    return 9 if proof_kernel_replay_expr_equal_public(&nodes, &children, zero, one, 0)
+    return 10 if proof_kernel_replay_expr_equal_public(&nodes, &children, zero, x, 0)
+    return 11 if proof_kernel_replay_expr_equal_public(&nodes, &children, zero, zero, PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
+    return 12 if proof_kernel_replay_expr_equal_public(&nodes, &children, nodes.count, zero, 0)
+    malformed_leaf: usize = add_node(&nodes, "int", "+", 0, 0, 0, 0, 0, 0, "", "")
+    return 13 if proof_kernel_replay_expr_equal_public(&nodes, &children, malformed_leaf, malformed_leaf, 0)
+    sum_one: usize = add_node(&nodes, "binary", "+", zero, one, 0, 0, 0, 0, "", "")
+    sum_one_copy: usize = add_node(&nodes, "binary", "+", zero, one, 0, 0, 0, 0, "", "")
+    sum_zero: usize = add_node(&nodes, "binary", "+", zero, zero, 0, 0, 0, 0, "", "")
+    return 16 if not proof_kernel_replay_expr_equal_public(&nodes, &children, sum_one, sum_one_copy, 0)
+    return 17 if proof_kernel_replay_expr_equal_public(&nodes, &children, sum_one, sum_zero, 0)
+    invalid_child: usize = add_node(&nodes, "binary", "+", nodes.count + 100, zero, 0, 0, 0, 0, "", "")
+    return 18 if proof_kernel_replay_expr_equal_public(&nodes, &children, invalid_child, invalid_child, 0)
+    cycle: usize = nodes.count
+    cyclic: usize = add_node(&nodes, "binary", "+", cycle, zero, 0, 0, 0, 0, "", "")
+    return 19 if proof_kernel_replay_expr_equal_public(&nodes, &children, cyclic, cyclic, 0)
+    bad_call_start: usize = children.count
+    children.push(zero)
+    bad_call: usize = add_node(&nodes, "call", "", x, 0, 0, bad_call_start, 1, 0, "", "")
+    return 20 if proof_kernel_replay_expr_equal_public(&nodes, &children, bad_call, bad_call, 0)
+    # Allocation-free leaf comparisons must retain the serialization boundary.
+    yes: usize = add_node(&nodes, "bool", "", 0, 0, 0, 0, 0, 1, "", "")
+    invalid_bool: usize = add_node(&nodes, "bool", "", 0, 0, 0, 0, 0, 2, "", "")
+    hidden_ident: usize = add_node(&nodes, "ident", "", 0, 0, 0, 0, 0, 0, "x", "hidden")
+    hidden_int: usize = add_node(&nodes, "int", "", 0, 0, 0, 1, 0, 0, "", "")
+    absent: usize = add_node(&nodes, "absent", "", 0, 0, 0, 0, 0, 0, "", "")
+    unsupported: usize = add_node(&nodes, "unsupported", "", 0, 0, 0, 0, 0, 0, "", "")
+    text: usize = add_node(&nodes, "string", "", 0, 0, 0, 0, 0, 0, "same", "")
+    other_text: usize = add_node(&nodes, "string", "", 0, 0, 0, 0, 0, 0, "other", "")
+    return 22 if not proof_kernel_replay_expr_equal_public(&nodes, &children, yes, yes, 0)
+    return 23 if proof_kernel_replay_expr_equal_public(&nodes, &children, invalid_bool, invalid_bool, 0)
+    return 24 if proof_kernel_replay_expr_equal_public(&nodes, &children, hidden_ident, x, 0)
+    return 25 if proof_kernel_replay_expr_equal_public(&nodes, &children, hidden_int, zero, 0)
+    return 26 if not proof_kernel_replay_expr_equal_public(&nodes, &children, absent, absent, 0)
+    return 27 if proof_kernel_replay_expr_equal_public(&nodes, &children, unsupported, unsupported, 0)
+    return 28 if not proof_kernel_replay_expr_equal_public(&nodes, &children, text, text, 0)
+    return 29 if proof_kernel_replay_expr_equal_public(&nodes, &children, text, other_text, 0)
+    return 30 if proof_kernel_replay_expr_equal_public(&nodes, &children, zero, yes, 0)
+    false_goal: usize = add_node(&nodes, "binary", "==", x, zero, 0, 0, 0, 0, "", "")
+    closed_false: usize = add_node(&nodes, "binary", "<=", four, three, 0, 0, 0, 0, "", "")
+    closed_true: usize = add_node(&nodes, "binary", "<=", three, three, 0, 0, 0, 0, "", "")
+    closed_clause: usize = add_node(&nodes, "binary", "or", closed_false, false_goal, 0, 0, 0, 0, "", "")
+    true_clause: usize = add_node(&nodes, "binary", "or", closed_true, false_goal, 0, 0, 0, 0, "", "")
+    closed_facts: darray[usize] = [closed_clause]
+    true_facts: darray[usize] = [true_clause]
+    return 14 if not proof_kernel_replay_goal_report(&nodes, &children, closed_facts, false_goal)
+    return 15 if proof_kernel_replay_goal_report(&nodes, &children, true_facts, false_goal)
+    upper: usize = add_node(&nodes, "binary", "<=", x, three, 0, 0, 0, 0, "", "")
+    equal_four: usize = add_node(&nodes, "binary", "==", x, four, 0, 0, 0, 0, "", "")
+    # Without a primitive integer witness, rounded integer bounds are forbidden.
+    fractional_lower: usize = add_node(&nodes, "binary", ">", x, zero, 0, 0, 0, 0, "", "")
+    fractional_upper: usize = add_node(&nodes, "binary", "<", x, one, 0, 0, 0, 0, "", "")
+    untyped_facts: darray[usize] = [fractional_lower, fractional_upper]
+    return 1 if proof_kernel_replay_goal_report(&nodes, &children, untyped_facts, false_goal)
+    marker_name: usize = add_node(&nodes, "ident", "", 0, 0, 0, 0, 0, 0, "__elisa_unsigned_type_bound", "")
+    first: usize = add_node(&nodes, "call_arg", "", x, 0, 0, 0, 0, 0, "", "")
+    second: usize = add_node(&nodes, "call_arg", "", width, 0, 0, 0, 0, 0, "", "")
+    marker_start: usize = children.count
+    children.push(first)
+    children.push(second)
+    marker: usize = add_node(&nodes, "call", "", marker_name, 0, 0, marker_start, 2, 0, "", "")
+    impossible: darray[usize] = [marker, equal_four, upper]
+    return 2 if not proof_kernel_replay_goal_report(&nodes, &children, impossible, false_goal)
+    equal_three: usize = add_node(&nodes, "binary", "==", x, three, 0, 0, 0, 0, "", "")
+    consistent: darray[usize] = [marker, equal_three, upper]
+    return 3 if proof_kernel_replay_goal_report(&nodes, &children, consistent, false_goal)
+    unit_clause: usize = add_node(&nodes, "binary", "or", upper, false_goal, 0, 0, 0, 0, "", "")
+    known_prefix_goal: usize = add_node(&nodes, "binary", "or", unit_clause, fractional_upper, 0, 0, 0, 0, "", "")
+    known_prefix_facts: darray[usize] = [unit_clause]
+    return 21 if not proof_kernel_replay_goal_report(&nodes, &children, known_prefix_facts, known_prefix_goal)
+    forced_unit: darray[usize] = [marker, equal_four, unit_clause]
+    return 5 if not proof_kernel_replay_goal_report(&nodes, &children, forced_unit, false_goal)
+    boundary_unit: darray[usize] = [marker, equal_three, unit_clause]
+    return 6 if proof_kernel_replay_goal_report(&nodes, &children, boundary_unit, false_goal)
+    fractional_clause: usize = add_node(&nodes, "binary", "or", fractional_upper, false_goal, 0, 0, 0, 0, "", "")
+    fractional_unit: darray[usize] = [fractional_lower, fractional_clause]
+    return 7 if proof_kernel_replay_goal_report(&nodes, &children, fractional_unit, false_goal)
+    equal_maximum: usize = add_node(&nodes, "binary", "==", x, maximum, 0, 0, 0, 0, "", "")
+    increment: usize = add_node(&nodes, "binary", "+", x, one, 0, 0, 0, 0, "", "")
+    wrapped_zero: usize = add_node(&nodes, "binary", "==", increment, zero, 0, 0, 0, 0, "", "")
+    wrapping: darray[usize] = [marker, equal_maximum, wrapped_zero]
+    return 4 if proof_kernel_replay_goal_report(&nodes, &children, wrapping, false_goal)
+    # Candidate filtering must preserve exact matches and primitive admission.
+    unrelated_order: usize = add_node(&nodes, "binary", "<", zero, one, 0, 0, 0, 0, "", "")
+    matching_order: usize = add_node(&nodes, "binary", "<", x, three, 0, 0, 0, 0, "", "")
+    distinct: usize = add_node(&nodes, "binary", "!=", x, three, 0, 0, 0, 0, "", "")
+    reversed_distinct: usize = add_node(&nodes, "binary", "!=", three, x, 0, 0, 0, 0, "", "")
+    matching_orders: darray[usize] = [marker, unrelated_order, matching_order]
+    unrelated_orders: darray[usize] = [marker, unrelated_order]
+    untyped_orders: darray[usize] = [unrelated_order, matching_order]
+    return 31 if not proof_kernel_replay_goal_report(&nodes, &children, matching_orders, distinct)
+    return 32 if not proof_kernel_replay_goal_report(&nodes, &children, matching_orders, reversed_distinct)
+    return 33 if proof_kernel_replay_goal_report(&nodes, &children, unrelated_orders, distinct)
+    return 34 if proof_kernel_replay_goal_report(&nodes, &children, untyped_orders, distinct)
+    return 0

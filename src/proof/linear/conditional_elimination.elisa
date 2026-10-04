@@ -1,0 +1,84 @@
+extend ElisaProof:
+    public:
+        def proof_unsigned_named_condition_refuted(condition: Ast::Expr, facts: darray[Ast::Expr]&, truth: bool) -> bool:
+            work: mutable usize = 4096
+            return proof_condition_refuted_depth(condition, facts, truth, 0, &work)
+
+        def proof_condition_refuted_depth(condition: Ast::Expr, facts: darray[Ast::Expr]&, truth: bool, depth: usize, work: mutable usize&) -> bool:
+            requires depth <= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+            decreases PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT - depth
+            return false if depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT or work == 0
+            work <- work - 1
+            match condition:
+                Ast::Expr.Binary(a, operator, b, _):
+                    if operator == TokenKind.And:
+                        left: bool = proof_condition_refuted_depth(a, facts, truth, depth + 1, work)
+                        right: bool = proof_condition_refuted_depth(b, facts, truth, depth + 1, work)
+                        return (left or right) if truth else (left and right)
+                    if operator == TokenKind.Or:
+                        left: bool = proof_condition_refuted_depth(a, facts, truth, depth + 1, work)
+                        right: bool = proof_condition_refuted_depth(b, facts, truth, depth + 1, work)
+                        return (left and right) if truth else (left or right)
+                    if (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and proof_primitive_comparison(a, b, facts):
+                        desired: TokenKind = proof_comparison_negation(operator) if truth else operator
+                        for fact in facts |fact, facts, a, b, desired|:
+                            match fact:
+                                Ast::Expr.Binary(x, op, y, _):
+                                    return true if op == desired and proof_primitive_comparison(x, y, facts) and proof_expr_equal(x, a) and proof_expr_equal(y, b)
+                                _:
+                                    pass
+                    return false if not proof_is_order_operator(operator) or proof_ident_name(a) == "" or proof_ident_name(b) == ""
+                    width: i64 = proof_peer_unsigned_width(a, facts)
+                    return false if width != 8 and width != 16 and width != 32 and width != 64
+                    return false if proof_peer_unsigned_width(b, facts) != width or not proof_primitive_comparison(a, b, facts)
+                    desired: TokenKind = proof_comparison_negation(operator) if truth else operator
+                    for fact in facts |fact, facts, a, b, desired|:
+                        order = proof_readable_order(fact, facts)
+                        return true if order.known and order.operator == desired and proof_expr_equal(order.left, a) and proof_expr_equal(order.right, b)
+                _:
+                    pass
+            return false
+        # Case analysis is logical, not signed interpretation of the arms.
+        # Both branches must prove, using the existing split and work budgets.
+        def proof_conditional_comparison_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            match goal:
+                Ast::Expr.Binary(left, operator, right, position):
+                    return false if not proof_is_comparison(operator)
+                    return false if not proof_expression_is_conditional(left) and not proof_expression_is_conditional(right)
+                    if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                        exhausted <- true
+                        return false
+                    # Null equality is a typed proposition, not scalar pointer
+                    # arithmetic. Both arms still require separate proofs.
+                    null_test: bool = (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and (proof_ident_name(proof_strip_parens(left)) == "null" or proof_ident_name(proof_strip_parens(right)) == "null")
+                    return false if not null_test and not proof_primitive_comparison(left, right, facts)
+                    match left:
+                        Ast::Expr.If(condition, then_expression, else_expression, _):
+                            then_facts: mutable darray[Ast::Expr] = []
+                            else_facts: mutable darray[Ast::Expr] = []
+                            then_facts.extend(facts)
+                            else_facts.extend(facts)
+                            then_facts.push(condition)
+                            else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
+                            then_goal: Ast::Expr = Ast::Expr.Binary(then_expression, operator, right, position)
+                            else_goal: Ast::Expr = Ast::Expr.Binary(else_expression, operator, right, position)
+                            return true if (proof_unsigned_named_condition_refuted(condition, facts, true) or proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)) and (proof_unsigned_named_condition_refuted(condition, facts, false) or proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted))
+                        _:
+                            pass
+                    match right:
+                        Ast::Expr.If(condition, then_expression, else_expression, _):
+                            then_facts: mutable darray[Ast::Expr] = []
+                            else_facts: mutable darray[Ast::Expr] = []
+                            then_facts.extend(facts)
+                            else_facts.extend(facts)
+                            then_facts.push(condition)
+                            else_facts.push(Ast::Expr.Unary(TokenKind.Not, condition, position))
+                            mirror_null: bool = null_test and proof_ident_name(proof_strip_parens(left)) == "null"
+                            then_goal: Ast::Expr = Ast::Expr.Binary(then_expression if mirror_null else left, operator, left if mirror_null else then_expression, position)
+                            else_goal: Ast::Expr = Ast::Expr.Binary(else_expression if mirror_null else left, operator, left if mirror_null else else_expression, position)
+                            return true if (proof_unsigned_named_condition_refuted(condition, facts, true) or proof_goal_depth(then_facts, then_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)) and (proof_unsigned_named_condition_refuted(condition, facts, false) or proof_goal_depth(else_facts, else_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted))
+                        _:
+                            pass
+                _:
+                    pass
+            return false

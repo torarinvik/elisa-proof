@@ -1,0 +1,94 @@
+# Decode explicit literal source spelling before interpreting an i64 bit payload.
+# No kernel admission is performed here. Target-sized sorts require an explicit
+# target-width witness and therefore remain unknown to this fixed-width decoder.
+extend ElisaProof:
+    private:
+        def proof_numeric_literal_sort_name(unsigned: bool, width: i64) -> sview:
+            return "u8" if unsigned and width == 8
+            return "u16" if unsigned and width == 16
+            return "u32" if unsigned and width == 32
+            return "u64" if unsigned and width == 64
+            return "i8" if not unsigned and width == 8
+            return "i16" if not unsigned and width == 16
+            return "i32" if not unsigned and width == 32
+            return "i64" if not unsigned and width == 64
+            return ""
+
+        # Compare decoded positive-token literals only when their explicit sorts
+        # agree. Unary signs and mixed-sort coercions need expression typing;
+        # neither can be inferred from the signed storage payload.
+        def proof_replay_numeric_literal_comparison(left_text: sview, left_sort: sview, operator: sview, right_text: sview, right_sort: sview) -> (known: bool, value: bool):
+            return (false, false) if left_sort != right_sort
+            left = proof_decode_numeric_literal_sort(left_text, left_sort)
+            right = proof_decode_numeric_literal_sort(right_text, right_sort)
+            return (false, false) if not left.known or not right.known
+            return (true, left.bits == right.bits) if operator == "=="
+            return (true, left.bits != right.bits) if operator == "!="
+            return (true, left.bits < right.bits) if operator == "<"
+            return (true, left.bits <= right.bits) if operator == "<="
+            return (true, left.bits > right.bits) if operator == ">"
+            return (true, left.bits >= right.bits) if operator == ">="
+            return (false, false)
+
+        def proof_decode_numeric_literal_sort(text: sview, sort: sview) -> (known: bool, bits: u64, unsigned: bool, width: i64):
+            unsigned: bool = sort == "u8" or sort == "u16" or sort == "u32" or sort == "u64"
+            signed: bool = sort == "i8" or sort == "i16" or sort == "i32" or sort == "i64"
+            return (false, 0, false, 0) if not unsigned and not signed
+            width: i64 = 8 if sort == "u8" or sort == "i8" else 16 if sort == "u16" or sort == "i16" else 32 if sort == "u32" or sort == "i32" else 64
+            maximum: mutable u64 = 18446744073709551615u64 if unsigned else 9223372036854775807u64
+            maximum <- 255 if unsigned and width == 8
+            maximum <- 127 if signed and width == 8
+            maximum <- 65535 if unsigned and width == 16
+            maximum <- 32767 if signed and width == 16
+            maximum <- 4294967295 if unsigned and width == 32
+            maximum <- 2147483647 if signed and width == 32
+            count: usize = sview_len(text)
+            return (false, 0, false, 0) if count == 0 or count > 4096
+            hex: bool = count >= 2 and sview_at(text, 0) == 48 and (sview_at(text, 1) == 120 or sview_at(text, 1) == 88)
+            base: u64 = 16 if hex else 10
+            index: mutable usize = 2 if hex else 0
+            value: mutable u64 = 0
+            digits: mutable usize = 0
+            while index < count |index, value, digits, text, count, hex, base, maximum|:
+                byte: u8 = sview_at(text, index)
+                if byte == 95:
+                    return (false, 0, false, 0) if digits == 0
+                    index <- index + 1
+                    continue
+                digit: mutable u64 = 16
+                digit <- (byte - 48).u64() if byte >= 48 and byte <= 57
+                digit <- (byte - 65 + 10).u64() if hex and byte >= 65 and byte <= 70
+                digit <- (byte - 97 + 10).u64() if hex and byte >= 97 and byte <= 102
+                return (false, 0, false, 0) if digit >= base or digit > maximum
+                # Check before multiply/add; hostile spellings cannot wrap or
+                # saturate into the expected smaller AST payload.
+                return (false, 0, false, 0) if value > (maximum - digit) / base
+                value <- value * base + digit
+                digits <- digits + 1
+                index <- index + 1
+            return (false, 0, false, 0) if digits == 0
+            return (true, value, unsigned, width)
+
+        def proof_replay_numeric_literal_sort(annotations: darray[Ast::EnumAnnotation]&, line: u32, column: u32, payload: i64) -> (known: bool, bits: u64, unsigned: bool, width: i64):
+            return (false, 0, false, 0) if line == 0 or column == 0
+            matches: mutable usize = 0
+            result: mutable (known: bool, bits: u64, unsigned: bool, width: i64) = (false, 0, false, 0)
+            for index in 0..<annotations.count |index, annotations, line, column, payload, matches, result|:
+                row: Ast::EnumAnnotation = annotations[index]
+                if row.owner == "__numeric_literal_sort_column":
+                    return (false, 0, false, 0) if index == 0 or annotations[index - 1].owner != "__numeric_literal_sort"
+                if row.owner == "__numeric_literal_sort_text":
+                    return (false, 0, false, 0) if index < 2 or annotations[index - 1].owner != "__numeric_literal_sort_column" or annotations[index - 2].owner != "__numeric_literal_sort"
+                continue if row.owner != "__numeric_literal_sort"
+                return (false, 0, false, 0) if index + 2 >= annotations.count
+                at_column: Ast::EnumAnnotation = annotations[index + 1]
+                spelling: Ast::EnumAnnotation = annotations[index + 2]
+                return (false, 0, false, 0) if at_column.owner != "__numeric_literal_sort_column" or at_column.name != row.name or at_column.line == 0
+                return (false, 0, false, 0) if spelling.owner != "__numeric_literal_sort_text" or spelling.line != row.line
+                continue if row.line != line or at_column.line != column
+                matches <- matches + 1
+                return (false, 0, false, 0) if matches != 1
+                decoded = proof_decode_numeric_literal_sort(spelling.name, row.name)
+                return (false, 0, false, 0) if not decoded.known or decoded.bits.i64() != payload
+                result <- decoded
+            return result if matches == 1 else (false, 0, false, 0)

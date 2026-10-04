@@ -1,0 +1,215 @@
+extend ElisaProof:
+    public:
+        def proof_logical_constant_value(expression: Ast::Expr, depth: usize = 0) -> (known: bool, value: bool):
+            return (false, false) if depth >= 64
+            match proof_strip_parens(expression):
+                Ast::Expr.BoolLit(value, _):
+                    return (true, value)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    inner_value = proof_logical_constant_value(inner, depth + 1)
+                    return (inner_value.known, not inner_value.value)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (false, false) if operator != TokenKind.And and operator != TokenKind.Or
+                    a = proof_logical_constant_value(left, depth + 1)
+                    b = proof_logical_constant_value(right, depth + 1)
+                    if operator == TokenKind.And:
+                        return (true, false) if (a.known and not a.value) or (b.known and not b.value)
+                        return (a.known and b.known, a.value and b.value)
+                    return (true, true) if (a.known and a.value) or (b.known and b.value)
+                    return (a.known and b.known, a.value or b.value)
+                _:
+                    return (false, false)
+
+        # Truth transport from exact primitive comparison premises. Fuel is
+        # shared across both children; no arithmetic model is treated as proof.
+        def proof_logical_context_value(expression: Ast::Expr, facts: darray[Ast::Expr]&, fuel: mutable usize&, depth: usize = 0) -> (known: bool, value: bool):
+            return (false, false) if depth >= 64 or fuel == 0
+            fuel <- fuel - 1
+            match proof_strip_parens(expression):
+                Ast::Expr.BoolLit(value, _):
+                    return (true, value)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    result = proof_logical_context_value(inner, facts, fuel, depth + 1)
+                    return (result.known, not result.value)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        a = proof_logical_context_value(left, facts, fuel, depth + 1)
+                        b = proof_logical_context_value(right, facts, fuel, depth + 1)
+                        if operator == TokenKind.And:
+                            return (true, false) if (a.known and not a.value) or (b.known and not b.value)
+                            return (a.known and b.known, a.value and b.value)
+                        return (true, true) if (a.known and a.value) or (b.known and b.value)
+                        return (a.known and b.known, a.value or b.value)
+                    return (false, false) if not proof_is_comparison(operator) or not proof_primitive_comparison(left, right, facts)
+                    for fact in facts |fact, facts, left, right, operator|:
+                        match proof_strip_parens(fact):
+                            Ast::Expr.Binary(a, relation, b, _):
+                                continue if not proof_is_comparison(relation) or not proof_primitive_comparison(a, b, facts)
+                                continue if not proof_expr_equal(a, left) or not proof_expr_equal(b, right)
+                                return (true, true) if relation == operator
+                                return (true, false) if relation == proof_comparison_negation(operator)
+                            _:
+                                pass
+                _:
+                    pass
+            return (false, false)
+
+        def proof_logical_equation_form(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize = 0) -> bool:
+            return false if depth >= 64
+            match proof_strip_parens(expression):
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _) | Ast::Expr.Call(_, _, _, _):
+                    return proof_scalar_term_witnessed(expression, facts, 0)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_logical_equation_form(inner, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        return proof_logical_equation_form(left, facts, depth + 1) and proof_logical_equation_form(right, facts, depth + 1)
+                    return proof_is_comparison(operator) and proof_primitive_comparison(left, right, facts)
+                _:
+                    return false
+
+        def proof_comparison_boolean_equation_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, equality, right, _):
+                    return false if equality != TokenKind.EqEq and equality != TokenKind.BangEq
+                    comparison: mutable Ast::Expr = left
+                    literal: mutable Ast::Expr = right
+                    match left:
+                        Ast::Expr.BoolLit(_, _):
+                            comparison <- right
+                            literal <- left
+                        _:
+                            pass
+                    match literal:
+                        Ast::Expr.BoolLit(value, _):
+                            positive: bool = value if equality == TokenKind.EqEq else not value
+                            # Logical connective results are Boolean by formation, not
+                            # integer terms. Equality to a Boolean literal preserves
+                            # the proposition or its exact negation.
+                            logical: mutable bool = false
+                            match comparison:
+                                Ast::Expr.Binary(_, connective, _, _):
+                                    logical <- connective == TokenKind.And or connective == TokenKind.Or
+                                Ast::Expr.Unary(unary_operator, _, _):
+                                    logical <- unary_operator == TokenKind.Not
+                                _:
+                                    pass
+                            if logical:
+                                return false if not proof_logical_equation_form(comparison, facts)
+                                fuel: mutable usize = 128
+                                constant = proof_logical_context_value(comparison, facts, fuel)
+                                return constant.value == positive if constant.known
+                                rewritten: Ast::Expr = comparison if positive else Ast::Expr.Unary(TokenKind.Not, comparison, Ast::pos_at_line(0))
+                                return proof_goal_depth(facts, rewritten, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                            match comparison:
+                                Ast::Expr.Binary(a, operator, b, position):
+                                    return false if not proof_is_comparison(operator) or not proof_primitive_comparison(a, b, facts)
+                                    rewritten: Ast::Expr = Ast::Expr.Binary(a, operator if positive else proof_comparison_negation(operator), b, position)
+                                    return proof_goal_depth(facts, rewritten, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                                _:
+                                    pass
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_unsigned_pinned_comparison(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_is_comparison(operator) or not proof_primitive_comparison(left, right, facts)
+                    on_left: bool = proof_ident_name(left) != ""
+                    alias: Ast::Expr = left if on_left else right
+                    cap: Ast::Expr = right if on_left else left
+                    return false if proof_ident_name(alias) == ""
+                    width: i64 = proof_peer_unsigned_width(alias, facts)
+                    return false if width != 8 and width != 16 and width != 32 and width != 64
+                    if proof_ident_name(cap) != "" and (operator == TokenKind.LtEq or operator == TokenKind.GtEq):
+                        zero: Ast::Expr = left if operator == TokenKind.LtEq else right
+                        peer: Ast::Expr = right if operator == TokenKind.LtEq else left
+                        return false if proof_peer_unsigned_width(peer, facts) != width or proof_peer_unsigned_width(zero, facts) != width
+                        for fact in facts |fact, zero, facts, width, annotations|:
+                            match proof_strip_parens(fact):
+                                Ast::Expr.Binary(a, TokenKind.EqEq, b, _):
+                                    continue if not proof_primitive_comparison(a, b, facts)
+                                    pinned: Ast::Expr = b if proof_expr_equal(a, zero) else a
+                                    continue if not proof_expr_equal(a, zero) and not proof_expr_equal(b, zero)
+                                    match pinned:
+                                        Ast::Expr.IntLit(payload, at):
+                                            continue if payload != 0
+                                            literal = proof_replay_numeric_literal_sort(annotations, at.line, at.column, 0)
+                                            return true if not literal.known or (literal.unsigned and literal.width == width and literal.bits == 0)
+                                        _:
+                                            pass
+                                _:
+                                    pass
+                        return false
+                    match cap:
+                        Ast::Expr.IntLit(value, position):
+                            target = proof_replay_numeric_literal_sort(annotations, position.line, position.column, value)
+                            return false if not target.known or not target.unsigned or target.width != width
+                            for fact in facts |fact, facts, alias, width, annotations, target, on_left, operator|:
+                                match proof_strip_parens(fact):
+                                    Ast::Expr.Binary(a, TokenKind.EqEq, b, _):
+                                        continue if not proof_primitive_comparison(a, b, facts)
+                                        known: Ast::Expr = b if proof_expr_equal(a, alias) else a
+                                        continue if not proof_expr_equal(a, alias) and not proof_expr_equal(b, alias)
+                                        match known:
+                                            Ast::Expr.IntLit(payload, at):
+                                                literal = proof_replay_numeric_literal_sort(annotations, at.line, at.column, payload)
+                                                bits: mutable u64 = 0
+                                                if literal.known:
+                                                    continue if not literal.unsigned or literal.width != width
+                                                    bits <- literal.bits
+                                                else:
+                                                    continue if payload < 0 or (width != 64 and payload > proof_unsigned_width_max(width))
+                                                    bits <- payload.u64()
+                                                x: u64 = bits if on_left else target.bits
+                                                y: u64 = target.bits if on_left else bits
+                                                return x == y if operator == TokenKind.EqEq
+                                                return x != y if operator == TokenKind.BangEq
+                                                return x < y if operator == TokenKind.Lt
+                                                return x <= y if operator == TokenKind.LtEq
+                                                return x > y if operator == TokenKind.Gt
+                                                return x >= y
+                                            _:
+                                                pass
+                                    _:
+                                        pass
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_unsigned_pinned_premise_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            for index in 0..<facts.count |index, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                premise: mutable Ast::Expr = proof_strip_parens(facts[index])
+                negated: mutable bool = false
+                match premise:
+                    Ast::Expr.Unary(TokenKind.Not, inner, _):
+                        negated <- true
+                        premise <- proof_strip_parens(inner)
+                    _:
+                        pass
+                match premise:
+                    Ast::Expr.Binary(a, operator, b, position):
+                        continue if not proof_is_comparison(operator)
+                        continue if operator == TokenKind.EqEq
+                        positive: bool = proof_unsigned_pinned_comparison(facts, premise, annotations)
+                        negative: bool = proof_unsigned_pinned_comparison(facts, Ast::Expr.Binary(a, proof_comparison_negation(operator), b, position), annotations)
+                        continue if not positive and not negative
+                        return true if (positive and negated) or (negative and not negated)
+                        if budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS:
+                            exhausted <- true
+                            return false
+                        budget <- budget + 1
+                        reduced: mutable darray[Ast::Expr] = []
+                        for other in 0..<facts.count |other, index, facts, reduced|:
+                            reduced.push(facts[other]) if other != index
+                        return proof_goal_depth(reduced, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                    _:
+                        pass
+            return false

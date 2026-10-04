@@ -1,0 +1,161 @@
+extend ElisaProof:
+    private:
+        def proof_unsigned_nonzero_lower_bound(goal: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            term: mutable Ast::Expr = Ast::Expr.Invalid
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, _):
+                    a = proof_constant_int(left)
+                    b = proof_constant_int(right)
+                    if a.known and ((operator == TokenKind.LtEq and a.value == 1) or (operator == TokenKind.Lt and a.value == 0)):
+                        term <- right
+                    elif b.known and ((operator == TokenKind.GtEq and b.value == 1) or (operator == TokenKind.Gt and b.value == 0)):
+                        term <- left
+                    else:
+                        return false
+                    return false if not proof_primitive_comparison(left, right, facts)
+                _:
+                    return false
+            return false if proof_unsigned_width_in_expression(term, facts) == 0
+            for fact in facts |fact, term, facts|:
+                candidate: mutable Ast::Expr = proof_strip_parens(fact)
+                negated: mutable bool = false
+                match candidate:
+                    Ast::Expr.Unary(TokenKind.Not, inner, _):
+                        candidate <- proof_strip_parens(inner)
+                        negated <- true
+                    _:
+                        pass
+                match candidate:
+                    Ast::Expr.Binary(left, operator, right, _):
+                        continue if (not negated and operator != TokenKind.BangEq) or (negated and operator != TokenKind.EqEq)
+                        continue if not proof_primitive_comparison(left, right, facts)
+                        a = proof_constant_int(left)
+                        b = proof_constant_int(right)
+                        return true if a.known and a.value == 0 and proof_expr_equal(right, term)
+                        return true if b.known and b.value == 0 and proof_expr_equal(left, term)
+                    _:
+                        pass
+            return false
+
+        # Mirror an independently checked intermediate assertion: primitive
+        # strict order implies disequality, even when a conditional call
+        # summary obscures the direct interval path to the final goal.
+        def proof_goal_with_strict_order_consequence(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            candidate_goal: mutable Ast::Expr = proof_strip_parens(goal)
+            match candidate_goal:
+                Ast::Expr.Binary(_, TokenKind.Or, right, _):
+                    candidate_goal <- proof_strip_parens(right)
+                _:
+                    pass
+            nonzero_goal: mutable bool = false
+            match candidate_goal:
+                Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
+                    a = proof_constant_int(left)
+                    b = proof_constant_int(right)
+                    nonzero_goal <- (a.known and a.value == 0) or (b.known and b.value == 0)
+                _:
+                    pass
+            return false if not nonzero_goal and not proof_expr_has_call(goal)
+            for fact in facts |fact, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, operator, right, position):
+                        continue if operator != TokenKind.Lt and operator != TokenKind.Gt
+                        a = proof_constant_int(left)
+                        zero_left: bool = a.known and a.value == 0
+                        consequence: Ast::Expr = Ast::Expr.Binary(right if zero_left else left, TokenKind.BangEq, left if zero_left else right, position)
+                        present: mutable bool = false
+                        for premise in facts |premise, consequence, present|:
+                            present <- true if proof_fact_contains(premise, consequence)
+                        continue if present or not proof_strict_order_fact_implies_disequality(consequence, facts)
+                        if budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS:
+                            exhausted <- true
+                            return false
+                        budget <- budget + 1
+                        enriched: mutable darray[Ast::Expr] = []
+                        enriched.extend(facts)
+                        enriched.push(consequence)
+                        return true if proof_goal_depth(&enriched, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                    _:
+                        pass
+            return false
+
+        # Congruence may transport an established primitive comparison, but
+        # may not establish a comparison merely because its operands are typed.
+        def proof_comparison_congruence_fact(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, position):
+                    return false if operator == TokenKind.EqEq or not proof_is_comparison(operator) or not proof_primitive_comparison(left, right, facts)
+                    for fact in facts |fact, facts, left, right, operator, position, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                        match proof_strip_parens(fact):
+                            Ast::Expr.Binary(a, fact_operator, b, _):
+                                continue if operator != fact_operator or not proof_primitive_comparison(a, b, facts)
+                                left_equal: Ast::Expr = Ast::Expr.Binary(left, TokenKind.EqEq, a, position)
+                                right_equal: Ast::Expr = Ast::Expr.Binary(right, TokenKind.EqEq, b, position)
+                                return true if proof_goal_depth(facts, left_equal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) and proof_goal_depth(facts, right_equal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                            _:
+                                pass
+                _:
+                    pass
+            return false
+
+        # Make independently justified call-summary consequences available to
+        # equality/congruence search; this does not identify different calls.
+        def proof_goal_with_call_consequences(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            derived: mutable darray[Ast::Expr] = []
+            for fact in facts |facts, derived|:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        continue if not proof_primitive_comparison(left, right, facts)
+                        for orientation in 0..<2 |orientation, left, right, facts, derived|:
+                            consequence: Ast::Expr = right if orientation == 0 else left
+                            continue if proof_expr_has_call(consequence) or proof_expr_has_move(consequence)
+                            present: mutable bool = false
+                            for premise in facts |premise, consequence, present|:
+                                present <- true if proof_fact_contains(premise, consequence)
+                            continue if present or not proof_fact_proves_call_summary(facts, consequence)
+                            derived.push(consequence)
+                    _:
+                        pass
+            return false if derived.count == 0
+            enriched: mutable darray[Ast::Expr] = []
+            enriched.extend(facts)
+            enriched.extend(&derived)
+            return proof_goal_depth(&enriched, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+
+        # Weakening removes unused quantified premises from the entire recursive
+        # proof context, not merely from the machine-arithmetic safety checks.
+        def proof_goal_without_quantified_premises(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            reduced: mutable darray[Ast::Expr] = []
+            removed: mutable bool = false
+            for fact in facts |reduced, removed, annotations|:
+                if proof_quantifier_kind(fact, annotations) != "":
+                    removed <- true
+                else:
+                    reduced.push(fact)
+            return false if not removed
+            return proof_goal_depth(&reduced, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+
+        # Eliminate an exact primitive predicate equation, not an arbitrary
+        # overloaded equality. The replacement itself must still be proved.
+        def proof_predicate_equality_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            predicate_call: mutable Ast::Expr = proof_strip_parens(goal)
+            predicate_negated: mutable bool = false
+            match predicate_call:
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    predicate_call <- proof_strip_parens(operand)
+                    predicate_negated <- true
+                _:
+                    pass
+            return false if not proof_expr_is_call_rooted(predicate_call) or not proof_scalar_term_witnessed(predicate_call, facts, 0)
+            for fact in facts |facts, predicate_call, predicate_negated, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, position):
+                        continue if not proof_expr_equal(left, predicate_call) and not proof_expr_equal(right, predicate_call)
+                        replacement: Ast::Expr = right if proof_expr_equal(left, predicate_call) else left
+                        continue if proof_expr_is_invalid(replacement) or proof_expr_has_call(replacement) or proof_expr_has_move(replacement)
+                        continue if not proof_primitive_comparison(left, right, facts)
+                        rewritten: Ast::Expr = Ast::Expr.Unary(TokenKind.Not, replacement, position) if predicate_negated else replacement
+                        return true if proof_goal_depth(facts, rewritten, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                    _:
+                        pass
+            return false

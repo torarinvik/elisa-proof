@@ -1,0 +1,140 @@
+# Factored helpers retained by the branch integration.
+extend ElisaProof:
+    private:
+        def proof_add_lemma_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
+            return if not proof_kernel_expression_supported(expression)
+            return if not proof_kernel_report_append_allowed(report, facts.count, 1, name)
+            return if parameter_names.count != argument_values.count
+            return if not proof_kernel_report_append_allowed(report, report.fact_traces.count, 1, name)
+            return if not proof_kernel_report_append_allowed(report, report.fact_trace_summary_names.count, parameter_names.count, name)
+            return if not proof_kernel_report_append_allowed(report, report.fact_trace_summary_values.count, argument_values.count, name)
+            return if not proof_kernel_report_append_allowed(report, report.fact_trace_summary_require_goal_ids.count, require_goal_ids.count, name)
+            encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(expression, report, name)
+            return if not encoded.known
+            facts.push(expression)
+            bindings_start: usize = report.fact_trace_summary_names.count
+            report.fact_trace_summary_names.extend(parameter_names)
+            report.fact_trace_summary_values.extend(argument_values)
+            requires_start: usize = report.fact_trace_summary_require_goal_ids.count
+            report.fact_trace_summary_require_goal_ids.extend(require_goal_ids)
+            report.fact_traces.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "lemma-summary", line: line, name: name, dependency: dependency, premises_start: report.fact_trace_premises.count, premises_count: 0, kernel_premises_start: report.kernel_fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index, owner_line: 0})
+
+        def proof_type_bound_name(expression: Ast::Expr) -> sview:
+            marker_name: sview = proof_unsigned_marker_name(expression)
+            return marker_name if marker_name != ""
+            match proof_marker_callee_name(expression):
+                "__elisa_signed_type_bound":
+                    signed_marker = proof_signed_marker_info(expression)
+                    return proof_place_root_name(signed_marker.term, 0) if signed_marker.known
+                "__elisa_builtin_operator_type":
+                    builtin_marker = proof_builtin_operator_marker_info(expression)
+                    return proof_place_root_name(builtin_marker.term, 0) if builtin_marker.known
+                "__elisa_untrusted_operator_type":
+                    untrusted_marker = proof_untrusted_operator_marker_info(expression)
+                    return proof_place_root_name(untrusted_marker.term, 0) if untrusted_marker.known
+                "__elisa_builtin_index_type":
+                    index_marker = proof_builtin_index_marker_info(expression)
+                    return proof_place_root_name(index_marker.term, 0) if index_marker.known
+                _:
+                    pass
+            # A type witness may be keyed by a place rather than a name. Retention follows the
+            # root symbol of that place, so `h.part`'s witness lives and dies with `h`.
+            root_name: sview = proof_type_marker_root_name(expression)
+            return root_name if root_name != ""
+            match expression:
+                Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
+                    match left:
+                        Ast::Expr.IntLit(value, _):
+                            match right:
+                                Ast::Expr.Ident(name, _):
+                                    return name if value == 0
+                                _:
+                                    pass
+                        _:
+                            pass
+                    match right:
+                        Ast::Expr.IntLit(_, _):
+                            match left:
+                                Ast::Expr.Ident(name, _):
+                                    return name
+                                _:
+                                    pass
+                        _:
+                            pass
+                _:
+                    pass
+            return ""
+
+        def proof_fact_is_type_bound(report: ProofReport&, expression: Ast::Expr, owner: sview) -> bool:
+            return false if proof_type_bound_name(expression) == ""
+            return false if report.type_bound_owner != owner
+            # Equal terms hash alike, so an entry with another hash cannot match.
+            hash: u32 = proof_expr_shape_hash(expression, 0)
+            indexed: bool = report.type_bound_seen_hashes.count == report.type_bound_seen.count
+            for index in 0..<report.type_bound_seen.count |index, report, expression, hash, indexed|:
+                continue if indexed and report.type_bound_seen_hashes[index] != hash
+                return true if proof_expr_equal(report.type_bound_seen[index], expression)
+            return false
+
+        # A qualified module constant is immutable independently of the function's alias
+        # analysis. Preserve only the exact fact that entered through the source-constant
+        # boundary; replay separately resolves that trace to one immutable declaration.
+        def proof_source_global_constant_term(report: ProofReport&, term: Ast::Expr, owner: sview) -> bool:
+            for trace in report.fact_traces:
+                continue if trace.name != owner or trace.kind != "global-constant-qualified"
+                match trace.expression:
+                    Ast::Expr.Binary(reference, TokenKind.EqEq, Ast::Expr.IntLit(_, _), _):
+                        return true if proof_expr_equal(reference, term)
+                    _:
+                        pass
+            return false
+
+        def proof_fact_is_source_global_constant(report: ProofReport&, expression: Ast::Expr, owner: sview) -> bool:
+            for trace in report.fact_traces:
+                continue if trace.name != owner
+                if proof_expr_equal(trace.expression, expression):
+                    return true if trace.kind == "global-constant" or trace.kind == "global-constant-qualified"
+                    if trace.kind == "type-bound":
+                        scalar_marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
+                        return true if scalar_marker.known and proof_source_global_constant_term(report, scalar_marker.term, owner)
+            return false
+
+        # Type bounds come from the compiler's variable type, not from mutable program state.
+        # Preserve only those explicitly traced facts across an opaque/recursive call, and only
+        # while their lexical binding is still live. Move-containing calls are excluded because
+        # ownership invalidation can remove the binding itself at the statement boundary.
+        def proof_restore_type_bound_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+            hashes: mutable darray[u32] = []
+            hashed: mutable bool = false
+            for fact in source |fact, facts, names, report, owner, hashes, hashed|:
+                bound_name: sview = proof_type_bound_name(fact)
+                continue if bound_name == "" or not (any candidate in names where candidate == bound_name)
+                continue if not proof_fact_is_type_bound(report, fact, owner)
+                # The duplicate check reads the target's hashes, taken once on first need.
+                if not hashed:
+                    hashes <- proof_fact_list_shape_hashes(facts)
+                    hashed <- true
+                hash: u32 = proof_expr_shape_hash(fact, 0)
+                if not proof_fact_list_contains_hashed(facts, hashes, fact, hash):
+                    facts.push(fact)
+                    hashes.push(hash)
+
+        # An imported qualified constant, `Limits::TOP == 8`, names an immutable declaration, so a
+        # call cannot falsify it; its path is no binding the stability scan can read, so it is
+        # restored by its trace, with the scalar witness of the same path.
+        def proof_restore_global_constant_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: ProofReport&, owner: sview) -> void:
+            for fact in source |fact, source, facts, report, owner|:
+                continue if not proof_fact_is_global_constant(report, fact, owner)
+                match fact:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, _, position):
+                        continue if proof_ident_name(left) != ""
+                        facts.push(fact) if not (any existing in facts where proof_expr_equal(existing, fact))
+                        witness: Ast::Expr = proof_scalar_term_marker(left, position)
+                        if any candidate in source where proof_expr_equal(candidate, witness):
+                            facts.push(witness) if not (any existing in facts where proof_expr_equal(existing, witness))
+                    _:
+                        pass
+
+        # A loop or pattern binder can shadow a name while the proof state still uses source
+        # spellings. Remove inherited type facts for those spellings before entering the child
+        # state; otherwise an outer `0 <= i` could be applied to an unrelated signed binder.

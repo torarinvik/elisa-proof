@@ -1,0 +1,58 @@
+# Required record-reference parameters supply null-exclusion facts, not ownership facts.
+# Scalars remain excluded: a scalar reference name can denote its dereferenced value.
+extend ElisaProof:
+    private:
+        def proof_required_record_reference_target(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_required_record_reference_target(inner, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    if operator == TokenKind.Mutable or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Static or operator == TokenKind.Tail:
+                        return proof_required_record_reference_target(inner, depth + 1)
+                    if operator == TokenKind.Ampersand:
+                        return proof_required_record_pointee_name(inner, depth + 1)
+                    return ""
+                _:
+                    return ""
+
+        def proof_required_record_pointee_name(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_required_record_pointee_name(inner, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_required_record_pointee_name(inner, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Static or operator == TokenKind.Tail
+                    return ""
+                _:
+                    return ""
+
+        def proof_required_reference_record_count(declarations: darray[Ast::Decl]&, wanted: sview, depth: usize) -> usize:
+            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |wanted, depth, count|:
+                match declaration:
+                    Ast::Decl.Struct(name, _, _, _, _, _, _):
+                        count <- count + 1 if name == wanted
+                    Ast::Decl.Alias(name, _, _):
+                        count <- count + 2 if name == wanted
+                    Ast::Decl.Enum(name, _, _, _, _):
+                        count <- count + 2 if name == wanted
+                    Ast::Decl.Module(_, body, _):
+                        count <- count + proof_required_reference_record_count(body, wanted, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_required_reference_record_count(body, wanted, depth + 1)
+                    _:
+                        pass
+            return count
+
+        def proof_add_required_reference_parameter_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, parameter: Ast::ParamDecl, owner: sview, position: Ast::Pos) -> void:
+            record: sview = proof_required_record_reference_target(parameter.type_expression, 0)
+            return if record == "" or parameter.name == ""
+            return if proof_required_reference_record_count(report.source_declarations, record, 0) != 1
+            expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(parameter.name, position), TokenKind.BangEq, Ast::Expr.Ident("null", position), position)
+            # Ordinary facts deliberately expire on rebinding, shadowing and opaque calls.
+            # Never classify this as a persistent type-bound fact over a reusable spelling.
+            proof_add_traced_fact(facts, report, expression, "required-reference-parameter", position.line, owner)

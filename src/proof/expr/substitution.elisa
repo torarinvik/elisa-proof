@@ -43,6 +43,10 @@ extend ElisaProof:
                         # `assert` is a runtime guard. The other contract forms are logical
                         # declarations and must not create executable call edges.
                         proof_collect_call_names(expression, names, qualifiers) if kind == "assert"
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        # Labels are not expressions. These control transfers add
+                        # no call edge; replay independently walks the whole body.
+                        pass
                     _:
                         proof_push_call_name(names, qualifiers, "__opaque_call__", "")
 
@@ -77,6 +81,33 @@ extend ElisaProof:
                 _:
                     pass
             return (false, Ast::Expr.Invalid)
+
+        # Project a field through the bounded record-update history used for mutable field
+        # writes. Stop at the original opaque base instead of feeding it back through the current
+        # root binding: doing so would recursively expand `state.field` into itself. The depth cap
+        # fails closed for long write histories.
+        def proof_project_record_field(base: Ast::Expr, field: sview, position: Ast::Pos, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match base:
+                Ast::Expr.RecordUpdate(previous, fields, _):
+                    for initializer in fields:
+                        return initializer.value if initializer.name == field
+                    return proof_project_record_field(previous, field, position, depth + 1)
+                Ast::Expr.Construct(_, fields, _):
+                    for initializer in fields:
+                        return initializer.value if initializer.name == field
+                    return Ast::Expr.Field(base, field, position)
+                Ast::Expr.Paren(inner, _):
+                    return proof_project_record_field(inner, field, position, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    then_field: Ast::Expr = proof_project_record_field(then_value, field, position, depth + 1)
+                    else_field: Ast::Expr = proof_project_record_field(else_value, field, position, depth + 1)
+                    return then_field if proof_expr_equal(then_field, else_field)
+                    return Ast::Expr.If(condition, then_field, else_field, position)
+                Ast::Expr.Invalid:
+                    return Ast::Expr.Invalid
+                _:
+                    return Ast::Expr.Field(base, field, position)
 
         def proof_substitute_scalar_reference_index(object: Ast::Expr, index: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&) -> (known: bool, value: Ast::Expr):
             match object:
@@ -174,12 +205,13 @@ extend ElisaProof:
                         # guess: `Box{value: x}.value` is exactly `x`. Positional or unknown
                         # fields remain opaque.
                         Ast::Expr.Construct(_, fields, _):
-                            for initializer in fields |names, values|:
-                                return proof_substitute(initializer.value, names, values) if initializer.name == field
+                            return proof_project_record_field(substituted_object, field, position, 0)
                         Ast::Expr.RecordUpdate(base, fields, _):
-                            for initializer in fields |names, values|:
-                                return proof_substitute(initializer.value, names, values) if initializer.name == field
-                            return proof_substitute(Ast::Expr.Field(base, field, position), names, values)
+                            return proof_project_record_field(substituted_object, field, position, 0)
+                        Ast::Expr.If(_, _, _, _):
+                            return proof_project_record_field(substituted_object, field, position, 0)
+                        Ast::Expr.Invalid:
+                            return Ast::Expr.Invalid
                         _:
                             pass
                     return Ast::Expr.Field(substituted_object, field, position)
@@ -337,12 +369,13 @@ extend ElisaProof:
                     substituted_object: Ast::Expr = proof_substitute_contract(object, names, values, old_names, old_values)
                     match substituted_object:
                         Ast::Expr.Construct(_, fields, _):
-                            for initializer in fields |names, values|:
-                                return proof_substitute_contract(initializer.value, names, values, old_names, old_values) if initializer.name == field
+                            return proof_project_record_field(substituted_object, field, position, 0)
                         Ast::Expr.RecordUpdate(base, fields, _):
-                            for initializer in fields |names, values|:
-                                return proof_substitute_contract(initializer.value, names, values, old_names, old_values) if initializer.name == field
-                            return proof_substitute_contract(Ast::Expr.Field(base, field, position), names, values, old_names, old_values)
+                            return proof_project_record_field(substituted_object, field, position, 0)
+                        Ast::Expr.If(_, _, _, _):
+                            return proof_project_record_field(substituted_object, field, position, 0)
+                        Ast::Expr.Invalid:
+                            return Ast::Expr.Invalid
                         _:
                             pass
                     return Ast::Expr.Field(substituted_object, field, position)

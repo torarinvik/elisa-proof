@@ -2,114 +2,7 @@ const PROOF_GOAL_COUNTEREXAMPLE_BUDGET: usize = 4096
 
 extend ElisaProof:
     public:
-        # For equally typed unsigned names, b <= a makes a - b non-wrapping,
-        # hence a - b <= a. Read only this direct order premise; no arithmetic
-        # assumptions are reinterpreted through the signed interval solver.
-        def proof_unsigned_subtraction_upper_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
-            match proof_strip_parens(goal):
-                Ast::Expr.Binary(difference, TokenKind.LtEq, bound, _):
-                    match proof_strip_parens(difference):
-                        Ast::Expr.Binary(first, TokenKind.Minus, second, _):
-                            return false if proof_ident_name(first) == "" or proof_ident_name(second) == ""
-                            return false if not proof_expr_equal(first, bound)
-                            width: i64 = proof_unsigned_width_in_expression(first, facts)
-                            return false if width == 0 or proof_unsigned_width_in_expression(second, facts) != width
-                            return proof_has_order_fact(second, first, false, facts)
-                        _:
-                            return false
-                _:
-                    return false
-
-        # A witnessed unsigned sum can be proved below a same-width bound when the facts give
-        # `second <= bound - first` and separately establish `first <= bound`. The subtraction
-        # and peer-width checks make that witness a non-wrapping proof of the sum itself, so run
-        # this shape before the generic unsigned-goal guard rejects the very addition being
-        # justified. Signed sums stay on the ordinary fully range-checked path.
-        def proof_unsigned_sum_upper_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
-            match proof_strip_parens(goal):
-                Ast::Expr.Binary(sum, operator, bound, _):
-                    return false if operator != TokenKind.Lt and operator != TokenKind.LtEq
-                    operands: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_sum_operands(sum)
-                    return false if not operands.known or proof_unsigned_width_in_expression(sum, facts) == 0
-                    return proof_sum_bound_goal(sum, operator, bound, facts)
-                _:
-                    return false
-
-        # An unsigned unit successor is strictly above its base when the addition is proved
-        # non-wrapping. Keep this rule structural: one side must be exactly the other's `+ 1`
-        # (in either operand order), both must have the same witnessed unsigned width, and the
-        # existing expression-safety checker must establish the successor is in range.
-        def proof_unsigned_unit_increment_order_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
-            match proof_strip_parens(goal):
-                Ast::Expr.Binary(left, operator, right, _):
-                    return false if operator != TokenKind.LtEq and operator != TokenKind.GtEq
-                    increment: mutable Ast::Expr = left
-                    base: mutable Ast::Expr = right
-                    if operator == TokenKind.LtEq:
-                        increment <- right
-                        base <- left
-                    shifted: (known: bool, base: Ast::Expr) = proof_shifted_unit_base(increment)
-                    return false if not shifted.known or not proof_expr_equal(shifted.base, base)
-                    width: i64 = proof_unsigned_width_in_expression(increment, facts)
-                    return false if width == 0 or proof_unsigned_width_in_expression(base, facts) != width
-                    return proof_unsigned_expression_safe(increment, facts)
-                _:
-                    return false
-
-        # If `base <= ceiling / k` for a positive same-width unsigned constant k, then
-        # `base * k <= ceiling`. Return only the exact structural witness; division by a
-        # different factor, a signed term, or a mismatched-width ceiling cannot close it.
-        def proof_unsigned_scaled_product_witness(product: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) can[Memory.Allocate, Abort.Panic]:
-            unknown: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = (false, Ast::Expr.Invalid, Ast::Expr.Invalid, 0)
-            match proof_strip_parens(product):
-                Ast::Expr.Binary(left, TokenKind.Star, right, _):
-                    right_constant: (known: bool, value: i64) = proof_constant_int(right)
-                    base: mutable Ast::Expr = left
-                    factor_expression: mutable Ast::Expr = right
-                    factor: mutable i64 = right_constant.value
-                    if not right_constant.known or right_constant.value <= 0:
-                        left_constant: (known: bool, value: i64) = proof_constant_int(left)
-                        return unknown if not left_constant.known or left_constant.value <= 0
-                        base <- right
-                        factor_expression <- left
-                        factor <- left_constant.value
-                    width: i64 = proof_unsigned_width_in_expression(product, facts)
-                    return unknown if width == 0 or proof_unsigned_width_in_expression(base, facts) != width
-                    return unknown if not proof_unsigned_constants_fit(factor_expression, width, 0)
-                    conjuncts: darray[Ast::Expr] = proof_conjunct_facts(facts)
-                    for fact in conjuncts |fact, base, factor_expression, factor, width|:
-                        order: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_readable_order(fact, facts)
-                        continue if not order.known
-                        quotient: mutable Ast::Expr = Ast::Expr.Invalid
-                        if order.operator == TokenKind.LtEq and proof_expr_equal(order.left, base):
-                            quotient <- order.right
-                        elif order.operator == TokenKind.GtEq and proof_expr_equal(order.right, base):
-                            quotient <- order.left
-                        else:
-                            continue
-                        match proof_strip_parens(quotient):
-                            Ast::Expr.Binary(ceiling, TokenKind.Slash, divisor, _):
-                                divisor_constant: (known: bool, value: i64) = proof_constant_int(divisor)
-                                continue if not divisor_constant.known or divisor_constant.value != factor
-                                continue if not proof_expr_equal(divisor, factor_expression)
-                                continue if proof_unsigned_width_in_expression(ceiling, facts) != width
-                                return (true, base, ceiling, factor)
-                            _:
-                                continue
-                    return unknown
-                _:
-                    return unknown
-
-        def proof_unsigned_scaled_product_upper_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
-            match proof_strip_parens(goal):
-                Ast::Expr.Binary(product, TokenKind.LtEq, bound, _):
-                    witness: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = proof_unsigned_scaled_product_witness(product, facts)
-                    return witness.known and proof_expr_equal(witness.bound, bound)
-                _:
-                    return false
-
-        # The nonnegativity rule addressed by the whole goal rather than by its operands, so it
-        # can be tried before the wrap guards that would otherwise refuse the goal outright.
+        # a<=b and c<=b-a prevent unsigned wrap in both a+c and b-c.
         def proof_unsigned_nonnegative_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
             match proof_strip_parens(goal):
                 Ast::Expr.Binary(left, operator, right, _):
@@ -152,7 +45,14 @@ extend ElisaProof:
             return proof_unsigned_expression_safe(sum, facts) if width == 0
             witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(first, second, facts)
             return false if not witness.known
-            return proof_peer_is_nameable(witness.bound) and proof_peer_unsigned_width(witness.bound, facts) == width
+            return true if proof_peer_is_nameable(witness.bound) and proof_peer_unsigned_width(witness.bound, facts) == width
+            # A nonnegative literal cap can also bound the mathematical sum.
+            # Keep the conservative width ceiling; no high-bit reinterpretation.
+            match proof_strip_parens(witness.bound):
+                Ast::Expr.IntLit(value, _):
+                    return value >= 0 and value <= proof_unsigned_width_max(width)
+                _:
+                    return false
 
         def proof_strict_shift_goal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
             return false if operator != TokenKind.LtEq
@@ -381,25 +281,25 @@ extend ElisaProof:
         # diagnostic aid, never an acceptance rule: a witness is
         # emitted only when every fact and the failed goal evaluate exactly under the assignment.
         # Unsupported expressions therefore produce no witness instead of a misleading guess.
-        def proof_counterexample_collect_names(expression: Ast::Expr, names: mutable darray[sview]&) -> void:
+        def proof_diagnostic_counterexample_collect_names(expression: Ast::Expr, names: mutable darray[sview]&) -> void:
             match expression:
                 Ast::Expr.Ident(name, _):
-                    if name != "" and proof_counterexample_name_index(names, name) == names.count:
+                    if name != "" and proof_diagnostic_counterexample_name_index(names, name) == names.count:
                         names.push(name)
                 Ast::Expr.Paren(inner, _):
-                    proof_counterexample_collect_names(inner, names)
+                    proof_diagnostic_counterexample_collect_names(inner, names)
                 Ast::Expr.Unary(_, operand, _):
-                    proof_counterexample_collect_names(operand, names)
+                    proof_diagnostic_counterexample_collect_names(operand, names)
                 Ast::Expr.Binary(left, _, right, _):
-                    proof_counterexample_collect_names(left, names)
-                    proof_counterexample_collect_names(right, names)
+                    proof_diagnostic_counterexample_collect_names(left, names)
+                    proof_diagnostic_counterexample_collect_names(right, names)
                 _:
                     pass
 
         # Counterexample assignments are user-facing semantic claims, unlike heuristic proof
         # search. Restrict them to atomic scalar comparisons: the evaluator stores every value in
         # i64 and cannot model narrower-width wrapping or overloaded operations on computed terms.
-        def proof_counterexample_integer_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, goal: Ast::Expr, boolean_names: darray[sview]&, depth: usize) -> bool:
+        def proof_diagnostic_counterexample_integer_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, goal: Ast::Expr, boolean_names: darray[sview]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(value, _):
@@ -408,126 +308,130 @@ extend ElisaProof:
                     # over it would refute true claims such as `0xFFFFFFFFFFFFFFFF > 0`.
                     return value >= 0
                 Ast::Expr.Ident(name, _):
-                    return proof_counterexample_integer_name(facts, goal, name, boolean_names) and proof_scalar_term_witnessed(expression, facts, depth + 1)
+                    return proof_diagnostic_counterexample_integer_name(facts, goal, name, boolean_names) and proof_scalar_term_witnessed(expression, facts, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_integer_atom(inner, facts, goal, boolean_names, depth + 1)
+                    return proof_diagnostic_counterexample_integer_atom(inner, facts, goal, boolean_names, depth + 1)
                 Ast::Expr.Unary(TokenKind.Plus, _, _) | Ast::Expr.Unary(TokenKind.Minus, _, _):
                     return proof_constant_int(expression).known
                 _:
                     return false
 
-        def proof_counterexample_boolean_atom(expression: Ast::Expr, boolean_names: darray[sview]&, depth: usize) -> bool:
+        def proof_diagnostic_counterexample_boolean_atom(expression: Ast::Expr, boolean_names: darray[sview]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.BoolLit(_, _):
                     return true
                 Ast::Expr.Ident(name, _):
-                    return proof_counterexample_has_name(boolean_names, name)
+                    return proof_diagnostic_counterexample_has_name(boolean_names, name)
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_boolean_atom(inner, boolean_names, depth + 1)
+                    return proof_diagnostic_counterexample_boolean_atom(inner, boolean_names, depth + 1)
                 _:
                     return false
 
-        def proof_counterexample_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, goal: Ast::Expr, boolean_names: darray[sview]&, depth: usize) -> bool:
+        def proof_diagnostic_counterexample_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, goal: Ast::Expr, boolean_names: darray[sview]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             return true if proof_type_marker_callee(expression)
             match expression:
                 Ast::Expr.BoolLit(_, _):
                     return true
                 Ast::Expr.Ident(name, _):
-                    return proof_counterexample_has_name(boolean_names, name)
+                    return proof_diagnostic_counterexample_has_name(boolean_names, name)
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_fragment(inner, facts, goal, boolean_names, depth + 1)
+                    return proof_diagnostic_counterexample_fragment(inner, facts, goal, boolean_names, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
-                    return proof_counterexample_fragment(operand, facts, goal, boolean_names, depth + 1)
+                    return proof_diagnostic_counterexample_fragment(operand, facts, goal, boolean_names, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And or operator == TokenKind.Or:
-                        return proof_counterexample_fragment(left, facts, goal, boolean_names, depth + 1) and proof_counterexample_fragment(right, facts, goal, boolean_names, depth + 1)
+                        return proof_diagnostic_counterexample_fragment(left, facts, goal, boolean_names, depth + 1) and proof_diagnostic_counterexample_fragment(right, facts, goal, boolean_names, depth + 1)
                     return false if not proof_is_comparison(operator)
-                    return true if proof_counterexample_integer_atom(left, facts, goal, boolean_names, depth + 1) and proof_counterexample_integer_atom(right, facts, goal, boolean_names, depth + 1)
-                    return (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and proof_counterexample_boolean_atom(left, boolean_names, 0) and proof_counterexample_boolean_atom(right, boolean_names, 0)
+                    return true if proof_diagnostic_counterexample_integer_atom(left, facts, goal, boolean_names, depth + 1) and proof_diagnostic_counterexample_integer_atom(right, facts, goal, boolean_names, depth + 1)
+                    return (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and proof_diagnostic_counterexample_boolean_atom(left, boolean_names, 0) and proof_diagnostic_counterexample_boolean_atom(right, boolean_names, 0)
                 _:
                     return false
 
         # Only borrow constants that occur directly against this same identifier. The fragment
         # checks its scalar domain before search; 0 and 1 are valid inhabitants of each admitted
         # domain, and copied literals have already passed the source compiler's type checks.
-        def proof_counterexample_collect_candidates(expression: Ast::Expr, name: sview, facts: darray[Ast::Expr]&, start: usize, bound: ProofBound, candidates: mutable darray[i64]&, depth: usize) -> void:
+        def proof_diagnostic_counterexample_collect_candidates(expression: Ast::Expr, name: sview, facts: darray[Ast::Expr]&, start: usize, bound: ProofBound, candidates: mutable darray[i64]&, depth: usize) -> void:
             return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    proof_counterexample_collect_candidates(inner, name, facts, start, bound, candidates, depth + 1)
+                    proof_diagnostic_counterexample_collect_candidates(inner, name, facts, start, bound, candidates, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
-                    proof_counterexample_collect_candidates(operand, name, facts, start, bound, candidates, depth + 1)
+                    proof_diagnostic_counterexample_collect_candidates(operand, name, facts, start, bound, candidates, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And or operator == TokenKind.Or:
-                        proof_counterexample_collect_candidates(left, name, facts, start, bound, candidates, depth + 1)
-                        proof_counterexample_collect_candidates(right, name, facts, start, bound, candidates, depth + 1)
+                        proof_diagnostic_counterexample_collect_candidates(left, name, facts, start, bound, candidates, depth + 1)
+                        proof_diagnostic_counterexample_collect_candidates(right, name, facts, start, bound, candidates, depth + 1)
                         return
                     return if not proof_is_comparison(operator)
                     match left:
                         Ast::Expr.Ident(left_name, _):
                             if left_name == name:
                                 constant: (known: bool, value: i64) = proof_constant_int(right)
-                                proof_counterexample_add_candidate(candidates, start, bound, constant.value) if constant.known
+                                proof_diagnostic_counterexample_add_candidate(candidates, start, bound, constant.value) if constant.known
                         _:
                             pass
                     match right:
                         Ast::Expr.Ident(right_name, _):
                             if right_name == name:
                                 constant: (known: bool, value: i64) = proof_constant_int(left)
-                                proof_counterexample_add_candidate(candidates, start, bound, constant.value) if constant.known
+                                proof_diagnostic_counterexample_add_candidate(candidates, start, bound, constant.value) if constant.known
                         _:
                             pass
                 _:
                     pass
 
-        def proof_counterexample_add_candidate(candidates: mutable darray[i64]&, start: usize, bound: ProofBound, value: i64) -> void:
+        def proof_diagnostic_counterexample_add_candidate(candidates: mutable darray[i64]&, start: usize, bound: ProofBound, value: i64) -> void:
             return if bound.has_lower and value < bound.lower
             return if bound.has_upper and value > bound.upper
             for index in start..<candidates.count |index, candidates, start, value|:
                 return if candidates[index] == value
             candidates.push(value)
 
-        def proof_counterexample_search(index: usize, names: darray[sview]&, boolean_names: darray[sview]&, values: mutable darray[i64]&, starts: darray[usize]&, counts: darray[usize]&, candidates: darray[i64]&, facts: darray[Ast::Expr]&, goal: Ast::Expr, budget: mutable usize&) -> bool:
+        def proof_diagnostic_counterexample_search(index: usize, names: darray[sview]&, boolean_names: darray[sview]&, values: mutable darray[i64]&, starts: darray[usize]&, counts: darray[usize]&, candidates: darray[i64]&, facts: darray[Ast::Expr]&, goal: Ast::Expr, budget: mutable usize&) -> bool:
             if index == names.count:
                 return false if budget == 0
                 budget <- budget - 1
                 for fact in facts |fact, names, values|:
-                    fact_value: (known: bool, value: bool) = proof_counterexample_diagnostic_bool(fact, names, boolean_names, values)
+                    fact_value: (known: bool, value: bool) = proof_diagnostic_counterexample_diagnostic_bool(fact, names, boolean_names, values)
                     return false if not fact_value.known or not fact_value.value
-                goal_value: (known: bool, value: bool) = proof_counterexample_diagnostic_bool(goal, names, boolean_names, values)
+                goal_value: (known: bool, value: bool) = proof_diagnostic_counterexample_diagnostic_bool(goal, names, boolean_names, values)
                 return goal_value.known and not goal_value.value
             start: usize = starts[index]
             end: usize = start + counts[index]
             candidate_index: mutable usize = start
             while candidate_index < end |candidate_index, end, candidates, values, index, names, starts, counts, facts, goal, budget|:
                 values[index] <- candidates[candidate_index]
-                return true if proof_counterexample_search(index + 1, names, boolean_names, values, starts, counts, candidates, facts, goal, budget)
+                return true if proof_diagnostic_counterexample_search(index + 1, names, boolean_names, values, starts, counts, candidates, facts, goal, budget)
                 candidate_index <- candidate_index + 1
             return false
 
         # Populate `assignments` only after an exact falsifying state is found. The result uses
         # ordinary equality expressions so existing JSON tooling can display/replay it directly.
-        def proof_find_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, assignments: mutable darray[Ast::Expr]&) -> bool:
+        def proof_find_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: ProofReport&, owner: sview, assignments: mutable darray[Ast::Expr]&) -> bool:
+            return true if proof_find_machine_counterexample(facts, goal, report, owner, assignments)
+            return proof_find_diagnostic_counterexample(facts, goal, assignments)
+
+        def proof_find_diagnostic_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, assignments: mutable darray[Ast::Expr]&) -> bool:
             names: mutable darray[sview] = []
             for fact in facts |names|:
-                proof_counterexample_collect_names(fact, &names)
-            proof_counterexample_collect_names(goal, &names)
+                proof_diagnostic_counterexample_collect_names(fact, &names)
+            proof_diagnostic_counterexample_collect_names(goal, &names)
             return false if names.count > ElisaProofKernelCore::PROOF_KERNEL_FINITE_MODEL_SYMBOL_LIMIT
             boolean_names: mutable darray[sview] = []
             for fact in facts |boolean_names|:
-                proof_counterexample_collect_boolean_names(fact, &boolean_names, 0)
-            proof_counterexample_collect_boolean_names(goal, &boolean_names, 0)
+                proof_diagnostic_counterexample_collect_boolean_names(fact, &boolean_names, 0)
+            proof_diagnostic_counterexample_collect_boolean_names(goal, &boolean_names, 0)
             # Equality can propagate an already-established Boolean domain across names. Repeat
             # at most once per admitted symbol; this is bounded independently of source size.
             for _ in 0..<names.count |facts, goal, boolean_names|:
                 for fact in facts |boolean_names|:
-                    proof_counterexample_collect_boolean_names(fact, &boolean_names, 0)
-                proof_counterexample_collect_boolean_names(goal, &boolean_names, 0)
-            return false if not proof_counterexample_fragment(goal, facts, goal, boolean_names, 0)
+                    proof_diagnostic_counterexample_collect_boolean_names(fact, &boolean_names, 0)
+                proof_diagnostic_counterexample_collect_boolean_names(goal, &boolean_names, 0)
+            return false if not proof_diagnostic_counterexample_fragment(goal, facts, goal, boolean_names, 0)
             for fact in facts:
-                return false if not proof_counterexample_fragment(fact, facts, goal, boolean_names, 0)
+                return false if not proof_diagnostic_counterexample_fragment(fact, facts, goal, boolean_names, 0)
             bounds: mutable darray[ProofBound] = []
             proof_collect_fact_bounds(facts, &bounds)
             proof_close_equalities(facts, &bounds)
@@ -537,21 +441,53 @@ extend ElisaProof:
             for name in names |name, starts, counts, candidates, bounds|:
                 bound: ProofBound = proof_bound_for(bounds, name)
                 start: usize = candidates.count
-                proof_counterexample_add_candidate(&candidates, start, bound, 0)
-                proof_counterexample_add_candidate(&candidates, start, bound, 1)
+                proof_diagnostic_counterexample_add_candidate(&candidates, start, bound, 0)
+                proof_diagnostic_counterexample_add_candidate(&candidates, start, bound, 1)
                 for fact in facts |name, start, bound, candidates|:
-                    proof_counterexample_collect_candidates(fact, name, facts, start, bound, &candidates, 0)
-                proof_counterexample_collect_candidates(goal, name, facts, start, bound, &candidates, 0)
+                    proof_diagnostic_counterexample_collect_candidates(fact, name, facts, start, bound, &candidates, 0)
+                proof_diagnostic_counterexample_collect_candidates(goal, name, facts, start, bound, &candidates, 0)
                 starts.push(start)
                 counts.push(candidates.count - start)
                 return false if counts[counts.count - 1] == 0
             values: mutable darray[i64] = []
             values.resize(names.count)
             budget: mutable usize = PROOF_GOAL_COUNTEREXAMPLE_BUDGET
-            found: bool = proof_counterexample_search(0, names, boolean_names, &values, starts, counts, candidates, facts, goal, &budget)
+            found: bool = proof_diagnostic_counterexample_search(0, names, boolean_names, &values, starts, counts, candidates, facts, goal, &budget)
             return false if not found
             position: Ast::Pos = Ast::expr_pos(goal)
             for index in 0..<names.count |index, names, values, assignments, position|:
-                value: Ast::Expr = Ast::Expr.BoolLit(values[index] != 0, position) if proof_counterexample_has_name(boolean_names, names[index]) else Ast::Expr.IntLit(values[index], position)
+                value: Ast::Expr = Ast::Expr.BoolLit(values[index] != 0, position) if proof_diagnostic_counterexample_has_name(boolean_names, names[index]) else Ast::Expr.IntLit(values[index], position)
                 assignments.push(Ast::Expr.Binary(Ast::Expr.Ident(names[index], position), TokenKind.EqEq, value, position))
             return true
+        # Discharge a primitive comparison of a source term when the path already records that
+        # exact term equal to a small literal. This local step intentionally ignores unrelated
+        # path facts: a later unsupported fixed-width expression must not hide a direct fact
+        # such as `WbRuntime::TIMER_DUE_INTERVAL == 2`. Kernel replay repeats the same narrow
+        # rule from the exact premise and literal nodes.
+        def proof_comparison_from_equality_literal(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if not proof_is_comparison(operator)
+            left_constant: (known: bool, value: i64) = proof_small_nonnegative_constant(left)
+            right_constant: (known: bool, value: i64) = proof_small_nonnegative_constant(right)
+            return proof_small_comparison_value(left_constant.value, operator, right_constant.value) if left_constant.known and right_constant.known
+            return false if left_constant.known == right_constant.known
+            term: Ast::Expr = right if left_constant.known else left
+            goal_constant: i64 = left_constant.value if left_constant.known else right_constant.value
+            term_is_left: bool = not left_constant.known
+            for fact in facts |term, operator, goal_constant, term_is_left, facts|:
+                match fact:
+                    Ast::Expr.Binary(fact_left, TokenKind.EqEq, fact_right, _):
+                        right_literal: (known: bool, value: i64) = proof_small_nonnegative_constant(fact_right)
+                        if right_literal.known and proof_expr_equal(fact_left, term):
+                            continue if not proof_primitive_comparison(left, right, facts) or not proof_primitive_comparison(fact_left, fact_right, facts)
+                            return proof_small_comparison_value(right_literal.value, operator, goal_constant) if term_is_left
+                            return proof_small_comparison_value(goal_constant, operator, right_literal.value)
+                        left_literal: (known: bool, value: i64) = proof_small_nonnegative_constant(fact_left)
+                        if left_literal.known and proof_expr_equal(fact_right, term):
+                            continue if not proof_primitive_comparison(left, right, facts) or not proof_primitive_comparison(fact_left, fact_right, facts)
+                            return proof_small_comparison_value(left_literal.value, operator, goal_constant) if term_is_left
+                            return proof_small_comparison_value(goal_constant, operator, left_literal.value)
+                    _:
+                        pass
+            return false
+
+include "./goal_solver_and_counterexamples_integrated_helpers.elisa"

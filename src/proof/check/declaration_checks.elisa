@@ -214,13 +214,13 @@ extend ElisaProof:
             signature_ensures: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "ensure")
             postconditions.extend(signature_ensures)
             postconditions.extend(proof_unfolded_ensures(parameters, body, return_type)) if postconditions.count == 0
-            proof_check_logical_contract_calls(body, functions, report, function_name)
+            proof_check_logical_contract_calls(body, functions, report, function_name, file.enum_annotations)
             proof_check_contract_placement(body, PROOF_CONTRACT_PLACE_FUNCTION, report, function_name)
             for signature_requirement in signature_requires |report, function_name, position|:
                 if proof_expr_has_move(signature_requirement):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-resource-unsupported", position.line, function_name, "logical contracts may not perform ownership transfers")
-                elif not proof_expr_supported(signature_requirement):
+                elif not proof_logical_contract_supported(signature_requirement, file.enum_annotations, functions):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "logical contract uses an unsupported expression form")
                 elif proof_expr_has_executable_call(signature_requirement) and not proof_contract_calls_are_pure(signature_requirement, functions):
@@ -230,7 +230,7 @@ extend ElisaProof:
                 if proof_expr_has_move(signature_ensure):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-resource-unsupported", position.line, function_name, "logical contracts may not perform ownership transfers")
-                elif not proof_expr_supported(signature_ensure):
+                elif not proof_logical_contract_supported(signature_ensure, file.enum_annotations, functions):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "logical contract uses an unsupported expression form")
                 elif proof_expr_has_executable_call(signature_ensure) and not proof_contract_calls_are_pure(signature_ensure, functions):
@@ -317,6 +317,7 @@ extend ElisaProof:
                 report.local_extent_names.push(parameter.name) if local_value or plain_value
                 report.value_binding_names.push(parameter.name) if plain_value
             for parameter in parameters |facts, report, function_name, position|:
+                proof_add_required_reference_parameter_fact(facts, report, parameter, function_name, position)
                 unsigned_width: i64 = proof_unsigned_type_width_index(parameter.type_expression, functions.type_audit_index, 0)
                 proof_add_unsigned_binding_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position) if unsigned_width > 0
                 signed_width: i64 = proof_signed_type_width_index(parameter.type_expression, functions.type_audit_index, 0)
@@ -366,7 +367,8 @@ extend ElisaProof:
             if function_flow.normal:
                 for ensure in postconditions |facts, report, function_name, names, values|:
                     normal_goal: Ast::Expr = proof_substitute_function_contract(ensure, frame_parameters, values, old_values)
-                    proof_add_pure_call_witnesses(normal_goal, facts, functions, report, position.line, function_name, 0)
+                    proof_add_quantified_call_summaries(normal_goal, facts, functions, file.enum_annotations, report, function_name) if proof_expr_has_call(normal_goal)
+                    proof_add_pure_call_witnesses(normal_goal, facts, functions, report, position.line, function_name, 0) if proof_expr_has_call(normal_goal)
                     proven: bool = proof_certify_goal_with_rule(facts, normal_goal, report, position.line, function_name, file.enum_annotations, proof_quantifier_rule(ensure, file.enum_annotations))
                     report.proof_obligation(proven)
                     proof_add_goal_failure(report, "ensure-unproven", position.line, function_name, "normal completion does not establish ensure", facts, normal_goal) if not proven
@@ -400,79 +402,6 @@ extend ElisaProof:
         # performs no other effect — a body can allocate or panic without calling anything, and
         # that remains the compiler effect checker's obligation. An unresolved callee or an
         # abstract row is reported and no certificate is emitted.
-        def proof_check_effect_containment(functions: ProofFunctionTable&, report: mutable ProofReport&, function_name: sview, line: u32) -> void:
-            caller: usize = proof_function_index_at_line(functions, function_name, line)
-            return if caller >= functions.names.count
-            return if caller >= functions.effects_declared.count or not functions.effects_declared[caller]
-            declared_start: usize = functions.effect_starts[caller]
-            declared_count: usize = functions.effect_counts[caller]
-            return if declared_start > functions.all_effects.count or declared_count > functions.all_effects.count - declared_start
-            declared: mutable darray[sview] = []
-            for offset in 0..<declared_count |offset, functions, declared, declared_start|:
-                declared.push(functions.all_effects[declared_start + offset])
-            if proof_effect_row_is_abstract(declared):
-                proof_add_finding(report, "effect-row-abstract", line, function_name, "an abstract effect row has no comparable members")
-                return
-            call_start: usize = functions.call_starts[caller]
-            call_count: usize = functions.call_counts[caller]
-            return if call_start > functions.all_calls.count or call_count > functions.all_calls.count - call_start
-            callee_indexes: mutable darray[usize] = []
-            for offset in 0..<call_count |offset, functions, call_start, callee_indexes, report, function_name, line|:
-                callee_name: sview = functions.all_calls[call_start + offset]
-                callee: usize = proof_function_call_target(functions, call_start + offset)
-                if callee >= functions.names.count:
-                    proof_add_finding(report, "effect-call-opaque", line, function_name, "a called function has no imported effect row")
-                    callee_indexes.clear()
-                    callee_indexes.push(functions.names.count)
-                    return
-                already: bool = any existing in callee_indexes where existing == callee
-                callee_indexes.push(callee) if not already
-            # Compare the rows before emitting anything: a certificate is only produced for a
-            # containment that holds, so a failing function has a diagnostic and no evidence.
-                for callee in callee_indexes |callee, functions, declared, report, function_name, line|:
-                    continue if callee >= functions.effect_counts.count
-                callee_start: usize = functions.effect_starts[callee]
-                callee_count: usize = functions.effect_counts[callee]
-                continue if callee_start > functions.all_effects.count or callee_count > functions.all_effects.count - callee_start
-                for offset in 0..<callee_count |offset, functions, declared, callee_start, report, function_name, line|:
-                    effect: sview = functions.all_effects[callee_start + offset]
-                    covered: bool = any member in declared where member == effect
-                    if not covered:
-                        proof_add_finding(report, "effect-row-exceeded", line, function_name, "a called function declares an effect outside this function's row")
-                        return
-            callee_effect_nodes: mutable usize = 0
-            for callee in callee_indexes |callee, functions, callee_effect_nodes|:
-                continue if callee >= functions.effect_counts.count
-                callee_effect_nodes <- callee_effect_nodes + functions.effect_counts[callee] + 2
-            needed_nodes: usize = declared.count + callee_effect_nodes + 2
-            needed_children: usize = declared.count + callee_effect_nodes - callee_indexes.count
-            if not proof_resource_kernel_capacity(report, needed_nodes, needed_children, function_name):
-                proof_kernel_budget_note(report, function_name)
-                proof_add_effect_goal_attempt(report, report.kernel_nodes.count, line, function_name)
-                return
-            declared_roots: mutable darray[usize] = []
-            for effect in declared |effect, report, declared_roots|:
-                declared_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect", "", 0, 0, 0, 0, 0, 0, effect, ""))
-            declared_children_start: usize = report.kernel_children.count
-            report.kernel_children.extend(declared_roots)
-            declared_row: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-row", "", 0, 0, 0, declared_children_start, declared_roots.count, 0, "", "")
-            call_roots: mutable darray[usize] = []
-            for callee in callee_indexes |callee, functions, report, call_roots|:
-                continue if callee >= functions.effect_counts.count
-                callee_start: usize = functions.effect_starts[callee]
-                callee_count: usize = functions.effect_counts[callee]
-                continue if callee_start > functions.all_effects.count or callee_count > functions.all_effects.count - callee_start
-                callee_effect_roots: mutable darray[usize] = []
-                for offset in 0..<callee_count |offset, functions, callee_start, report, callee_effect_roots|:
-                    callee_effect_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect", "", 0, 0, 0, 0, 0, 0, functions.all_effects[callee_start + offset], ""))
-                callee_children_start: usize = report.kernel_children.count
-                report.kernel_children.extend(callee_effect_roots)
-                callee_row: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-row", "", 0, 0, 0, callee_children_start, callee_effect_roots.count, 0, "", "")
-                call_roots.push(proof_kernel_add_node(&report.kernel_nodes, "effect-call", "", callee_row, 0, 0, 0, 0, 0, functions.names[callee], ""))
-            containment_children_start: usize = report.kernel_children.count
-            report.kernel_children.extend(call_roots)
-            containment: usize = proof_kernel_add_node(&report.kernel_nodes, "effect-containment", "", declared_row, 0, 0, containment_children_start, call_roots.count, 0, function_name, "")
-            proof_add_effect_goal_attempt(report, containment, line, function_name)
 
         def proof_record_declaration(declaration: Ast::Decl, file: Ast::File&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, report: mutable ProofReport&) -> void:
             summary: mutable ProofDeclarationSummary = proof_declaration_summary("declaration", "", 0)

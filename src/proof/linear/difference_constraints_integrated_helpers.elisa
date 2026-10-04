@@ -1,0 +1,152 @@
+# Factored helpers retained by the branch integration.
+extend ElisaProof:
+    public:
+        def proof_signed_quantifier_instance(value: i64) -> Ast::Expr:
+            position: Ast::Pos = Ast::pos_at_line(0)
+            if value < 0:
+                magnitude: (known: bool, value: i64) = proof_sub_safe(0, value)
+                return Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(magnitude.value, position), position) if magnitude.known
+            return Ast::Expr.IntLit(value, position)
+
+        def proof_exact_int_from_facts(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, value: i64):
+            constant: (known: bool, value: i64) = proof_constant_int(expression)
+            return constant if constant.known
+            bounds: mutable darray[ProofBound] = []
+            proof_collect_fact_bounds(facts, &bounds)
+            proof_close_equalities(facts, &bounds)
+            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+            return (true, interval.lower) if interval.known and interval.lower == interval.upper
+            return (false, 0)
+
+        def proof_affine_expression(expression: Ast::Expr) -> ProofAffine:
+            empty: ProofAffine = ProofAffine{known: false, base: "", offset: 0, negative: false}
+            constant: (known: bool, value: i64) = proof_constant_int(expression)
+            return ProofAffine{known: true, base: "", offset: constant.value, negative: false} if constant.known
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_affine_expression(inner)
+                Ast::Expr.Ident(name, _):
+                    return ProofAffine{known: name != "", base: name, offset: 0, negative: false}
+                Ast::Expr.Unary(TokenKind.Plus, operand, _):
+                    return proof_affine_expression(operand)
+                Ast::Expr.Unary(TokenKind.Minus, operand, _):
+                    inner: ProofAffine = proof_affine_expression(operand)
+                    return empty if not inner.known or inner.base == ""
+                    negated_offset: (known: bool, value: i64) = proof_sub_safe(0, inner.offset)
+                    return empty if not negated_offset.known
+                    return ProofAffine{known: true, base: inner.base, offset: negated_offset.value, negative: not inner.negative}
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_affine: ProofAffine = proof_affine_expression(left)
+                    right_constant: (known: bool, value: i64) = proof_constant_int(right)
+                    if left_affine.known and left_affine.base != "" and right_constant.known:
+                        if operator == TokenKind.Plus:
+                            combined: (known: bool, value: i64) = proof_add_safe(left_affine.offset, right_constant.value)
+                            return ProofAffine{known: true, base: left_affine.base, offset: combined.value, negative: left_affine.negative} if combined.known
+                        if operator == TokenKind.Minus:
+                            # `x - MIN_I64` has no representable +offset form. Decline it
+                            # rather than manufacturing an overflowing negation.
+                            return empty if right_constant.value == proof_i64_min()
+                            negated: (known: bool, value: i64) = proof_sub_safe(0, right_constant.value)
+                            combined: (known: bool, value: i64) = proof_add_safe(left_affine.offset, negated.value) if negated.known else (false, 0)
+                            return ProofAffine{known: true, base: left_affine.base, offset: combined.value, negative: left_affine.negative} if combined.known
+                        if operator == TokenKind.Star and right_constant.value == 1:
+                            return left_affine
+                    left_constant: (known: bool, value: i64) = proof_constant_int(left)
+                    right_affine: ProofAffine = proof_affine_expression(right)
+                    if left_constant.known and right_affine.known and operator == TokenKind.Plus:
+                        combined: (known: bool, value: i64) = proof_add_safe(left_constant.value, right_affine.offset)
+                        return ProofAffine{known: true, base: right_affine.base, offset: combined.value, negative: right_affine.negative} if combined.known
+                    if left_constant.known and right_affine.known and right_affine.base != "" and operator == TokenKind.Minus:
+                        combined: (known: bool, value: i64) = proof_sub_safe(left_constant.value, right_affine.offset) if not right_affine.negative else proof_add_safe(left_constant.value, right_affine.offset)
+                        return ProofAffine{known: true, base: right_affine.base, offset: combined.value, negative: not right_affine.negative} if combined.known
+                    if left_constant.known and operator == TokenKind.Star and left_constant.value == 1:
+                        return right_affine
+                _:
+                    pass
+            return empty
+
+        # Prove that an affine expression is evaluated without fixed-width overflow for every
+        # value in the current interval. Only the endpoint relevant to the offset is required:
+        # positive offsets need an upper bound, negative offsets a lower bound.
+        # A difference constraint carries a bound from one name to another: `x - y <= c` with
+        # `y <= U` gives `x <= U + c`, and with `x >= L` gives `y >= L - c`. The interval pass
+        # collects only the bounds a fact states about a name directly, so `index < count` beside
+        # `count <= 1000` left `index` with no upper bound at all -- and the overflow guard, which
+        # asks for exactly that, refused `index + 1` even though 999 was derivable. Each step is an
+        # ordinary interval inference and can only narrow an interval that already held. The pass runs
+        # to a fixed point: a chain through N names settles in N rounds, so the limit (32 names plus
+        # one) only stops a contradictory cycle that would tighten forever, and a bound it leaves
+        # underived is merely a lost proof (BACKLOG C-01).
+        const PROOF_BOUND_PROPAGATION_ROUND_LIMIT: usize = 33
+
+        # `a + 1` cannot overflow when a fact bounds `a` strictly below a value of the same unsigned
+        # width: `a < Y` gives `a + 1 <= Y`, and `Y` is at most the type's maximum by typing alone.
+        # This is the addition counterpart of the guarded-subtraction rule, and like it the
+        # argument is relational rather than numeric -- which is the whole point. A 64-bit unsigned
+        # value has no representable interval in this prover's i64 domain, so an interval argument
+        # can never admit `index + 1` for a `usize`, however the facts are arranged, while this one
+        # needs no magnitude at all.
+        # The expression form of the same relational argument: `a + 1` is in range when a fact says
+        # `a < Y` for a `Y` of the same unsigned width, because `Y` is at most the type's maximum
+        # by typing. No interval is involved, which is what lets it work for `usize` -- a 64-bit
+        # unsigned value has no representable interval in this prover's i64 domain at all.
+        def proof_unsigned_unit_increment_base(left: Ast::Expr, right: Ast::Expr) -> (known: bool, base: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            right_constant: (known: bool, value: i64) = proof_constant_int(right)
+            return (true, left) if right_constant.known and right_constant.value == 1
+            left_constant: (known: bool, value: i64) = proof_constant_int(left)
+            return (true, right) if left_constant.known and left_constant.value == 1
+            return (false, Ast::Expr.Invalid)
+
+        # A peer that may bound an increment: a bare name, or a field of one. Neither can mention the
+        # base's own increment, which is what the restriction is for -- `a < a + 1` is precisely the
+        # claim whose range this decides, and neither shape can spell it. A field place is admitted
+        # because `index < values.count` is how a bound is written wherever a collection is walked.
+        def proof_peer_is_nameable(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_peer_is_nameable(inner)
+                Ast::Expr.Ident(name, _):
+                    return name != ""
+                Ast::Expr.Field(object, field_name, _):
+                    return field_name != "" and proof_ident_name(proof_strip_parens(object)) != ""
+                _:
+                    return false
+
+        # The width of a term when it is used as a *peer*, which is a narrower question than the
+        # width of a term in arithmetic. The element count of a collection is a `usize`, but nothing
+        # records a width marker for a field place, so `values.count` has no width and the peer rule
+        # cannot use the one bound every loop over a collection has. Reporting the platform width
+        # only here is safe in the direction the peer rule uses it -- it needs
+        # `peer <= TYPE_MAX(base)`, and a peer reported wider than it is can only make that test
+        # fail -- and it deliberately does not reach `proof_unsigned_width_in_expression`, where it
+        # would make every arithmetic term containing `.count` subject to the unsigned wrap guard
+        # and cost far more proofs than it buys.
+        def proof_peer_unsigned_width(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> i64:
+            declared: i64 = proof_unsigned_width_in_expression(expression, facts)
+            return declared if declared != 0
+            match proof_strip_parens(expression):
+                Ast::Expr.Field(object, field_name, _):
+                    return 0 if field_name != "count"
+                    return 64 if proof_ident_name(proof_strip_parens(object)) != ""
+                    return 0
+                _:
+                    return 0
+
+        def proof_unsigned_increment_has_strict_peer(base: Ast::Expr, width: i64, facts: darray[Ast::Expr]&) -> bool:
+            return false if width == 0
+            # The peer is required to be a bare name. A peer that mentioned the base could justify
+            # itself -- `a < a + 1` is exactly the claim whose range this rule is deciding -- and a
+            # name cannot.
+            return true if proof_unsigned_increment_has_direct_peer(base, width, facts)
+            # One step further: `base <= middle < peer` (a partition's `lo <= k < xs.count`).
+            for fact in facts |fact, base, width, facts|:
+                match fact:
+                    Ast::Expr.Binary(fact_left, TokenKind.LtEq, fact_right, _):
+                        continue if not proof_expr_equal(fact_left, base) or not proof_peer_is_nameable(fact_right) or proof_expr_equal(fact_right, base)
+                        return true if proof_unsigned_increment_has_direct_peer(fact_right, width, facts)
+                    Ast::Expr.Binary(fact_left, TokenKind.GtEq, fact_right, _):
+                        continue if not proof_expr_equal(fact_right, base) or not proof_peer_is_nameable(fact_left) or proof_expr_equal(fact_left, base)
+                        return true if proof_unsigned_increment_has_direct_peer(fact_left, width, facts)
+                    _:
+                        pass
+            return false

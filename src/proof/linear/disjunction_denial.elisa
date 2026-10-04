@@ -1,0 +1,100 @@
+# Classical disjunction introduction: prove B under not A, then conclude A or B.
+# These are temporary proof-path hypotheses, not source facts or trusted axioms.
+extend ElisaProof:
+    private:
+        # De Morgan changes only a checked propositional goal, never its facts.
+        def proof_negated_boolean_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match proof_strip_parens(goal):
+                Ast::Expr.Unary(TokenKind.Not, operand, position):
+                    return false if not proof_disjunction_denial_fragment(operand, facts, 0)
+                    match proof_strip_parens(operand):
+                        Ast::Expr.Binary(left, operator, right, _):
+                            return false if operator != TokenKind.And and operator != TokenKind.Or
+                            complement: TokenKind = TokenKind.Or if operator == TokenKind.And else TokenKind.And
+                            transformed: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, left, position), complement, Ast::Expr.Unary(TokenKind.Not, right, position), position)
+                            return proof_goal_depth(facts, transformed, annotations, operator_mask, depth + 1, budget, split_depth, exhausted)
+                        _:
+                            return false
+                _:
+                    return false
+
+        const PROOF_DISJUNCTION_DENIAL_FACT_LIMIT: usize = 64
+
+        # Admit integer ordering only from exact type witnesses, not a scalar witness
+        # that could describe a float. Primitive integer +/- preserves integer
+        # total ordering even under wrap; subsequent arithmetic tiers still
+        # enforce machine-range safety on every consumed premise.
+        def proof_disjunction_denial_integer_term(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_disjunction_denial_integer_term(inner, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_scalar_term_witnessed(expression, facts, 0) and proof_disjunction_denial_integer_term(left, facts, depth + 1) and proof_disjunction_denial_integer_term(right, facts, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    return proof_unsigned_marker_width_for_name(facts, name) != 0 or proof_signed_marker_width_for_term(facts, expression) != 0
+                Ast::Expr.Field(_, _, _):
+                    return proof_unsigned_place_marker_width(facts, expression) != 0 or proof_signed_marker_width_for_term(facts, expression) != 0
+                Ast::Expr.Call(_, _, _, _):
+                    return proof_scalar_term_witnessed(expression, facts, 0) and (proof_unsigned_place_marker_width(facts, expression) != 0 or proof_signed_marker_width_for_term(facts, expression) != 0)
+                _:
+                    return false
+
+        def proof_disjunction_denial_value_closed(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Call(_, _, _, _):
+                    return proof_scalar_term_witnessed(expression, facts, 0)
+                Ast::Expr.Binary(_, operator, _, _):
+                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_disjunction_denial_integer_term(expression, facts, depth + 1)
+                Ast::Expr.Field(base, _, _) | Ast::Expr.Scope(base, _, _) | Ast::Expr.Paren(base, _):
+                    return proof_disjunction_denial_value_closed(base, facts, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return proof_disjunction_denial_fragment(condition, facts, depth + 1) and proof_disjunction_denial_value_closed(then_value, facts, depth + 1) and proof_disjunction_denial_value_closed(else_value, facts, depth + 1)
+                _:
+                    return false
+
+        def proof_disjunction_denial_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Field(_, _, _) | Ast::Expr.Scope(_, _, _):
+                    return proof_disjunction_denial_value_closed(expression, facts, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_disjunction_denial_fragment(inner, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_disjunction_denial_fragment(left, facts, depth + 1) and proof_disjunction_denial_fragment(right, facts, depth + 1) if operator == TokenKind.Or or operator == TokenKind.And
+                    equality: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq
+                    ordering: bool = operator == TokenKind.Lt or operator == TokenKind.LtEq or operator == TokenKind.Gt or operator == TokenKind.GtEq
+                    integer_order: bool = ordering and proof_primitive_comparison(left, right, facts) and proof_disjunction_denial_integer_term(left, facts, depth + 1) and proof_disjunction_denial_integer_term(right, facts, depth + 1)
+                    null_equality: bool = equality and (proof_ident_name(left) == "null" or proof_ident_name(right) == "null")
+                    return (integer_order or (equality and (proof_primitive_comparison(left, right, facts) or null_equality))) and proof_disjunction_denial_value_closed(left, facts, depth + 1) and proof_disjunction_denial_value_closed(right, facts, depth + 1)
+                _:
+                    return false
+
+        def proof_push_disjunction_denial(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, limit: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or facts.count >= limit
+            return false if not proof_disjunction_denial_fragment(expression, facts, 0)
+            stripped: Ast::Expr = proof_strip_parens(expression)
+            position: Ast::Pos = Ast::expr_pos(stripped)
+            match stripped:
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    facts.push(inner)
+                Ast::Expr.BoolLit(value, _):
+                    facts.push(Ast::Expr.BoolLit(not value, position))
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_push_disjunction_denial(left, facts, limit, depth + 1) and proof_push_disjunction_denial(right, facts, limit, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    complement: TokenKind = proof_comparison_negation(operator)
+                    null_equality: bool = (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and (proof_ident_name(left) == "null" or proof_ident_name(right) == "null")
+                    if complement != TokenKind.Eof and (proof_primitive_comparison(left, right, facts) or null_equality):
+                        facts.push(Ast::Expr.Binary(left, complement, right, position))
+                    else:
+                        facts.push(Ast::Expr.Unary(TokenKind.Not, stripped, position))
+                _:
+                    facts.push(Ast::Expr.Unary(TokenKind.Not, stripped, position))
+            return true

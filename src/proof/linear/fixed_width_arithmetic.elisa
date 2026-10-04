@@ -2,167 +2,6 @@ extend ElisaProof:
     private:
         const PROOF_CROSS_WIDTH_SAFE_INTEGER_MAX: i64 = ElisaProofKernelCore::PROOF_KERNEL_I8_MAX
 
-        def proof_small_nonnegative_constant(expression: Ast::Expr) -> (known: bool, value: i64):
-            return proof_small_nonnegative_constant_depth(expression, 0)
-
-        def proof_small_nonnegative_constant_depth(expression: Ast::Expr, depth: usize) -> (known: bool, value: i64):
-            requires depth <= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            decreases PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT - depth
-            return (false, 0) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.IntLit(value, _):
-                    return (value >= 0 and value <= PROOF_CROSS_WIDTH_SAFE_INTEGER_MAX, value)
-                Ast::Expr.Paren(inner, _):
-                    return proof_small_nonnegative_constant_depth(inner, depth + 1)
-                Ast::Expr.Unary(operator, operand, _):
-                    inner: (known: bool, value: i64) = proof_small_nonnegative_constant_depth(operand, depth + 1)
-                    return (false, 0) if not inner.known
-                    return inner if operator == TokenKind.Plus
-                    return (true, 0) if operator == TokenKind.Minus and inner.value == 0
-                    return (false, 0)
-                Ast::Expr.Binary(left, operator, right, _):
-                    left_value: (known: bool, value: i64) = proof_small_nonnegative_constant_depth(left, depth + 1)
-                    right_value: (known: bool, value: i64) = proof_small_nonnegative_constant_depth(right, depth + 1)
-                    return (false, 0) if not left_value.known or not right_value.known
-                    # The imported term does not retain the operand width. A shift by 8 or more
-                    # can be in range at i64 width but invalid/poison at a narrower fixed width;
-                    # a shift by fewer than 7 whose result stays small is the same at every width.
-                    return (false, 0) if (operator == TokenKind.LShift or operator == TokenKind.RShift) and right_value.value >= 7
-                    result: (known: bool, value: i64) = proof_constant_int(expression)
-                    return (false, 0) if not result.known or result.value < 0 or result.value > PROOF_CROSS_WIDTH_SAFE_INTEGER_MAX
-                    return result
-                _:
-                    return (false, 0)
-
-        def proof_safe_comparison_constant(expression: Ast::Expr) -> (known: bool, value: i64):
-            match expression:
-                Ast::Expr.IntLit(value, _):
-                    return (value >= 0, value)
-                _:
-                    return proof_small_nonnegative_constant(expression)
-
-        def proof_closed_integer_arithmetic(expression: Ast::Expr, depth: usize) -> bool:
-            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.IntLit(_, _):
-                    return true
-                Ast::Expr.Paren(inner, _):
-                    return proof_closed_integer_arithmetic(inner, depth + 1)
-                Ast::Expr.Unary(operator, operand, _):
-                    return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_closed_integer_arithmetic(operand, depth + 1)
-                Ast::Expr.Binary(left, operator, right, _):
-                    arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret or operator == TokenKind.LShift or operator == TokenKind.RShift
-                    return arithmetic and proof_closed_integer_arithmetic(left, depth + 1) and proof_closed_integer_arithmetic(right, depth + 1)
-                _:
-                    return false
-
-        # Integer literals and constant expressions reach the proof IR without resolved
-        # primitive widths. Negative payloads may be unsigned bit patterns, and even positive
-        # constant arithmetic may wrap at a narrow width. Numeric solvers may still use them
-        # when explicit typing evidence is modeled; until then, this predicate identifies terms
-        # that must not enter the unbounded-i64 fragment.
-        def proof_has_ambiguous_integer_constant(expression: Ast::Expr, depth: usize) -> bool:
-            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Invalid:
-                    return true
-                Ast::Expr.Absent:
-                    return true
-                Ast::Expr.IntLit(value, _):
-                    return value < 0
-                Ast::Expr.FloatLit(_, _):
-                    return false
-                Ast::Expr.StringLit(_, _):
-                    return false
-                Ast::Expr.CharLit(_, _):
-                    return false
-                Ast::Expr.BoolLit(_, _):
-                    return false
-                Ast::Expr.Ident(_, _):
-                    return false
-                Ast::Expr.ShorthandMember(_, _):
-                    return false
-                Ast::Expr.Paren(inner, _):
-                    return proof_has_ambiguous_integer_constant(inner, depth + 1)
-                Ast::Expr.Unary(operator, operand, _):
-                    if operator == TokenKind.Plus or operator == TokenKind.Minus:
-                        safe: (known: bool, value: i64) = proof_small_nonnegative_constant(expression)
-                        return not safe.known if proof_closed_integer_arithmetic(expression, depth)
-                    return proof_has_ambiguous_integer_constant(operand, depth + 1)
-                Ast::Expr.Binary(left, operator, right, _):
-                    if operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.Ampersand or operator == TokenKind.Pipe or operator == TokenKind.Caret or operator == TokenKind.LShift or operator == TokenKind.RShift:
-                        safe: (known: bool, value: i64) = proof_small_nonnegative_constant(expression)
-                        return not safe.known if proof_closed_integer_arithmetic(expression, depth)
-                    return proof_has_ambiguous_integer_constant(left, depth + 1) or proof_has_ambiguous_integer_constant(right, depth + 1)
-                Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_has_ambiguous_integer_constant(callee, depth + 1)
-                    for argument in arguments |depth|:
-                        return true if proof_has_ambiguous_integer_constant(argument, depth + 1)
-                    return false
-                Ast::Expr.Field(object, _, _):
-                    return proof_has_ambiguous_integer_constant(object, depth + 1)
-                Ast::Expr.Scope(base, _, _):
-                    return proof_has_ambiguous_integer_constant(base, depth + 1)
-                Ast::Expr.Index(object, index, _):
-                    return proof_has_ambiguous_integer_constant(object, depth + 1) or proof_has_ambiguous_integer_constant(index, depth + 1)
-                Ast::Expr.Slice(object, low, high, _):
-                    return proof_has_ambiguous_integer_constant(object, depth + 1) or proof_has_ambiguous_integer_constant(low, depth + 1) or proof_has_ambiguous_integer_constant(high, depth + 1)
-                Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_has_ambiguous_integer_constant(object, depth + 1)
-                    for argument in arguments |depth|:
-                        return true if proof_has_ambiguous_integer_constant(argument, depth + 1)
-                    return false
-                Ast::Expr.Move(operand, _):
-                    return proof_has_ambiguous_integer_constant(operand, depth + 1)
-                Ast::Expr.RegionNew(operand, _, _):
-                    return proof_has_ambiguous_integer_constant(operand, depth + 1)
-                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
-                    return true
-                Ast::Expr.Array(elements, _):
-                    for element in elements |depth|:
-                        return true if proof_has_ambiguous_integer_constant(element, depth + 1)
-                    return false
-                Ast::Expr.Tuple(elements, _):
-                    for element in elements |depth|:
-                        return true if proof_has_ambiguous_integer_constant(element, depth + 1)
-                    return false
-                Ast::Expr.SetLit(elements, _):
-                    for element in elements |depth|:
-                        return true if proof_has_ambiguous_integer_constant(element, depth + 1)
-                    return false
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries |depth|:
-                        return true if proof_has_ambiguous_integer_constant(entry.key, depth + 1) or proof_has_ambiguous_integer_constant(entry.value, depth + 1)
-                    return false
-                Ast::Expr.Construct(type_expression, fields, _):
-                    return true if proof_has_ambiguous_integer_constant(type_expression, depth + 1)
-                    for field in fields |depth|:
-                        return true if proof_has_ambiguous_integer_constant(field.value, depth + 1)
-                    return false
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_has_ambiguous_integer_constant(base, depth + 1)
-                    for field in fields |depth|:
-                        return true if proof_has_ambiguous_integer_constant(field.value, depth + 1)
-                    return false
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_has_ambiguous_integer_constant(condition, depth + 1) or proof_has_ambiguous_integer_constant(then_expression, depth + 1) or proof_has_ambiguous_integer_constant(else_expression, depth + 1)
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_has_ambiguous_integer_constant(iterable, depth + 1) or proof_has_ambiguous_integer_constant(condition, depth + 1) or proof_has_ambiguous_integer_constant(body, depth + 1)
-                Ast::Expr.Refinement(base, predicate, _):
-                    return proof_has_ambiguous_integer_constant(base, depth + 1) or proof_has_ambiguous_integer_constant(predicate, depth + 1)
-                Ast::Expr.Match(_, _, _):
-                    return true
-                Ast::Expr.Catch(_, _, _):
-                    return true
-                Ast::Expr.GetElse(_, _, _):
-                    return true
-                Ast::Expr.Lambda(_, _, _):
-                    return true
-                Ast::Expr.Block(_, _, _, _):
-                    return true
-                _:
-                    return true
-
         def proof_signed_i64_only_context(facts: darray[Ast::Expr]&) -> bool:
             has_i64_type: mutable bool = false
             for fact in facts |fact, has_i64_type|:
@@ -247,10 +86,88 @@ extend ElisaProof:
                 _:
                     return false
 
-        # Direct comparisons between nonnegative integer literals have the same truth value in
-        # every primitive integer width in which both literals are representable. This narrower
-        # fact is safe to use without numeric premises: it contains no arithmetic and excludes
-        # negative i64 payloads used to encode out-of-range unsigned literals.
+        # A comparison between closed safe constants has the same truth value in every supported
+        # integer width. Do not let unrelated unsigned facts in the surrounding context suppress
+        # this fact: no premise is consumed by the comparison. Match the kernel's ambiguity guard
+        # as well as its constant-comparison replay rule.
+        def proof_closed_safe_constant_comparison_in(goal: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return false if proof_has_ambiguous_integer_constant(goal, 0)
+            for fact in facts:
+                return false if proof_has_ambiguous_integer_constant(fact, 0)
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_is_comparison(operator)
+                    a: (known: bool, value: i64) = proof_safe_comparison_constant(left)
+                    b: (known: bool, value: i64) = proof_safe_comparison_constant(right)
+                    return false if not a.known or not b.known
+                    return a.value == b.value if operator == TokenKind.EqEq
+                    return a.value != b.value if operator == TokenKind.BangEq
+                    return a.value < b.value if operator == TokenKind.Lt
+                    return a.value > b.value if operator == TokenKind.Gt
+                    return a.value <= b.value if operator == TokenKind.LtEq
+                    return a.value >= b.value if operator == TokenKind.GtEq
+                    return false
+                _:
+                    return false
+
+        # Search asks the source-neutral kernel for the same closed typed rule
+        # that certificate replay will check. No signed-payload arithmetic or
+        # premise-derived type guesses enter this path.
+        def proof_typed_constant_guard_candidate(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or work == 0
+            work <- work - 1
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(a, operator, b, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        return proof_typed_constant_guard_candidate(a, annotations, depth + 1, work) and proof_typed_constant_guard_candidate(b, annotations, depth + 1, work)
+                    return proof_is_comparison(operator) and proof_typed_constant_expression_candidate(a, annotations, depth + 1, work) and proof_typed_constant_expression_candidate(b, annotations, depth + 1, work)
+                _:
+                    return false
+
+        def proof_typed_constant_expression_candidate(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or work == 0
+            work <- work - 1
+            match proof_strip_parens(expression):
+                Ast::Expr.IntLit(value, position):
+                    return proof_replay_numeric_literal_sort(annotations, position.line, position.column, value).known or value >= 0
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus
+                    return proof_typed_constant_expression_candidate(left, annotations, depth + 1, work) and proof_typed_constant_expression_candidate(right, annotations, depth + 1, work)
+                Ast::Expr.If(condition, yes, no, _):
+                    return proof_typed_constant_guard_candidate(condition, annotations, depth + 1, work) and proof_typed_constant_expression_candidate(yes, annotations, depth + 1, work) and proof_typed_constant_expression_candidate(no, annotations, depth + 1, work)
+                _:
+                    return false
+
+        def proof_closed_typed_constant_comparison(goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            work: mutable usize = 4096
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_is_comparison(operator)
+                    return false if not proof_typed_constant_expression_candidate(left, annotations, 0, &work) or not proof_typed_constant_expression_candidate(right, annotations, 0, &work)
+                _:
+                    return false
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, annotations)
+            return false if root >= nodes.count
+            comparison: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if comparison.left >= nodes.count or comparison.right >= nodes.count
+            value = ElisaProofKernelCore::typed_constant_expression_comparison(&nodes, comparison.left, comparison.operator, comparison.right)
+            contextual = ElisaProofKernelCore::contextual_unsigned_constant_comparison(&nodes, comparison.left, comparison.operator, comparison.right)
+            return false if not ((value.known and value.value) or (contextual.known and contextual.value))
+            return ElisaProofKernelReplay::proof_kernel_replay_goal_report(&nodes, &children, [], root)
+
+        def proof_closed_typed_return_fits(expression: Ast::Expr, width: i64, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if width != 8 and width != 16 and width != 32 and width != 64
+            work: mutable usize = 4096
+            return false if not proof_typed_constant_expression_candidate(expression, annotations, 0, &work)
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            root: usize = proof_kernel_encode_annotated(expression, &nodes, &children, annotations)
+            return ElisaProofKernelCore::typed_constant_expression_unsigned_width(&nodes, root) == width or ElisaProofKernelCore::contextual_constant_expression_unsigned_width(&nodes, root) == width
+
+        # Direct nonnegative literals compare alike at every representable width.
+        # Negative payloads without retained sorts remain outside this rule.
         def proof_closed_literal_comparison(goal: Ast::Expr) -> bool:
             match proof_strip_parens(goal):
                 Ast::Expr.Binary(left, operator, right, _):
@@ -266,6 +183,14 @@ extend ElisaProof:
                                     return left_value > right_value if operator == TokenKind.Gt
                                     return left_value <= right_value if operator == TokenKind.LtEq
                                     return left_value >= right_value if operator == TokenKind.GtEq
+                                    return false
+                                _:
+                                    return false
+                        Ast::Expr.StringLit(left_value, _):
+                            match proof_strip_parens(right):
+                                Ast::Expr.StringLit(right_value, _):
+                                    return left_value == right_value if operator == TokenKind.EqEq
+                                    return left_value != right_value if operator == TokenKind.BangEq
                                     return false
                                 _:
                                     return false
@@ -552,3 +477,5 @@ extend ElisaProof:
                 _:
                     pass
             return proof_has_ambiguous_integer_constant(expression, depth)
+
+include "./fixed_width_arithmetic_integrated_helpers.elisa"

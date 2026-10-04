@@ -54,6 +54,25 @@ The `trust` object contains an itemized `boundary_facts` ledger (kind, source ow
 source-neutral kernel root) whose length must equal `trusted_boundary_facts`, plus an explicit
 `trusted_assumptions` ledger. The latter is empty in the current system, and future foreign axioms
 or unchecked escape hatches must appear there explicitly.
+Logical `and`/`or`/`not` results compared with Boolean literals now normalize to
+the proposition or its exact negation, including mirrored equality and inequality.
+Producer and replay kernel check their expression forms independently. Numeric
+literal leaves, unwitnessed terms, invalid Boolean payloads, malformed references,
+and cyclic logical nodes do not enter this rule. The focused native control is
+`scripts/test_kernel_logical_equations.sh`; this is not general Boolean equality
+normalization or proof of the assistant's implementation. Bounded logical constant
+reduction also handles constant-determined conjunctions/disjunctions and nested
+negation. Formation is checked before absorption: an invalid or unwitnessed operand
+cannot be hidden beside `false` or `true`. Unknown terms are not constant values.
+Same-operator logical joins also have a bounded associative/commutative/idempotent
+identity rule with AND-true and OR-false identities. Search and replay independently
+flatten the expressions and compare their witnessed atom sets; call terms, mixed
+operators, unwitnessed atoms, numeric literal leaves and exhausted traversal fuel
+remain unsupported.
+This rule does not erase arbitrary predicates or introduce distribution/rewrite
+assumptions. Void postconditions can rewrite pure summaries already established
+by the body's calls, just as value-return postconditions do; result-dependent void
+claims remain rejected.
 `declaration_details` provides deterministic source-level
 function/module metadata, parameter names, contract counts, recursion/purity/structural flags,
 and executable-summary status. For executable functions, `verified` is true only after the body

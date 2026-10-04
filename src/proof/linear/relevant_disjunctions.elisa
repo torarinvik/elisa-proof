@@ -1,0 +1,187 @@
+extend ElisaProof:
+    private:
+        # Applicability is separate from proof success: false OR P reduces to P
+        # even when P remains unproved. Retrying the whole OR repeats that search.
+        def proof_disjunction_false_left_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> (applicable: bool, proven: bool):
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    known_left: mutable (known: bool, value: bool) = proof_constant_bool(left)
+                    match proof_strip_parens(left):
+                        Ast::Expr.Binary(a, TokenKind.BangEq, b, _):
+                            match proof_strip_parens(a):
+                                Ast::Expr.IntLit(first, _):
+                                    match proof_strip_parens(b):
+                                        Ast::Expr.IntLit(second, _):
+                                            known_left <- (true, false) if first == second
+                                        _:
+                                            pass
+                                _:
+                                    pass
+                        _:
+                            pass
+                    return (false, false) if not known_left.known or known_left.value
+                    return (false, false) if not proof_source_arithmetic_operator_guard(goal, facts, operator_mask)
+                    return (true, proof_goal_depth(facts, right, annotations, operator_mask, depth, budget, split_depth, exhausted))
+                _:
+                    return (false, false)
+
+        def proof_disjunction_premise_entails_goal(goal: Ast::Expr, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            for fact in facts:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(_, TokenKind.Or, _, _):
+                        return true if proof_disjunction_entails_goal(fact, goal, facts, annotations, 0)
+                    _:
+                        pass
+            return false
+
+        # Every alternative of one premise either introduces the goal or is
+        # explicitly refuted. This is OR elimination without case-state copies.
+        def proof_disjunction_entails_goal(premise: Ast::Expr, goal: Ast::Expr, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return true if proof_goal_contains_disjunct(goal, premise, facts, 0)
+            match proof_strip_parens(premise):
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_disjunction_entails_goal(left, goal, facts, annotations, depth + 1) and proof_disjunction_entails_goal(right, goal, facts, annotations, depth + 1)
+                _:
+                    return proof_disjunct_refuted(premise, facts, annotations, 0)
+
+        # OR introduction from an already known subtree needs no case search.
+        # The caller checks source operator dispatch for the entire goal first.
+        def proof_disjunction_direct_branch(goal: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            for fact in facts:
+                return true if proof_fact_contains(fact, goal)
+            match proof_strip_parens(goal):
+                Ast::Expr.BoolLit(value, _):
+                    return value
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_disjunction_direct_branch(left, facts, depth + 1) or proof_disjunction_direct_branch(right, facts, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_comparison_from_equality_literal(left, operator, right, facts) if proof_is_comparison(operator)
+                _:
+                    pass
+            return false
+
+        # Eliminate an explicitly refuted alternative without branching. Ordering
+        # complements require integer witnesses; never assume float totality.
+        def proof_disjunct_refuted(expression: Ast::Expr, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return true if proof_fact_denies(expression, facts)
+            # Contract substitution leaves literal negations such as not true.
+            # Fold only Boolean literals/parentheses/not, never symbolic terms.
+            constant: (known: bool, value: bool) = proof_constant_bool(expression)
+            return true if constant.known and not constant.value
+            match proof_strip_parens(expression):
+                Ast::Expr.BoolLit(value, _):
+                    return not value
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_disjunct_refuted(left, facts, annotations, depth + 1) and proof_disjunct_refuted(right, facts, annotations, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_disjunct_refuted(left, facts, annotations, depth + 1) or proof_disjunct_refuted(right, facts, annotations, depth + 1)
+                Ast::Expr.Binary(left, operator, right, position):
+                    complement: TokenKind = proof_comparison_negation(operator)
+                    return false if complement == TokenKind.Eof
+                    # Closed safe constants need no invented branch facts. Keep
+                    # the existing ambiguity/width checks at this boundary.
+                    denied_constant: Ast::Expr = Ast::Expr.Binary(left, complement, right, position)
+                    return true if proof_closed_typed_constant_comparison(denied_constant, annotations)
+                    return true if proof_closed_safe_constant_comparison_in(denied_constant, facts)
+                    # A literal equality fixes this exact primitive term. This
+                    # also handles witnessed pure call results, without treating
+                    # arbitrary calls or wrapping arithmetic as integer bounds.
+                    return true if proof_comparison_from_equality_literal(left, complement, right, facts)
+                    equality: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq
+                    primitive: bool = proof_primitive_comparison(left, right, facts)
+                    integer_order: bool = not equality and primitive and proof_disjunction_denial_integer_term(left, facts, 0) and proof_disjunction_denial_integer_term(right, facts, 0)
+                    for fact in facts |left, right, complement, equality, primitive, integer_order, facts|:
+                        # Early-return guards retain not(comparison). Normalize
+                        # only its operator; preserve primitive and term guards.
+                        premise: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_comparison_disjunct_shape(fact)
+                        continue if not premise.known or premise.operator != complement or not primitive or not proof_primitive_comparison(premise.left, premise.right, facts)
+                        integers: bool = integer_order and proof_disjunction_denial_integer_term(premise.left, facts, 0) and proof_disjunction_denial_integer_term(premise.right, facts, 0)
+                        return true if (equality or integers) and proof_disjunct_terms_equivalent(left, premise.left, facts) and proof_disjunct_terms_equivalent(right, premise.right, facts)
+                    return false if not proof_disjunction_denial_fragment(expression, facts, 0)
+                    denied: Ast::Expr = Ast::Expr.Binary(left, complement, right, position)
+                    for fact in facts:
+                        return true if proof_fact_contains(fact, denied)
+                _:
+                    pass
+            return false
+
+        # Prioritize disjunctions whose branches match the postcondition. Guarded selectors
+        # accumulate unrelated fall-through facts, while the case-split budget is deliberately
+        # shallow.
+        def proof_comparison_disjunct_shape(expression: Ast::Expr) -> (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr):
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(left, operator, right, _):
+                    return (true, left, operator, right) if proof_is_comparison(operator)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match proof_strip_parens(operand):
+                        Ast::Expr.Binary(left, operator, right, _):
+                            complement: TokenKind = proof_comparison_negation(operator)
+                            return (true, left, complement, right) if complement != TokenKind.Eof
+                        _:
+                            pass
+                _:
+                    pass
+            return (false, Ast::Expr.Absent, TokenKind.Eof, Ast::Expr.Absent)
+
+        def proof_disjunct_terms_equivalent(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return true if proof_expr_equal(left, right)
+            for fact in facts:
+                match proof_strip_parens(fact):
+                    Ast::Expr.Binary(name, TokenKind.EqEq, value, _):
+                        return true if proof_expr_equal(left, name) and proof_expr_equal(right, value)
+                        return true if proof_expr_equal(left, value) and proof_expr_equal(right, name)
+                    _:
+                        pass
+            return false
+
+        def proof_disjunct_atoms_equivalent(left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            return true if proof_disjunct_terms_equivalent(left, right, facts)
+            first: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_comparison_disjunct_shape(left)
+            second: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_comparison_disjunct_shape(right)
+            return first.known and second.known and first.operator == second.operator and proof_disjunct_terms_equivalent(first.left, second.left, facts) and proof_disjunct_terms_equivalent(first.right, second.right, facts)
+
+        def proof_goal_contains_disjunct(goal: Ast::Expr, candidate: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
+            requires depth <= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            decreases PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT - depth
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return proof_goal_contains_disjunct(left, candidate, facts, depth + 1) or proof_goal_contains_disjunct(right, candidate, facts, depth + 1)
+                _:
+                    return proof_disjunct_atoms_equivalent(goal, candidate, facts)
+
+        def proof_goal_disjunction_relevance(goal: Ast::Expr, left: Ast::Expr, right: Ast::Expr, facts: darray[Ast::Expr]&) -> usize:
+            left_matches: bool = proof_goal_contains_disjunct(goal, left, facts, 0)
+            right_matches: bool = proof_goal_contains_disjunct(goal, right, facts, 0)
+            return 2 if left_matches and right_matches
+            return 1 if left_matches or right_matches
+            return 0
+
+        def proof_find_goal_relevant_disjunction(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr):
+            first_index: mutable usize = facts.count
+            first_left: mutable Ast::Expr = Ast::Expr.Absent
+            first_right: mutable Ast::Expr = Ast::Expr.Absent
+            best_index: mutable usize = facts.count
+            best_left: mutable Ast::Expr = Ast::Expr.Absent
+            best_right: mutable Ast::Expr = Ast::Expr.Absent
+            best_score: mutable usize = 0
+            for index in 0..<facts.count |index, facts, goal, first_index, first_left, first_right, best_index, best_left, best_right, best_score|:
+                candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(facts[index])
+                continue if not candidate.known
+                if first_index == facts.count:
+                    first_index <- index
+                    first_left <- candidate.left
+                    first_right <- candidate.right
+                score: usize = proof_goal_disjunction_relevance(goal, candidate.left, candidate.right, facts)
+                if score > best_score:
+                    best_index <- index
+                    best_left <- candidate.left
+                    best_right <- candidate.right
+                    best_score <- score
+                break if best_score == 2
+            return (true, best_index, best_left, best_right) if best_score > 0
+            return (true, first_index, first_left, first_right) if first_index < facts.count
+            return (false, facts.count, Ast::Expr.Absent, Ast::Expr.Absent)

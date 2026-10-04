@@ -108,6 +108,16 @@ if [[ "$tactic_status" -ne 0 ]]; then
     exit 1
 fi
 printf 'dogfood tactic_runtime: kernel-backed state actions and branch obligations passed\n'
+# Required-reference provenance must reject altered declarations, not merely replay a null test.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/required-reference-replay.o" "$SNAPSHOT_ROOT/examples/required_reference_replay_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/required-reference-replay" "$runtime_dir/required-reference-replay.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/required-reference-replay" "$runtime_dir/required-reference-replay.o"
+fi
+"$runtime_dir/required-reference-replay"
+printf 'dogfood required_reference_replay: nullable, value, missing, shifted, duplicate and alias-collision origins rejected\n'
+
 
 # Corrupt a checked lemma-summary binding in memory and require independent replay to reject every
 # caller certificate that tries to consume the now-mismatched instantiated postcondition.
