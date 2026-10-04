@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,26 @@ assert report["trust"]["trusted_assumptions"] == [], report["trust"]
 functions = {item["name"]: item for item in report["declaration_details"]
              if item.get("kind") == "function"}
 assert functions["parameter_heavy_manifest_route"]["verified"], functions
+assert functions["parameter_heavy_manifest_route_contract"]["verified"], functions
+# The old implication was reversed: it demanded zero for valid kinds. Keep it
+# as an adversarial control instead of teaching the verifier to accept it.
+with tempfile.TemporaryDirectory(prefix="elisa-proof-selector-contract-") as scratch:
+    false_source = Path(scratch) / "reversed_implication.elisa"
+    text = SOURCE.read_text()
+    correct = "ensures kind <= WbRuntime::RESOURCE_KIND_COMPONENT_INSTANCES or result == 0"
+    assert text.count(correct) == 2
+    false_source.write_text(text.replace(correct, correct.replace("<=", ">"), 1))
+    false_run = subprocess.run([str(BINARY), "--json", str(false_source)],
+                               capture_output=True, text=True, timeout=60)
+    assert false_run.returncode == 1, (false_run.returncode, false_run.stderr)
+    false_report = json.loads(false_run.stdout)
+    assert false_report["summary"]["semantic_errors"] == 0, false_report["summary"]
+    assert false_report["replay"]["gaps"] == 0, false_report["replay"]
+    assert false_report["trust"]["trusted_assumptions"] == [], false_report["trust"]
+    assert any(f["kind"] == "ensure-unproven" and f["name"] == "parameter_heavy_manifest_route"
+               for f in false_report["findings"]), false_report["findings"]
+    assert not next(d for d in false_report["declaration_details"]
+                    if d["name"] == "parameter_heavy_manifest_route")["verified"]
 over_limit_run = subprocess.run([str(BINARY), "--json", str(OVER_LIMIT_SOURCE)],
                                 capture_output=True, text=True, timeout=60)
 assert over_limit_run.returncode == 1, (over_limit_run.returncode, over_limit_run.stderr)

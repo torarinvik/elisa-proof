@@ -27,6 +27,17 @@ remain refused. Source-length and kernel-inventory checks pass. The full regress
 matrix and self-verification remain incomplete; this checkpoint claims focused
 coverage, not overall completion or a measured throughput improvement.
 
+The parameter-heavy selector fixture had a genuinely false first postcondition:
+`kind > maximum or result == 0` demanded zero for valid kinds, not invalid kinds.
+It now uses `kind <= maximum or result == 0`. The selector itself carries explicit
+postconditions, all checked against its high-arity body, which its caller then
+uses as verified summaries rather than asking bounded pure unfolding to inspect
+an unsupported selector body. The test requires both functions verified and all
+certificates replayed. A generated reversed-implication mutant remains unverified
+with an ensure refusal, and the ordinary 64-limit over-budget control still fails.
+This repairs the fixture specification and strengthens its safety controls; it
+does not extend inline-unfolding budgets or claim broader selector coverage.
+
 ## 2026-09-19 checkpoint: constants refactor must preserve the verification frontier
 
 The committed constants cleanups (`03aa2ea`, `8d18da4`, and `d622b03`) preserve the proof
