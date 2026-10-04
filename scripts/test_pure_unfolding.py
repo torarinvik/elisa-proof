@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Pure function unfolding (BACKLOG D-04): positive, adversarial, malformed and budget cases."""
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = ROOT / "build/elisa-proof"
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 
 
 def report(source):

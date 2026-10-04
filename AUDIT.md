@@ -11179,3 +11179,27 @@ test has a stale exact count (17 proven versus the expected 16). These remain op
 than being concealed by the focused fixes. The parameter-heavy fixture additionally has
 an invalid implication: `kind > maximum or result == 0` constrains valid resource kinds,
 not the invalid-kind branch. Correct that specification before expanding proof power for it.
+
+## Captured-loop constant discovery (2026-10-04)
+
+`test_loop_state_joins.py` failed only `constant_invariant`, also on main. A minimal loop
+proved without captures but failed with `|count|`: constant-use pruning did not descend
+into `Ast::Expr.Block`, the frontend representation of captured loops. Exact constant
+facts were therefore never imported. Discovery now traverses block statements and values,
+including initializer and returned blocks, with a shared finite AST-depth limit across
+statement/expression recursion. Namespace reservation, declared-width checks, parameter
+shadowing, source provenance and independent fact replay are unchanged.
+
+The strict O2 candidate passes the loop-state gate and a new focused test covering three
+block positions, false initial invariants, parameter and sibling namespace controls,
+malformed duplicate captures, and deep-body budget refusal. Include/qualified constant,
+pure-unfolding, SMT-oracle and ten-package portable replay gates pass. No new certificate
+kind or trusted rule is added; inventory and source-length checks pass.
+
+The qualified-constant statement fixture already proves all 17 obligations on main,
+including its guarded u8 decreases expression. Its stale expectation of 16 successes plus
+a decreases refusal is corrected to require a wholly proved verdict, empty findings and
+complete replay; wrong-value and shadowing controls still fail. The first diagnostic matrix
+finished with 42 failed steps, including stale expectations, build/provenance failures and
+the since-fixed CLI routing. It ran across investigation snapshots and is not a final
+validation of these commits. A clean full matrix and dogfood are still required.

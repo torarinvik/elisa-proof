@@ -187,6 +187,7 @@ run_py_test test_unsigned_or_goal.py
 run_py_test test_unsigned_sum_upper_shape.py
 run_py_test test_unsigned_remainder_range.py
 run_py_test test_loop_state_joins.py
+run_py_test test_captured_loop_constants.py
 run_py_test test_comprehension_resources.py
 run_py_test test_monotone_orders.py
 run_py_test test_replay_construct_arguments.py
