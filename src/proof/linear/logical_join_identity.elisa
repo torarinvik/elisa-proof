@@ -1,5 +1,26 @@
 extend ElisaProof:
     public:
+        # Comparisons remain opaque atoms: no arithmetic evaluation or operator
+        # complementation. Only stable, witnessed primitive operands qualify.
+        def proof_logical_comparison_operand(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            match proof_strip_parens(expression):
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.CharLit(_, _):
+                    return proof_scalar_term_witnessed(expression, facts, 0)
+                _:
+                    return false
+
+        def proof_logical_comparison_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            current = proof_strip_parens(expression)
+            for fact in facts:
+                marker = proof_untrusted_operator_marker_info(fact)
+                return false if marker.known and proof_scalar_untrusted_operator_applies(current, marker.term, 0)
+            match current:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
+                    return proof_logical_comparison_operand(left, facts) and proof_logical_comparison_operand(right, facts)
+                _:
+                    return false
+
         struct ProofLogicalSignedAtom:
             expression: Ast::Expr
             negated: bool
@@ -33,6 +54,10 @@ extend ElisaProof:
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
                     return proof_logical_signed_atoms(inner, operator, not negated, facts, atoms, fuel, depth + 1)
                 Ast::Expr.Binary(left, candidate, right, _):
+                    if candidate != TokenKind.And and candidate != TokenKind.Or:
+                        return false if not proof_logical_comparison_atom(current, facts)
+                        atoms.push(ProofLogicalSignedAtom{expression: current, negated: negated, constant: false, value: false})
+                        return true
                     effective = (TokenKind.Or if candidate == TokenKind.And else TokenKind.And) if negated else candidate
                     return false if effective != operator
                     return proof_logical_signed_atoms(left, operator, negated, facts, atoms, fuel, depth + 1) and proof_logical_signed_atoms(right, operator, negated, facts, atoms, fuel, depth + 1)
@@ -67,7 +92,7 @@ extend ElisaProof:
                     return false
 
         # Validate the entire primitive logical tree before using constant
-        # absorption. No calls, fields, comparisons or unwitnessed atoms.
+        # absorption. No calls, fields or unwitnessed atoms.
         def proof_logical_constant(expression: Ast::Expr, facts: darray[Ast::Expr]&, fuel: mutable usize&, depth: usize = 0) -> (valid: bool, known: bool, value: bool):
             return (false, false, false) if fuel == 0 or depth >= 64
             fuel <- fuel - 1
@@ -80,7 +105,7 @@ extend ElisaProof:
                     inner = proof_logical_constant(operand, facts, fuel, depth + 1)
                     return (inner.valid, inner.known, not inner.value)
                 Ast::Expr.Binary(left, candidate, right, _):
-                    return (false, false, false) if candidate != TokenKind.And and candidate != TokenKind.Or
+                    return (proof_logical_comparison_atom(expression, facts), false, false) if candidate != TokenKind.And and candidate != TokenKind.Or
                     a = proof_logical_constant(left, facts, fuel, depth + 1)
                     b = proof_logical_constant(right, facts, fuel, depth + 1)
                     return (false, false, false) if not a.valid or not b.valid
