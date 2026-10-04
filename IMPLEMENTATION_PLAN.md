@@ -77,6 +77,21 @@ The first implementation milestone therefore closes current regressions and reco
 - Distinguish sound conservative rejection from a supported proof. Restore lost expressiveness with evidence, not by weakening a rejection guard.
 - Compiler bugs encountered during this work receive minimized stage0/stage1 cases and compiler fixes. Do not hide them in the prover. Keep unrelated compiler changes out of scoped commits.
 - Commit each completed, validated gain. Record what was tested and what remains unverified. Do not commit exploratory scratch fixtures as supported functionality.
+- Linux and macOS are required acceptance targets. Windows work is deferred, not an
+  excuse to introduce platform-dependent proof semantics. Native ABI-dependent terms must
+  carry checked width identity; cross-ABI packages must reject rather than reinterpret it.
+- Run full matrices and censuses from immutable committed snapshots with matching binaries.
+  Do not edit the source tree being audited. A source-digest mismatch invalidates the census,
+  even when earlier focused tests passed; it is not a proof-coverage regression to bless.
+- Bind every direct compiler probe to the freshness-guarded checkout explicitly. Record
+  frontend, product and runtime identities. An explicit missing checkout is an error, not
+  authorization to fall back to an unrelated PATH compiler or bootstrap.
+- Classify failures by the failing assertion and exact obligation, not the test's headline.
+  An imported-library replay gap can fail an otherwise correctly rejected adversarial fixture.
+  Preserve whole-report replay gates and fix the underlying gap rather than exempting it.
+- Keep performance comparisons paired on source, compiler, target, optimization mode and
+  workload; compare obligations and replay coverage as well as time/instructions/memory.
+  Stable profiler function identities must remain distinct through export, not just JSON capture.
 
 ## 4. Target architecture and trust model
 
