@@ -293,7 +293,7 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
-| `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_head_name` | `proof/expr/ast_equal.elisa` | source adapter; module/type head lookup, not callable contract resolution |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
 | `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
