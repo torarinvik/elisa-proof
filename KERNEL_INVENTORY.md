@@ -25,6 +25,7 @@ Consumers are all kernel modules unless the row names specific ones. Structural 
 | Kind | Family | Fields | Producer |
 |---|---|---|---|
 | `int` | scalar | `value`; `operator` = width tag `u64`/`usize` only with `value` < 0 (denotes `value` + 2^64), else empty | `proof/kernel.elisa` |
+| `typed-int` | scalar | `value` = typed bit pattern; `name` = exact primitive integer sort | `kernel_typed_arithmetic.elisa`, `kernel_contextual_constants.elisa` |
 | `bool` | scalar | `value` in {0,1} | `proof/kernel.elisa`, `check/kernel_proposition_environment.elisa` |
 | `float` | scalar | always rejected: NaN breaks reflexive equality | none |
 | `string` | scalar | `name` = literal text | `proof/kernel.elisa`, `check/kernel_proposition_environment.elisa` |
@@ -112,7 +113,7 @@ and the source producer is `check/kernel_proposition_environment.elisa`.
 
 ## Certificate rules
 
-`proof_replay_certificate_rule_valid` (`replay/certificate_validation.elisa`) is the closed rule
+`proof_replay_certificate_rule_valid` (`replay/certificate_validation_integrated_helpers.elisa`) is the closed rule
 protocol. `proof_replay_certificate_with_stack` (`replay/fact_trace_validation.elisa`) dispatches
 each certificate to one public kernel entry point, after it has tied the certificate to a proven
 goal attempt, bound every fact to a trace and re-matched the AST against the arena.
@@ -149,6 +150,7 @@ summary trace cannot be relabelled as one.
 | Kind | Producer | Source construct |
 |---|---|---|
 | `global-constant` | `check/global_constants.elisa` | a module constant's value (re-validated by `replay/global_constant_validation.elisa`) |
+| `global-constant-qualified` | `check/global_constants.elisa` | a module constant reached through a qualified name (re-validated by `replay/global_constant_validation.elisa`) |
 | `variant-exclusion` | `check/variant_exclusion.elisa` | `not (x is E.V) or not (x is E.W)` for distinct variants of a uniquely declared enum (re-validated by `replay/variant_exclusion_validation.elisa`) |
 | `precondition` | `check/declaration_checks.elisa` | a function `requires` clause |
 | `type-bound` | `check/bounds_and_facts.elisa` | the range of a parameter's machine-integer type |
@@ -269,7 +271,6 @@ claims marked "(checked)".
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
-| `proof_integer_literal_tag` | `proof/expr/literal_types.elisa` | source adapter |
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
 | `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
 | `proof_internal_rebind_name` | `proof/check/internal_name_safety.elisa` | source adapter |

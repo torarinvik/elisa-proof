@@ -89,7 +89,7 @@ def node_kinds() -> set[str]:
 
 
 def certificate_rules() -> set[str]:
-    text = read(PROOF / "replay" / "certificate_validation.elisa")
+    text = read(PROOF / "replay" / "certificate_validation_integrated_helpers.elisa")
     return match_arms(function_body(text, "proof_replay_certificate_rule_valid"))
 
 
