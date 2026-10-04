@@ -36,6 +36,7 @@ POSITIVE = {
     "goal_disjunct_split_probe": {"goal", "resource-safety"},
     "disjunctive_goals": {"goal", "index-upper"},
     "leaving_branch_join": {"goal", "index-upper"},
+    "linear_disequality_refuted": {"goal", "resource-safety"},
 }
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
@@ -320,6 +321,34 @@ double_negative["theorems"] = [reseal(double_negative, double_negative["theorems
 refused(double_negative, "compound-double-negation-is-not-complement", "rejected", "kernel-rejected")
 
 # Consistent forgeries: the kernel itself must refuse them.
+wrapped_denial = copy.deepcopy(base)
+wrapped_denial["kernel"] = {"nodes": [], "children": []}
+subject = append_node(wrapped_denial, "ident", name="x")
+width = append_node(wrapped_denial, "int", value="8")
+scalar = marker_call(wrapped_denial, "__elisa_primitive_scalar_type", [subject])
+signed = marker_call(wrapped_denial, "__elisa_signed_type_bound", [subject, width])
+zero = append_node(wrapped_denial, "int", value="0")
+one = append_node(wrapped_denial, "int", value="1")
+low = append_node(wrapped_denial, "int", value="126")
+high = append_node(wrapped_denial, "int", value="127")
+magnitude = append_node(wrapped_denial, "int", value="128")
+minimum = append_node(wrapped_denial, "unary", "-", magnitude)
+increment = append_node(wrapped_denial, "binary", "+", subject, one)
+lower = append_node(wrapped_denial, "binary", ">=", subject, low)
+upper = append_node(wrapped_denial, "binary", "<=", subject, high)
+premise = append_node(wrapped_denial, "binary", "!=", increment, zero)
+claim = copy.deepcopy(assumption)
+claim.update(hypotheses=[scalar, signed, lower, upper, premise],
+             hypothesis_origins=[{"kind": "adapter"}] * 5,
+             conclusion=append_node(wrapped_denial, "binary", "!=", subject, zero))
+wrapped_denial["theorems"] = [reseal(wrapped_denial, claim)]
+code, result = replay(wrapped_denial, "linear-denial-wrapped-premise-control")
+assert code == 0 and result["status"] == "replayed", result
+false_wrapped = copy.deepcopy(wrapped_denial)
+false_wrapped["theorems"][0]["conclusion"] = append_node(false_wrapped, "binary", "!=", increment, minimum)
+false_wrapped["theorems"] = [reseal(false_wrapped, false_wrapped["theorems"][0])]
+refused(false_wrapped, "linear-denial-wrapping-goal", "rejected", "kernel-rejected")
+
 indexed = copy.deepcopy(packages["disjunctive_goals"])
 indexed_claim = next(t for t in indexed["theorems"] if t["name"] == "live" and t["rule"] == "goal")
 indexed_nodes = indexed["kernel"]["nodes"]

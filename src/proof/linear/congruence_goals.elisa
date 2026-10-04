@@ -124,6 +124,21 @@ extend ElisaProof:
                     return true if proof_source_arithmetic_operator_guard(goal, facts, operator_mask) and proof_disjunction_premise_entails_goal(goal, facts, annotations)
                     false_left: (applicable: bool, proven: bool) = proof_disjunction_false_left_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
                     return false_left.proven if false_left.applicable
+                    # Preserve correlations before a failing left-alternative search spends
+                    # fuel splitting this same premise. The kernel uses this order too.
+                    if proof_source_arithmetic_operator_guard(goal, facts, operator_mask):
+                        candidate: (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr) = proof_find_goal_relevant_disjunction(facts, goal)
+                        exhausted <- true if candidate.known and split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
+                        if candidate.known and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
+                            left_facts: mutable darray[Ast::Expr] = []
+                            right_facts: mutable darray[Ast::Expr] = []
+                            for index in 0..<facts.count |index, facts, left_facts, right_facts, candidate|:
+                                continue if index == candidate.index
+                                left_facts.push(facts[index])
+                                right_facts.push(facts[index])
+                            left_facts.push(candidate.left)
+                            right_facts.push(candidate.right)
+                            return true if proof_goal_depth(left_facts, goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(right_facts, goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
                     return true if proof_goal_depth(facts, left, annotations, operator_mask, depth, budget, split_depth, exhausted)
                 _:
                     pass
@@ -244,26 +259,6 @@ extend ElisaProof:
                 exhausted <- true
                 return false
             return proof_quantifier_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) if quantifier_kind != ""
-            # When both the goal and a premise are disjunctive, split the premise
-            # first and prove the whole goal in each case. Trying each goal
-            # disjunct independently loses correlations such as
-            # `not (A and B) |- not A or not B`.
-            match proof_strip_parens(goal):
-                Ast::Expr.Binary(_, TokenKind.Or, _, _):
-                    candidate: (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr) = proof_find_goal_relevant_disjunction(facts, goal)
-                    exhausted <- true if candidate.known and split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
-                    if candidate.known and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
-                        left_facts: mutable darray[Ast::Expr] = []
-                        right_facts: mutable darray[Ast::Expr] = []
-                        for index in 0..<facts.count |index, facts, left_facts, right_facts, candidate|:
-                            continue if index == candidate.index
-                            left_facts.push(facts[index])
-                            right_facts.push(facts[index])
-                        left_facts.push(candidate.left)
-                        right_facts.push(candidate.right)
-                        return true if proof_goal_depth(left_facts, goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted) and proof_goal_depth(right_facts, goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
-                _:
-                    pass
             # The entry rule already attempted the left alternative with these exact facts.
             # The right alternative still enters all operator and machine-range guards.
             match goal:
@@ -399,6 +394,17 @@ extend ElisaProof:
                 return proof_goal_without_unsafe_premises(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
             return true if proof_facts_inconsistent(facts)
             return true if proof_linear_disequality_refuted(facts)
+            # To prove primitive a != b, refute a == b with an existing linear
+            # disequality premise. All consumed facts have passed the wrap guard.
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.BangEq, right, position):
+                    if proof_primitive_comparison(left, right, facts) and proof_signed_expression_safe(goal, facts) and proof_unsigned_expression_safe(goal, facts):
+                        denied: mutable darray[Ast::Expr] = []
+                        denied.extend(facts)
+                        denied.push(Ast::Expr.Binary(left, TokenKind.EqEq, right, position))
+                        return true if proof_linear_disequality_refuted(denied)
+                _:
+                    pass
             return true if proof_fact_proves_call_summary(facts, goal)
             return true if proof_goal_with_call_consequences(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted)
             if not proof_unsigned_expression_safe(goal, facts):
