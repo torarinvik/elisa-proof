@@ -59,6 +59,12 @@ extend ElisaProof:
                                     return (false, 0)
                                 value <- literal
                                 found <- true
+                            Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(magnitude, _), _):
+                                return (false, 0) if magnitude < 0
+                                literal: i64 = 0 - magnitude
+                                return (false, 0) if found and value != literal
+                                value <- literal
+                                found <- true
                             _:
                                 pass
                     _:
@@ -159,8 +165,15 @@ extend ElisaProof:
             for fact in facts |expression, report, owner|:
                 continue if not proof_fact_is_source_global_constant(report, fact, owner)
                 match proof_strip_parens(fact):
-                    Ast::Expr.Binary(left, TokenKind.EqEq, Ast::Expr.IntLit(_, _), _):
-                        return true if proof_expr_equal(expression, left)
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        continue if not proof_expr_equal(expression, left)
+                        match right:
+                            Ast::Expr.IntLit(_, _):
+                                return true
+                            Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(magnitude, _), _):
+                                return true if magnitude >= 0
+                            _:
+                                pass
                     _:
                         pass
             return false
@@ -207,7 +220,7 @@ extend ElisaProof:
 
         def proof_counterexample_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            return true if proof_type_marker_callee(expression)
+            return true if proof_type_marker_callee(expression) or proof_counterexample_qualified_unsigned_marker(expression, facts)
             match expression:
                 Ast::Expr.BoolLit(_, _):
                     return true
@@ -226,8 +239,19 @@ extend ElisaProof:
 
         # Only borrow constants that occur directly against this same typed identifier. 0 and 1
         # are valid inhabitants of every primitive scalar domain used here; copied source
-        # literals have already passed the compiler's width/type checks. No affine-derived or
-        # neighboring value is invented outside an identifier's declared range.
+        # literals have already passed the compiler's width/type checks. The successor of an
+        # exact boundary is admitted only within a witnessed unsigned machine domain.
+        def proof_counterexample_add_boundary_candidates(expression: Ast::Expr, name: sview, facts: darray[Ast::Expr]&, start: usize, bound: ProofBound, candidates: mutable darray[i64]&) -> void:
+            constant = proof_constant_int(expression)
+            resolved = constant if constant.known else proof_counterexample_fact_literal(expression, facts)
+            return if not resolved.known
+            proof_counterexample_add_candidate(candidates, start, bound, resolved.value)
+            width: i64 = proof_unsigned_marker_width_for_name(facts, name)
+            return if width == 0 or resolved.value < 0 or resolved.value == 9223372036854775807
+            successor: i64 = resolved.value + 1
+            return if width != 64 and successor > proof_unsigned_width_max(width)
+            proof_counterexample_add_candidate(candidates, start, bound, successor)
+
         def proof_counterexample_collect_candidates(expression: Ast::Expr, name: sview, facts: darray[Ast::Expr]&, start: usize, bound: ProofBound, candidates: mutable darray[i64]&, depth: usize) -> void:
             return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
@@ -244,15 +268,13 @@ extend ElisaProof:
                     match left:
                         Ast::Expr.Ident(left_name, _):
                             if left_name == name:
-                                constant: (known: bool, value: i64) = proof_constant_int(right)
-                                proof_counterexample_add_candidate(candidates, start, bound, constant.value) if constant.known
+                                proof_counterexample_add_boundary_candidates(right, name, facts, start, bound, candidates)
                         _:
                             pass
                     match right:
                         Ast::Expr.Ident(right_name, _):
                             if right_name == name:
-                                constant: (known: bool, value: i64) = proof_constant_int(left)
-                                proof_counterexample_add_candidate(candidates, start, bound, constant.value) if constant.known
+                                proof_counterexample_add_boundary_candidates(left, name, facts, start, bound, candidates)
                         _:
                             pass
                 _:
@@ -311,9 +333,11 @@ extend ElisaProof:
                 start: usize = candidates.count
                 proof_counterexample_add_candidate(&candidates, start, bound, 0)
                 proof_counterexample_add_candidate(&candidates, start, bound, 1)
+                # Prefer the failed goal's boundary over unrelated type-range
+                # endpoints, producing the smallest nearby diagnostic witness.
+                proof_counterexample_collect_candidates(goal, name, facts, start, bound, &candidates, 0)
                 for fact in facts |name, start, bound, candidates|:
                     proof_counterexample_collect_candidates(fact, name, facts, start, bound, &candidates, 0)
-                proof_counterexample_collect_candidates(goal, name, facts, start, bound, &candidates, 0)
                 starts.push(start)
                 counts.push(candidates.count - start)
                 return false if counts[counts.count - 1] == 0
