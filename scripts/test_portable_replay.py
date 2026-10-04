@@ -37,6 +37,7 @@ POSITIVE = {
     "disjunctive_goals": {"goal", "index-upper"},
     "leaving_branch_join": {"goal", "index-upper"},
     "linear_disequality_refuted": {"goal", "resource-safety"},
+    "closed_goal_width_uniform": {"goal", "resource-safety"},
 }
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
@@ -321,6 +322,21 @@ double_negative["theorems"] = [reseal(double_negative, double_negative["theorems
 refused(double_negative, "compound-double-negation-is-not-complement", "rejected", "kernel-rejected")
 
 # Consistent forgeries: the kernel itself must refuse them.
+closed = copy.deepcopy(packages["closed_goal_width_uniform"])
+closed_nodes = closed["kernel"]["nodes"]
+closed_claim = next(theorem for theorem in closed["theorems"]
+                    if closed_nodes[theorem["conclusion"]]["kind"] == "binary"
+                    and closed_nodes[theorem["conclusion"]]["operator"] == "or"
+                    and closed_nodes[closed_nodes[closed_nodes[theorem["conclusion"]]["left"]]["left"]]["kind"] == "binary"
+                    and closed_nodes[closed_nodes[closed_nodes[theorem["conclusion"]]["left"]]["left"]]["operator"] == "-")
+comparison = closed_nodes[closed_nodes[closed_claim["conclusion"]]["left"]]
+assert comparison["operator"] == "<", comparison
+ring = closed_nodes[comparison["left"]]
+assert closed_nodes[ring["left"]]["value"] == "0" and closed_nodes[ring["right"]]["value"] == "1", ring
+comparison["operator"] = ">"
+closed["theorems"] = [reseal(closed, closed_claim)]
+refused(closed, "closed-width-nonuniform-claim", "rejected", "kernel-rejected")
+
 wrapped_denial = copy.deepcopy(base)
 wrapped_denial["kernel"] = {"nodes": [], "children": []}
 subject = append_node(wrapped_denial, "ident", name="x")
