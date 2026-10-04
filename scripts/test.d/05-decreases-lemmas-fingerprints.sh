@@ -14,7 +14,7 @@ lemma_summary_provenance_json_status=${lemma_summary_provenance_statuses[1]}
 rejected_theorem_catalog_statuses=("${PIPESTATUS[@]}")
 rejected_theorem_catalog_status=${rejected_theorem_catalog_statuses[0]}
 rejected_theorem_catalog_json_status=${rejected_theorem_catalog_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma_default_catalog.elisa" | python3 -c 'import json, sys; theorem = json.load(sys.stdin)["theorems"][0]; assert theorem["verified"] is True; assert theorem["parameters"] == ["x", "amount"]; assert theorem["parameter_defaults"] == [None, {"kind": "int", "value": 7}]'
+"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma_default_catalog.elisa" | python3 -c 'import json, sys; theorem = json.load(sys.stdin)["theorems"][0]; assert theorem["verified"] is True; assert theorem["parameters"] == ["x", "amount"]; assert theorem["parameter_defaults"] == [None, {"kind": "int", "value": 7, "line": 1, "column": 44, "offset": 43}]'
 default_theorem_catalog_statuses=("${PIPESTATUS[@]}")
 default_theorem_catalog_status=${default_theorem_catalog_statuses[0]}
 default_theorem_catalog_json_status=${default_theorem_catalog_statuses[1]}
@@ -40,7 +40,7 @@ theorem_suggestion_json_status=${theorem_suggestion_statuses[1]}
 unverified_theorem_suggestion_statuses=("${PIPESTATUS[@]}")
 unverified_theorem_suggestion_status=${unverified_theorem_suggestion_statuses[0]}
 unverified_theorem_suggestion_json_status=${unverified_theorem_suggestion_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --suggest 8 "$ROOT_DIR/examples/theorem_suggestion_defaults.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["source"]["complete"] is True; assert [candidate["theorem"] for candidate in result["candidates"]] == ["safe_default"]; candidate = result["candidates"][0]; assert candidate["bindings"][1] == {"parameter": "amount", "value": {"kind": "int", "value": 7}}; assert candidate["applicable"] is True'
+"$ROOT_DIR/build/elisa-proof" --suggest 8 "$ROOT_DIR/examples/theorem_suggestion_defaults.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["source"]["complete"] is True; assert [candidate["theorem"] for candidate in result["candidates"]] == ["safe_default"]; candidate = result["candidates"][0]; assert candidate["bindings"][1] == {"parameter": "amount", "value": {"kind": "int", "value": 7, "line": 4, "column": 46, "offset": 90}}; assert candidate["applicable"] is True'
 theorem_suggestion_default_statuses=("${PIPESTATUS[@]}")
 theorem_suggestion_default_status=${theorem_suggestion_default_statuses[0]}
 theorem_suggestion_default_json_status=${theorem_suggestion_default_statuses[1]}
