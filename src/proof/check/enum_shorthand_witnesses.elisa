@@ -1,0 +1,65 @@
+# Owner-aware witnesses for owner-neutral shorthand enum terms.
+extend ElisaProof:
+        # A shorthand member is owner-neutral in the term AST. It is a scalar only when this
+        # complete source tree contains exactly one matching enum variant and that declaration
+        # is a zero-payload const enum. Count non-const enum variants as collisions as well.
+        def proof_const_enum_shorthand_owner(declarations: darray[Ast::Decl]&, wanted: sview, depth: usize) -> (count: usize, owner: sview, admissible: bool):
+            return (2, "", false) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            selected_owner: mutable sview = ""
+            admissible: mutable bool = false
+            for declaration in declarations |wanted, depth, count, selected_owner, admissible|:
+                match declaration:
+                    Ast::Decl.Enum(name, variants, is_const, _, _):
+                        for variant in variants |wanted, name, is_const, count, selected_owner, admissible|:
+                            if variant.name == wanted:
+                                count <- count + 1
+                                if count == 1:
+                                    selected_owner <- name
+                                    admissible <- is_const and variant.fields.count == 0
+                    Ast::Decl.Module(_, body, _):
+                        nested: (count: usize, owner: sview, admissible: bool) = proof_const_enum_shorthand_owner(body, wanted, depth + 1)
+                        return nested if nested.count >= 2
+                        if nested.count > 0:
+                            if count == 0:
+                                count <- nested.count
+                                selected_owner <- nested.owner
+                                admissible <- nested.admissible
+                            else:
+                                count <- 2
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, owner: sview, admissible: bool) = proof_const_enum_shorthand_owner(body, wanted, depth + 1)
+                        return nested if nested.count >= 2
+                        if nested.count > 0:
+                            if count == 0:
+                                count <- nested.count
+                                selected_owner <- nested.owner
+                                admissible <- nested.admissible
+                            else:
+                                count <- 2
+                    _:
+                        pass
+            return (count, selected_owner, admissible)
+
+        # Keep root_declarations immutable through nested module walks: variant ambiguity is
+        # global to the source tree, not local to the subtree containing the declared enum.
+        def proof_add_const_enum_shorthand_witnesses(declarations: darray[Ast::Decl]&, root_declarations: darray[Ast::Decl]&, enum_owner: sview, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos, budget: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or budget == 0
+            for declaration in declarations |root_declarations, enum_owner, facts, report, line, owner, position, budget, depth|:
+                match declaration:
+                    Ast::Decl.Enum(name, variants, is_const, _, _):
+                        if name == enum_owner and is_const:
+                            for variant in variants |name, facts, report, line, owner, position, budget, root_declarations|:
+                                return if budget == 0
+                                budget <- budget - 1
+                                resolution: (count: usize, owner: sview, admissible: bool) = proof_const_enum_shorthand_owner(root_declarations, variant.name, 0)
+                                continue if resolution.count != 1 or not resolution.admissible or resolution.owner != name
+                                shorthand: Ast::Expr = Ast::Expr.ShorthandMember([variant.name], position)
+                                proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(shorthand, position), line, owner)
+                                return if budget == 0
+                    Ast::Decl.Module(_, body, _):
+                        proof_add_const_enum_shorthand_witnesses(body, root_declarations, enum_owner, facts, report, line, owner, position, budget, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_add_const_enum_shorthand_witnesses(body, root_declarations, enum_owner, facts, report, line, owner, position, budget, depth + 1)
+                    _:
+                        pass
