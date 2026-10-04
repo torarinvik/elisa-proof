@@ -2,6 +2,66 @@ extend ElisaProof:
     public:
         const PROOF_ALIAS_TRANSFER_BUDGET: usize = 16
 
+        # Preserve only receiver-free consequences of an already established numeric copy,
+        # while its pre-state premises are still available. The equality to the mutable source
+        # itself is intentionally not retained: mutation invalidation must still revoke it.
+        def proof_transfer_numeric_snapshot_facts(receiver: Ast::Expr, local: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&) -> void:
+            original: darray[Ast::Expr] = proof_copy_exprs(facts)
+            budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
+            copied: Ast::Expr = Ast::Expr.Binary(local, TokenKind.EqEq, receiver, position)
+            if not proof_expr_equal(local, receiver) and proof_goal(original, copied, annotations):
+                proof_add_derived_fact_from(facts, report, copied, original, "proof-step", position.line, owner)
+            for fact in original |fact, original, receiver, local, facts, report, owner, position, annotations, budget|:
+                pieces: mutable darray[Ast::Expr] = []
+                proof_conjunct_components(fact, pieces)
+                for piece in pieces |piece, original, receiver, local, facts, report, owner, position, annotations, budget|:
+                    return if budget == 0
+                    rewritten: (changed: bool, value: Ast::Expr) = proof_replace_place(piece, receiver, local, 0)
+                    continue if not rewritten.changed or proof_expr_reads(rewritten.value, receiver, 0)
+                    continue if any existing in facts where proof_expr_equal(existing, rewritten.value)
+                    match rewritten.value:
+                        Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                            continue if proof_expr_equal(left, right)
+                        _:
+                            pass
+                    budget <- budget - 1
+                    continue if not proof_goal(original, rewritten.value, annotations)
+                    proof_add_derived_fact_from(facts, report, rewritten.value, original, "proof-step", position.line, owner)
+
+        # A write through a verified primitive scalar reference cannot change a copy already
+        # held by a by-value local. Retain only exact local/literal equalities here; unrelated
+        # reference facts and more general arithmetic consequences remain havoced.
+        def proof_clear_scalar_reference_write_facts(facts: mutable darray[Ast::Expr]&, report: ProofReport&, owner: sview, root: sview) -> void:
+            original: darray[Ast::Expr] = proof_copy_exprs(facts)
+            write_index: mutable usize = 0
+            for fact in original |facts, report, owner, root, original, write_index|:
+                if proof_fact_is_type_bound(report, fact, owner) or proof_fact_is_source_global_constant(report, fact, owner):
+                    facts[write_index] <- fact
+                    write_index <- write_index + 1
+                    continue
+                continue if proof_expr_mentions_name(fact, root)
+                continue if not proof_numeric_snapshot_literal_equality(fact, report.value_binding_names)
+                facts[write_index] <- fact
+                write_index <- write_index + 1
+            facts.resize(write_index)
+
+        def proof_numeric_snapshot_literal_equality(expression: Ast::Expr, value_names: darray[sview]&) -> bool:
+            match expression:
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    match left:
+                        Ast::Expr.Ident(name, _):
+                            return (any value_name in value_names where value_name == name) and proof_constant_int(right).known
+                        _:
+                            pass
+                    match right:
+                        Ast::Expr.Ident(name, _):
+                            return (any value_name in value_names where value_name == name) and proof_constant_int(left).known
+                        _:
+                            pass
+                    return false
+                _:
+                    return false
+
         # Rebinding a name drops every fact over its old symbol. When a live local is recorded
         # equal to that old value -- `begin == cursor` before `cursor <- begin` -- the facts still
         # hold of the local: `cursor <= stop` is `begin <= stop`. Each fact is rewritten onto the

@@ -414,10 +414,21 @@ extend ElisaProof:
             proof_add_primitive_operator_witnesses(facts, report, root, type_expression, position)
             scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type(type_expression, report.source_declarations, 0)
             if scalar_reference.known:
+                # This root is scalar only because the source declaration resolved to a
+                # primitive pointee type; the branch does not apply to general references.
+                proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(proof_ident_name(root), position), line, owner) if proof_ident_name(root) != ""
                 proof_add_builtin_index_witness(facts, report, root, position)
                 proof_add_index_operator_witnesses(facts, report, root, scalar_reference.target, position)
                 element_width: i64 = proof_unsigned_type_width(scalar_reference.target, report.source_declarations, 0)
                 proof_add_scalar_type_witness(facts, report, proof_scalar_element_marker(root, 1, position, element_width), line, owner)
+                # A scalar reference's implicit read and its explicit zero-index read have
+                # the declared pointee width, not an inferred "all references are scalar" type.
+                # The place marker below is exact to the one source index admitted by the
+                # builtin-index witness and is independently shape-checked during replay.
+                signed_element_width: i64 = proof_signed_type_width(scalar_reference.target, report.source_declarations, 0)
+                proof_add_scalar_type_witness(facts, report, proof_signed_type_marker(root, signed_element_width, position), line, owner) if signed_element_width > 0
+                explicit_zero: Ast::Expr = Ast::Expr.Index(root, Ast::Expr.IntLit(0, position), position)
+                proof_add_scalar_type_witness(facts, report, proof_signed_place_marker(explicit_zero, signed_element_width, position), line, owner) if signed_element_width > 0
                 return
             builtin_type: sview = proof_builtin_operator_type_name(type_expression, report.source_declarations, 0)
             if builtin_type != "":
@@ -545,28 +556,55 @@ extend ElisaProof:
         # Zero means a non-unsigned type; -1 means alias resolution is ambiguous or too
         # deep. Never silently treat a failed resolution as ordinary signed arithmetic.
 
-        # A widening integer conversion `name.T()` keeps its receiver's value: a receiver whose
-        # type marker bounds it within `T`'s range converts without truncation or wrapping. Only
-        # a bare name with a type marker, and a target no source function shadows, qualifies;
-        # narrowing and sign-changing conversions keep an opaque value.
+        # A builtin integer conversion keeps its receiver's mathematical value only when the
+        # receiver has an exact source type witness and that type, or the current fact interval,
+        # fits the destination range. Places are limited to names, fields, and an explicitly
+        # witnessed zero-index scalar reference element; calls and arbitrary reference roots do
+        # not acquire a scalar type by shape alone.
         def proof_widening_cast_receiver(callee: Ast::Expr, argument_count: usize, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> (known: bool, receiver: Ast::Expr, target: sview):
             conversion: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, argument_count, functions)
             return (false, Ast::Expr.Invalid, "") if not conversion.known
-            receiver_name: sview = proof_ident_name(conversion.receiver)
-            return (false, Ast::Expr.Invalid, "") if receiver_name == ""
+            receiver: Ast::Expr = proof_strip_parens(conversion.receiver)
+            match receiver:
+                Ast::Expr.Ident(name, _): return (false, Ast::Expr.Invalid, "") if name == ""
+                Ast::Expr.Field(_, field, _): return (false, Ast::Expr.Invalid, "") if field == ""
+                Ast::Expr.Index(_, index, _):
+                    return (false, Ast::Expr.Invalid, "") if not proof_builtin_index_expression_witnessed(receiver, facts)
+                    return (false, Ast::Expr.Invalid, "") if not proof_expr_is_zero(index)
+                _:
+                    return (false, Ast::Expr.Invalid, "")
             target_name: sview = proof_cast_target_name(callee)
             target: Ast::Expr = Ast::Expr.Ident(target_name, Ast::expr_pos(callee))
             target_unsigned: i64 = proof_unsigned_primitive_width(target)
             target_signed: i64 = proof_signed_primitive_width(target)
-            receiver_unsigned: i64 = proof_unsigned_marker_width_for_name(facts, receiver_name)
-            receiver_signed: i64 = proof_signed_marker_width_for_term(facts, conversion.receiver)
+            return (false, Ast::Expr.Invalid, "") if target_unsigned <= 0 and target_signed <= 0
+            receiver_unsigned: i64 = proof_unsigned_width_in_expression(receiver, facts)
+            receiver_signed: i64 = proof_signed_width_in_expression(receiver, facts)
+            return (false, Ast::Expr.Invalid, "") if not proof_scalar_term_witnessed(receiver, facts, 0)
             widening: mutable bool = false
             if receiver_unsigned > 0:
                 widening <- (target_unsigned > 0 and target_unsigned >= receiver_unsigned) or (target_signed > 0 and target_signed > receiver_unsigned)
             elif receiver_signed > 0:
                 widening <- target_signed > 0 and target_signed >= receiver_signed
+            if not widening:
+                bounds: mutable darray[ProofBound] = []
+                for fact in facts |bounds|:
+                    proof_collect_bounds(fact, facts, &bounds)
+                proof_close_equalities(facts, &bounds)
+                interval = proof_interval(receiver, bounds)
+                if interval.has_lower and interval.has_upper and interval.lower <= interval.upper:
+                    if target_signed > 0:
+                        widening <- interval.lower >= ElisaProofKernelCore::proof_kernel_signed_width_min(target_signed) and interval.upper <= ElisaProofKernelCore::proof_kernel_signed_width_max(target_signed)
+                    elif target_unsigned > 0:
+                        widening <- interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(target_unsigned)
             return (widening, conversion.receiver, target_name) if widening
             return (false, Ast::Expr.Invalid, "")
+
+        def proof_expr_is_zero(expression: Ast::Expr) -> bool:
+            match proof_strip_parens(expression):
+                Ast::Expr.IntLit(value, _): return value == 0
+                _:
+                    return false
 
         def proof_add_widening_cast_witnesses(expression: Ast::Expr, callee: Ast::Expr, argument_count: usize, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void:
             widening: (known: bool, receiver: Ast::Expr, target: sview) = proof_widening_cast_receiver(callee, argument_count, facts, functions)
