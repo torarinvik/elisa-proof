@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 import subprocess
 
+if not __debug__:
+    raise SystemExit("explanation checks must run without Python -O")
+
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 
@@ -29,7 +32,21 @@ status, text = run("--explain", "2", str(OPEN))
 assert status == 1 and text == SNAPSHOT, text
 
 status, text = run("--explain", "0", str(ROOT / "examples/literal_count.elisa"))
-assert status == 0 and "verdict: proven, certificate 0\n" in text, text
+assert status == 0 and "verdict: proven, replayed certificate 0\n" in text, text
+
+# An unchecked recursive summary can produce a certificate that independent replay refuses.
+# The human-facing verdict must expose that refusal, not the producer's provisional result.
+GAP = ROOT / "examples/rejected_lexicographic_decreases.elisa"
+status, raw = run("--json", str(GAP))
+report = json.loads(raw)
+assert status == 1 and report["replay"]["gaps"] > 0, report["replay"]
+gaps = [goal for goal in report["goals"] if goal.get("replay_status") == "gap"]
+assert gaps, report["goals"]
+for goal in gaps:
+    status, text = run("--explain", str(goal["goal_id"]), str(GAP))
+    assert status == 1, (status, text)
+    assert "verdict: not proven: producer result lacks successful kernel replay\n" in text, text
+    assert "verdict: proven" not in text, text
 
 # Every open goal of the budget fixture names the same gate the JSON report does, and lists
 # exactly the facts the report carries.
@@ -38,7 +55,8 @@ _, raw = run("--json", str(BUDGET))
 for goal in json.loads(raw)["goals"]:
     status, text = run("--explain", str(goal["goal_id"]), str(BUDGET))
     if goal["proven"]:
-        assert "verdict: proven" in text, text
+        assert goal["replay_status"] == "replayed", goal
+        assert "verdict: proven, replayed certificate " in text, text
     else:
         assert "refused at gate %s\n" % goal["refusal_gate"] in text, text
     assert "  facts: %d\n" % len(goal["facts"]) in text and text.count("\n    [") == len(goal["facts"])
