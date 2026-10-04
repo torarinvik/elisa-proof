@@ -438,3 +438,27 @@ def source_false_unique_variant(option: AuditOption) -> bool:
         if package["source"]["admissible"]:
             package_replay(package, scratch, example)
         print("negative:", example, "claim refused and absent from portable package")
+
+    # The exact scalar-witness exception must not disturb longstanding IEEE float refusals.
+    float_controls = (
+        ("rejected_float_reflexivity.elisa", ("float_reflexivity", "float_ordering")),
+        ("integer_disjunction_denial_rejected.elisa", ("integer_denial_float_field",)),
+    )
+    for example, targets in float_controls:
+        source = ROOT / "examples" / example
+        _, report = run_json([str(PROOF), "--json", str(source)])
+        assert report["status"] == "failed" and report["summary"]["semantic_errors"] == 0
+        assert report["replay"]["gaps"] == 0
+        assert report["replay"]["certificates"] == report["replay"]["replayed"]
+        for target in targets:
+            goals = [goal for goal in report["goals"]
+                     if goal["name"] == target and goal["rule"] == "goal"]
+            assert len(goals) == 1 and not goals[0]["proven"], (example, target, report["goals"])
+            assert any(finding.get("name") == target and finding.get("kind") == "ensure-unproven"
+                       for finding in report["findings"]), (example, target, report["findings"])
+        _, package = run_json([str(PROOF), "--package", str(source)])
+        assert not any(theorem.get("name") in targets and theorem.get("rule") == "goal"
+                       for theorem in package.get("theorems", [])), (example, targets)
+        if package["source"]["admissible"]:
+            package_replay(package, scratch, "float-control-" + example)
+        print("legacy float control:", example, "refused with certificates replayed")
