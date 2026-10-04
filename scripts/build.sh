@@ -230,6 +230,7 @@ compile_object() {
 # in the background keeps its output in a log that is printed, in product order, once it ends.
 OBJECT_KEYS=()
 COMPILE_INDICES=()
+compile_count=0
 for index in "${!PRODUCT_MAINS[@]}"; do
     object_key="$(object_key_of "${PRODUCT_MAINS[$index]}")"
     OBJECT_KEYS+=("$object_key")
@@ -238,10 +239,14 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         printf 'build: reused cached object %s\n' "${object_key:0:12}" >&2
     else
         COMPILE_INDICES+=("$index")
+        compile_count=$((compile_count + 1))
     fi
 done
 compile_status=0
-if [[ "${#COMPILE_INDICES[@]}" -eq 1 || "$BUILD_JOBS" -eq 1 ]]; then
+# Bash 3.2 treats an empty array as unset under nounset. Skip all expansions
+# of COMPILE_INDICES when every product was restored from the object cache.
+if [[ "$compile_count" -gt 0 ]]; then
+if [[ "$compile_count" -eq 1 || "$BUILD_JOBS" -eq 1 ]]; then
     for index in "${COMPILE_INDICES[@]}"; do
         compile_object "${PRODUCT_MAINS[$index]}" "$(stage_object_of "$index")"
     done
@@ -272,6 +277,7 @@ for index in "${COMPILE_INDICES[@]}"; do
         cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" && mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
     fi
 done
+fi
 COMPILER_PRODUCT="$COMPILER"
 if [[ -n "${stage1_root:-}" && -x "${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}" ]]; then
     COMPILER_PRODUCT="${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}"
