@@ -11141,3 +11141,41 @@ Next: `git bisect start 7f742ac f68e213 && git bisect run scripts/bisect_replay_
 compiler pin across that range; about 12 minutes per step; run nothing else that compiles at
 the same time), fix the first bad commit's replay mirror, then rerun `test.sh` with
 `ELISA_FULL_AUDIT_TIME_LIMIT=1500` and `dogfood.sh`.
+
+## Compound Boolean pure unfolding (2026-10-04)
+
+Isolated branch `codex/pure-unfolding`, starting at main `6ccb282`, reproduced the
+`is_space` failure in `examples/pure_unfolding.elisa`. Its checked synthesized summary
+reduces to `P or not P` for a compound disjunction, not an arithmetic claim requiring a
+new numeric axiom. Commit `58347d2` adds bounded exact-negation recognition in producer
+and independent replay. It uses existing deterministic-fragment/type/operator guards;
+no new certificate kind, trusted summary, or budget increase is introduced.
+
+Strict macOS O2 main and portable replay builds succeeded with the fresh compiler/runtime.
+The example now proves with 21 certificates replayed and zero gaps. Focused pure-unfolding,
+symbolic-quantifier, dispatcher-budget, safe-constant replay, chained-call, and call-result
+bound gates pass. Portable replay checks ten positive packages and rejects resealed false
+near-complements and double-negation claims, alongside existing malformed arenas, trust,
+forgery, schema, and budget controls. Unverified helper summaries remain unusable.
+
+The keep-going full matrix is still running; dogfood and corpus census have not been run
+for this branch. This is focused correctness evidence, not a full self-verification claim.
+
+## Linear-hint CLI routing restored (2026-10-04)
+
+The keep-going matrix exposed ten SMT-oracle test failures that also reproduce with main's
+binary. `--linear-hints` selected the hint file but left `path_slot` at its default 1, so the
+argument-count guard returned status 2 before source checking. Setting the source slot to 3
+restores the documented command without changing certificate admission or trusted rules.
+A separate strict O2 candidate output passes `test_smt_oracle.py`: valid Z3 hints carry a
+replayed linear certificate; six forged records reach checked refusal; malformed files,
+unreadable paths, and invalid argument counts fail closed; absent Z3 leaves the verdict unchanged.
+The test now distinguishes a checked refusal from a CLI failure instead of describing every
+missing report as a forged hint proving a goal.
+
+Other current matrix failures include parameter-heavy selectors, loop-state joins, and a
+goal-disjunct probe. The first two also reproduce with main's binary. A qualified-constant
+test has a stale exact count (17 proven versus the expected 16). These remain open rather
+than being concealed by the focused fixes. The parameter-heavy fixture additionally has
+an invalid implication: `kind > maximum or result == 0` constrains valid resource kinds,
+not the invalid-kind branch. Correct that specification before expanding proof power for it.

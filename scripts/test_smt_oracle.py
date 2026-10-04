@@ -54,7 +54,13 @@ hint = hints_path.read_text().split()
 code, report = run_hints(" ".join(hint))
 check(report is not None and goal(report, target)["proven"] and goal(report, target)["replay_status"] == "replayed",
       "hinted goal is not proven and replayed")
+check(code == 0, f"valid hint invocation exited {code}; stderr/argument routing must not bypass checking")
 check(report is not None and "linear-certificate" in json.dumps(report), "hinted proof carries no linear certificate")
+
+for arguments in (("--linear-hints",), ("--linear-hints", str(hints_path)),
+                  ("--linear-hints", str(hints_path), str(SOURCE), "extra")):
+    invalid = subprocess.run([str(BINARY), *arguments], capture_output=True, text=True, timeout=60)
+    check(invalid.returncode == 2, f"invalid hint argument count accepted: {arguments}")
 
 # Forgeries only fail to prove.
 values = [int(field) for field in hint]
@@ -68,7 +74,7 @@ forged = {
 }
 for label, fields in forged.items():
     code, report = run_hints(" ".join(str(field) for field in fields))
-    check(report is not None and not goal(report, target)["proven"], f"forged hint proved the goal: {label}")
+    check(report is not None and code == 1 and not goal(report, target)["proven"], f"forged hint did not reach a checked refusal: {label} (exit {code})")
 
 # Malformed files are refused before checking.
 for label, text in {"truncated": f"{target} 1 2 32 1", "not a number": "x 1 1 0 1",
