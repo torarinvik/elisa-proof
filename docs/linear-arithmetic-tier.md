@@ -82,6 +82,24 @@ mirrored in the certificate schema and the replay dispatcher.
 
 ## Tests
 
+### Disequality and correlated cases
+
+`a != b` can also close by temporarily assuming `a == b` and using the existing linear
+disequality-refutation procedure. The primitive comparison and both the original premises and
+goal must pass machine-width guards first. Replay constructs and checks the same temporary
+equality independently; no unchecked producer result is admitted. This retains the existing
+atom, constraint, and arithmetic limits.
+
+For disjunctive goals with correlated premises, split the relevant premise before spending
+search fuel on an alternative that cannot hold in every case. Parentheses under a negated
+conjunction are transparent to that split. Both cases must establish the whole goal; one case
+alone is not a proof. `scripts/test_correlated_disjunction.py` pins the positive and false
+controls, including an unsafe wrapping goal and independent portable replay.
+
+The separate closed-width rule in `kernel_replay/closed_width_formulas.elisa` accepts an OR
+formula only when exact closed evaluation is true at every signed/unsigned integer width.
+It never generalizes affine reasoning to arbitrary wrapping premises.
+
 - **Accepted:** the `accel` bound, the `origin + cap` wrap guard, and a
   three-name chain.
 - **Rejected controls:** an off-by-one bound, a certificate with a negative
