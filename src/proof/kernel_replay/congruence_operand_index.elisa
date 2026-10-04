@@ -1,0 +1,111 @@
+extend ElisaProofKernelReplay:
+    private:
+        # Saturation compares every pair of terms each round, and the plain pair rule located
+        # each operand's class by a linear structural-equality scan of the whole universe
+        # (`proof_kernel_replay_congruence_class`), so one round cost O(terms^3) term
+        # comparisons. The universe is fixed once collection ends, and `lookup` is a pure
+        # function of the universe and the operand root, so each operand's term index is computed
+        # once here. Only `find` reads the union-find state, and it still runs at use time, so
+        # every pair verdict is the one the per-pair lookups gave.
+        #
+        # `slots` holds three entries per term: the term index of each congruence operand, or of
+        # the subscript for an `index` read (entry 0). `unknown` (terms.count) stands for every
+        # case where the plain rule returns false for want of a class: an operand it could not
+        # read or one outside the universe.
+        struct ProofKernelReplayCongruenceOperands:
+            slots: darray[usize]
+            counts: darray[usize]
+            unknown: usize
+
+        def proof_kernel_replay_congruence_operand_index(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, terms: darray[usize]&) -> ProofKernelReplayCongruenceOperands:
+            slots: mutable darray[usize] = []
+            counts: mutable darray[usize] = []
+            unknown: usize = terms.count
+            for index in 0..<terms.count |index, nodes, children, terms, slots, counts, unknown|:
+                term: (known: bool, value: usize) = proof_kernel_replay_index_at(terms, index)
+                root: usize = term.value if term.known else nodes.count
+                count: usize = proof_kernel_replay_congruence_operand_count(nodes, root)
+                counts.push(count)
+                for offset in 0..<3 |offset, nodes, children, terms, slots, root, count|:
+                    slots.push(proof_kernel_replay_congruence_operand_slot(nodes, children, terms, root, count, offset))
+            return ProofKernelReplayCongruenceOperands{slots: slots, counts: counts, unknown: unknown}
+
+        def proof_kernel_replay_congruence_operand_slot(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, terms: darray[usize]&, root: usize, count: usize, offset: usize) -> usize:
+            if offset < count:
+                operand: (known: bool, value: usize) = proof_kernel_replay_congruence_operand_at(nodes, root, offset)
+                return terms.count if not operand.known
+                located: (known: bool, index: usize) = proof_kernel_replay_congruence_lookup(nodes, children, terms, operand.value)
+                return located.index if located.known
+                return terms.count
+            return terms.count if offset != 0 or root >= nodes.count or nodes[root].kind != "index"
+            subscript: (known: bool, index: usize) = proof_kernel_replay_congruence_lookup(nodes, children, terms, nodes[root].right)
+            return subscript.index if subscript.known
+            return terms.count
+
+        def proof_kernel_replay_congruence_slot(operands: ProofKernelReplayCongruenceOperands&, term_index: usize, offset: usize) -> usize:
+            return operands.unknown if term_index >= operands.counts.count or offset >= 3
+            position: usize = term_index * 3 + offset
+            return operands.unknown if position >= operands.slots.count
+            return operands.slots[position]
+
+        def proof_kernel_replay_congruence_slot_class(operands: ProofKernelReplayCongruenceOperands&, parent: mutable darray[usize]&, term_index: usize, offset: usize) -> (known: bool, index: usize):
+            slot: usize = proof_kernel_replay_congruence_slot(operands, term_index, offset)
+            return (false, 0) if slot >= operands.unknown
+            representative: usize = proof_kernel_replay_congruence_find(parent, slot)
+            return (true, representative)
+
+        # Whether two universe terms are congruent under the current classes.
+        def proof_kernel_replay_congruence_pair_indexed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, operands: ProofKernelReplayCongruenceOperands&, parent: mutable darray[usize]&, left_index: usize, right_index: usize, left_root: usize, right_root: usize) -> bool:
+            left_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, left_root)
+            right_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, right_root)
+            return false if not left_located.known or not right_located.known
+            left: ElisaProofKernelCore::ProofKernelNode = left_located.node
+            right: ElisaProofKernelCore::ProofKernelNode = right_located.node
+            if left.kind == "index" and right.kind == "index":
+                # Reading one container is a function of the subscript within one state: the
+                # containers must be the same term, and the subscripts must already share a class.
+                return false if not proof_kernel_replay_expr_equal(nodes, children, left.left, right.left, 0)
+                left_subscript: (known: bool, index: usize) = proof_kernel_replay_congruence_slot_class(operands, parent, left_index, 0)
+                right_subscript: (known: bool, index: usize) = proof_kernel_replay_congruence_slot_class(operands, parent, right_index, 0)
+                return left_subscript.known and right_subscript.known and left_subscript.index == right_subscript.index
+            return false if not proof_kernel_replay_congruent_former(left)
+            return false if left.kind != right.kind or left.operator != right.operator
+            # Field selectors, construction field names, and literal payloads are part of the
+            # former's identity, not operands: two terms differing there are different formers.
+            return false if left.name != right.name or left.secondary_name != right.secondary_name or left.value != right.value
+            return proof_kernel_replay_congruence_operands_match(operands, parent, left_index, right_index)
+
+        def proof_kernel_replay_congruence_operands_match(operands: ProofKernelReplayCongruenceOperands&, parent: mutable darray[usize]&, left_index: usize, right_index: usize) -> bool:
+            return false if left_index >= operands.counts.count or right_index >= operands.counts.count
+            operand_count: usize = operands.counts[left_index]
+            return false if operand_count == 0 or operand_count != operands.counts[right_index]
+            for offset in 0..<operand_count |offset, operands, parent, left_index, right_index|:
+                left_class: (known: bool, index: usize) = proof_kernel_replay_congruence_slot_class(operands, parent, left_index, offset)
+                right_class: (known: bool, index: usize) = proof_kernel_replay_congruence_slot_class(operands, parent, right_index, offset)
+                return false if not left_class.known or not right_class.known
+                return false if left_class.index != right_class.index
+            return true
+
+        def proof_kernel_replay_congruence_round_indexed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, terms: darray[usize]&, parent: mutable darray[usize]&, operands: ProofKernelReplayCongruenceOperands&) -> bool:
+            changed: mutable bool = false
+            for left_index in 0..<terms.count |left_index, terms, nodes, children, parent, changed, operands|:
+                for right_index in 0..<terms.count |right_index, left_index, terms, nodes, children, parent, changed, operands|:
+                    continue if right_index <= left_index
+                    continue if proof_kernel_replay_congruence_find(parent, left_index) == proof_kernel_replay_congruence_find(parent, right_index)
+                    left_term: (known: bool, value: usize) = proof_kernel_replay_index_at(terms, left_index)
+                    right_term: (known: bool, value: usize) = proof_kernel_replay_index_at(terms, right_index)
+                    continue if not left_term.known or not right_term.known
+                    continue if not proof_kernel_replay_congruence_pair_indexed(nodes, children, operands, parent, left_index, right_index, left_term.value, right_term.value)
+                    changed <- true if proof_kernel_replay_congruence_union(parent, left_index, right_index)
+            return changed
+
+        def proof_kernel_replay_congruence_saturate_indexed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, terms: darray[usize]&, parent: mutable darray[usize]&, exhausted: mutable bool&) -> void:
+            operands: ProofKernelReplayCongruenceOperands = proof_kernel_replay_congruence_operand_index(nodes, children, terms)
+            round: mutable usize = 0
+            changed: mutable bool = true
+            while round < proof_kernel_replay_congruence_round_limit() and changed |round, changed, nodes, children, terms, parent, operands|:
+                changed <- proof_kernel_replay_congruence_round_indexed(nodes, children, terms, parent, operands)
+                round <- round + 1
+            # The round budget ended the loop while the last round was still merging classes, so
+            # the fixed point was not reached and the answer below may be incomplete.
+            exhausted <- true if changed
