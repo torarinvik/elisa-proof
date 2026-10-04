@@ -29,7 +29,11 @@ def check(condition, message):
 
 
 def report(path):
-    result = subprocess.run([str(BINARY), "--json", str(path)], capture_output=True, text=True)
+    try:
+        result = subprocess.run([str(BINARY), "--json", str(path)], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        failures.append(f"{path.name} exceeded the 120-second proof-search deadline")
+        return None
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError:
