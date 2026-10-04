@@ -40,7 +40,7 @@ statistical confidence claim. RSS was essentially unchanged; no broad speedup is
 The most useful result is a verified comparison baseline and removal of avoidable work. Targeted
 profiling is still needed before another performance batch. This is not a full matrix pass.
 
-Two pre-existing blockers remain distinct from these optimizations:
+The proof baseline limitation and resolved platform follow-up are distinct from these optimizations:
 
 1. `test_pure_unfolding.py` fails identically in baseline and candidate: `is_space` line 29 has an
    open connective-shaped ensure, and `first_space` line 38 cannot use its unverified summary.
@@ -49,12 +49,22 @@ Two pre-existing blockers remain distinct from these optimizations:
    verified `pure_identity` summaries reduce its goal to the existing `a == b` premise in both
    baseline and candidate. Its certificate replays; this is summary unfolding, not admission of
    arbitrary calls as congruent formers. The new benchmark retains it as a positive control.
-2. The native profiler compiles on Linux after an explicit Boolean-reference value read
-   (`elisa-profiler` commit `6547adb`), but capture is not Linux-ready. Its native file-open and
-   clock constants are Darwin-specific; target linking also assumes Apple dead-stripping and
-   underscore-prefixed entry symbols. Do not use instrumented measurements until platform I/O,
-   clock, symbol rewriting, collector execution, and timeout controls pass on Linux.
-   `scripts/perf_luna_profile.sh` therefore refuses unsupported hosts before expensive work.
+2. The native profiler's x86_64 Linux capture/build support is now committed as
+   `elisa-profiler` commit `d2de05f`. Linux and macOS sampling, validated cache reuse/invalidation,
+   target timeout, and descendant cleanup tests pass. Linux also passes progress, prebuilt reuse,
+   collector identity, ABI, and timing failure/mismatch tests. File flags and monotonic clock IDs
+   are target-specific; ELF entry-symbol rewriting and GNU linking replace Darwin assumptions.
+   `scripts/perf_luna_profile.sh` now admits x86_64 Linux and retains the macOS path.
+   Windows is explicitly deferred until a native Windows backend/test host is available.
+
+The first full-checker instrumented O2 build exceeded the profiler's default five-minute compiler
+bound before target execution. The follow-up capture explicitly raises the still-capped tool bound
+to 1200 seconds, independently of the 120-second target bound, with a per-command 1800-second outer
+bound. Its per-run target cache avoids compiling the same checker separately for all three workloads.
+Captures are instrumented CPU stack occupancy, not instruction-pointer samples or uninstrumented
+speedup evidence. A second six-Luna pass has disjoint quantifier, intern, linear-producer, checker,
+trusted-replay, and profile-summary lanes; algorithm edits require measured hotspots and exact
+proof/package/portable-replay comparison. No second-pass speedup is established yet.
 
 The instance workspace is not a persistent volume. Keep source gains committed locally and copy
 important evidence off-box before recycling/destroying it. Builds/caches are not repository gains.

@@ -2,13 +2,16 @@
 # Bounded, source-aware profiling of elisa-proof using the native elisa-profiler.
 # Run from any directory after the native profiler toolchain is ready.
 # ELISA_PROFILER may name the profiler executable; ELISA_PROFILE_OUT selects the output root.
-# Profiling is intentionally Darwin-only until native I/O constants and collector execution pass
-# Linux validation; uninstrumented benchmark drivers are independent of this gate.
+# Native capture is validated on macOS and x86_64 Linux. Windows needs its own
+# native backend and test host; do not treat a POSIX compatibility layer as support.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILER="${ELISA_PROFILER:-$ROOT/../elisa-profiler/bin/elisa-profiler}"
 OUT_ROOT="${ELISA_PROFILE_OUT:-$ROOT/build/luna-profile}"
+# The proof checker includes the compiler frontend; its instrumented O2 compile
+# exceeds the profiler's normal five-minute tool bound on the Linux host.
+export ELISA_PROFILER_TOOL_TIMEOUT_SECONDS="${ELISA_PROFILER_TOOL_TIMEOUT_SECONDS:-1200}"
 
 fail() {
     printf 'luna profile: %s\n' "$1" >&2
@@ -16,9 +19,14 @@ fail() {
 }
 
 HOST_OS="$(uname -s)"
-if [[ "$HOST_OS" != Darwin ]]; then
-    fail "unsupported host $HOST_OS: native profiler file-open and monotonic-clock constants are not Linux-validated; refusing an instrumented build that may fail before diagnostics"
-fi
+case "$HOST_OS" in
+    Darwin) ;;
+    Linux)
+        [[ "$(uname -m)" == x86_64 ]] || fail "Linux profiling is currently validated on x86_64 only"
+        export ELISA_HOST_LINUX=1 ELISA_HOST_X86_64=1
+        ;;
+    *) fail "unsupported native profiler host $HOST_OS; Windows support is deferred until native validation is available" ;;
+esac
 
 [[ -x "$PROFILER" ]] || fail "profiler executable not found: $PROFILER (set ELISA_PROFILER)"
 [[ -f "$ROOT/src/main.elisa" ]] || fail "proof entry source is missing"
@@ -41,10 +49,12 @@ RUN_DIR="$(mktemp -d "$OUT_ROOT/luna-$REV_SHORT.XXXXXX")"
     printf 'proof_worktree_status=\n'
     git -C "$ROOT" status --short --untracked-files=all -- src examples
     printf 'profiler=%s\n' "$PROFILER"
+    printf 'host_os=%s\nhost_architecture=%s\n' "$HOST_OS" "$(uname -m)"
     printf 'profiler_sha256='
     sha256sum "$PROFILER" | awk '{print $1}'
     printf 'collection_mode=sample\nsample_period_us=1000\noptimization_level=-O2\n'
-    printf 'repetitions=3\nwarmups=0\ntarget_timeout_seconds=120\noverall_timeout_seconds=900\n'
+    printf 'repetitions=3\nwarmups=0\ntarget_timeout_seconds=120\noverall_timeout_seconds=1800\n'
+    printf 'tool_timeout_seconds=%s\n' "$ELISA_PROFILER_TOOL_TIMEOUT_SECONDS"
     printf 'target_instrumentation=profiler compiles the Elisa target with function tracing and debug source information\n'
     printf 'sampling_caveat=CPU samples retain instrumented Elisa call stacks; they are not native instruction-pointer samples or exact invocation counts\n'
     printf 'attribution_caveat=runtime, foreign, and optimized-away frames are not unwound; their work can be charged to an instrumented Elisa caller\n'
@@ -70,12 +80,13 @@ profile_case() {
     set +e
     (
         cd "$ROOT"
-        timeout --signal=TERM --kill-after=15s 900s \
+        timeout --signal=TERM --kill-after=15s 1800s \
             "$PROFILER" profile "$ROOT/src/main.elisa" \
             --mode sample --sample-period-us 1000 \
             --repeat 3 --warmup 0 -O2 \
             --timeout 120 --max-capture-bytes 67108864 \
             --max-artifact-bytes 134217728 \
+            --cache-dir "$RUN_DIR/build-cache" \
             --path-map "$ROOT=elisa-proof" \
             --format json --output "$report" \
             -- --json "$workload"
