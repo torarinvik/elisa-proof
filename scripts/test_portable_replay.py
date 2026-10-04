@@ -29,6 +29,7 @@ POSITIVE = {
     "early_return_index_guard": {"index-lower", "index-upper"},
     "fixed_array_slice_bounds": {"slice-lower", "slice-upper", "slice-order"},
     "pure_unfolding": {"goal"},
+    "goal_disjunct_split_probe": {"goal", "resource-safety"},
 }
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
@@ -313,6 +314,18 @@ double_negative["theorems"] = [reseal(double_negative, double_negative["theorems
 refused(double_negative, "compound-double-negation-is-not-complement", "rejected", "kernel-rejected")
 
 # Consistent forgeries: the kernel itself must refuse them.
+clamped = copy.deepcopy(packages["goal_disjunct_split_probe"])
+clamp_claim = next(t for t in clamped["theorems"] if t["name"] == "a" and t["rule"] == "goal")
+clamp_nodes = clamped["kernel"]["nodes"]
+# Remove the lower bound that refutes the low-speed alternative. Keep the
+# statement and fingerprint consistent, so rejection must come from replay.
+removed = [h for h in clamp_claim["hypotheses"]
+           if clamp_nodes[h]["kind"] == "binary" and clamp_nodes[h]["operator"] == ">="]
+assert len(removed) == 1, removed
+clamp_claim["hypotheses"] = [h for h in clamp_claim["hypotheses"] if h not in removed]
+clamped["theorems"] = [reseal(clamped, clamp_claim)]
+refused(clamped, "clamp-call-without-lower-bound", "rejected", "kernel-rejected")
+
 dropped = copy.deepcopy(assumption)
 dropped["hypotheses"] = [h for h in dropped["hypotheses"] if h != dropped["conclusion"]]
 forged = with_theorem(base, dropped)

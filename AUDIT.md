@@ -4,6 +4,29 @@ Passing the current suites is regression evidence, not completion of the full au
 The objective covers all existing implementation code, scripts, proof fixtures, and their
 assumptions about the compiler. No module below is yet certified as fully audited.
 
+## 2026-10-04 checkpoint: Boolean summary disjunctions over signed call results
+
+The clamp-then-check regression reproduced on the existing main binary: 23 of 24
+obligations replayed, with the final Boolean call exhausting case-search fuel.
+The checker now tries the existing bounded disjunction-elimination rule for call
+goals, and kernel replay independently checks every surviving/refuted alternative.
+Neither proof fuel nor case-split limits changed.
+
+Both signed-place marker readers also rejected plain named call terms, although
+the source adapter already emits those exact width markers for pure call results.
+They now recognize named source calls through the existing named-call validators;
+scalar witnesses and exact integer widths remain required for ordering refutations.
+This does not authenticate package hypotheses or authorize arbitrary call unfolding.
+
+Strict O2 checker and portable replay products built after a normal compiler reseed
+and successful source-provenance check. Goal-disjunct/summary-alias, call-result-width,
+pure-unfolding, dispatcher-budget, loop-state-join and captured-loop-constant suites
+passed. Eleven portable packages replay, while consistent forged claims (including
+removing the clamp lower bound), malformed arenas, schema, trust and budget controls
+remain refused. Source-length and kernel-inventory checks pass. The full regression
+matrix and self-verification remain incomplete; this checkpoint claims focused
+coverage, not overall completion or a measured throughput improvement.
+
 ## 2026-09-19 checkpoint: constants refactor must preserve the verification frontier
 
 The committed constants cleanups (`03aa2ea`, `8d18da4`, and `d622b03`) preserve the proof
