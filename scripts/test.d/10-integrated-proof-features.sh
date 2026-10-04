@@ -28,6 +28,7 @@ run_py_test test_bounded_u8_conversion.py
 run_py_test test_signed_distinct_constants.py
 run_py_test test_pure_call_result_bound.py
 run_py_test test_ambiguous_name_purity.py
+run_py_test test_reference_local_write.py
 run_py_test test_disjunction_domain.py
 run_py_test test_qualified_constant_call_domain.py
 run_py_test test_qualified_constant_pins.py
