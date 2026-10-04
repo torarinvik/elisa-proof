@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
+import platform
 import resource
 import signal
 import statistics
@@ -64,6 +66,22 @@ MUST_PROVE = {
 MUST_BE_INADMISSIBLE = {"rejected_symbolic_quantifier"}
 MAX_ROUNDS = 9
 MAX_TIMEOUT = 300
+
+
+def file_identity(path: Path) -> dict:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+            size += len(block)
+    return {"sha256": digest.hexdigest(), "size_bytes": size}
+
+
+def require_unchanged_inputs(identities: dict[Path, dict]) -> None:
+    for path, identity in identities.items():
+        if file_identity(path) != identity:
+            raise RuntimeError(f"benchmark input changed during measurement: {path}")
 
 
 def measured_child(command: list[str]) -> int:
@@ -154,6 +172,21 @@ def self_test_process_group_cleanup() -> None:
 
     with tempfile.TemporaryDirectory(prefix="elisa-perf-luna-self-test-") as temporary:
         directory = Path(temporary)
+        stable = directory / "identity-control"
+        stable.write_bytes(b"stable input")
+        identities = {stable: file_identity(stable)}
+        if identities[stable] != {"sha256": hashlib.sha256(b"stable input").hexdigest(),
+                                  "size_bytes": len(b"stable input")}:
+            raise RuntimeError("benchmark input identity is incorrect")
+        require_unchanged_inputs(identities)
+        stable.write_bytes(b"mutated input")
+        try:
+            require_unchanged_inputs(identities)
+        except RuntimeError as error:
+            if "input changed" not in str(error):
+                raise
+        else:
+            raise RuntimeError("benchmark input mutation was not refused")
         target = directory / "fake-proof"
         pid_file = directory / "child.pid"
         target.write_text(
@@ -284,6 +317,9 @@ def run(args: argparse.Namespace) -> dict:
             if not binary.is_file() or not os.access(binary, os.X_OK):
                 raise RuntimeError(f"{label} executable is missing or not executable: {binary}")
 
+    identities = {path: file_identity(path) for pair in binaries.values() for path in pair}
+    identities.update({source: file_identity(source) for _, source, _, _ in FIXTURES})
+
     entries = []
     with tempfile.TemporaryDirectory(prefix="elisa-proof-perf-luna-") as temporary:
         scratch = Path(temporary)
@@ -358,6 +394,7 @@ def run(args: argparse.Namespace) -> dict:
 
             entries.append({
                 "fixture": fixture,
+                "source": {"path": str(source), **identities[source]},
                 "proof": {variant: record_measurements(data["proof"])
                           for variant, data in run_outputs.items()},
                 "package_export": {variant: record_measurements(data["export"])
@@ -367,12 +404,17 @@ def run(args: argparse.Namespace) -> dict:
                 "outputs_identical": True,
             })
 
+    require_unchanged_inputs(identities)
     return {
         "schema": SCHEMA,
         "comparison": "exact-stdout-bytes",
         "rounds": args.rounds,
         "timeout_seconds": args.timeout,
-        "binaries": {label: {"proof": str(pair[0]), "replay": str(pair[1])}
+        "host": {"platform": sys.platform, "machine": platform.machine(),
+                 "python": platform.python_version()},
+        "binaries": {label: {"proof": str(pair[0]), "replay": str(pair[1]),
+                             "proof_identity": identities[pair[0]],
+                             "replay_identity": identities[pair[1]]}
                      for label, pair in binaries.items()},
         "fixtures": entries,
     }
@@ -395,7 +437,7 @@ def main() -> int:
         except (OSError, RuntimeError) as error:
             print(f"perf_luna_benchmark self-test failed: {error}", file=sys.stderr)
             return 1
-        print("perf_luna_benchmark process cleanup self-test passed")
+        print("perf_luna_benchmark input identity and process cleanup self-tests passed")
         return 0
 
     parser = argparse.ArgumentParser(description=__doc__)
