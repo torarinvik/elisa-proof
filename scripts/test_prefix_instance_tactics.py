@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
@@ -42,4 +43,19 @@ assert report["source_goal_binding"]["previously_proven"]
 assert report["tactic"]["action_count"] == 9 and report["tactic"]["accepted_count"] == 9
 assert report["tactic"]["trace_replayed"] and report["tactic"]["kernel_trace_replayed"]
 assert report["tactic"]["kernel_replayed"] and report["tactic"]["certificate_replayed"]
+# Binding must remain exact even when the source and tactic actions are otherwise valid.
+with tempfile.TemporaryDirectory(prefix="elisa-prefix-fingerprint-") as temporary:
+    script = json.loads((ROOT / "examples/tactic_script_whole_row_instance.json").read_text())
+    script["target"]["goal_fingerprint"] ^= 1
+    path = Path(temporary) / "wrong-fingerprint.json"
+    path.write_text(json.dumps(script))
+    refused = subprocess.run(
+        [BIN, "--tactics", str(path), str(ROOT / "examples/open_quantified_prefix_elimination.elisa")],
+        capture_output=True, text=True, timeout=60,
+    )
+    control = json.loads(refused.stdout)
+    assert refused.returncode == 1 and control["status"] == "failed", control
+    assert control["source_goal_binding"]["bound"], control
+    assert not control["source_goal_binding"]["fingerprint_match"], control
+    assert not control["tactic"]["valid"] and not control["tactic"]["solved"], control
 print("row-instance and explicit prefix-preservation proofs replay; false controls reject; complete length-prefix loop proves automatically")
