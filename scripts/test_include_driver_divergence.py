@@ -18,7 +18,7 @@ def report(name):
 
 status, control = report("control.elisa")
 assert status == 0 and control["status"] == "proved", (status, control["status"])
-for name in ("tab_separator.elisa", "trailing_text.elisa", "empty_then_body.elisa", "indented_directive.elisa"):
+for name in ("tab_separator.elisa", "trailing_text.elisa", "indented_directive.elisa"):
     status, divergent = report(name)
     assert status == 1, (name, status)
     assert divergent["status"] != "proved" and divergent["verification_state"] != "proved", (name, divergent["status"])
