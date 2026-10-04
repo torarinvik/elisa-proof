@@ -191,6 +191,7 @@ run_py_test test_captured_loop_constants.py
 run_py_test test_indexed_boolean_denial.py
 run_py_test test_counterexample_domains.py
 run_py_test test_ranking_context.py
+run_py_test test_build_runtime_inputs.py
 run_py_test test_comprehension_resources.py
 run_py_test test_monotone_orders.py
 run_py_test test_replay_construct_arguments.py
