@@ -82,14 +82,22 @@ proof verification and withholds ambiguous definition attribution; its ten synth
 
 The second six-Luna pass targets replay witnesses, marker decoding, quantified replay, and trace
 hook linkage. Three experiments were reverted because uninstrumented comparisons did not show
-repeatable gains. A bare-identifier witness scan optimization is under final review; no second-pass
-speedup is accepted yet. Algorithm edits require focused adversarial/budget gates and exact
-proof/package/portable-replay comparison.
+repeatable gains. The bare-identifier witness scan optimization is committed as `29ffd6d`:
+it avoids a redundant structural primitive-marker scan before the existing name-matching scan.
+Untrusted operator checks remain first, and marker validation and recursion budgets are unchanged.
+Two three-round uninstrumented comparisons preserved exact proof/package/portable-replay outputs
+across six fixtures. In the second run, symbolic proof time was 1.5877 s versus 1.4865 s, export
+1.6017 s versus 1.4858 s, and replay 0.5315 s versus 0.4878 s. This is workload-specific evidence,
+not a system-wide speedup claim. Congruence malformed/budget, symbolic quantifier, safe constant,
+dispatcher-budget, and portable replay forgery/schema/trust controls all passed.
 
 The broader profiler regression matrix remains non-green: Linux full-mode collection growth hits
-a compiler-generated suffixed trace-hook symbol, now assigned to a compiler lane. The macOS arena
-reuse workload also has a baseline exit-status mismatch. These are not concealed by the successful
-sampling gates. Compiler pins remain unchanged while the trace-hook fix is validated.
+a compiler-generated suffixed trace-hook symbol. Compiler commit `43956296` reuses only the exact
+canonical reserved fault-handler signature. A fresh private Linux compiler passes separate
+uninstrumented, `-ftrace`, and `-ftrace-functions` link/run controls and the original collection
+growth workload. Normal seed publication and the broader profiler suite are being checked next.
+The macOS arena reuse workload also has a baseline exit-status mismatch under investigation.
+These are not concealed by the successful sampling gates. Compiler pins remain unchanged.
 
 The instance workspace is not a persistent volume. Keep source gains committed locally and copy
 important evidence off-box before recycling/destroying it. Builds/caches are not repository gains.
