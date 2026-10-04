@@ -1,0 +1,76 @@
+# Closed ring formulas are admitted only when true at every primitive integer width.
+# No type marker or producer truth flag is consulted; explicit typed literals are excluded.
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_closed_ring(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize, work: mutable usize&) -> ProofKernelReplayInt:
+            unknown: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return unknown if work == 0 or depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or root >= nodes.count
+            work <- work - 1
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return ProofKernelReplayInt{known: node.value >= 0, value: node.value} if node.kind == "int"
+            if node.kind == "unary" and (node.operator == "+" or node.operator == "-"):
+                inner: ProofKernelReplayInt = proof_kernel_replay_closed_ring(nodes, node.left, depth + 1, work)
+                return unknown if not inner.known
+                return inner if node.operator == "+"
+                return proof_kernel_replay_sub_safe(0, inner.value)
+            return unknown if node.kind != "binary" or (node.operator != "+" and node.operator != "-" and node.operator != "*")
+            left: ProofKernelReplayInt = proof_kernel_replay_closed_ring(nodes, node.left, depth + 1, work)
+            right: ProofKernelReplayInt = proof_kernel_replay_closed_ring(nodes, node.right, depth + 1, work)
+            return unknown if not left.known or not right.known
+            return proof_kernel_replay_add_safe(left.value, right.value) if node.operator == "+"
+            return proof_kernel_replay_sub_safe(left.value, right.value) if node.operator == "-"
+            return proof_kernel_replay_mul_safe(left.value, right.value)
+
+        def proof_kernel_replay_closed_at_width(value: i64, bits: i64, signed: bool) -> (high: bool, low: i64):
+            if bits == 64:
+                return (false, value) if signed
+                return (value < 0, value)
+            modulus: i64 = 256 if bits == 8 else (65536 if bits == 16 else 4294967296)
+            reduced: mutable i64 = value % modulus
+            reduced <- reduced + modulus if reduced < 0
+            reduced <- reduced - modulus if signed and reduced >= modulus / 2
+            return (false, reduced)
+
+        def proof_kernel_replay_closed_formula(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, bits: i64, signed: bool, depth: usize, work: mutable usize&) -> ProofKernelReplayBool:
+            unknown: ProofKernelReplayBool = ProofKernelReplayBool{known: false, value: false}
+            return unknown if work == 0 or depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or root >= nodes.count
+            work <- work - 1
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return ProofKernelReplayBool{known: true, value: node.value != 0} if node.kind == "bool"
+            if node.kind == "unary" and node.operator == "not":
+                inner: ProofKernelReplayBool = proof_kernel_replay_closed_formula(nodes, node.left, bits, signed, depth + 1, work)
+                return ProofKernelReplayBool{known: inner.known, value: not inner.value}
+            return unknown if node.kind != "binary"
+            if node.operator == "and" or node.operator == "or" or node.operator == "=>":
+                left: ProofKernelReplayBool = proof_kernel_replay_closed_formula(nodes, node.left, bits, signed, depth + 1, work)
+                right: ProofKernelReplayBool = proof_kernel_replay_closed_formula(nodes, node.right, bits, signed, depth + 1, work)
+                return unknown if not left.known or not right.known
+                return ProofKernelReplayBool{known: true, value: left.value and right.value} if node.operator == "and"
+                return ProofKernelReplayBool{known: true, value: left.value or right.value} if node.operator == "or"
+                return ProofKernelReplayBool{known: true, value: not left.value or right.value}
+            return unknown if not proof_kernel_replay_negation_supported(node.operator)
+            left_exact: ProofKernelReplayInt = proof_kernel_replay_closed_ring(nodes, node.left, depth + 1, work)
+            right_exact: ProofKernelReplayInt = proof_kernel_replay_closed_ring(nodes, node.right, depth + 1, work)
+            return unknown if not left_exact.known or not right_exact.known
+            a: (high: bool, low: i64) = proof_kernel_replay_closed_at_width(left_exact.value, bits, signed)
+            b: (high: bool, low: i64) = proof_kernel_replay_closed_at_width(right_exact.value, bits, signed)
+            less: bool = (b.high and not a.high) or (a.high == b.high and a.low < b.low)
+            equal: bool = a.high == b.high and a.low == b.low
+            return ProofKernelReplayBool{known: true, value: equal} if node.operator == "=="
+            return ProofKernelReplayBool{known: true, value: not equal} if node.operator == "!="
+            return ProofKernelReplayBool{known: true, value: less} if node.operator == "<"
+            return ProofKernelReplayBool{known: true, value: less or equal} if node.operator == "<="
+            return ProofKernelReplayBool{known: true, value: not less and not equal} if node.operator == ">"
+            return ProofKernelReplayBool{known: true, value: not less}
+
+        def proof_kernel_replay_closed_width_uniform_true(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
+            # Bound total visits across every width, including shared DAG paths.
+            work: mutable usize = PROOF_KERNEL_REPLAY_LINEAR_TERM_LIMIT
+            reference: ProofKernelReplayBool = proof_kernel_replay_closed_formula(nodes, root, 64, true, 0, &work)
+            return false if not reference.known or not reference.value
+            for index in 0..<8 |index, nodes, root, work|:
+                level: usize = index / 2
+                bits: i64 = 8 if level == 0 else (16 if level == 1 else (32 if level == 2 else 64))
+                reading: ProofKernelReplayBool = proof_kernel_replay_closed_formula(nodes, root, bits, index % 2 == 0, 0, &work)
+                return false if not reading.known or not reading.value
+            return true
