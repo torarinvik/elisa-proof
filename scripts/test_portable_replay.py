@@ -30,6 +30,8 @@ POSITIVE = {
     "fixed_array_slice_bounds": {"slice-lower", "slice-upper", "slice-order"},
     "pure_unfolding": {"goal"},
     "goal_disjunct_split_probe": {"goal", "resource-safety"},
+    "disjunctive_goals": {"goal", "index-upper"},
+    "leaving_branch_join": {"goal", "index-upper"},
 }
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
@@ -314,6 +316,17 @@ double_negative["theorems"] = [reseal(double_negative, double_negative["theorems
 refused(double_negative, "compound-double-negation-is-not-complement", "rejected", "kernel-rejected")
 
 # Consistent forgeries: the kernel itself must refuse them.
+indexed = copy.deepcopy(packages["disjunctive_goals"])
+indexed_claim = next(t for t in indexed["theorems"] if t["name"] == "live" and t["rule"] == "goal")
+indexed_nodes = indexed["kernel"]["nodes"]
+element_witnesses = [h for h in indexed_claim["hypotheses"]
+                     if indexed_nodes[h]["kind"] == "call"
+                     and indexed_nodes[indexed_nodes[h]["left"]]["name"] == "__elisa_primitive_scalar_element"]
+assert len(element_witnesses) == 1, element_witnesses
+indexed_claim["hypotheses"] = [h for h in indexed_claim["hypotheses"] if h not in element_witnesses]
+indexed["theorems"] = [reseal(indexed, indexed_claim)]
+refused(indexed, "indexed-denial-without-element-witness", "rejected", "kernel-rejected")
+
 clamped = copy.deepcopy(packages["goal_disjunct_split_probe"])
 clamp_claim = next(t for t in clamped["theorems"] if t["name"] == "a" and t["rule"] == "goal")
 clamp_nodes = clamped["kernel"]["nodes"]

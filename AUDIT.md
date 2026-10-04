@@ -38,6 +38,25 @@ with an ensure refusal, and the ordinary 64-limit over-budget control still fail
 This repairs the fixture specification and strengthens its safety controls; it
 does not extend inline-unfolding budgets or claim broader selector coverage.
 
+## 2026-10-04 checkpoint: primitive indexed Boolean denial
+
+The checked fragment for Boolean denial excluded indexed values even when exact
+primitive-element witnesses existed. Consequently `not (in_range and cell) or
+in_range` remained open, preventing the verified guard summary from reaching
+callers. Checker and kernel now admit index/index-n values only through their
+existing bounded scalar-witness validators. No new index-bound fact, mutable
+frame preservation rule, type axiom, or proof budget was added.
+
+Separate strict O2 candidate products prove/replay all 13 disjunctive-goal and
+24 leaving-branch obligations. Their false implication and stale/falling-branch
+controls remain refused. Thirteen portable packages replay; a consistently
+resealed indexed-denial claim with its primitive-element witness removed is
+refused. Pure-unfolding and call-result-width regressions pass. The completed
+pre-change matrix recorded 32 failed steps, including duplicated positive
+coverage checks, stale expectations, and one full-source standalone-audit replay
+gap; these are not all classified and no full-suite pass is claimed. The replay
+gap is a priority investigation separate from these indexed-fragment fixes.
+
 ## 2026-09-19 checkpoint: constants refactor must preserve the verification frontier
 
 The committed constants cleanups (`03aa2ea`, `8d18da4`, and `d622b03`) preserve the proof
