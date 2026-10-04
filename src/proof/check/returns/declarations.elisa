@@ -120,7 +120,6 @@ extend ElisaProof:
                         no_moves: darray[sview] = []
                         proof_check_return_contracts(Ast::Stmt.Expr(initializer, position), no_moves, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, flow)
                         return true
-                    initializer_has_unmodeled_operator: bool = proof_invalidate_for_unmodeled_operator(initializer, names, values, facts, frame_parameters, report, name, position)
                     value: mutable Ast::Expr = proof_substitute(initializer, names, values)
                     prior_value_count: usize = values.count
                     shadowed: mutable bool = false
@@ -129,7 +128,15 @@ extend ElisaProof:
                     call_applied: mutable bool = false
                     # An integer conversion of a bare name runs no source function: there is no
                     # summary to apply and no state it can change, so the local keeps the term.
-                    conversion_only: bool = proof_expr_has_call(value) and proof_expr_calls_are_conversions(value, functions, 0)
+                    # Classify against the source initializer: substitution can replace a
+                    # match-bound cast receiver with its branch symbol, which is useful for
+                    # its width witness but must not make the original builtin cast opaque.
+                    conversion_only: bool = proof_expr_has_call(initializer) and proof_expr_calls_are_conversions(initializer, functions, 0)
+                    # The generic operator audit does not classify method-shaped numeric casts;
+                    # the conversion recognizer above does, after checking the builtin target
+                    # and receiver place. Do not erase its type/range facts as if it were an
+                    # unmodeled user call.
+                    initializer_has_unmodeled_operator: bool = false if conversion_only else proof_invalidate_for_unmodeled_operator(initializer, names, values, facts, frame_parameters, report, name, position)
                     match value:
                         Ast::Expr.Call(callee, _, _, _):
                             if not conversion_only:
@@ -227,6 +234,26 @@ extend ElisaProof:
                     proof_add_primitive_operator_witnesses(facts, report, Ast::Expr.Ident(local_name, position), type_expression, position)
                     proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(local_name, position), position.line, name) if local_scalar_kind == 1 and unsigned_width <= 0
                     proof_bind_scalar_symbol(names, values, prior_value_count, position) if local_scalar_kind == 1 and unsigned_width <= 0
+                    # A signed scalar local normally has no value equation in the proof state.
+                    # For a recognized widening conversion only, retain the source value across
+                    # the binding so later arithmetic can use the receiver's checked type range.
+                    # Matching the declared and conversion target types prevents an implicit
+                    # narrowing or additional conversion from entering this path.
+                    if local_scalar_kind == 1 and unsigned_width <= 0 and not shadowed:
+                        # Keep the source initializer's cast shape, but resolve its receiver to
+                        # the branch-local SSA name before looking up the width marker. Substituting
+                        # the whole cast first can project it away when the bound value itself has
+                        # already been rebound.
+                        match initializer:
+                            Ast::Expr.Call(callee, arguments, _, _):
+                                resolved_callee: Ast::Expr = proof_substitute(callee, names, values)
+                                widened: (known: bool, receiver: Ast::Expr, target: sview) = proof_widening_cast_receiver(resolved_callee, arguments.count, facts, functions)
+                                receiver_name: sview = proof_ident_name(widened.receiver)
+                                if widened.known and proof_ident_name(type_expression) == widened.target and receiver_name != "" and receiver_name != local_name:
+                                    binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(local_name, position), TokenKind.EqEq, widened.receiver, position)
+                                    proof_add_traced_fact(facts, report, binding, "local-binding", position.line, name)
+                            _:
+                                pass
                     local_witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
                     proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(local_name, position), type_expression, position.line, name, position, &local_witness_budget, 0) if local_scalar_kind != 1
                     # A local is call-stable only when its type has no nested reference or
