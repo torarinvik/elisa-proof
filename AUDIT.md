@@ -29,6 +29,27 @@ The P-01 baseline is seven paired rounds on three fixtures, but phase timings, a
 Linux qualification, and the broader compiler/Core corpus remain open. See the active queue in
 [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md); no weakness is marked closed by this sample.
 
+## 2026-10-05 partial R-004: declaration inventory consistency
+
+`proof_report_source_has_unresolved_checks` now requires `report.declarations` to equal the
+number of recorded `declaration_details`. The recursive declaration scheduler increments the
+counter and records a summary for each declaration, including nested module and scope contents.
+This catches a report that loses a declaration summary while leaving the remaining obligations
+and replay certificates complete. The standalone `examples/report_invariants_runtime.elisa`
+harness mutates the count to model a missing summary and requires the report to remain incomplete;
+it compiled, linked and ran successfully with pinned Stage1. Strict O2 build product
+`build/elisa-proof` SHA-256 is
+`73e0af5e2057da569724dca13c5733691fcf71a77d5eb71c74b533cc7e67f8c2` (pinned Stage1 revision
+`7b27fa312c5af923f044f6ee0e5e1de4f811f595`). End-to-end `--json` checks on
+`examples/perf_luna_accept.elisa` (1 declaration, 2/2 obligations) and
+`examples/global_constant_module.elisa` (3 declarations, 2/2 obligations) both returned `proved`
+with zero replay gaps and matching declaration-summary counts.
+
+This is one report-integrity cross-check, not completion of R-004. The report still does not
+independently reconstruct the expected declaration inventory from the immutable source tree, and
+this change does not establish that every exported theorem is bound to a complete checked source
+root. The full suite and cross-platform gates were not run.
+
 ## 2026-10-04 checkpoint: Boolean summary disjunctions over signed call results
 
 The clamp-then-check regression reproduced on the existing main binary: 23 of 24
