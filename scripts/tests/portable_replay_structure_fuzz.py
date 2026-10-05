@@ -111,6 +111,41 @@ def install_cpu_limit():
 LAST_CHILD_CPU = resource.getrusage(resource.RUSAGE_CHILDREN).ru_utime + resource.getrusage(resource.RUSAGE_CHILDREN).ru_stime
 
 
+# The nominal 4,096-hypothesis boundary collides with the independent 65,536-byte string cap.
+# A bool leaf is the shortest proposition identity: `(bool::1:"":"")` is 15 bytes. The
+# canonical statement for 4,096 copies is 65,572 bytes, so the statement field is rejected as
+# theorem-schema before the theorem-level hypothesis budget can admit an exact positive. Keep
+# this control bounded and pin the ordering rather than claiming the nominal limit is reachable.
+boundary = copy.deepcopy(base)
+short_proposition = append_node(boundary, "bool", value="1")
+origin = copy.deepcopy(assumption["hypothesis_origins"][0])
+exact_hypotheses = copy.deepcopy(assumption)
+exact_hypotheses["conclusion"] = short_proposition
+exact_hypotheses["hypotheses"] = [short_proposition] * 4096
+exact_hypotheses["hypothesis_origins"] = [copy.deepcopy(origin)] * 4096
+exact_hypotheses = reseal(boundary, exact_hypotheses)
+assert len(exact_hypotheses["statement"].encode("utf-8")) == 65572
+exact_result, _ = run_fresh(with_theorem(boundary, exact_hypotheses),
+                            "hypothesis-budget-exact-shadow", must_refuse=True)
+assert exact_result["status"] == "malformed" and exact_result["reason"] == "theorem-schema", exact_result
+assert exact_result["summary"] == {"theorems": 1, "replayed": 0, "not_replayed": 1}, exact_result
+assert all(theorem["status"] != "replayed" for theorem in exact_result["theorems"]), exact_result
+
+# A compact existing statement lets the count check run first for 4,097. Its identity is
+# intentionally stale because a canonical one-over statement would exceed STRING_BYTES too;
+# this pins hypothesis-budget refusal ordering, not a valid portable theorem.
+over_hypotheses = copy.deepcopy(exact_hypotheses)
+over_hypotheses["hypotheses"].append(short_proposition)
+over_hypotheses["hypothesis_origins"].append(copy.deepcopy(origin))
+over_hypotheses["statement"] = assumption["statement"]
+over_hypotheses["goal_fingerprint"] = assumption["goal_fingerprint"]
+over_result, _ = run_fresh(with_theorem(boundary, over_hypotheses),
+                           "hypothesis-budget-over-shadow", must_refuse=True)
+assert over_result["status"] == "over-budget" and over_result["reason"] == "hypothesis-budget", over_result
+assert over_result["summary"] == {"theorems": 1, "replayed": 0, "not_replayed": 1}, over_result
+assert len(over_result["theorems"]) == 1 and over_result["theorems"][0]["status"] == "over-budget", over_result
+
+
 def retain(raw, label):
     """Structurally delta-minimize and retain an unexpected package seed."""
     SEEDS.mkdir(parents=True, exist_ok=True)
@@ -306,7 +341,8 @@ large["source"]["path"] = "x" * (8 * 1024 * 1024)
 result, workload_seconds = run_fresh(large, "oversized-string", must_refuse=True)
 assert workload_seconds < WALL_LIMIT_SECONDS, workload_seconds
 
-print("R-006 structured package fuzz: positive replay control, 3 node text-schema mutations, "
+print("R-006 structured package fuzz: hypothesis-cap exact/over shadow controls, positive replay "
+      "control, 3 node text-schema mutations, "
       "5 nesting depths, 8 exact-index boundaries, 5 child-indexes, "
       "1 unknown reachable node tag, 4 child ranges, 2 node refs, 2 cycles, 1 forward ref, "
       "and 1 8-MiB parser workload passed; "
