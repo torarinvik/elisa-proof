@@ -231,6 +231,8 @@ run_py_test test_negated_guard_orders.py
 run_py_test test_nested_early_return_guards.py
 python3 "$ROOT_DIR/scripts/tests/test_portable_replay_generation_resolution.py"
 python3 "$ROOT_DIR/scripts/tests/test_dogfood_package_pair_resolution.py"
+run_py_test test_portable_source_metadata_trust.py
+run_py_test tests/test_package_mutation_campaign.py
 run_py_test test_portable_replay.py
 python3 "$ROOT_DIR/scripts/tests/test_portable_package_byte_boundaries.py"
 python3 "$ROOT_DIR/scripts/tests/test_portable_package_string_budget.py"
