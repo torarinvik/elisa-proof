@@ -150,6 +150,29 @@ def main():
             finally:
                 os.environ["ELISA_PROOF_REPORT_CACHE"] = active_cache
             assert cached_integer == uncached_integer == integer_miss, "integer-mode cached and uncached reports differed"
+
+            # Replacing a proof executable in place must not reuse the report written by the
+            # previous executable at the same path.
+            previous_binary_key = cache.cache_key(fixture, writer_binary)
+            writer_binary.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                "print(json.dumps({'status': 'proved', 'mode': 'replacement-v2'}))\n"
+                "raise SystemExit(0)\n", encoding="utf-8")
+            writer_binary.chmod(0o755)
+            replacement_key = cache.cache_key(fixture, writer_binary)
+            assert replacement_key != previous_binary_key, "same-path binary replacement retained the old cache identity"
+            replacement_miss = cache.json_run(fixture, writer_binary)
+            assert replacement_miss[0] == 0 and json.loads(replacement_miss[1])["mode"] == "replacement-v2", "same-path binary replacement reused the old report"
+            assert (report_cache / (previous_binary_key + ".json")).is_file(), "binary replacement unexpectedly removed the previous cache entry"
+            prefetch.run_one(str(writer_binary), str(report_cache), str(fixture))
+            cached_replacement = cache.json_run(fixture, writer_binary)
+            active_cache = os.environ.pop("ELISA_PROOF_REPORT_CACHE")
+            try:
+                uncached_replacement = cache.json_run(fixture, writer_binary)
+            finally:
+                os.environ["ELISA_PROOF_REPORT_CACHE"] = active_cache
+            assert cached_replacement == uncached_replacement == replacement_miss, "replacement-binary cached and uncached reports differed"
         finally:
             cache.DEFAULT_BINARY = original_default
             cache.REPORT_CACHE_RECIPES = original_recipes
