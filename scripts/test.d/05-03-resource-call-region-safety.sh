@@ -22,6 +22,17 @@ if [[ "$rejected_call_stable_facts_status" -ne 0 ]]; then
     exit 1
 fi
 
+# Rebound call-result facts survive only while their owning local remains unreachable; a mutable
+# lend to that local still invalidates the summary.
+set +e
+run_json_report "$ROOT_DIR/examples/call_stable_result_symbols.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions = {item["name"]: item for item in report["declaration_details"] if item["kind"] == "function"}; assert functions["result_bound_survives_unrelated_call"]["verified"]; assert not functions["result_bound_does_not_survive_mutable_lend"]["verified"]; assert not [finding for finding in report["findings"] if finding["name"] == "result_bound_survives_unrelated_call"]; assert any(finding["name"] == "result_bound_does_not_survive_mutable_lend" and finding["kind"] == "ensure-unproven" for finding in report["findings"]); assert not report["trust"]["trusted_assumptions"]'
+call_stable_result_symbols_status=${PIPESTATUS[1]}
+set -e
+if [[ "$call_stable_result_symbols_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: rebound call-result stability or mutable-lend refusal\n' >&2
+    exit 1
+fi
+
 # A by-value aggregate that contains a reference still reaches external state. Its nested
 # collection extent must be forgotten across a call that can mutate the referent through a global.
 set +e
