@@ -41,9 +41,59 @@ include "../src/proof/tactics.elisa"
 
 extend ElisaProof:
     public:
-        def test_summary_local_binding_source(report: ProofReport&, owner: sview, local_name: sview, line: u32, call: Ast::Expr) -> bool:
+        def test_summary_local_binding_source(report: ProofReport&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, call: Ast::Expr) -> bool:
             matches: mutable usize = 0
-            return proof_replay_summary_local_call_declarations(report.source_declarations, owner, local_name, line, call, &matches, 0) and matches == 1
+            return proof_replay_summary_local_call_declarations(report.source_declarations, owner, owner_line, local_name, binding_position, call, &matches, 0) and matches == 1
+
+        def test_summary_argument_order_replay() -> bool:
+            report: mutable ProofReport = proof_empty_report()
+            report.executable_parameters.push("first")
+            report.executable_parameters.push("second")
+            report.fact_trace_summary_names.push("first")
+            report.fact_trace_summary_names.push("second")
+            position: Ast::Pos = Ast::pos_at_line(1)
+            report.fact_trace_summary_values.push(Ast::Expr.Ident("left", position))
+            report.fact_trace_summary_values.push(Ast::Expr.Ident("right", position))
+            summary: ProofExecutableSummary = ProofExecutableSummary{name: "ordered", line: 1, parameters_start: 0, parameters_count: 2, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: true, verified: true, verification_reason: ""}
+            trace: ProofFactTrace = ProofFactTrace{expression: Ast::Expr.Absent, kernel_expression: 0, kind: "function-summary", line: 1, name: "caller", dependency: "ordered", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 3, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 1}
+            arguments: darray[Ast::Expr] = [Ast::Expr.Ident("left", position), Ast::Expr.Ident("right", position)]
+            argument_names: darray[sview] = ["", ""]
+            call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident("ordered", position), arguments, argument_names, position)
+            return false if not proof_replay_summary_call_arguments_match(&report, trace, summary, call)
+            report.fact_trace_summary_values[0] <- Ast::Expr.Ident("right", position)
+            report.fact_trace_summary_values[1] <- Ast::Expr.Ident("left", position)
+            return not proof_replay_summary_call_arguments_match(&report, trace, summary, call)
+
+        def test_summary_source_call_known(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> bool:
+            return proof_replay_summary_source_call(report, trace, summary).known
+
+        def test_summary_source_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> (known: bool, call: Ast::Expr):
+            return proof_replay_summary_source_call(report, trace, summary)
+
+        def test_local_return_position(body: darray[Ast::Stmt]&, local_name: sview, position: mutable Ast::Pos&, found: mutable bool&) -> bool:
+            for statement in body |local_name, position, found|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        match value:
+                            Ast::Expr.Ident(name, source_position) if name == local_name:
+                                position <- source_position
+                                found <- true
+                    _:
+                        pass
+            return true
+
+        def test_local_return_position_declarations(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, local_name: sview, position: mutable Ast::Pos&, found: mutable bool&, depth: usize) -> bool:
+            return false if depth >= 96
+            for declaration in declarations |owner, owner_line, local_name, position, found, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, function_position):
+                        if name == owner and function_position.line == owner_line:
+                            return test_local_return_position(body, local_name, position, found)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not test_local_return_position_declarations(nested, owner, owner_line, local_name, position, found, depth + 1)
+                    _:
+                        pass
+            return true
 
 using Ast
 using ElisaProof
@@ -53,7 +103,8 @@ const FORGED_LOCAL_BINDING_ENCODING_FAILED: i64 = 25
 const FORGED_LOCAL_BINDING_ACCEPTED: i64 = 26
 
 def main() -> i64 can[Memory.Allocate, Abort.Panic]:
-    text: sview = "module Gate:\n    module Inner:\n        public:\n            def bounded(x: i64) -> i64:\n                requires x >= 0\n                ensure result >= 0\n                return x\n\nmodule Elsewhere:\n    module Inner:\n        public:\n            def unrelated(x: i64) -> i64:\n                return x\n\ndef caller(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    return Gate::Inner::bounded(x)\n\ndef caller_local(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    result_value: i64 = Gate::Inner::bounded(x)\n    return result_value\n"
+    return 34 if not test_summary_argument_order_replay()
+    text: sview = "module Gate:\n    module Inner:\n        public:\n            def bounded(x: i64) -> i64:\n                requires x >= 0\n                ensure result >= 0\n                return x\n\nmodule Elsewhere:\n    module Inner:\n        public:\n            def unrelated(x: i64) -> i64:\n                return x\n\ndef caller(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    return Gate::Inner::bounded(x)\n\ndef caller_local(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    result_value: i64 = Gate::Inner::bounded(x)\n    return result_value\n\ndef caller_guard(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    return 1 if Gate::Inner::bounded(x) < 0\n    return 0\n"
     source: mutable darray[u8] = []
     for index in 0..<sview_len(text) |index, text, source|:
         source.push(sview_at(text, index))
@@ -71,6 +122,17 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 9 if summary_index >= report.fact_traces.count
     summary_original: ProofFactTrace = report.fact_traces[summary_index]
     return 10 if not proof_replay_fact_trace_entry(&report, summary_index)
+
+    guard_trace_index: mutable usize = report.fact_traces.count
+    for index in 0..<report.fact_traces.count |index, report, guard_trace_index|:
+        candidate: ProofFactTrace = report.fact_traces[index]
+        if candidate.kind == "function-summary" and candidate.name == "caller_guard" and candidate.dependency == "bounded":
+            guard_trace_index <- index
+            break
+    return 43 if guard_trace_index >= report.fact_traces.count
+    report.replay_owner_line <- 26
+    return 44 if not proof_replay_fact_trace_entry(&report, guard_trace_index)
+    report.replay_owner_line <- 15
     summary_result_index: mutable usize = summary_original.summary_bindings_start
     for offset in 0..<summary_original.summary_bindings_count |offset, summary_original, report, summary_result_index|:
         summary_result_index <- summary_original.summary_bindings_start + offset if report.fact_trace_summary_names[summary_original.summary_bindings_start + offset] == "result"
@@ -119,15 +181,58 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
             local_call <- inner
         _:
             pass
-    local_call_position: Ast::Pos = Ast::expr_pos(local_call)
-    return 21 if not test_summary_local_binding_source(&report, "caller_local", "result_value", local_call_position.line, local_call)
-    return 22 if test_summary_local_binding_source(&report, "caller_local", "wrong_local", local_call_position.line, local_call)
+    local_binding_position: mutable Ast::Pos = Ast::pos_at_line(24)
+    local_binding_found: mutable bool = false
+    return 21 if not test_local_return_position_declarations(report.source_declarations, "caller_local", 20, "result_value", &local_binding_position, &local_binding_found, 0)
+    return 22 if not local_binding_found
+    return 23 if not test_summary_local_binding_source(&report, "caller_local", 20, "result_value", local_binding_position, local_call)
+    return 24 if test_summary_local_binding_source(&report, "caller_local", 20, "wrong_local", local_binding_position, local_call)
     summary_argument_index: usize = summary_original.summary_bindings_start
     summary_argument_original: Ast::Expr = report.fact_trace_summary_values[summary_argument_index]
     report.fact_trace_summary_values[summary_argument_index] <- Ast::Expr.IntLit(0, Ast::expr_pos(summary_original.expression))
-    return 23 if proof_replay_fact_trace_entry(&report, summary_index)
+    return 25 if proof_replay_fact_trace_entry(&report, summary_index)
     report.fact_trace_summary_values[summary_argument_index] <- summary_argument_original
-    return 24 if not proof_replay_fact_trace_entry(&report, summary_index)
+    return 26 if not proof_replay_fact_trace_entry(&report, summary_index)
+
+    assignment_text: sview = "def assignment_add_one(x: i64) -> i64:\n    requires x >= 0\n    ensure result == x + 1\n    return x + 1\n\ndef assignment_rhs_state(x: i64) -> i64:\n    requires x >= 0\n    ensure result == x + 1\n    value: mutable i64 = x\n    value <- assignment_add_one(value)\n    return value\n"
+    assignment_source: mutable darray[u8] = []
+    for index in 0..<sview_len(assignment_text) |index, assignment_text, assignment_source|:
+        assignment_source.push(sview_at(assignment_text, index))
+    assignment_source.push(0)
+    assignment_file: Ast::File = frontend_parse(&assignment_source[0])
+    assignment_report: mutable ProofReport = proof_empty_report()
+    proof_check(assignment_file, &assignment_report)
+    proof_replay_certificates(&assignment_report)
+    assignment_trace_index: mutable usize = assignment_report.fact_traces.count
+    for index in 0..<assignment_report.fact_traces.count |index, assignment_report, assignment_trace_index|:
+        candidate: ProofFactTrace = assignment_report.fact_traces[index]
+        if candidate.kind == "function-summary" and candidate.name == "assignment_rhs_state" and candidate.dependency == "assignment_add_one":
+            assignment_trace_index <- index
+            break
+    return 35 if assignment_trace_index >= assignment_report.fact_traces.count
+    assignment_report.replay_owner_line <- 6
+    return 36 if not proof_replay_fact_trace_entry(&assignment_report, assignment_trace_index)
+    reassigned_text: sview = "def assignment_add_one(x: i64) -> i64:\n    requires x >= 0\n    ensure result == x + 1\n    return x + 1\n\ndef assignment_rhs_state(x: i64) -> i64:\n    requires x >= 0\n    ensure result == x + 1\n    value: mutable i64 = x\n    value <- assignment_add_one(value)\n    value <- 0\n    return value\n"
+    reassigned_source: mutable darray[u8] = []
+    for index in 0..<sview_len(reassigned_text) |index, reassigned_text, reassigned_source|:
+        reassigned_source.push(sview_at(reassigned_text, index))
+    reassigned_source.push(0)
+    reassigned_file: Ast::File = frontend_parse(&reassigned_source[0])
+    reassigned_position: mutable Ast::Pos = Ast::pos_at_line(12)
+    reassigned_return_found: mutable bool = false
+    return 37 if not test_local_return_position_declarations(reassigned_file.top_decls, "assignment_rhs_state", 6, "value", &reassigned_position, &reassigned_return_found, 0)
+    return 38 if not reassigned_return_found
+    assignment_trace: ProofFactTrace = assignment_report.fact_traces[assignment_trace_index]
+    assignment_summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
+    assignment_summary_found: mutable bool = false
+    for candidate in assignment_report.executable_summaries |candidate, assignment_trace, assignment_summary_found, assignment_summary|:
+        if candidate.name == "assignment_add_one" and candidate.line == assignment_trace.owner_line:
+            assignment_summary <- candidate
+            assignment_summary_found <- true
+    return 39 if not assignment_summary_found
+    assignment_call: (known: bool, call: Ast::Expr) = test_summary_source_call(&assignment_report, assignment_trace, assignment_summary)
+    return 40 if not assignment_call.known
+    return 41 if test_summary_local_binding_source(&assignment_report, "assignment_rhs_state", 6, "value", reassigned_position, assignment_call.call)
 
     trace_index: mutable usize = report.fact_traces.count
     for index in 0..<report.fact_traces.count |index, report, trace_index|:
@@ -144,7 +249,12 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
             match marker_arguments[0]:
                 Ast::Expr.Call(call_callee, arguments, argument_names, call_position):
                     forged_position: Ast::Pos = call_position
+                    forged_position.line <- forged_position.line + 1
+                    forged_position.column <- forged_position.column + 1
                     forged_position.offset <- forged_position.offset + 1
+                    forged_position.end_line <- forged_position.end_line + 1
+                    forged_position.end_column <- forged_position.end_column + 1
+                    forged_position.end_offset <- forged_position.end_offset + 1
                     position_forged_call: Ast::Expr = Ast::Expr.Call(call_callee, arguments, argument_names, forged_position)
                     position_forged_arguments: darray[Ast::Expr] = [position_forged_call]
                     position_forgery: Ast::Expr = Ast::Expr.Call(marker_callee, position_forged_arguments, marker_names, position)
@@ -207,7 +317,7 @@ def main() -> None:
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 
-    print("qualified call-summary replay: local-result and argument checks hold; wrong local, argument, call-span, same-leaf owner and forged local-binding claims rejected")
+    print("qualified call-summary replay: assignment RHS, exact local binding, argument order and reassignment checks hold; forged arguments, call spans, wrong modules and local-binding claims rejected")
 
 
 if __name__ == "__main__":
