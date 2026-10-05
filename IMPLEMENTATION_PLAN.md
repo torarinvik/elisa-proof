@@ -714,7 +714,23 @@ Start after immediate false acceptance/corruption containment. The goal is predi
 
 **Gate:** At least seven alternating paired rounds after warm-up for claims; report median/p95, CPU, peak RSS, proof bytes, obligations and replay. Timeouts remain censored outcomes, not successful timings. Include cold/no-op/edit and portable-replay costs.
 
-**Progress (2026-10-05):** P-01 now has an independently versioned workload contract in [`scripts/p01_sentinels.json`](scripts/p01_sentinels.json): six existing fixtures are pinned by path, size and SHA-256 with expected proof/refusal outcomes. The runner rejects fixture-set, path or content drift before measurement and consumes the manifest's semantic outcomes. Focused harness validation passed (`python3 scripts/test_p01_baseline.py`); no `build/elisa-proof` exists in this checkout, so this is not a fresh product or timing baseline. R-011 remains open: additional workload classes (field equality, composed calls, resource-heavy modules and fact-growth scaling), paired benchmark expansion, and seven-round evidence are outstanding. See [`docs/evidence/2026-10-05-r011-p01-sentinel.md`](docs/evidence/2026-10-05-r011-p01-sentinel.md).
+**Progress (2026-10-05):** P-01 has an independently versioned workload contract in
+[`scripts/p01_sentinels.json`](scripts/p01_sentinels.json), with fixtures pinned by path, size,
+SHA-256 and expected outcomes. The paired benchmark now validates manifest sidecars, executable
+hashes, proof/replay source and toolchain identity, and baseline/candidate toolchain identity;
+it rechecks manifests after snapshotting inputs. Its default is seven alternating paired rounds
+after warm-up and it reports median/p95 wall time, CPU and peak RSS. Fifteen focused harness tests
+and its self-test pass. A `Popen.kill()`/`wait4()` double-reap race in the P-01 measurement runner
+was fixed, with its test passing five consecutive runs.
+
+The actual paired preflight rejected the current `build/elisa-proof` and
+`build/elisa-proof-replay`: their proof-source tree hashes are respectively
+`8ad03c75…d35715` and `0de5d950…b62f35b`, although both identify the same clean Stage1 compiler
+and pinned frontend. The guard emitted no timing result. Exact product hashes and the refusal
+output are in [`docs/evidence/2026-10-05-r011-measurement-guard.md`](docs/evidence/2026-10-05-r011-measurement-guard.md).
+R-011 remains open: no comparable seven-round baseline has been recorded, and the field-equality,
+composed-call, resource-heavy, fact-growth, cold/no-op/edit, portable-replay and other required
+sentinel classes plus proof-byte/obligation/replay-count reporting remain to be implemented.
 
 #### R-012 — Account for actual search work with named budgets
 
