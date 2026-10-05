@@ -1258,6 +1258,17 @@ validation independently replayed every accepted certificate with zero gaps. No 
 mismatch or sound narrow behavior fix was found; the broader width-specific minimum and overflow
 matrix remains open. See [signed division boundary evidence](docs/evidence/2026-10-05-r042-signed-division-boundaries.md).
 
+**Contextual signed arithmetic cross-route slice (2026-10-05):** Commit `23e3bccb` rejected
+suffix-only machine-integer witnesses. The follow-up regression demonstrates contextual `i8`
+addition and bounded multiplication from actual parameter/return types, with unsuffixed literals,
+across source execution, source proof and certificate replay, `decide`, and portable package replay.
+The suffix-only wrapping assertion remains false at runtime and unproved through producer/tactic;
+the existing expectation is unchanged. This slice covers in-range runtime multiplication only.
+A typed local assignment proof was probed and remains refused (`wrap-guard-goal`); signed
+multiplication overflow, signed division/remainder/shift parity, other widths and casts/bitwise
+operations are not established here. Exact products, commands and the unsupported list are in
+[`R-042 contextual signed cross-route evidence`](docs/evidence/2026-10-05-r042-contextual-signed-cross-route.md).
+
 #### R-043 — Make float/string/character boundaries explicit
 
 **Change:** Preserve existing conservative float rules while defining which IEEE operations, NaNs, signed zeros, infinities and rounding modes are supported. Separately model string bytes/characters, indexing and cstr termination according to Elisa semantics.

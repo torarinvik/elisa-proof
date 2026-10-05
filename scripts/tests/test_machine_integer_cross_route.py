@@ -27,6 +27,19 @@ def imported_suffix_wrap_claim() -> void:
 def imported_suffix_safe_boundary() -> void:
     proof 254u8 + 1u8 == 255u8:
         assert 254u8 + 1u8 == 255u8
+
+# These literals have no suffix. The declared parameter and return types
+# provide the signed i8 context for the arithmetic expressions.
+def contextual_i8_add(value: i8) -> i8:
+    requires value == 126
+    ensure result == 127
+    return value + 1
+
+def contextual_i8_square(value: i8) -> i8:
+    requires value >= -2
+    requires value <= 2
+    ensure result >= 0
+    return value * value
 """
 
 
@@ -105,12 +118,16 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
     source = directory / "suffix-import.elisa"
     source.write_text(SOURCE, encoding="utf-8")
 
-    # Independent compiler execution pins the source meaning: suffix tokens do
-    # not turn the uncontextualized expression into a u8 bitvector operation.
+    # Independently execute contextual signed arithmetic with unsuffixed literals
+    # and declared i8 parameter/results.
     runtime_source = directory / "source-runtime.elisa"
     runtime_source.write_text(
+        "def contextual_add(value: i8) -> i8:\n"
+        "    return value + 1\n"
+        "def contextual_square(value: i8) -> i8:\n"
+        "    return value * value\n"
         "def main() -> i32:\n"
-        "    return 0 if 255u8 + 1u8 == 0u8 else 1\n",
+        "    return 0 if contextual_add(126) == 127 and contextual_square(10) == 100 and not (255u8 + 1u8 == 0u8) else 1\n",
         encoding="utf-8",
     )
     executable = directory / "source-runtime"
@@ -118,9 +135,9 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
                     str(runtime_source)], cwd=compiler_root, label="source runtime compile")
     assert compiled.returncode == 0, compiled.stderr[-2000:]
     executed = run([str(executable)], label="source runtime evaluation")
-    assert executed.returncode == 1, (
-        "the compiler must evaluate 255u8 + 1u8 == 0u8 as false when these suffixes "
-        f"are not contextual types; got {executed.returncode}"
+    assert executed.returncode == 0, (
+        "the compiler must execute in-range signed i8 addition and multiplication while "
+        f"keeping the suffix-only expression false; got {executed.returncode}"
     )
 
     report_run = run([str(proof_binary), "--json", str(source)], env=env,
@@ -131,28 +148,43 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
     goals = [goal for goal in report["goals"] if goal["rule"] == "goal"]
     false_claim = [goal for goal in goals if goal["name"] == "imported_suffix_wrap_claim"]
     safe_claim = [goal for goal in goals if goal["name"] == "imported_suffix_safe_boundary"]
+    contextual_add = [goal for goal in goals if goal["name"] == "contextual_i8_add"]
+    contextual_square = [goal for goal in goals if goal["name"] == "contextual_i8_square"]
     assert len(false_claim) == len(safe_claim) == 2, goals
     assert all(not goal["proven"] and goal["replay_status"] != "replayed" for goal in false_claim), false_claim
     assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in safe_claim), safe_claim
+    assert contextual_add and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in contextual_add), contextual_add
+    assert contextual_square and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in contextual_square), contextual_square
     assert report["replay"]["certificates"] == report["replay"]["replayed"], report["replay"]
 
     # Exercise the untrusted decision tactic against the very same source-bound
     # propositions; the false wrap claim must not regain acceptance through tactics.
     tactic_result(proof_binary, source, false_claim[0], False, directory, env)
     tactic_result(proof_binary, source, safe_claim[0], True, directory, env)
+    tactic_result(proof_binary, source, contextual_add[0], True, directory, env)
+    tactic_result(proof_binary, source, contextual_square[0], True, directory, env)
 
     package_source = directory / "safe-package.elisa"
     package_source.write_text(
         "def package_safe_boundary() -> void:\n"
         "    proof 254u8 + 1u8 == 255u8:\n"
-        "        assert 254u8 + 1u8 == 255u8\n",
+        "        assert 254u8 + 1u8 == 255u8\n"
+        "def package_contextual_signed(value: i8) -> i8:\n"
+        "    requires value == 126\n"
+        "    ensure result == 127\n"
+        "    return value + 1\n"
+        "def package_contextual_square(value: i8) -> i8:\n"
+        "    requires value >= -2\n"
+        "    requires value <= 2\n"
+        "    ensure result >= 0\n"
+        "    return value * value\n",
         encoding="utf-8",
     )
     package_run = run([str(proof_binary), "--package", str(package_source)], env=env,
                       label="safe theorem package export")
     package = json.loads(package_run.stdout)
     theorem_names = {item["name"] for item in package["theorems"] if item["rule"] == "goal"}
-    assert "package_safe_boundary" in theorem_names, theorem_names
+    assert {"package_safe_boundary", "package_contextual_signed", "package_contextual_square"} <= theorem_names, theorem_names
     package_path = directory / "safe-package.json"
     package_path.write_text(package_run.stdout, encoding="utf-8")
     portable = run([str(replay_binary), str(package_path)], env=env,
@@ -182,7 +214,8 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
 
 print(
     "R-042 cross-route: compiler rejects suffix-as-u8 overflow interpretation; "
-    "producer/tactic refuse it, safe source and package replay pass, and exhaustive typed-u8 "
+    "producer/tactic refuse it, contextual signed add/multiply source and package replay pass, "
+    "and exhaustive typed-u8 "
     f"kernel arithmetic passes ({generation}; Stage1 {compiler_identity['stage1_revision']}; "
     f"compiler {compiler_identity['product']['sha256']}; runtime {manifest['runtime']['sha256']})"
 )
