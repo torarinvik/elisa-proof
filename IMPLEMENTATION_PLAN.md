@@ -626,6 +626,16 @@ remained available. This covers parse, import, semantic and proposition-formatio
 structural mutation of the report inventory. R-004 remains open until omission/deletion/count
 mutations and unreachable unsupported operations are shown to fail closed.
 
+An additional invariant now requires the number of recorded successful goal attempts to match
+the report's `proven` counter; deleting a successful attempt or retaining a success count without
+an attempt makes source admission fail. The standalone report-invariant mutation harness and the
+six-class/twelve-route source-admission matrix passed on strict O2 product SHA-256
+`9363e938ab063baf212ff8ebd9e3d75e8a0f46470897d738c8f0f5222a3814eb` (source revision
+`43796a5eac31ce5707645e2815b294dd16ab4b5d`). Exact identities and commands are recorded in
+[`docs/evidence/2026-10-05-r004-proven-attempt-inventory.md`](docs/evidence/2026-10-05-r004-proven-attempt-inventory.md).
+This still does not bind a complete expected obligation inventory to the original AST or prove
+that every unsupported path has a recorded attempt, so R-004 remains open.
+
 #### R-005 — Audit source-derived boundary facts and call witnesses
 
 **Change:** Extend the recent source-derived witness work in `check/function_contracts_and_frames.elisa` and `replay/boundary_trace_shapes.elisa`. Inventory initial facts about parameter types, ranges, calls, aliases, effects and resources; replay exact owner, argument position, state version and declaration identity instead of trusting producer bookkeeping.
