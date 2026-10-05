@@ -23,8 +23,8 @@ def run(source):
     return process.returncode, report
 
 
-# The target premise follows eight unrelated disjunctions. They must not use
-# the candidate budget in either the producer or independent replay kernel.
+# Irrelevant disjunctions do not consume the candidate budget before the
+# relevant premise, in either the producer or independent replay kernel.
 source = "\n".join(
     [
         "def identity(value: bool) -> bool:",
@@ -41,6 +41,60 @@ source = "\n".join(
 )
 code, late = run(source)
 assert code == 0 and late["status"] == "proved", late["findings"]
+
+# These premises each have a goal-matching alternative, but their other side
+# remains open, so eight/nine of them genuinely fail the entailment check.
+def relevant_failures(count, late_success=False):
+    parameters = ["accepted: bool"] + [f"other_{index}: bool" for index in range(count)]
+    lines = [
+        "def opaque(value: bool) -> bool:",
+        "    return value",
+        "",
+        f"def relevant_failures({', '.join(parameters)}) -> bool:",
+    ]
+    lines.extend(
+        f"    requires opaque(accepted) or opaque(other_{index})"
+        for index in range(count)
+    )
+    if late_success:
+        lines.append("    requires opaque(accepted) or false")
+    lines.extend(["    ensure opaque(accepted)", "    return accepted", ""])
+    return "\n".join(lines)
+
+
+code, eight_failures = run(relevant_failures(8))
+assert code == 1 and eight_failures["status"] == "failed", eight_failures["findings"]
+assert any(
+    finding["kind"] == "ensure-unproven" and finding["status"] == "unknown"
+    for finding in eight_failures["findings"]
+), eight_failures["findings"]
+code, nine_failures = run(relevant_failures(9))
+assert code == 1 and nine_failures["status"] == "failed", nine_failures["findings"]
+assert any(
+    finding["kind"] == "ensure-unproven" and finding["status"] == "unknown"
+    for finding in nine_failures["findings"]
+), nine_failures["findings"]
+
+# A later refuted alternative can still be established by the independent
+# disjunctive-syllogism rule after the bounded entailment scan stops.
+code, late_success = run(relevant_failures(9, late_success=True))
+assert code == 0 and late_success["status"] == "proved", late_success["findings"]
+
+# A premise with no goal-matching branch but with every branch refuted was
+# accepted by the old entailment rule. Preserve that contradiction case.
+contradiction = """\
+def opaque(value: bool) -> bool:
+    return value
+
+def contradiction(value: bool, q: bool, r: bool) -> bool:
+    requires not q
+    requires not r
+    requires q or r
+    ensure opaque(value)
+    return value
+"""
+code, contradictory = run(contradiction)
+assert code == 0 and contradictory["status"] == "proved", contradictory["findings"]
 
 # The high-fact pure-call domain case regressed under a raw fact-count guard.
 # Keep it in this focused boundary suite so producer and replay retain coverage.
