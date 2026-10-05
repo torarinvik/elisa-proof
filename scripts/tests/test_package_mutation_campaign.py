@@ -8,16 +8,17 @@ decoder regression cannot hang the suite.
 
 import copy
 import json
-import os
 from pathlib import Path
 import random
 import subprocess
+import sys
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PRODUCER = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
+sys.path.insert(0, str(ROOT / "scripts"))
+from portable_replay_support import BINARY as PRODUCER, REPLAY
+
 TIMEOUT_SECONDS = 12
 SEED = 0xE115A
 
@@ -91,6 +92,14 @@ def assert_refused(directory, label, payload):
     assert all(theorem.get("status") != "replayed" for theorem in result.get("theorems", [])), (label, result)
 
 
+def assert_no_publication(directory, label, payload, expected_reason):
+    code, result = write_and_replay(directory, label, payload)
+    assert code == 1 and result["status"] == "malformed" \
+        and result.get("reason") == expected_reason, (label, code, result)
+    assert result["theorems"] == [], (label, result)
+    assert result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, (label, result)
+
+
 def mutate_field(package, path, replacement):
     changed = copy.deepcopy(package)
     previous = get_at_path(changed, path)
@@ -160,6 +169,11 @@ def main():
         ("theorem-rule-tag", ("theorems", 0, "rule"), "untrusted-oracle"),
         ("length-child-span-overrun", ("kernel", "nodes", child_index, "children_count"),
          child_node["children_count"] + len(base["kernel"]["children"]) + 1),
+        ("nested-span-start-at-end-with-positive-count",
+         ("kernel", "nodes", child_index, "children_start"), len(base["kernel"]["children"])),
+        ("nested-span-overflowing-start-and-count",
+         ("kernel", "nodes", child_index, "children_start"), 2**63 - 1),
+        ("nested-span-negative-count", ("kernel", "nodes", child_index, "children_count"), -1),
         ("length-truncate-child-arena", ("kernel", "children"), base["kernel"]["children"][:-1]),
         ("length-truncate-node-arena", ("kernel", "nodes"), nodes[:theorem["conclusion"]]),
         ("node-operator-type", ("kernel", "nodes", compound_index, "operator"), 0),
@@ -168,6 +182,7 @@ def main():
         ("node-child-start-float", ("kernel", "nodes", child_index, "children_start"), 0.5),
         ("node-child-count-bool", ("kernel", "nodes", child_index, "children_count"), False),
         ("node-child-count-inexact-bound", ("kernel", "nodes", child_index, "children_count"), 2**53),
+        ("node-child-count-signed-limit", ("kernel", "nodes", child_index, "children_count"), 2**63 - 1),
         ("node-name-type", ("kernel", "nodes", compound_index, "name"), []),
         ("node-secondary-name-type", ("kernel", "nodes", compound_index, "secondary_name"), {}),
         ("child-id-float", ("kernel", "children", 0), 0.5),
@@ -202,6 +217,52 @@ def main():
 
         for label, path, value in cases:
             assert_refused(directory, label, mutate_field(base, path, value))
+
+        one_over_empty_span = copy.deepcopy(base)
+        one_over_empty_span["kernel"]["nodes"][child_index]["children_start"] = \
+            len(one_over_empty_span["kernel"]["children"]) + 1
+        one_over_empty_span["kernel"]["nodes"][child_index]["children_count"] = 0
+        assert_refused(directory, "nested-span-zero-count-start-one-over", one_over_empty_span)
+
+        # A zero-length nested span exactly at the child-arena end is the inclusive boundary.
+        # Its one-over neighbor is covered above and must fail closed, even though it refers to
+        # no child. This catches unchecked start+count arithmetic and off-by-one range tests.
+        exact_empty_span = copy.deepcopy(base)
+        exact_empty_span["kernel"]["nodes"].append({
+            "kind": "array", "operator": "", "left": 0, "right": 0, "auxiliary": 0,
+            "children_start": len(exact_empty_span["kernel"]["children"]), "children_count": 0,
+            "value": "0", "name": "", "secondary_name": "",
+        })
+        code, result = write_and_replay(directory, "nested-span-exact-empty-boundary", exact_empty_span)
+        assert code == 0 and result["status"] == "replayed" \
+            and result["summary"]["replayed"] == 1, result
+
+        # Repeated goal IDs are accepted by the current package contract; they must not alias a
+        # replay cache entry. The second record is independently rejected when its fingerprint
+        # is forged, instead of inheriting the first record's successful result.
+        duplicate_ids = copy.deepcopy(base)
+        second = copy.deepcopy(duplicate_ids["theorems"][0])
+        second["name"] = "same-id-independent-record"
+        duplicate_ids["theorems"].append(second)
+        code, result = write_and_replay(directory, "duplicate-goal-id-independent-replay", duplicate_ids)
+        assert code == 0 and result["status"] == "replayed" \
+            and result["summary"] == {"theorems": 2, "replayed": 2, "not_replayed": 0}, result
+        assert [item["goal_id"] for item in result["theorems"]] == [
+            duplicate_ids["theorems"][0]["goal_id"], duplicate_ids["theorems"][0]["goal_id"]], result
+
+        duplicate_ids["theorems"][1]["goal_fingerprint"] ^= 1
+        code, result = write_and_replay(directory, "duplicate-goal-id-cache-isolation", duplicate_ids)
+        assert code == 1 and result["status"] == "rejected" \
+            and result["summary"] == {"theorems": 2, "replayed": 1, "not_replayed": 1}, result
+        assert [item["status"] for item in result["theorems"]] == ["replayed", "rejected"], result
+
+        # Package-wide structure validation precedes per-theorem replay/publication. Even with
+        # two valid theorem records before the malformed arena entry, no prefix may escape.
+        late_global_error = copy.deepcopy(duplicate_ids)
+        late_global_error["theorems"][1]["goal_fingerprint"] ^= 1
+        late_global_error["kernel"]["nodes"][0]["unexpected"] = True
+        assert_no_publication(directory, "late-global-schema-error-no-partial-theorems",
+                              late_global_error, "node-schema")
 
         schema_cases = [
             ("missing-source-authenticated", ("source", "authenticated")),
@@ -242,8 +303,8 @@ def main():
         assert code == 0 and result["status"] == "replayed", result
         assert result["summary"]["replayed"] == len(changed_fingerprint["theorems"]), result
 
-    refused_count = len(cases) + len(schema_cases) + 4
-    print(f"package mutation campaign: {refused_count} adversarial inputs refused; 2 hint-only edits freshly replayed; seed={SEED}")
+    refused_count = len(cases) + len(schema_cases) + 6
+    print(f"package mutation campaign: {refused_count} adversarial inputs refused; exact empty-span boundary and duplicate-ID cache isolation checked; 2 hint-only edits freshly replayed; seed={SEED}")
 
 
 if __name__ == "__main__":
