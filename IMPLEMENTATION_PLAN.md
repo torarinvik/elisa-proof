@@ -1000,6 +1000,16 @@ unsigned-remainder, and signed variable-divisor focused tests passed. The shared
 not yet been rebuilt, so rebuild proof/replay together and rerun the full integrated matrix before
 counting this subfeature closed. R-042 remains open for the rest of the width/sign/operation matrix.
 
+**Follow-up validation (2026-10-05):** A clean strict Stage1 O2 build at source commit
+`c87fc1b9c186a40bf22cc52b55e5b6ac5040943b` rebuilt proof and portable replay together. The direct
+same-width unsigned `value / divisor <= value` slice passed with a variable `divisor > 0`, a
+positive literal divisor, and a high-bit `u64` dividend; all five mismatch, zero-divisor, wrapping,
+unrelated-bound, and signed-negative controls remained unproven. The report had zero semantic
+errors and zero replay gaps, with every generated certificate independently replayed. Exact product
+identities and focused commands are recorded in [R-042 quotient slice evidence](docs/evidence/2026-10-05-r042-unsigned-quotient-slice.md).
+This closes the narrow quotient-bound slice; no width matrix, other arithmetic operation, or full
+integrated-suite claim is implied.
+
 #### R-043 — Make float/string/character boundaries explicit
 
 **Change:** Preserve existing conservative float rules while defining which IEEE operations, NaNs, signed zeros, infinities and rounding modes are supported. Separately model string bytes/characters, indexing and cstr termination according to Elisa semantics.
