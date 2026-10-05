@@ -146,6 +146,34 @@ def main() -> None:
             }):
                 result = MODULE.run(SimpleNamespace(binary=binary, timeout=5, rss_limit_kib=500000,
                                                     rounds=2, warmup_runs=1))
+                checksum_path = Path(str(manifest_path) + ".sha256")
+                original_checksum = checksum_path.read_bytes()
+                original_invoke = MODULE.invoke
+                changed = [False]
+
+                def mutate_manifest_during_measurement(*args, **kwargs):
+                    row = original_invoke(*args, **kwargs)
+                    if not changed[0]:
+                        updated_manifest = json.loads(manifest_path.read_bytes())
+                        updated_manifest["build_identity"] = "changed-during-measurement"
+                        updated_bytes = json.dumps(updated_manifest, sort_keys=True).encode("utf-8")
+                        manifest_path.write_bytes(updated_bytes)
+                        checksum_path.write_text(hashlib.sha256(updated_bytes).hexdigest() + "\n",
+                                                 encoding="ascii")
+                        changed[0] = True
+                    return row
+
+                try:
+                    with mock.patch.object(MODULE, "invoke", side_effect=mutate_manifest_during_measurement):
+                        MODULE.run(SimpleNamespace(binary=binary, timeout=5, rss_limit_kib=500000,
+                                                   rounds=1, warmup_runs=0))
+                except RuntimeError as error:
+                    assert "proof build identity changed during measurement" in str(error), error
+                else:
+                    raise AssertionError("P-01 accepted a build-manifest change during measurement")
+                finally:
+                    manifest_path.write_bytes(manifest_bytes)
+                    checksum_path.write_bytes(original_checksum)
         finally:
             MODULE.FIXTURES = old
         assert result["schema"] == "elisa-proof-p01-baseline-v3"

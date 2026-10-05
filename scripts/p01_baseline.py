@@ -414,6 +414,8 @@ def run(args: argparse.Namespace) -> dict:
                                         for key, values in scenarios.items()}})
     if fixture_ids != {name: identity(path) for name, path in FIXTURES}:
         raise RuntimeError("a fixed workload changed during measurement")
+    if build_identity(binary) != build:
+        raise RuntimeError("P-01 proof build identity changed during measurement")
     return {"schema": SCHEMA, "complete": not failures, "failures": failures,
             "machine": {"platform": platform.platform(),
             "python": platform.python_version(), "target": platform.machine(),
