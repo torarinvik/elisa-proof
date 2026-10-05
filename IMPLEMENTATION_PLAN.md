@@ -809,9 +809,9 @@ focused test sources. It is source inspection only: construction call sites are 
 no complete transitive root-to-source/compiler/runtime dependency graph or rule soundness map is
 established. R-008 remains open.
 
-**Certificate producer inventory follow-up (2026-10-05):** Commit `fff61c73` makes
+**Certificate producer inventory follow-up (2026-10-05):** Commits `fff61c73` and `32aedfe3` make
 `scripts/test_kernel_inventory.py` discover every function that appends a `ProofGoalCertificate`
-and compare that exact set against `KERNEL_INVENTORY.md`. The first run also exposed two current
+including multiline construction sites, and compare that exact set against `KERNEL_INVENTORY.md`. The first run also exposed two current
 boundary fact kinds missing from the inventory; `deterministic-call` and `match-exhaustiveness`
 are now documented with their source producers and replay checks. The focused inventory check
 passes with 10 source-matched tables and 169 entries. This catches undocumented producer/kind
@@ -2136,14 +2136,16 @@ the queue and put its minimized reproducer first.
    proof source snapshot and one checked compiler/frontend/runtime identity. Verify manifests,
    executable hashes, source-tree digest, options and certificate format; place outputs under a
    unique snapshot path. A one-product or mismatched pair is unusable evidence.
-4. **P0.4 — Make product-pair publication and reading generation-safe.** A `mv`-shim regression
-   already demonstrates a mixed proof/replay pair with individually valid checksums after an
-   interruption; pair-identity validation refuses it, and a later build repairs it. Extend failure
-   injection to every rename and restart boundary. Design immutable generation directories with a
-   generation ID embedded in both manifests, and require each reader to pin one generation for all
-   executables/manifests or verify a stable pointer and retry. A pointer or stable path spelling
-   alone is not atomic for a multi-file reader. Recovery must expose a complete old or new pair,
-   never a mixed one. Keep same-root locking and test separate output roots.
+4. **P0.4 — Migrate every proof/replay consumer to generation-pinned products (R-015).** The
+   immutable generation directory, shared manifest generation ID, atomic `CURRENT` pointer and
+   validating resolver landed in `bf2c7158`; injected pointer/generation and legacy-file
+   interruptions passed with mock tools. Inventory every test, CLI, benchmark, build helper and
+   documentation command that opens proof and replay binaries. Each paired operation must resolve
+   once and use both returned paths from that generation; a stable legacy filename or two separate
+   resolves can still mix generations. Keep compatibility aliases only for single-product use.
+   Next add real Stage1 build and process-kill/restart tests, independent-root writer coordination,
+   immutable source snapshot binding, and safe old-generation retention/cleanup. Recovery must
+   expose a complete old or new pair, never a mixed one.
 5. **P0.5 — Refresh the exact-current admission census.** Run, from that one matched product pair,
    the qualified-constant reproducer, each `Slide.inner` conditional gap, qualified/nested call
    cases, forged-summary controls, field-equality success and timeout/refusal, fact-budget edges,
@@ -2157,8 +2159,10 @@ the queue and put its minimized reproducer first.
    the invalid operation. Fix the responsible proof/runtime/compiler layer; never mask it with a
    broad unsupported result. Keep a compiler differential if the source lowering is responsible.
 7. **P0.7 — Close producer/replay gaps without losing valid paths (R-003).** Preserve the narrow
-   root-48 positive-conjunct rule and its negative controls; close root 51 only with independently
-   checked signed arithmetic and range premises. Trace every remaining conditional-return gap from
+   root-48 positive-conjunct rule and its negative controls. Root 51 now has a narrowly shaped,
+   fixed-width-safe signed unit-shift replay rule (`71ede8b4`, hardened against circular guard
+   range evidence by `fcbc4b95`); its old matched evidence is not current-compiler evidence. Trace
+   every remaining conditional-return gap from
    source CFG node through VC, witness, certificate and replay. Add the smallest rule preserving
    branch identity or refuse before emitting incomplete evidence. Rebuild the exact current snapshot
    on the newest provenance-checked Stage1 before accepting the candidate as current behavior.
@@ -2177,8 +2181,11 @@ the queue and put its minimized reproducer first.
     binders, post-check AST mutation, escaped eigenvariables, failed branches, nested tactics,
     scratch reuse, and concurrent access. Compare accepted certificates to a simple independent
     context-membership oracle.
-11. **P0.11 — Finish decoder/parser adversarial coverage (R-006/R-088).** Generate valid source and
-    packages, mutate one byte/field at a time, and cover every tag, Boolean/integer encoding, span,
+11. **P0.11 — Finish decoder/parser adversarial coverage (R-006/R-088).** The 28-case structured
+    matrix plus 512 deterministic raw-byte mutations (`5118536c`) now run in bounded fresh
+    processes; all 16 positive packages replay, and three mutations that stayed valid encodings
+    replayed successfully. This is not coverage-guided fuzzing. Extend with generated valid source
+    and packages, mutate one byte/field at a time, and cover every tag, Boolean/integer encoding, span,
     object key, UTF-8/surrogate rule, version, count, length, reference, root and checksum. Impose
     process CPU/RSS bounds; retain seeds and assert structured refusal, no panic, no partial `proved`,
     and no partial cache publication.
@@ -2206,11 +2213,13 @@ These are measurement gates, not optimization claims. Complete them before broad
     certificate generation, replay, decoder, report building, cache, and wall/RSS limits independent
     names and counters. At exact and one-over boundaries report stage/dimension/observed/limit;
     return `unknown`, `timeout`, or `unsupported`, never `false`, no model, and no partial theorem.
-16. **P1.4 — Calibrate the actual Elisa profiler path (R-014).** Replace synthetic-only confidence with
-    an Elisa runtime probe that allocates known counts and sizes, explicitly frees/reclaims, resets a
-    region, retains capacity, returns a view, and exercises nested stores. Compare expected events,
-    live/retired bytes, peaks, lifetime and RSS; verify every event-loss/truncation marker. Preserve
-    source/function/store identity and demonstrate the profiler does not corrupt the program.
+16. **P1.4 — Complete profiler calibration and measure overhead (R-014).** The real runtime probe
+    (`5dfcebba`) now covers known allocation/reclaim/reset events and the production analyzer, and
+    reports logical-live, retained-capacity and RSS separately. Add explicit event-loss/truncation,
+    nested-store attribution, invalid-after-reset view, and profiler-noninterference controls. Then
+    capture one matched uninstrumented/counter-only/full-profiler run with identical products,
+    workloads, reports and replay; quantify wall/CPU/RSS overhead before using profiles to select a
+    hot path. The existing probe makes no claim that a returned view remains valid after reset.
 17. **P1.5 — Capture representative prover behavior.** Profile one small success, large complete
     success, expensive refusal, large replay, and malformed-package rejection. Keep incomplete or
     dropped captures out of hot-path selection. Attribute self/total time, call counts, allocations,
