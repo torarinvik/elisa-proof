@@ -24,6 +24,8 @@ def run_report(source: Path) -> tuple[int, dict]:
 
 
 def check_emitted_inventory(report: dict, *, proved: bool) -> None:
+    assert report["source_obligation_inventory"]["coverage"] == "partial"
+    assert report["source_obligation_inventory"]["whole_program"] is False
     summary = report["summary"]
     declarations = report["declaration_details"]
     goals = report["goals"]
@@ -66,12 +68,25 @@ def main() -> None:
     )
 
     # The Elisa harness imports the exact report_invariants module used by CLI admission,
-    # mutates its report rows/counters, and returns nonzero if any mutation remains admitted.
+    # retains source declarations outside the mutable report, and checks both an intact
+    # positive control and coordinated source-report deletion of a required postcondition.
     mutation = subprocess.run([str(INVARIANT_HARNESS)], capture_output=True, timeout=30)
     assert mutation.returncode == 0, (
-        "R-004 bypass characterization failed: the harness did not reproduce both "
-        "report-owned scheduling-status and aggregate-offset bypasses: "
+        "R-004 source-derived admission regression failed: the harness did not accept "
+        "the positive control and reject the deliberately omitted source obligation: "
         f"exit={mutation.returncode}, stderr={mutation.stderr[:500]!r}"
+    )
+
+    # Exercise the production CLI gate with a source function inside the explicitly supported
+    # subset, independently of the hand-built mutation report in the native harness.
+    code, source_control = run_report(ROOT / "examples/source_obligation_inventory_positive.elisa")
+    assert code == 0
+    check_emitted_inventory(source_control, proved=True)
+    assert any(
+        goal["name"] == "source_inventory_positive"
+        and goal["rule"] == "goal"
+        and goal["proven"]
+        for goal in source_control["goals"]
     )
 
     code, verified = run_report(ROOT / "examples/verified.elisa")
@@ -107,7 +122,7 @@ def main() -> None:
     assert unsupported["verification_state"] == "unsupported"
     assert any(finding["status"] == "unsupported" for finding in unsupported["findings"])
 
-    print("R-004 audit: both proposed-gate bypasses reproduced; existing CLI inventory checks passed (source completeness remains open)")
+    print("R-004 slice: source-owned positive control accepted; coordinated required-postcondition omission rejected; CLI inventory fixtures passed")
 
 
 if __name__ == "__main__":

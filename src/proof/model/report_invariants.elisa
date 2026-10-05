@@ -122,6 +122,88 @@ extend ElisaProof:
             return false if not proof_report_goal_attempts_bounded_by_obligations(report)
             return proof_report_proven_attempts_consistent(report)
 
+        # Independent source inventory slice (R-004): recognize only a deliberately tiny,
+        # auditable shape: a uniquely named function with exactly one `ensure true` and one
+        # integer-literal return. Such a function has exactly one source postcondition and no
+        # other body statement that could masquerade as its proof attempt. The source tree is an
+        # immutable input owned by the caller, never reconstructed from report scheduling rows.
+        # All other postconditions are outside this slice and remain explicitly unaccounted for.
+        def proof_source_literal_ensure_candidate(declaration: Ast::Decl) -> (known: bool, name: sview):
+            match declaration:
+                Ast::Decl.Func(name, _, _, body, _, _, _):
+                    return (false, "") if body.count != 2
+                    has_ensure: mutable bool = false
+                    has_return: mutable bool = false
+                    for statement in body |has_ensure, has_return|:
+                        match statement:
+                            Ast::Stmt.Contract(kind, expression, _):
+                                return (false, "") if kind != "ensure" or has_ensure
+                                match expression:
+                                    Ast::Expr.BoolLit(value, _):
+                                        return (false, "") if not value
+                                    _:
+                                        return (false, "")
+                                has_ensure <- true
+                            Ast::Stmt.Return(value, _):
+                                return (false, "") if has_return
+                                match value:
+                                    Ast::Expr.IntLit(_, _):
+                                        has_return <- true
+                                    _:
+                                        return (false, "")
+                            _:
+                                return (false, "")
+                    return (has_ensure and has_return, name)
+                _:
+                    return (false, "")
+
+        def proof_source_literal_ensure_count(declarations: darray[Ast::Decl]&, name: sview) -> usize:
+            count: mutable usize = 0
+            for declaration in declarations |count, name|:
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, _, _, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Module(_, nested, _):
+                        count <- count + proof_source_literal_ensure_count(nested, name)
+                    Ast::Decl.Scoped(nested, _):
+                        count <- count + proof_source_literal_ensure_count(nested, name)
+                    _:
+                        pass
+            return count
+
+        def proof_source_literal_ensure_inventory(declarations: darray[Ast::Decl]&) -> darray[sview]:
+            inventory: mutable darray[sview] = []
+            for declaration in declarations |inventory|:
+                match declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, _):
+                        candidate: (known: bool, name: sview) = proof_source_literal_ensure_candidate(declaration)
+                        if candidate.known:
+                            # Empty is an explicit fail-closed ambiguity marker; otherwise the
+                            # inventory retains only the immutable source name, not a mutable AST
+                            # body or any report-owned scheduling information.
+                            inventory.push(candidate.name if proof_source_literal_ensure_count(declarations, candidate.name) == 1 else "")
+                    # Module/scope members are outside this first bounded inventory. They are
+                    # not silently flattened because that would make bare names ambiguous.
+                    Ast::Decl.Module(_, _, _) | Ast::Decl.Scoped(_, _):
+                        pass
+                    _:
+                        pass
+            return inventory
+
+        def proof_source_literal_ensure_coverage(inventory: darray[sview]&, report: ProofReport&) -> bool:
+            for expected_name in inventory |report|:
+                return false if expected_name == ""
+                matching: mutable usize = 0
+                for attempt in report.goal_attempts |expected_name, matching|:
+                    if attempt.name == expected_name and attempt.rule == "goal":
+                        match attempt.goal:
+                            Ast::Expr.BoolLit(value, _):
+                                matching <- matching + 1 if value
+                            _:
+                                pass
+                return false if matching != 1
+            return true
+
         def proof_report_has_open_goals(report: ProofReport&) -> bool:
             for attempt in report.goal_attempts:
                 return true if not attempt.proven
