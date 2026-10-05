@@ -1,7 +1,564 @@
-# Replay call coverage facade. Keep independent source walks split by responsibility.
-include "./source_call_walk.elisa"
-include "./deterministic_call_state.elisa"
-include "./deterministic_call_sites.elisa"
-include "./summary_call_sites.elisa"
-include "./summary_default_arguments.elisa"
-include "./summary_local_alias_sites.elisa"
+# Independent executable-call coverage. This walk does not consult producer call
+# indexes. Unsupported dispatch fails closed; success is not a purity summary.
+extend ElisaProof:
+    private:
+        def proof_replay_call_pattern_bindings(pattern: Ast::Pattern, bindings: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 96
+            match pattern:
+                Ast::Pattern.Binding(name):
+                    bindings.push(name)
+                Ast::Pattern.Rest(name):
+                    bindings.push(name) if name != ""
+                Ast::Pattern.TypeBind(_, name):
+                    bindings.push(name)
+                Ast::Pattern.As(name, children):
+                    bindings.push(name)
+                    for child in children |bindings, depth|:
+                        return false if not proof_replay_call_pattern_bindings(child, bindings, depth + 1)
+                Ast::Pattern.Variant(_, children):
+                    for child in children |bindings, depth|:
+                        return false if not proof_replay_call_pattern_bindings(child, bindings, depth + 1)
+                Ast::Pattern.Struct(_, children):
+                    for child in children |bindings, depth|:
+                        return false if not proof_replay_call_pattern_bindings(child, bindings, depth + 1)
+                Ast::Pattern.Field(_, children):
+                    for child in children |bindings, depth|:
+                        return false if not proof_replay_call_pattern_bindings(child, bindings, depth + 1)
+                Ast::Pattern.Tuple(children):
+                    for child in children |bindings, depth|:
+                        return false if not proof_replay_call_pattern_bindings(child, bindings, depth + 1)
+                Ast::Pattern.Or(children):
+                    for child in children |bindings, depth|:
+                        return false if not proof_replay_call_pattern_bindings(child, bindings, depth + 1)
+                Ast::Pattern.Wildcard:
+                    pass
+                Ast::Pattern.Literal(_):
+                    pass
+                Ast::Pattern.Pin(_):
+                    pass
+                Ast::Pattern.Range(_, _, _):
+                    pass
+                _:
+                    return false
+            return true
+
+        def proof_replay_call_arms(arms: darray[Ast::MatchArm]&, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 96
+            for arm in arms |bindings, calls, depth|:
+                mark: usize = bindings.count
+                return false if not proof_replay_call_pattern_bindings(arm.pattern, bindings, depth + 1)
+                return false if not proof_replay_call_expression(arm.guard, bindings, calls, depth + 1)
+                return false if not proof_replay_call_body(&arm.body, bindings, calls, depth + 1)
+                bindings.resize(mark)
+            return true
+
+        def proof_replay_call_expression(expression: Ast::Expr, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 96
+            match expression:
+                Ast::Expr.Absent:
+                    pass
+                Ast::Expr.IntLit(_, _):
+                    pass
+                Ast::Expr.FloatLit(_, _):
+                    pass
+                Ast::Expr.StringLit(_, _):
+                    pass
+                Ast::Expr.CharLit(_, _):
+                    pass
+                Ast::Expr.BoolLit(_, _):
+                    pass
+                Ast::Expr.Ident(_, _):
+                    pass
+                Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Call(callee, arguments, _, _):
+                    # Unqualified direct dispatch contributes a call-graph edge. Qualified
+                    # dispatch remains fail-closed until replay compares its resolved owner.
+                    # A field callee is method syntax: the producer deliberately does not
+                    # infer a source-function edge from its leaf name, so replay only walks
+                    # its receiver (and arguments) for nested direct calls.
+                    match callee:
+                        Ast::Expr.Ident(name, _):
+                            return false if name == "" or any bound in bindings where bound == name
+                            calls.push(name) if not (any existing in calls where existing == name)
+                        Ast::Expr.Field(_, _, _):
+                            return false if not proof_replay_call_expression(callee, bindings, calls, depth + 1)
+                        _:
+                            return false
+                    for argument in arguments |bindings, calls, depth|:
+                        return false if not proof_replay_call_expression(argument, bindings, calls, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_call_expression(inner, bindings, calls, depth + 1)
+                Ast::Expr.Unary(_, inner, _):
+                    return proof_replay_call_expression(inner, bindings, calls, depth + 1)
+                Ast::Expr.Move(inner, _):
+                    return proof_replay_call_expression(inner, bindings, calls, depth + 1)
+                Ast::Expr.RegionNew(inner, _, _):
+                    return proof_replay_call_expression(inner, bindings, calls, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    # Category-test binders require branch-sensitive scope reconstruction.
+                    return false if operator == TokenKind.Is
+                    return proof_replay_call_expression(left, bindings, calls, depth + 1) and proof_replay_call_expression(right, bindings, calls, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return proof_replay_call_expression(object, bindings, calls, depth + 1)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_replay_call_expression(base, bindings, calls, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_replay_call_expression(object, bindings, calls, depth + 1) and proof_replay_call_expression(index, bindings, calls, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_replay_call_expression(object, bindings, calls, depth + 1) and proof_replay_call_expression(low, bindings, calls, depth + 1) and proof_replay_call_expression(high, bindings, calls, depth + 1)
+                Ast::Expr.IndexN(object, elements, _):
+                    return false if not proof_replay_call_expression(object, bindings, calls, depth + 1)
+                    for element in elements |bindings, calls, depth|:
+                        return false if not proof_replay_call_expression(element, bindings, calls, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |bindings, calls, depth|:
+                        return false if not proof_replay_call_expression(element, bindings, calls, depth + 1)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |bindings, calls, depth|:
+                        return false if not proof_replay_call_expression(element, bindings, calls, depth + 1)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |bindings, calls, depth|:
+                        return false if not proof_replay_call_expression(element, bindings, calls, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |bindings, calls, depth|:
+                        return false if not proof_replay_call_expression(entry.key, bindings, calls, depth + 1) or not proof_replay_call_expression(entry.value, bindings, calls, depth + 1)
+                Ast::Expr.Construct(base, fields, _):
+                    return false if not proof_replay_call_expression(base, bindings, calls, depth + 1)
+                    for field in fields |bindings, calls, depth|:
+                        return false if not proof_replay_call_expression(field.value, bindings, calls, depth + 1)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_replay_call_expression(base, bindings, calls, depth + 1)
+                    for field in fields |bindings, calls, depth|:
+                        return false if not proof_replay_call_expression(field.value, bindings, calls, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return proof_replay_call_expression(condition, bindings, calls, depth + 1) and proof_replay_call_expression(yes, bindings, calls, depth + 1) and proof_replay_call_expression(no, bindings, calls, depth + 1)
+                Ast::Expr.Comprehension(name, iterable, condition, value, _):
+                    return false if not proof_replay_call_expression(iterable, bindings, calls, depth + 1)
+                    mark: usize = bindings.count
+                    bindings.push(name)
+                    valid: bool = proof_replay_call_expression(condition, bindings, calls, depth + 1) and proof_replay_call_expression(value, bindings, calls, depth + 1)
+                    bindings.resize(mark)
+                    return valid
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_replay_call_expression(base, bindings, calls, depth + 1) and proof_replay_call_expression(predicate, bindings, calls, depth + 1)
+                Ast::Expr.Match(value, arms, _):
+                    return proof_replay_call_expression(value, bindings, calls, depth + 1) and proof_replay_call_arms(&arms, bindings, calls, depth + 1)
+                Ast::Expr.Catch(value, arms, _):
+                    return proof_replay_call_expression(value, bindings, calls, depth + 1) and proof_replay_call_arms(&arms, bindings, calls, depth + 1)
+                Ast::Expr.GetElse(value, recovery, _):
+                    return proof_replay_call_expression(value, bindings, calls, depth + 1) and proof_replay_call_body(&recovery, bindings, calls, depth + 1)
+                Ast::Expr.Block(body, value, captures, _):
+                    mark: usize = bindings.count
+                    bindings.extend(captures)
+                    return false if not proof_replay_call_statements(&body, bindings, calls, depth + 1)
+                    valid: bool = proof_replay_call_expression(value, bindings, calls, depth + 1)
+                    bindings.resize(mark)
+                    return valid
+                _:
+                    return false
+            return true
+
+        def proof_replay_call_body(body: darray[Ast::Stmt]&, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, depth: usize) -> bool:
+            mark: usize = bindings.count
+            valid: bool = proof_replay_call_statements(body, bindings, calls, depth)
+            bindings.resize(mark)
+            return valid
+
+        # Captured statement loops have a parser Block wrapper with an Invalid
+        # value sentinel, not an evaluated result. Admit that sentinel only at
+        # statement position and only for declarations followed by one loop.
+        # Every initializer, loop condition and body still gets an independent
+        # call walk. Invalid values elsewhere continue to fail closed.
+        def proof_replay_call_statement_expression(expression: Ast::Expr, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 96
+            match expression:
+                Ast::Expr.Block(nested, Ast::Expr.Invalid, captures, _):
+                    return false if nested.count == 0
+                    for index in 0..<nested.count |index, nested|:
+                        if index + 1 == nested.count:
+                            match nested[index]:
+                                Ast::Stmt.While(_, _, _) | Ast::Stmt.For(_, _, _, _, _):
+                                    pass
+                                _:
+                                    return false
+                        else:
+                            match nested[index]:
+                                Ast::Stmt.VarDecl(_, _, _, _):
+                                    pass
+                                _:
+                                    return false
+                    mark: usize = bindings.count
+                    bindings.extend(captures)
+                    valid: bool = proof_replay_call_body(&nested, bindings, calls, depth + 1)
+                    bindings.resize(mark)
+                    return valid
+                _:
+                    return proof_replay_call_expression(expression, bindings, calls, depth + 1)
+
+        def proof_replay_call_statements(body: darray[Ast::Stmt]&, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 96
+            for statement in body |bindings, calls, depth|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return false if not proof_replay_call_expression(returned, bindings, calls, depth + 1)
+                    Ast::Stmt.Expr(value, _):
+                        return false if not proof_replay_call_statement_expression(value, bindings, calls, depth + 1)
+                    Ast::Stmt.VarDecl(name, _, value, _):
+                        return false if not proof_replay_call_expression(value, bindings, calls, depth + 1)
+                        bindings.push(name)
+                    Ast::Stmt.Assign(target, operator, value, _):
+                        return false if not proof_replay_call_expression(target, bindings, calls, depth + 1) or not proof_replay_call_expression(value, bindings, calls, depth + 1)
+                        if operator == TokenKind.Assign:
+                            match target:
+                                Ast::Expr.Ident(name, _):
+                                    bindings.push(name)
+                                _:
+                                    return false
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return false if not proof_replay_call_expression(condition, bindings, calls, depth + 1) or not proof_replay_call_body(&yes, bindings, calls, depth + 1) or not proof_replay_call_body(&no, bindings, calls, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        return false if not proof_replay_call_expression(condition, bindings, calls, depth + 1) or not proof_replay_call_body(&nested, bindings, calls, depth + 1)
+                    Ast::Stmt.For(_, variables, iterable, nested, _):
+                        return false if not proof_replay_call_expression(iterable, bindings, calls, depth + 1)
+                        mark: usize = bindings.count
+                        bindings.extend(variables)
+                        return false if not proof_replay_call_body(&nested, bindings, calls, depth + 1)
+                        bindings.resize(mark)
+                    Ast::Stmt.Match(value, arms, _):
+                        return false if not proof_replay_call_expression(value, bindings, calls, depth + 1) or not proof_replay_call_arms(&arms, bindings, calls, depth + 1)
+                    Ast::Stmt.Block(kind, _, binding, nested, _):
+                        mark: usize = bindings.count
+                        bindings.push(binding) if binding != ""
+                        if kind == "assert_by":
+                            return false if nested.count == 0
+                            match nested[0]:
+                                Ast::Stmt.Contract("assert", goal, _):
+                                    return false if not proof_replay_call_expression(goal, bindings, calls, depth + 1)
+                                _:
+                                    return false
+                        else:
+                            return false if not proof_replay_call_body(&nested, bindings, calls, depth + 1)
+                        bindings.resize(mark)
+                    Ast::Stmt.Contract(kind, value, _):
+                        if kind == "assert":
+                            return false if not proof_replay_call_expression(value, bindings, calls, depth + 1)
+                    Ast::Stmt.Break(_, _):
+                        pass
+                    Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_source_calls(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, calls: mutable darray[sview]&) -> bool:
+            calls.clear()
+            bindings: mutable darray[sview] = []
+            # Defaults are executable at omitted-argument calls; preserve their edges
+            # rather than assuming a call-site always supplies every argument.
+            for parameter in parameters |bindings|:
+                bindings.push(parameter.name)
+            for parameter in parameters |bindings, calls|:
+                if parameter.has_default:
+                    if not proof_replay_call_expression(parameter.default_value, &bindings, calls, 0):
+                        calls.clear()
+                        return false
+            if not proof_replay_call_body(body, &bindings, calls, 0):
+                calls.clear()
+                return false
+            return true
+
+        def proof_replay_source_call_set_matches(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expected: darray[sview]&) -> bool:
+            calls: mutable darray[sview] = []
+            return false if not proof_replay_source_calls(parameters, body, &calls) or calls.count != expected.count
+            for index in 0..<expected.count |index, expected, calls|:
+                name: sview = expected[index]
+                return false if not (any called in calls where called == name)
+                for earlier in 0..<index |earlier, expected, name|:
+                    return false if expected[earlier] == name
+            return true
+
+        # Structural expression equality intentionally erases source positions. Until replay
+        # carries an authenticated occurrence witness for nested calls, deterministic-call
+        # matching refuses any argument or callee that contains a call node. Unknown/deep forms
+        # also refuse so a later AST constructor cannot silently bypass this boundary.
+        def proof_replay_expression_contains_call_node(expression: Ast::Expr, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(_, _, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    return true
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
+                    return proof_replay_expression_contains_call_node(object, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_replay_expression_contains_call_node(object, depth + 1) or proof_replay_expression_contains_call_node(index, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_replay_expression_contains_call_node(object, depth + 1) or proof_replay_expression_contains_call_node(low, depth + 1) or proof_replay_expression_contains_call_node(high, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_expression_contains_call_node(left, depth + 1) or proof_replay_expression_contains_call_node(right, depth + 1)
+                Ast::Expr.IndexN(object, elements, _):
+                    return true if proof_replay_expression_contains_call_node(object, depth + 1)
+                    for element in elements |depth|:
+                        return true if proof_replay_expression_contains_call_node(element, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |depth|:
+                        return true if proof_replay_expression_contains_call_node(element, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |depth|:
+                        return true if proof_replay_expression_contains_call_node(entry.key, depth + 1) or proof_replay_expression_contains_call_node(entry.value, depth + 1)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_replay_expression_contains_call_node(base, depth + 1)
+                    for field in fields |depth|:
+                        return true if proof_replay_expression_contains_call_node(field.value, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return proof_replay_expression_contains_call_node(condition, depth + 1) or proof_replay_expression_contains_call_node(yes, depth + 1) or proof_replay_expression_contains_call_node(no, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, value, _):
+                    return proof_replay_expression_contains_call_node(iterable, depth + 1) or proof_replay_expression_contains_call_node(condition, depth + 1) or proof_replay_expression_contains_call_node(value, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_replay_expression_contains_call_node(base, depth + 1) or proof_replay_expression_contains_call_node(predicate, depth + 1)
+                Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    return true
+                _:
+                    return true
+            return false
+
+        # Rebuild deterministic call sites from caller source, not the trace payload.
+        def proof_replay_deterministic_call_arguments_equal(source: darray[Ast::Expr]&, source_names: darray[sview]&, expected: darray[Ast::Expr]&, expected_names: darray[sview]&) -> bool:
+            return false if source.count != expected.count
+            return false if source_names.count != 0 and source_names.count != source.count
+            return false if expected_names.count != 0 and expected_names.count != expected.count
+            for index in 0..<source.count |index, source, source_names, expected, expected_names|:
+                source_name: sview = source_names[index] if source_names.count > 0 else ""
+                expected_name: sview = expected_names[index] if expected_names.count > 0 else ""
+                return false if proof_replay_expression_contains_call_node(source[index], 0) or proof_replay_expression_contains_call_node(expected[index], 0)
+                return false if source_name != expected_name or not proof_replay_expr_equal(source[index], expected[index])
+            return true
+
+        def proof_replay_deterministic_call_expression_equal(source: Ast::Expr, expected: Ast::Expr) -> bool:
+            match source:
+                Ast::Expr.Call(source_callee, source_arguments, source_names, source_position):
+                    match expected:
+                        Ast::Expr.Call(expected_callee, expected_arguments, expected_names, expected_position):
+                            return false if proof_replay_expression_contains_call_node(source_callee, 0) or proof_replay_expression_contains_call_node(expected_callee, 0)
+                            return source_position.line == expected_position.line and source_position.column == expected_position.column and source_position.offset == expected_position.offset and source_position.end_line == expected_position.end_line and source_position.end_column == expected_position.end_column and source_position.end_offset == expected_position.end_offset and proof_replay_expr_equal(source_callee, expected_callee) and proof_replay_deterministic_call_arguments_equal(source_arguments, source_names, expected_arguments, expected_names)
+                        _:
+                            return false
+                _:
+                    return proof_replay_expr_equal(source, expected)
+
+        def proof_replay_deterministic_call_source_contains(expression: Ast::Expr, expected: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 96
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_replay_deterministic_call_expression_equal(expression, expected)
+                    return true if proof_replay_deterministic_call_source_contains_any(arguments, expected, depth + 1)
+                    return proof_replay_deterministic_call_source_contains(callee, expected, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _):
+                    return proof_replay_deterministic_call_source_contains(inner, expected, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_deterministic_call_source_contains(left, expected, depth + 1) or proof_replay_deterministic_call_source_contains(right, expected, depth + 1)
+                _:
+                    return false
+
+        def proof_replay_deterministic_call_source_contains_any(expressions: darray[Ast::Expr]&, expected: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 96
+            for expression in expressions |expected, depth|:
+                return true if proof_replay_deterministic_call_source_contains(expression, expected, depth + 1)
+            return false
+
+        def proof_replay_deterministic_call_source_expression(expression: Ast::Expr, expected: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&) -> bool:
+            resolved: Ast::Expr = proof_replay_substitute_many(expression, names, values)
+            expected_resolved: Ast::Expr = proof_replay_substitute_many(expected, names, values)
+            return proof_replay_deterministic_call_source_contains(expression, expected, 0) or proof_replay_deterministic_call_source_contains(resolved, expected, 0) or proof_replay_deterministic_call_source_contains(expression, expected_resolved, 0) or proof_replay_deterministic_call_source_contains(resolved, expected_resolved, 0)
+
+        # Bind caller locals in statement order. This independent source walk reconstructs the
+        # resolved actuals that the producer placed in the marker at the call's pre-state.
+        # Control-flow joins and unsupported writes fail closed in this first bounded slice.
+        def proof_replay_deterministic_call_source_statements(body: darray[Ast::Stmt]&, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize) -> (known: bool, matches: usize):
+            return (false, 0) if depth >= 96
+            for statement in body |expected, line, names, values, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, _, initializer, position):
+                        return (true, 1) if position.line == line and proof_replay_deterministic_call_source_expression(initializer, expected, names, values)
+                        return (true, 0) if position.line > line
+                        resolved_initializer: Ast::Expr = proof_replay_substitute_many(initializer, names, values)
+                        names.push(local_name)
+                        values.push(resolved_initializer)
+                    Ast::Stmt.Assign(target, operator, value, position):
+                        return (true, 0) if position.line > line
+                        return (false, 0) if operator != TokenKind.Assign and operator != TokenKind.LArrow
+                        return (true, 1) if position.line == line and proof_replay_deterministic_call_source_expression(value, expected, names, values)
+                        resolved_value: Ast::Expr = proof_replay_substitute_many(value, names, values)
+                        match target:
+                            Ast::Expr.Ident(local_name, _):
+                                names.push(local_name)
+                                values.push(resolved_value)
+                            _:
+                                return (false, 0)
+                    Ast::Stmt.Expr(value, position):
+                        return (true, 0) if position.line > line
+                        return (true, 1) if position.line == line and proof_replay_deterministic_call_source_expression(value, expected, names, values)
+                    Ast::Stmt.Return(value, position):
+                        return (true, 0) if position.line > line
+                        return (true, 1) if position.line == line and proof_replay_deterministic_call_source_expression(value, expected, names, values)
+                    Ast::Stmt.Contract(_, expression, position):
+                        return (true, 0) if position.line > line
+                        return (true, 1) if position.line == line and proof_replay_deterministic_call_source_expression(expression, expected, names, values)
+                    Ast::Stmt.If(condition, yes, no, position):
+                        return (true, 0) if position.line > line
+                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression(condition, expected, names, values) else 0
+                        names_mark: usize = names.count
+                        values_mark: usize = values.count
+                        yes_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(yes, expected, line, names, values, depth + 1)
+                        names.resize(names_mark)
+                        values.resize(values_mark)
+                        return (false, 0) if not yes_matches.known
+                        no_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(no, expected, line, names, values, depth + 1)
+                        names.resize(names_mark)
+                        values.resize(values_mark)
+                        return (false, 0) if not no_matches.known
+                        branch_matches: usize = condition_match + yes_matches.matches + no_matches.matches
+                        return (true, branch_matches) if branch_matches > 0
+                    Ast::Stmt.Match(value, arms, position):
+                        return (true, 0) if position.line > line
+                        value_match: usize = 1 if proof_replay_deterministic_call_source_expression(value, expected, names, values) else 0
+                        arm_match_count: mutable usize = value_match
+                        rebind_index: mutable usize = 0
+                        for arm in arms |arm, expected, line, names, values, depth, arm_match_count, rebind_index|:
+                            names_mark: usize = names.count
+                            values_mark: usize = values.count
+                            pattern_names: mutable darray[sview] = []
+                            return (false, 0) if not proof_replay_call_pattern_bindings(arm.pattern, &pattern_names, depth + 1)
+                            for pattern_name in pattern_names |pattern_name, names, values|:
+                                names.push(pattern_name)
+                                values.push(Ast::Expr.Absent)
+                                rebind_name: sview = proof_internal_rebind_name(rebind_index)
+                                return (false, 0) if rebind_name == "" or pattern_name == rebind_name
+                                names.push(rebind_name)
+                                values.push(Ast::Expr.Ident(pattern_name, Ast::expr_pos(expected)))
+                                rebind_index <- rebind_index + 1
+                            guard_match: usize = 1 if proof_replay_deterministic_call_source_expression(arm.guard, expected, names, values) else 0
+                            arm_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(arm.body, expected, line, names, values, depth + 1)
+                            names.resize(names_mark)
+                            values.resize(values_mark)
+                            return (false, 0) if not arm_matches.known
+                            arm_match_count <- arm_match_count + guard_match + arm_matches.matches
+                        return (true, arm_match_count) if arm_match_count > 0
+                    Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Block(_, _, _, _, position):
+                        return (true, 0) if position.line > line
+                        return (false, 0)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return (false, 0)
+            return (true, 0)
+
+        def proof_replay_deterministic_call_source_declarations(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, expected: Ast::Expr, line: u32, matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for declaration in declarations |owner, owner_line, expected, line, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
+                        if name == owner and (owner_line == 0 or position.line == owner_line):
+                            names: mutable darray[sview] = []
+                            values: mutable darray[Ast::Expr] = []
+                            for parameter in parameters |names, values|:
+                                names.push(parameter.name)
+                                values.push(Ast::Expr.Absent)
+                            source_matches = proof_replay_deterministic_call_source_statements(body, expected, line, &names, &values, 0)
+                            return false if not source_matches.known
+                            matches <- matches + source_matches.matches
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_deterministic_call_source_declarations(nested, owner, owner_line, expected, line, matches, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_deterministic_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
+            matches: mutable usize = 0
+            owner_line: mutable u32 = report.replay_owner_line
+            owner_line <- 0 if owner_line == 4294967295
+            return false if not proof_replay_deterministic_call_source_declarations(report.source_declarations, trace.name, owner_line, call, trace.line, &matches, 0)
+            return matches == 1
+
+        # A call summary's parameter values are part of the trusted substitution into its
+        # postcondition. Reconstruct positional/named argument mapping from the source call;
+        # defaults and ambiguous mappings remain unsupported until their source semantics are
+        # independently reconstructed here.
+        def proof_replay_summary_call_arguments_match(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, call: Ast::Expr) -> bool:
+            match call:
+                Ast::Expr.Call(_, arguments, argument_names, _):
+                    return false if arguments.count != summary.parameters_count
+                    return false if argument_names.count != 0 and argument_names.count != arguments.count
+                    slots: mutable darray[bool] = []
+                    for index in 0..<summary.parameters_count |slots|:
+                        slots.push(false)
+                    next_positional: mutable usize = 0
+                    saw_named: mutable bool = false
+                    for index in 0..<arguments.count |index, arguments, argument_names, slots, next_positional, saw_named, report, trace, summary|:
+                        argument_name: sview = argument_names[index] if argument_names.count > 0 else ""
+                        parameter_slot: mutable usize = summary.parameters_count
+                        if argument_name == "":
+                            return false if saw_named
+                            while next_positional < summary.parameters_count and slots[next_positional] |next_positional, slots|:
+                                next_positional <- next_positional + 1
+                            parameter_slot <- next_positional
+                            next_positional <- next_positional + 1
+                        else:
+                            saw_named <- true
+                            for candidate in 0..<summary.parameters_count |candidate, argument_name, report, summary, parameter_slot|:
+                                formal_index: usize = summary.parameters_start + candidate
+                                return false if formal_index >= report.executable_parameters.count
+                                parameter_slot <- candidate if report.executable_parameters[formal_index] == argument_name
+                        return false if parameter_slot >= summary.parameters_count or slots[parameter_slot]
+                        slots[parameter_slot] <- true
+                        binding_index: usize = trace.summary_bindings_start + parameter_slot
+                        return false if binding_index >= report.fact_trace_summary_values.count
+                        # The producer stores postcondition-reduced values, so structural equality
+                        # cannot authenticate a nested call's source occurrence or substitution.
+                        return false if proof_replay_expression_contains_call_node(arguments[index], 0)
+                        return false if not proof_replay_expr_equal(arguments[index], report.fact_trace_summary_values[binding_index])
+                    for assigned in slots:
+                        return false if not assigned
+                    return true
+                _:
+                    return false
+
+        def proof_replay_summary_direct_call_statement(body: darray[Ast::Stmt]&, line: u32, call: Ast::Expr, matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for statement in body |line, call, matches, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, initializer, position):
+                        return true if position.line > line
+                        matches <- matches + 1 if proof_replay_deterministic_call_source_contains(initializer, call, 0)
+                    Ast::Stmt.Assign(_, TokenKind.Assign, value, position) | Ast::Stmt.Expr(value, position) | Ast::Stmt.Return(value, position):
+                        return true if position.line > line
+                        matches <- matches + 1 if proof_replay_deterministic_call_source_contains(value, call, 0)
+                    Ast::Stmt.If(_, _, _, position) | Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Match(_, _, position) | Ast::Stmt.Block(_, _, _, _, position):
+                        return true if position.line > line
+                        return false
+                    Ast::Stmt.Contract(_, expression, position):
+                        return true if position.line > line
+                        matches <- matches + 1 if proof_replay_deterministic_call_source_contains(expression, call, 0)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_summary_direct_call_declarations(declarations: darray[Ast::Decl]&, owner: sview, line: u32, call: Ast::Expr, matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for declaration in declarations |owner, line, call, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        if name == owner and position.line <= line:
+                            return false if not proof_replay_summary_direct_call_statement(body, line, call, matches, 0)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_summary_direct_call_declarations(nested, owner, line, call, matches, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_summary_direct_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
+            return proof_replay_deterministic_call_source_site(report, trace, call)

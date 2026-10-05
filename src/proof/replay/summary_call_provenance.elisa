@@ -1,0 +1,275 @@
+# Reconstruct executable function-summary call sites and local-result reaching definitions.
+# A source match is accepted only when the call occurrence and every tracked assignment agree.
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_LOCAL_CALL_NO_MATCH: usize = 0
+        const PROOF_REPLAY_LOCAL_CALL_EXACT_MATCH: usize = 1
+        const PROOF_REPLAY_LOCAL_CALL_AMBIGUOUS: usize = 2
+
+        def proof_replay_summary_has_unresolved_import(annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            for annotation in annotations:
+                match annotation.name:
+                    "__using" | "__using_alias" | "__using_alias_target" | "__binding_wildcard_import" | "__from_member" | "__from_src":
+                        return true
+                    _:
+                        pass
+            return false
+
+        def proof_replay_summary_same_module_name_count(declarations: darray[Ast::Decl]&, name: sview, owner_module: sview, current_module: sview, count: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for declaration in declarations |name, owner_module, current_module, count, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate_name, _, _, _, _, _, _):
+                        count <- count + 1 if candidate_name == name and current_module == owner_module
+                    Ast::Decl.Extern(candidate_name, _, _, _, _, _, _, _):
+                        # There is no type-authenticated overload witness in replay. An extern
+                        # with the same source name could be the selected call even when an
+                        # internal summary of that name is available, so count every signature.
+                        count <- count + 1 if candidate_name == name and current_module == owner_module
+                    Ast::Decl.Struct(candidate_name, _, _, _, _, _, _):
+                        # These declarations can occupy or introduce a same-name callable/type
+                        # namespace. Without resolved callee identity, do not guess which one a
+                        # same-spelled call denotes.
+                        return false if candidate_name == name and current_module == owner_module
+                    Ast::Decl.Enum(candidate_name, _, _, _, _):
+                        return false if candidate_name == name and current_module == owner_module
+                    Ast::Decl.Alias(candidate_name, _, _):
+                        return false if candidate_name == name and current_module == owner_module
+                    Ast::Decl.Law(candidate_name, _, _):
+                        return false if candidate_name == name and current_module == owner_module
+                    Ast::Decl.Const(candidate_name, _, _, _, _):
+                        return false if candidate_name == name and current_module == owner_module
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if module_name == name and current_module == owner_module
+                        return false if not proof_replay_summary_same_module_name_count(nested, name, owner_module, module_name, count, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_summary_same_module_name_count(nested, name, owner_module, current_module, count, depth + 1)
+                    Ast::Decl.Import(_, _):
+                        # Decl.Import has no resolved target declarations or selected-callee
+                        # witness here. It may affect bare-name resolution, including through
+                        # enclosing namespaces, so refuse summary replay for this source tree.
+                        return false
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        # Future declaration forms may add callable names. Refuse until this
+                        # walk explicitly classifies them instead of treating them as harmless.
+                        return false
+            return true
+
+        # Replay has no trusted overload-resolution witness. Refuse summaries whose callee name
+        # is overloaded in its declaring module rather than guessing from arity or a trace line.
+        def proof_replay_summary_overload_is_unique(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.owner_line == 0
+            # Using/from imports are represented in parser annotations rather than Decl rows.
+            # Replay lacks their resolved targets and selected declaration witness, so fail
+            # closed if any such resolution metadata appears in the source snapshot.
+            return false if proof_replay_summary_has_unresolved_import(report.source_annotations)
+            owner_module: mutable sview = ""
+            owner_count: mutable usize = 0
+            proof_replay_function_owner_module(report.source_declarations, trace.dependency, trace.owner_line, "", &owner_module, &owner_count, 0)
+            return false if owner_count != 1
+            same_module_count: mutable usize = 0
+            return false if not proof_replay_summary_same_module_name_count(report.source_declarations, trace.dependency, owner_module, "", &same_module_count, 0)
+            return same_module_count == 1
+
+        def proof_replay_local_call_value_state(value: Ast::Expr, expected_call: Ast::Expr) -> usize:
+            match value:
+                Ast::Expr.Call(_, _, _, _):
+                    return PROOF_REPLAY_LOCAL_CALL_EXACT_MATCH if proof_replay_call_source_position_equal(value, expected_call) else PROOF_REPLAY_LOCAL_CALL_NO_MATCH
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_local_call_value_state(inner, expected_call)
+                _:
+                    return PROOF_REPLAY_LOCAL_CALL_NO_MATCH
+
+        def proof_replay_local_call_self_value(value: Ast::Expr, local_name: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match value:
+                Ast::Expr.Ident(name, _):
+                    return name == local_name
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_local_call_self_value(inner, local_name, depth + 1)
+                _:
+                    return false
+
+        def proof_replay_summary_local_call_statement(body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, matches: mutable usize&, found: mutable bool&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            found_at_entry: bool = found
+            for statement in body |local_name, binding_position, expected_call, matches, found, found_at_entry, depth|:
+                return true if found_at_entry
+                match statement:
+                    Ast::Stmt.VarDecl(name, _, initializer, position):
+                        return true if position.line > binding_position.line
+                        if name == local_name:
+                            return false if depth > 0
+                            matches <- proof_replay_local_call_value_state(initializer, expected_call)
+                        elif proof_expr_has_call(initializer) or proof_expr_mentions_name(initializer, local_name):
+                            # Calls can mutate aliases, and copying an aggregate can create a
+                            # second path to mutate the tracked value. Neither is modeled here.
+                            return false
+                    Ast::Stmt.Assign(target, operator, value, position):
+                        return true if position.line > binding_position.line
+                        target_name: sview = proof_replay_ident_name(target)
+                        if target_name == local_name:
+                            if operator == TokenKind.Assign or operator == TokenKind.LArrow:
+                                if proof_replay_local_call_self_value(value, local_name, 0):
+                                    pass
+                                else:
+                                    matches <- proof_replay_local_call_value_state(value, expected_call)
+                            else:
+                                matches <- PROOF_REPLAY_LOCAL_CALL_NO_MATCH
+                        elif proof_expr_mentions_name(target, local_name):
+                            # A field/index write can change the value represented by this local.
+                            matches <- PROOF_REPLAY_LOCAL_CALL_NO_MATCH
+                        elif proof_expr_has_call(target) or proof_expr_has_call(value) or proof_expr_mentions_name(value, local_name):
+                            # An unknown call may mutate an alias; storing this value elsewhere
+                            # may create an alias that a later write can mutate.
+                            return false
+                    Ast::Stmt.If(condition, yes, no, position):
+                        return true if position.line > binding_position.line
+                        return false if proof_expr_has_call(condition) or proof_expr_mentions_name(condition, local_name)
+                        yes_matches: mutable usize = matches
+                        no_matches: mutable usize = matches
+                        yes_found: mutable bool = false
+                        no_found: mutable bool = false
+                        return false if not proof_replay_summary_local_call_statement(yes, local_name, binding_position, expected_call, &yes_matches, &yes_found, depth + 1)
+                        # The summary trace has no branch-path witness. A use found only in
+                        # one arm cannot establish which reaching local value produced it.
+                        return false if yes_found
+                        return false if not proof_replay_summary_local_call_statement(no, local_name, binding_position, expected_call, &no_matches, &no_found, depth + 1)
+                        return false if no_found
+                        matches <- yes_matches if yes_matches == no_matches else PROOF_REPLAY_LOCAL_CALL_AMBIGUOUS
+                    Ast::Stmt.Match(value, arms, position):
+                        return true if position.line > binding_position.line
+                        return false if proof_expr_has_call(value) or proof_expr_mentions_name(value, local_name)
+                        entry_matches: usize = matches
+                        merged_matches: mutable usize = entry_matches
+                        first_arm: mutable bool = true
+                        for arm in arms |arm, local_name, binding_position, expected_call, entry_matches, merged_matches, first_arm, matches, depth|:
+                            pattern_names: mutable darray[sview] = []
+                            return false if not proof_replay_call_pattern_bindings(arm.pattern, &pattern_names, depth + 1)
+                            return false if any pattern_name in pattern_names where pattern_name == local_name
+                            return false if proof_expr_has_call(arm.guard) or proof_expr_mentions_name(arm.guard, local_name)
+                            arm_matches: mutable usize = entry_matches
+                            arm_found: mutable bool = false
+                            return false if not proof_replay_summary_local_call_statement(arm.body, local_name, binding_position, expected_call, &arm_matches, &arm_found, depth + 1)
+                            # As with `if`, a return inside an arm needs a path-sensitive
+                            # witness that this scanner deliberately does not reconstruct.
+                            return false if arm_found
+                            if first_arm:
+                                merged_matches <- arm_matches
+                                first_arm <- false
+                            else:
+                                merged_matches <- PROOF_REPLAY_LOCAL_CALL_AMBIGUOUS if merged_matches != arm_matches
+                        # Without proving pattern exhaustiveness, the unmatched path retains
+                        # the incoming value. Include it in the join rather than assuming every
+                        # match reaches one of the recorded arms.
+                        matches <- entry_matches if first_arm
+                        matches <- PROOF_REPLAY_LOCAL_CALL_AMBIGUOUS if not first_arm and merged_matches != entry_matches
+                    Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Block(_, _, _, _, position):
+                        return true if position.line > binding_position.line
+                        return false
+                    Ast::Stmt.Return(value, position):
+                        # These statements do not rebind the local. A later statement ends this
+                        # linear source window; an earlier/same-line return is ambiguous and
+                        # must not authenticate a result local.
+                        if position.line == binding_position.line:
+                            return false if not proof_replay_source_local_use(value, local_name, binding_position, 0)
+                            found <- true
+                            return true
+                        return true if position.line > binding_position.line
+                        return false
+                    Ast::Stmt.Expr(value, position):
+                        return true if position.line > binding_position.line
+                        return false if proof_expr_has_call(value) or proof_expr_mentions_name(value, local_name)
+                        return false
+                    Ast::Stmt.Break(_, position) | Ast::Stmt.Continue(_, position):
+                        # A transfer before the call site makes simple sequential binding
+                        # reconstruction incomplete. Do not skip it as harmless syntax.
+                        return true if position.line > binding_position.line
+                        return false
+                    Ast::Stmt.Contract(_, expression, _):
+                        return false if proof_expr_has_call(expression)
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_summary_local_call_declarations(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, call: Ast::Expr, matches: mutable usize&, found: mutable bool&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, local_name, binding_position, call, matches, found, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        if name == owner and (owner_line == 0 or position.line == owner_line):
+                            return proof_replay_summary_local_call_statement(body, local_name, binding_position, call, matches, found, 0)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_summary_local_call_declarations(nested, owner, owner_line, local_name, binding_position, call, matches, found, depth + 1)
+                    _:
+                        pass
+            return true
+
+        # Call summaries are emitted both for the call term and, when it initializes a local,
+        # for that local's name. Accept the latter only when the source declaration binds that
+        # exact local to the exact call already used by a same-site direct summary. This recovers
+        # call occurrence identity only; nested call arguments (including forged inner argument
+        # spans) remain unsupported when the producer records their postcondition-reduced value,
+        # because replay has no checked substitution chain for that inner occurrence yet.
+        def proof_replay_summary_source_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> (known: bool, call: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if not proof_replay_summary_overload_is_unique(report, trace)
+            result_index: usize = trace.summary_bindings_start + summary.parameters_count
+            return (false, Ast::Expr.Invalid) if result_index >= report.fact_trace_summary_values.count
+            result_value: Ast::Expr = report.fact_trace_summary_values[result_index]
+            match result_value:
+                Ast::Expr.Call(_, _, _, _):
+                    return (true, result_value) if proof_replay_summary_direct_call_source_site(report, trace, result_value)
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Paren(inner, _):
+                    match inner:
+                        Ast::Expr.Call(_, _, _, _):
+                            return (true, inner) if proof_replay_summary_direct_call_source_site(report, trace, inner)
+                            return (false, Ast::Expr.Invalid)
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                Ast::Expr.Ident(local_name, binding_position):
+                    candidate_matches: mutable usize = 0
+                    candidate_call: mutable Ast::Expr = Ast::Expr.Invalid
+                    for candidate in report.fact_traces |candidate, report, trace, summary, local_name|:
+                        continue if candidate.kind != "function-summary" or candidate.name != trace.name or candidate.line != trace.line or candidate.dependency != trace.dependency or candidate.owner_line != trace.owner_line or candidate.summary_ensure_index != trace.summary_ensure_index
+                        continue if candidate.summary_bindings_start > report.fact_trace_summary_values.count or candidate.summary_bindings_count > report.fact_trace_summary_values.count - candidate.summary_bindings_start
+                        continue if candidate.summary_bindings_start > report.fact_trace_summary_names.count or candidate.summary_bindings_count > report.fact_trace_summary_names.count - candidate.summary_bindings_start
+                        continue if summary.parameters_count >= candidate.summary_bindings_count
+                        candidate_result_index: usize = candidate.summary_bindings_start + summary.parameters_count
+                        continue if candidate_result_index >= report.fact_trace_summary_values.count
+                        direct_call: mutable Ast::Expr = report.fact_trace_summary_values[candidate_result_index]
+                        match direct_call:
+                            Ast::Expr.Call(_, _, _, _):
+                                pass
+                            Ast::Expr.Paren(inner, _):
+                                direct_call <- inner if proof_replay_is_call(inner)
+                            _:
+                                continue
+                        continue if candidate.summary_bindings_count != trace.summary_bindings_count
+                        same_parameters: mutable bool = true
+                        for offset in 0..<summary.parameters_count |offset, same_parameters, candidate, report, trace, summary|:
+                            candidate_index: usize = candidate.summary_bindings_start + offset
+                            trace_index: usize = trace.summary_bindings_start + offset
+                            same_parameters <- false if report.fact_trace_summary_names[candidate_index] != report.fact_trace_summary_names[trace_index] or not proof_replay_expr_equal(report.fact_trace_summary_values[candidate_index], report.fact_trace_summary_values[trace_index])
+                        continue if not same_parameters
+                        local_matches: mutable usize = 0
+                        local_found: mutable bool = false
+                        owner_line: mutable u32 = report.replay_owner_line
+                        owner_line <- 0 if owner_line == 4294967295
+                        return (false, Ast::Expr.Invalid) if not proof_replay_summary_local_call_declarations(report.source_declarations, trace.name, owner_line, local_name, binding_position, direct_call, &local_matches, &local_found, 0)
+                        candidate_matches <- candidate_matches + 1 if local_found and local_matches == PROOF_REPLAY_LOCAL_CALL_EXACT_MATCH
+                        candidate_call <- direct_call if local_matches == PROOF_REPLAY_LOCAL_CALL_EXACT_MATCH
+                    return (true, candidate_call) if candidate_matches == 1
+                    return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_replay_is_call(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                _:
+                    return false
