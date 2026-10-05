@@ -11341,3 +11341,15 @@ range precondition. No unbounded `abs_i64` summary is claimed across signed-mini
 
 Evidence: `scripts/test_min_max_abs_summaries.py`, `examples/min_max_abs_summaries.elisa`,
 and `examples/rejected_min_max_abs_summaries.elisa`.
+
+## Loop invariants compile and constrain proofs (E-03)
+
+The pinned Stage1 compiler (`7b27fa312c5af923f044f6ee0e5e1de4f811f595`) compiles the four
+invariant-bearing loops in `examples/loop_invariants_compile.elisa`; the emitted object links and
+the executable passes its runtime checks. The matching strict O2 proof product
+(`9d4c4e21e50136996a84f5401adc305f5d8c18d89048ceb22588c2a12f259e63`, built from proof source
+HEAD `0ea0c3e12e7b21c6249cd54268cf9c6de365e3ce`) proves the fixture with no findings and zero
+replay gaps. The gate also negates or tightens each invariant and requires all eight mutations to
+stay unproved, confirming the annotations constrain the proof result.
+
+Evidence: `scripts/test_loop_invariants_compile.py`.
