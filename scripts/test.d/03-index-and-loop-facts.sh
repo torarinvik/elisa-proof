@@ -280,18 +280,23 @@ if [[ "$rejected_counting_loop_measure_status" -ne 1 ]] || ! python3 -c 'import 
     printf 'proof test matrix failed: rejected_counting_loop_measure=%s\n' "$rejected_counting_loop_measure_status" >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==50 and r["summary"]["obligations"]==50; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'
-dogfood_core_contract_probe_status=${PIPESTATUS[1]}
-if [[ "$dogfood_core_contract_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: direct calls to dogfood kernel contracts\n' >&2
+dogfood_inventory_test_report="$ELISA_TEST_TMP/dogfood-kernel-core-inventory.json"
+kernel_core_inventory_test_report="$ELISA_TEST_TMP/kernel-core-inventory.json"
+run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" >"$dogfood_inventory_test_report"
+dogfood_core_contract_probe_status=$?
+run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" >"$kernel_core_inventory_test_report"
+kernel_core_self_probe_status=$?
+if [[ "$dogfood_core_contract_probe_status" -ne 0 || "$kernel_core_self_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: kernel-core dogfood report generation\n' >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==37 and r["summary"]["obligations"]==37; assert r["findings"]==[] and r["summary"]["semantic_errors"]==0; assert r["replay"]["gaps"]==0 and r["kernel"]["independent_replay"] is True'
-kernel_core_self_probe_status=${PIPESTATUS[1]}
-if [[ "$kernel_core_self_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: kernel core does not verify itself\n' >&2
-    exit 1
-fi
+python3 "$ROOT_DIR/scripts/check_dogfood_kernel_core_inventory.py" \
+    --root "$ROOT_DIR" --report "$dogfood_inventory_test_report" \
+    --inventory "$ROOT_DIR/scripts/dogfood_kernel_core_inventory.json" --slice kernel_core_fixture
+python3 "$ROOT_DIR/scripts/check_dogfood_kernel_core_inventory.py" \
+    --root "$ROOT_DIR" --report "$kernel_core_inventory_test_report" \
+    --inventory "$ROOT_DIR/scripts/dogfood_kernel_core_inventory.json" --slice kernel_core
+python3 "$ROOT_DIR/scripts/tests/test_dogfood_kernel_core_inventory.py"
 run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] for goal in report["goals"]); assert any(not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_cycle_arena" for finding in report["findings"])'
 arena_cycle_probe_status=${PIPESTATUS[1]}
 if [[ "$arena_cycle_probe_status" -ne 0 ]]; then

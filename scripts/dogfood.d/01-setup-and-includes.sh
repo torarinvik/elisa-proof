@@ -184,6 +184,14 @@ PY
 run_probe kernel_core src/proof/kernel_core.elisa 0
 run_probe kernel_core_fixture examples/dogfood_kernel_core.elisa 0
 run_probe source_context_scope examples/source_context_scope.elisa 0
+# Bind the dogfood claim to the exact checked source, full declaration inventory, and
+# named property goals. The totals below remain useful diagnostics, not the coverage oracle.
+python3 "$ROOT_DIR/scripts/check_dogfood_kernel_core_inventory.py" \
+    --root "$ROOT_DIR" --report "$REPORT_DIR/kernel_core.json" \
+    --inventory "$ROOT_DIR/scripts/dogfood_kernel_core_inventory.json" --slice kernel_core
+python3 "$ROOT_DIR/scripts/check_dogfood_kernel_core_inventory.py" \
+    --root "$ROOT_DIR" --report "$REPORT_DIR/kernel_core_fixture.json" \
+    --inventory "$ROOT_DIR/scripts/dogfood_kernel_core_inventory.json" --slice kernel_core_fixture
 python3 - "$REPORT_DIR/kernel_core.json" "$REPORT_DIR/kernel_core_fixture.json" <<'PY'
 import json
 import sys
