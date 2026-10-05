@@ -3,15 +3,16 @@
 import copy
 import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROOF = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
+sys.path.insert(0, str(ROOT / "scripts"))
+from portable_replay_support import BINARY as PROOF, REPLAY
+
 STRING_BUDGET_BYTES = 65536
 
 
