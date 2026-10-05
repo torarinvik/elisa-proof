@@ -35,25 +35,25 @@ proven, and 2,544/2,544 certificates replayed with zero gaps. It took 11.649 sec
 1,758,848 KiB under a 3,000,000 KiB cap. The raw report is
 `/private/tmp/elisa-p07-kernel-comparison-current-20261005.json`.
 
-The refreshed six-input census remains incomplete in three places: `field_equality_runtime.elisa`
-timed out at 60 seconds (about 1.13 GiB sampled RSS); `track.elisa` reported 943 obligations and
-926 proven, with 926/928 certificates replayed and two gaps; and the initial 1.5 GiB run of
-`kernel_comparison_runtime.elisa` stopped at its memory cap before the separate larger bounded
-run completed. Other current results include `kernel_core.elisa` at 37/37, mocap `balance.elisa`
-at 240/240, and compiler `lexer.elisa` at 110/326 with 110/110 replayed and 173 unsupported
-sites. The census is `/private/tmp/elisa-p07-support-final-20261005.json`.
+The prior six-input census used proof source `1cf9…` and frontend pin `4c479…`. It was incomplete
+in three places: `field_equality_runtime.elisa` timed out at 60 seconds (about 1.13 GiB sampled
+RSS); `track.elisa` reported 943 obligations and 926 proven, with 926/928 certificates replayed
+and two gaps; and the initial 1.5 GiB run of `kernel_comparison_runtime.elisa` stopped at its
+memory cap before a separate larger bounded run completed. The historical census is
+`/private/tmp/elisa-p07-support-final-20261005.json`.
 
 The earlier crash cause, a minimal source/compiler regression, O0 behavior, and Linux behavior
-remain open. The two track replay gaps are still bounds goals in included `Slide.inner`
-(`slide.elisa:115`) formed from ternary-return index conditions. No crash disappearance is being
-counted as a correctness fix. A separate three-line conditional-return case now reproduces a
-single replay gap: `inner(at:i64)` has `ensure result == 0 or at >= 1` and returns `1 if at >= 1
-else 0`. It contains no qualified constant or body rewrite, so this replay defect is independent
-of the historical crash. The regression is in
-`test/repro/minimal_conditional_ensure_replay_gap.elisa` and
-`scripts/test_conditional_ensure_replay_gap.py`; it accepts a future complete replay or today's
-explicit refusal, and rejects a `proved` label with gaps. The focused test passed against the
-refreshed O2 binary. It does not yet identify which replay rule should be fixed.
+remain open. The two current track replay gaps are in included `Slide.inner` (`slide.elisa:125`)
+and arise from the conditional return `1 if at >= 1 and at + 1 < count else 0` under edge
+postconditions. No crash disappearance is being counted as a correctness fix. The three-line
+conditional-return case separately reproduces one gap: `inner(at:i64)` has
+`ensure result == 0 or at >= 1` and returns `1 if at >= 1 else 0`. Both contain no qualified
+constant or body rewrite, so these replay defects are independent of the historical crash. The
+regressions are `test/repro/minimal_conditional_ensure_replay_gap.elisa` and
+`test/repro/minimal_slide_inner_replay_gap.elisa`, checked by
+`scripts/test_conditional_ensure_replay_gap.py`. The focused test passed against the coherent O2
+binary and accepts only full replay or explicit refusal. The responsible replay rule remains to be
+identified.
 
 Commit `95daaea` factors the bounded unsigned literal/add/sub replay path while preserving its
 same-width checks, modulo-width arithmetic and refusal of malformed or unsupported nodes. The
@@ -147,6 +147,31 @@ and commands are in `/private/tmp/elisa-p06-profile-20261005-recovered/` (`balan
 profiles remain historical and are not attributed to the current source. No optimization or paired
 uninstrumented speedup is established yet; the known `track` 300-second timeout remains a separate
 bounded failure and was not repeated.
+
+## P-07 current census
+
+The six-input refresh ran serially against the same coherent product identity above. All input
+hashes matched before and after. Per-input time/RSS ceilings and raw captures are recorded in
+`/private/tmp/elisa-p07-current-20261005/aggregate.json`.
+
+| Input | Result | Obligations / proven | Certificates / replayed / gaps | Time | Peak RSS |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `balance.elisa` | Proved | 240 / 240 | 240 / 240 / 0 | 0.231 s | 19,920 KiB |
+| `track.elisa` | Incomplete replay | 943 / 926 | 928 / 926 / 2 | 10.539 s | 131,024 KiB |
+| `field_equality_runtime.elisa` | Timeout, no complete report | — | — | 120.171 s | 601,536 KiB |
+| `kernel_comparison_runtime.elisa` | Unsupported findings | 3,800 / 2,544 | 2,544 / 2,544 / 0 | 23.279 s | 612,672 KiB |
+| `kernel_core.elisa` | Proved | 37 / 37 | 37 / 37 / 0 | 0.076 s | 15,824 KiB |
+| `lexer.elisa` | Unsupported findings | 326 / 110 | 110 / 110 / 0 | 0.422 s | 60,720 KiB |
+
+`kernel_comparison_runtime` had 1,109 unsupported sites and 691 unverified declarations;
+`lexer` had 173 unsupported sites and 154 unverified declarations. All emitted certificates for
+those two inputs replayed. The full `track.elisa` report is preserved at
+`/private/tmp/elisa-p07-current-20261005/track-report-full.json`: certificates 512 and 513 are the
+two gaps in `Slide.inner` at `slide.elisa:125`. The 120-second `field_equality_runtime` timeout and
+the two replay gaps remain explicit bounded failures; no bound was extended after either result.
+Individual census captures are `balance.json`, `track.json`, `field_equality_runtime.json`,
+`kernel_comparison_runtime.json`, `kernel_core.json`, and `lexer.json` in the same directory. No
+support repair has yet been accepted from this ranking.
 
 ## Acceptance status
 
