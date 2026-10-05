@@ -43,6 +43,12 @@ def run(path, timeout):
             return data_key(path), None, time.monotonic() - started, "invalid-json"
         if not isinstance(data, dict) or not isinstance(data.get("summary"), dict):
             return data_key(path), None, time.monotonic() - started, "invalid-report"
+        status = data.get("status")
+        expected_exit = {"proved": 0, "failed": 1}.get(status) if isinstance(status, str) else None
+        if expected_exit is None:
+            return data_key(path), None, time.monotonic() - started, "invalid-verdict"
+        if result.returncode != expected_exit:
+            return data_key(path), None, time.monotonic() - started, "exit-verdict-mismatch"
         summary = data["summary"]
         if (type(summary.get("proven")) is not int or type(summary.get("obligations")) is not int
                 or summary["proven"] < 0 or summary["obligations"] < summary["proven"]):

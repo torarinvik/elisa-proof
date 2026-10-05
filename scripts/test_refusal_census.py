@@ -5,6 +5,10 @@ import hashlib
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
+
+if not __debug__:
+    raise SystemExit("refusal census checks must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -110,5 +114,21 @@ def provenance_guard_test():
 
 
 provenance_guard_test()
+
+# A complete-looking report cannot hide a crash or an inconsistent process verdict.
+for status, code, expected_error in (
+    ("proved", 0, None), ("failed", 1, None),
+    ("proved", -11, "exit-verdict-mismatch"),
+    ("proved", 1, "exit-verdict-mismatch"),
+    ("failed", 0, "exit-verdict-mismatch"),
+    ("unknown", 0, "invalid-verdict"),
+    ([], 0, "invalid-verdict"),
+):
+    payload = {"status": status, "summary": {"proven": 0, "obligations": 1}, "findings": []}
+    process = subprocess.CompletedProcess([], code, stdout=json.dumps(payload), stderr="")
+    with patch.object(refusal_census.subprocess, "run", return_value=process):
+        _, data, _, error = refusal_census.run(ROOT / "examples/verified.elisa", 1)
+    assert error == expected_error, (status, code, error)
+    assert (data is not None) == (expected_error is None), (status, code, data)
 
 print("refusal census: deterministic counts, dogfood inclusion, timings, and provenance guards")
