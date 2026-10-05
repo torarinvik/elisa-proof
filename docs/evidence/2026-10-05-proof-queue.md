@@ -57,10 +57,11 @@ refreshed O2 binary. It does not yet identify which replay rule should be fixed.
 
 Commit `95daaea` factors the bounded unsigned literal/add/sub replay path while preserving its
 same-width checks, modulo-width arithmetic and refusal of malformed or unsupported nodes. The
-kernel comparison runtime passed a direct O0 compile/link/run against the updated source. The
-typed-unsigned report controls also passed, but that report binary predates the helper's lifetime
-annotation; exact-source O2 report controls are pending the current P-06 rebuild. This refactor is
-not evidence that the historical crash has been fixed.
+kernel comparison runtime passed a direct O0 compile/link/run against the updated source. Exact
+proof-source O2 typed-unsigned report controls also passed (11 certificates replayed, zero gaps),
+but that build exposed Stage1 revision `60c906…` against frontend pin `7b27fa…`; a coherent
+provenance rebuild and repeat are pending. The earlier report binary also predates the helper's
+lifetime annotation. This refactor is not evidence that the historical crash has been fixed.
 
 ## P-01 baseline
 
