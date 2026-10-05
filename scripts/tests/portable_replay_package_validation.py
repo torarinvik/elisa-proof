@@ -9,6 +9,19 @@ import subprocess
 
 from portable_replay_support import *
 
+
+def refused_without_theorem_publication(package, name, status, reason):
+    path = WORK / (name + ".json")
+    path.write_text(json.dumps(package, separators=(",", ":")), encoding="utf-8")
+    checked = subprocess.run([str(REPLAY), str(path)], capture_output=True, timeout=120)
+    assert len(checked.stdout) <= 4096 and len(checked.stderr) <= 4096, (name, "unbounded refusal")
+    result = json.loads(checked.stdout)
+    assert checked.returncode == 1 and result.get("status") == status \
+        and result.get("reason") == reason, (name, checked.returncode, result)
+    assert result.get("theorems") == [], (name, result)
+    assert result.get("summary") == {"theorems": 0, "replayed": 0, "not_replayed": 0}, (name, result)
+    return result
+
 # Header, trust and schema: nothing is inferred, over-claimed or accepted twice.
 text = json.dumps(with_theorem(base, assumption))
 valid_header = with_theorem(base, assumption)
@@ -149,18 +162,41 @@ refused(extreme, "extreme-value-off-by-one", "rejected", "statement-mismatch")
 
 # Budgets are checked before the work they bound.
 huge = with_theorem(base, assumption)
+huge["kernel"]["nodes"] = [{}] * 1000000
+exact_node_result = refused_without_theorem_publication(
+    huge, "node-budget-exact-shape-shadow", "malformed", "node-schema")
+# A fully valid million-node package cannot reach kernel admission because the package-wide
+# copied-string limit is smaller; these deliberately malformed entries prove the count check
+# admits the exact count (then refuses the node schema) rather than treating it as one-over.
+huge = with_theorem(base, assumption)
 huge["kernel"]["nodes"] = [{}] * 1000001
-refused(huge, "node-budget", "over-budget", "node-budget")
+refused_without_theorem_publication(huge, "node-budget", "over-budget", "node-budget")
+exact_children = with_theorem(base, assumption)
+exact_child_limit = 4000000
+exact_child_start = len(exact_children["kernel"]["children"])
+exact_children["kernel"]["children"].extend([0] * (exact_child_limit - exact_child_start))
+# The admitted arena requires the flat child vector to be covered by valid aggregate spans.
+# Add a disconnected, well-formed array node over the entire exact-limit suffix instead of
+# making the valid fixture fail later for unowned child entries.
+exact_children["kernel"]["nodes"].append({
+    "kind": "array", "operator": "", "left": 0, "right": 0, "auxiliary": 0,
+    "children_start": exact_child_start, "children_count": exact_child_limit - exact_child_start,
+    "value": "0", "name": "", "secondary_name": "",
+})
+code, exact_result = replay(exact_children, "child-budget-exact")
+assert code == 0 and exact_result["status"] == "replayed", exact_result
+assert exact_result["summary"]["replayed"] == len(exact_children["theorems"]), exact_result
+del exact_children
 huge = with_theorem(base, assumption)
 huge["kernel"]["children"] = [0] * 4000001
-refused(huge, "child-budget", "over-budget", "child-budget")
+refused_without_theorem_publication(huge, "child-budget", "over-budget", "child-budget")
 many = copy.deepcopy(assumption)
 many["hypotheses"] = [0] * 4097
 many["hypothesis_origins"] = [{}] * 4097
 refused(with_theorem(base, many), "hypothesis-budget", "over-budget", "hypothesis-budget")
 flood = with_theorem(base, assumption)
 flood["theorems"] = [{}] * 65537
-refused(flood, "theorem-budget", "over-budget", "theorem-budget")
+refused_without_theorem_publication(flood, "theorem-budget", "over-budget", "theorem-budget")
 
 # One bad theorem among good ones fails the package and is named; the rest still replay.
 mixed = copy.deepcopy(packages["global_constant_module"])

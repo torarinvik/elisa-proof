@@ -72,6 +72,8 @@ def write_and_replay(directory, label, payload):
     # subprocess.run starts a brand-new process; the decoder has no producer-side state.
     result = run([str(REPLAY), str(path)])
     assert result.returncode in (0, 1), (label, result.returncode, result.stdout, result.stderr)
+    assert len(result.stdout.encode("utf-8")) <= 4 * 1024 * 1024, (label, "unbounded stdout")
+    assert len(result.stderr.encode("utf-8")) <= 4 * 1024 * 1024, (label, "unbounded stderr")
     decoded = json.loads(result.stdout)
     check_result_shape(decoded)
     return result.returncode, decoded
@@ -85,6 +87,7 @@ def assert_refused(directory, label, payload):
     # or a positive replay count, even if decoder work reached theorem validation.
     assert result["summary"]["replayed"] == 0, (label, result)
     assert result["summary"]["not_replayed"] == result["summary"]["theorems"], (label, result)
+    assert len(result.get("theorems", [])) == result["summary"]["theorems"], (label, result)
     assert all(theorem.get("status") != "replayed" for theorem in result.get("theorems", [])), (label, result)
 
 
@@ -164,8 +167,11 @@ def main():
         ("node-auxiliary-type", ("kernel", "nodes", compound_index, "auxiliary"), "0"),
         ("node-child-start-float", ("kernel", "nodes", child_index, "children_start"), 0.5),
         ("node-child-count-bool", ("kernel", "nodes", child_index, "children_count"), False),
+        ("node-child-count-inexact-bound", ("kernel", "nodes", child_index, "children_count"), 2**53),
         ("node-name-type", ("kernel", "nodes", compound_index, "name"), []),
         ("node-secondary-name-type", ("kernel", "nodes", compound_index, "secondary_name"), {}),
+        ("child-id-float", ("kernel", "children", 0), 0.5),
+        ("child-id-out-of-range", ("kernel", "children", 0), len(nodes) + 1),
         # A backward edge is legal in neither the package DAG nor the identity traversal.
         ("dag-self-cycle", ("kernel", "nodes", compound_index, "left"), compound_index),
         ("dag-invalid-reference", ("kernel", "nodes", compound_index, "right"), len(nodes) + 1),
