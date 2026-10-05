@@ -67,6 +67,8 @@ with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
     (compiler / "src/front.elisa").write_text("frontend edit\n")
     assert digest(proof, "src/main.elisa") != main_before
     assert digest(proof, "src/replay_main.elisa") == replay_before
+    main_current = digest(proof, "src/main.elisa")
+    replay_current = digest(proof, "src/replay_main.elisa")
 
     clang = shutil.which("clang")
     if clang:
@@ -79,8 +81,17 @@ with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
         first_recipe_digest = recipes_digest(recipe)
         output = base / "proof-bin"
         output.write_bytes(b"binary")
+        main_output = base / "main-bin"
+        main_output.write_bytes(b"binary")
+        main_identity = identity(proof, "src/main.elisa", fake_compiler,
+                                 clang, linked, main_output, recipe=recipe)
         proof_identity = identity(proof, "src/replay_main.elisa", fake_compiler,
                                   clang, linked, output, recipe=recipe)
+        (proof / "src/unrelated.elisa").write_text("another unrelated edit\n")
+        assert digest(proof, "src/main.elisa") == main_current
+        assert digest(proof, "src/replay_main.elisa") == replay_current
+        assert identity(proof, "src/main.elisa", fake_compiler,
+                        clang, linked, main_output, recipe=recipe) == main_identity
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
                         clang, linked, output, recipe=recipe) == proof_identity
         build_jobs_env = dict(os.environ, ELISA_PROOF_BUILD_JOBS="9")
