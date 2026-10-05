@@ -639,6 +639,8 @@ complete.
 
 **Gate:** Escaping eigenvariables, alpha-renaming collisions, sibling contamination, shadowed names, stale context IDs and post-validation mutation cannot manufacture a theorem. Positive nested quantifier and branch proofs preserve their valid behavior.
 
+**Progress (2026-10-05):** A narrow pinned O2 audit of quantifier substitution and two branch controls found that substitution refuses when capture-avoiding rewriting would cross a differently named nested binder, dictionary binders use marker-based simultaneous substitution, and disjunctive branches receive separate fact arrays. The focused symbolic-quantifier, variant-exclusion and conditional-ensure tests passed. This does not test post-validation arena mutation, scratch-handle reuse, escaping eigenvariables, distinct binder IDs or exact/stale context identity; R-007 remains open. Details and build identity are in `docs/evidence/2026-10-05-r007-quantifier-boundary-audit.md`.
+
 #### R-008 — Establish a complete trusted-rule/dependency register
 
 **Change:** Link each inference family, specialized arithmetic/resource checker and source-adapter premise to implementation, specification, tests and trusted assumptions. Inventory all theorem-construction paths and keep checked theorem constructors private. Distinguish logical axioms, source correspondence, compiler/runtime trust and environment assumptions.
