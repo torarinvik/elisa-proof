@@ -268,7 +268,7 @@ if [[ "$loop_entry_state_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] >= 34; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; goals = report["goals"]; assert goals and all(goal["proven"] for goal in goals); assert {"source_times", "pushed_times", "pushed_times_return_region"} <= {goal["name"] for goal in goals}; assert report["findings"] == []; declarations = {decl["name"]: decl for decl in report["declaration_details"] if decl["kind"] == "function"}; assert declarations["pushed_times"]["verified"] and declarations["pushed_times_return_region"]["verified"]'
+run_json_report "$ROOT_DIR/examples/while_loop_facts.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["obligations"] == 38; assert report["summary"]["proven"] == 38; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == 38; assert report["replay"]["replayed"] == 38; goals = report["goals"]; assert len(goals) == 38 and all(goal["proven"] for goal in goals); assert {"source_times", "pushed_times", "pushed_times_return_region"} <= {goal["name"] for goal in goals}; assert report["findings"] == []; declarations = {decl["name"]: decl for decl in report["declaration_details"] if decl["kind"] == "function"}; assert declarations["pushed_times"]["verified"] and declarations["pushed_times_return_region"]["verified"]'
 while_loop_facts_status=${PIPESTATUS[1]}
 set -e
 if [[ "$while_loop_facts_status" -ne 0 ]]; then
@@ -277,7 +277,7 @@ if [[ "$while_loop_facts_status" -ne 0 ]]; then
 fi
 
 set +e
-run_json_report "$ROOT_DIR/examples/rejected_local_darray_return.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; errors = [(d["kind_code"], d["name"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert errors == [(596, "local_values")], errors'
+run_json_report "$ROOT_DIR/examples/rejected_local_darray_return.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; errors = [(d["kind_code"], d["name"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert errors == [(596, "local_values")], errors; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert {f["kind"] for f in report["findings"]} >= {"ensure-unproven", "function-summary-unverified"}; declarations = {d["name"]: d for d in report["declaration_details"] if d["kind"] == "function"}; assert not declarations["rejected_local_darray_return"]["verified"] and not declarations["main"]["verified"]; assert declarations["rejected_local_darray_return"]["verification_reason"] == "source-error" and declarations["main"]["verification_reason"] == "source-error"; assert all(not g["proven"] or g.get("replay_status") == "replayed" for g in report["goals"]), report["goals"]'
 rejected_local_darray_return_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_local_darray_return_status" -ne 0 ]]; then
