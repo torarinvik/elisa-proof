@@ -5042,11 +5042,12 @@ goal result parity`), after `49963e53` (`Document bounded model stress fixture`)
 shared checkout also contains uncommitted and untracked changes
 from parallel audit work; they are not part of that commit, are not one qualified source snapshot,
 and must not be combined or described as landed without ownership review and a fresh matched build.
-The compiler revision most recently freshness-checked in these investigations is Stage1
-`541788548651d43dd466d0b5210955eb966eb18e`, but it is currently stale: the freshness guard now fails
-`source_tree_sha256` because `Elisa-compiler/src/parser/parser_stmt_pattern.elisa` is modified. A
-Stage1 pass against one detached snapshot does not qualify later dirty source or another generation;
-no proof/replay validation after this change may claim fresh-Stage1 status until reseeding succeeds.
+The compiler checkout is now at `6b475d894331f0a81c3112167ef7fcf5c642a424` (the shared compiler tree
+has only a pre-existing `.gitignore` edit). The installed Stage1 provenance still records
+`541788548651d43dd466d0b5210955eb966eb18e`; the freshness guard fails both `source_revision` and
+`source_tree_sha256`. A Stage1 pass against one detached snapshot does not qualify later source or
+another generation; no proof/replay validation may claim fresh-Stage1 status until a product from
+the current verified compiler source is seeded and checked.
 
 | Finding | Evidence and certainty | Immediate disposition |
 | --- | --- | --- |
