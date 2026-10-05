@@ -58,7 +58,10 @@ for name, count, status in (("branch_join", 12, "proved"),
     }
 
 positive = sentinels["branch_join"]["semantic_expectations"]
-profile_measurement = {"stop_reason": None, "report_complete": True, "cpu_seconds": 0.01,
+profile_measurement = {"stop_reason": None, "report_complete": True, "wall_seconds": 0.02,
+                       "cpu_seconds": 0.01,
+                       "phase_timings_seconds": {"proof_cli_invocation_wall": 0.02,
+                           "proof_cli_child_cpu": 0.01, "baseline_harness_json_decode": 0.001},
                        "replay_gaps": positive["replay_gaps"],
                        "replay_certificates": positive["replay_certificates"],
                        "replayed": positive["replayed"], "goal_cache_hits": 0,
@@ -73,6 +76,22 @@ profile_measurement = {"stop_reason": None, "report_complete": True, "cpu_second
                        "trusted_boundary_facts": positive["trusted_boundary_facts"],
                        "proof_certificates": positive["proof_certificates"]}
 MODULE.check_report(profile_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+for invalid_timings, message in (
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.01}, "schema"),
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.01,
+      "baseline_harness_json_decode": float("nan")}, "invalid baseline_harness_json_decode"),
+    ({"proof_cli_invocation_wall": 0.03, "proof_cli_child_cpu": 0.01,
+      "baseline_harness_json_decode": 0.001}, "disagrees with proof CLI invocation"),
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.02,
+      "baseline_harness_json_decode": 0.001}, "disagrees with proof CLI child CPU"),
+):
+    invalid_measurement = {**profile_measurement, "phase_timings_seconds": invalid_timings}
+    try:
+        MODULE.check_report(invalid_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+    except RuntimeError as error:
+        assert message in str(error), (message, error)
+    else:
+        raise AssertionError(f"invalid P-01 phase timing was accepted: {invalid_timings}")
 profile_measurement["trusted_assumptions"] = 1
 try:
     MODULE.check_report(profile_measurement, sentinels["branch_join"]["expected_outcome"], positive)

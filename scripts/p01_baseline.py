@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import signal
@@ -61,6 +62,11 @@ PHASE_TIMING_AVAILABILITY = {
     "kernel_replay": "unavailable-no-internal-clock-hook",
     "proof_json_reporting": "unavailable-no-internal-clock-hook",
 }
+MEASURED_PHASE_TIMINGS = (
+    "proof_cli_invocation_wall",
+    "proof_cli_child_cpu",
+    "baseline_harness_json_decode",
+)
 
 
 def identity(path: Path) -> dict:
@@ -277,6 +283,18 @@ def check_report(measurement: dict, expected: dict | None = None,
         raise RuntimeError("proof process did not emit a complete JSON report")
     if not isinstance(measurement.get("cpu_seconds"), (int, float)):
         raise RuntimeError("proof process CPU time is unavailable on this host")
+    phase_timings = measurement.get("phase_timings_seconds")
+    if not isinstance(phase_timings, dict) or set(phase_timings) != set(MEASURED_PHASE_TIMINGS):
+        raise RuntimeError("report has a missing or unexpected phase-timing schema")
+    for phase in MEASURED_PHASE_TIMINGS:
+        value = phase_timings[phase]
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise RuntimeError(f"report has an invalid {phase} duration")
+    if phase_timings["proof_cli_invocation_wall"] != measurement.get("wall_seconds"):
+        raise RuntimeError("phase timing disagrees with proof CLI invocation wall time")
+    if phase_timings["proof_cli_child_cpu"] != measurement.get("cpu_seconds"):
+        raise RuntimeError("phase timing disagrees with proof CLI child CPU time")
     if measurement["replay_gaps"] != 0:
         raise RuntimeError(f"report contains replay gaps: {measurement['replay_gaps']}")
     if measurement["replay_certificates"] != measurement["replayed"]:
