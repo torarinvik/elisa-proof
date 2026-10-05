@@ -27,6 +27,18 @@ FIXTURES = (
 )
 
 
+def cache_hit_without_runner(path: Path) -> tuple[int, str]:
+    original_run = report_cache.subprocess.run
+    try:
+        def fail_if_cache_misses(*args, **kwargs):
+            raise AssertionError("cache lookup unexpectedly launched the verifier")
+
+        report_cache.subprocess.run = fail_if_cache_misses
+        return report_cache.json_run(path, BINARY, timeout=120)
+    finally:
+        report_cache.subprocess.run = original_run
+
+
 def main() -> None:
     assert BINARY.is_file() and os.access(BINARY, os.X_OK), BINARY
     original_binary = report_cache.DEFAULT_BINARY
@@ -41,17 +53,7 @@ def main() -> None:
                 key = report_cache.cache_key(fixture, BINARY)
                 entry = report_cache._read_cached_entry(str(Path(temporary) / key))
                 assert entry is not None, (fixture, "prefetch did not publish a valid cache entry")
-                original_run = report_cache.subprocess.run
-                try:
-                    def fail_if_cache_misses(*args, **kwargs):
-                        raise AssertionError("cache lookup unexpectedly launched the verifier")
-
-                    report_cache.subprocess.run = fail_if_cache_misses
-                    cached_rc, cached_payload = report_cache.json_run(
-                        fixture, BINARY, timeout=120
-                    )
-                finally:
-                    report_cache.subprocess.run = original_run
+                cached_rc, cached_payload = cache_hit_without_runner(fixture)
                 assert (cached_rc, cached_payload) == entry, (fixture, "cache lookup missed")
 
                 os.environ.pop("ELISA_PROOF_REPORT_CACHE", None)
@@ -73,6 +75,48 @@ def main() -> None:
                     f"{report['summary']['obligations']} proven; "
                     f"{replay['replayed']}/{replay['certificates']} replayed"
                 )
+
+            # A real included module changes the semantic theorem while the root file path and
+            # bytes stay fixed. The dependency digest must select a fresh verifier report.
+            dependency = Path(temporary) / "limits.elisa"
+            source = Path(temporary) / "included_dependency.elisa"
+            source.write_text(
+                'include "limits.elisa"\n'
+                "def fetch() -> i64:\n"
+                "    ensure result == Limit::VALUE\n"
+                "    return Limit::VALUE\n",
+                encoding="utf-8",
+            )
+            dependency.write_text("module Limit:\n    const VALUE: i64 = 0\n", encoding="utf-8")
+            prefetch.run_one(str(BINARY), temporary, str(source))
+            original_key = report_cache.cache_key(source, BINARY)
+            original_cached = cache_hit_without_runner(source)
+            original_report = json.loads(original_cached[1])
+            assert original_cached[0] == 0 and original_report["status"] == "proved"
+            assert original_report["goals"][-1]["goal"]["left"]["value"] == 0
+
+            dependency.write_text("module Limit:\n    const VALUE: i64 = 1\n", encoding="utf-8")
+            changed_key = report_cache.cache_key(source, BINARY)
+            assert changed_key != original_key, "included real source edit kept the old cache identity"
+            changed = report_cache.json_run(source, BINARY, timeout=120)
+            changed_report = json.loads(changed[1])
+            assert changed[0] == 0 and changed_report["status"] == "proved"
+            assert changed_report["goals"][-1]["goal"]["left"]["value"] == 1
+            assert changed != original_cached, "included source edit returned a stale theorem report"
+
+            prefetch.run_one(str(BINARY), temporary, str(source))
+            changed_cached = cache_hit_without_runner(source)
+            os.environ.pop("ELISA_PROOF_REPORT_CACHE", None)
+            try:
+                changed_fresh = report_cache.json_run(source, BINARY, timeout=120)
+            finally:
+                os.environ["ELISA_PROOF_REPORT_CACHE"] = temporary
+            assert changed_cached == changed == changed_fresh, (
+                "changed included source cached report differs from fresh verification"
+            )
+            assert changed_report["replay"]["gaps"] == 0
+            assert changed_report["replay"]["certificates"] == changed_report["replay"]["replayed"]
+            print("included module edit: fresh theorem identity, complete replay, cached/fresh JSON equal")
     finally:
         report_cache.DEFAULT_BINARY = original_binary
         if original_cache is None:
