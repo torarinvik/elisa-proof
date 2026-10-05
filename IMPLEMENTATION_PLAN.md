@@ -878,6 +878,8 @@ surface before relying on the compact route for batch tooling.
 
 **Gate:** Comment-only and unrelated-file edits avoid unnecessary work while relevant dependency/runtime/flag changes force it. Corrupt outputs trigger rebuild. Publish actual no-op cost, not only compiler cache-hit time.
 
+**Progress (2026-10-05):** `scripts/test_build_dependency_closure.py` now corrupts one product's manifest checksum sidecar in its deterministic end-to-end build fixture. The next build recompiles and relinks that product, regenerates a checksum matching its new manifest, and leaves the other product unchanged. This establishes the rebuild decision with stub compiler/linker tools; no real-build timing or compiler-semantics claim is made. Closure/no-op cost, suite dependency maps, and measured real no-op cost remain open.
+
 ### 23.5 Priority band C — remove repeated work in the current engine
 
 R-010–R-014 identify which items have the greatest payoff; reorder within this band using measurements.
