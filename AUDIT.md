@@ -11380,3 +11380,15 @@ asserts the runtime stays below its 60-second budget.
 Evidence: `scripts/test_long_difference_chain.py`,
 `examples/long_difference_chain.elisa`, and
 `examples/rejected_long_difference_chain.elisa`.
+
+## Versioned agent report protocol (H-05)
+
+JSON reports now include `protocol_version: 2`. The v1 schema accepts a representative
+unversioned pre-marker report, while the v2 schema requires marker value 2 and rejects marker 1.
+The integrated `scripts/test_agent_protocol_schema.py` additionally validates a report emitted
+by strict O2 product `ddca51a94f3fe0c0834e7a862046058b4cd9555017e9dc9e7c20f0b1fc222974`, built
+with pinned Stage1 `7b27fa312c5af923f044f6ee0e5e1de4f811f595`. Both schema files parse as JSON. The
+compatibility test uses one representative old report, not a corpus of archived reports.
+
+Evidence: `schema/elisa-proof-v1.json`, `schema/elisa-proof-v2.json`, and
+`scripts/test_agent_protocol_schema.py`.
