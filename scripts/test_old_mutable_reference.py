@@ -53,7 +53,7 @@ assert any(
     finding["name"] == "changed_owned_field_is_not_its_entry_value"
     and finding["kind"] == "ensure-unproven"
     and finding["line"] == 7
-    and finding.get("refusal_gate") == "no-rule"
+    and finding.get("refusal_gate") == "unknown"
     and not finding["counterexample_found"]
     for finding in owned_report["findings"]
 ), owned_report["findings"]
