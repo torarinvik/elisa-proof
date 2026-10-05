@@ -9,14 +9,10 @@ from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
-import math
 import os
 import platform
 import resource
-import signal
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -29,6 +25,19 @@ from perf_build_provenance import (
     read_build_manifest,
     require_compatible_products,
     shared_product_context,
+)
+from perf_luna_benchmark_process import (
+    require_unchanged_inputs,
+    run_wrapper,
+    self_test_process_group_cleanup,
+)
+from perf_luna_benchmark_validation import (
+    check_exit,
+    measurement_self_test,
+    proof_report,
+    record_measurements,
+    replay_result,
+    semantic_workload_metrics,
 )
 
 
@@ -151,288 +160,6 @@ def invoke_for_side(binary: Path, arguments: list[str], timeout: int,
                 "speedup=not-reported"
             ) from error
         raise
-
-
-def run_wrapper(wrapper: list[str], timeout: float) -> subprocess.CompletedProcess:
-    """Run a measurement wrapper in its own process group and reap it on timeout."""
-    process = subprocess.Popen(wrapper, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, start_new_session=True)
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as error:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = process.communicate()
-        raise RuntimeError(f"measurement wrapper timed out after {timeout}s: {stderr.strip()}") from error
-    return subprocess.CompletedProcess(wrapper, process.returncode, stdout, stderr)
-
-
-def process_is_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    try:
-        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
-                               capture_output=True, text=True, check=False).stdout.strip()
-    except OSError:
-        return True
-    return bool(state) and not state.startswith("Z")
-
-
-def self_test_process_group_cleanup() -> None:
-    """Check a normal measured command and prove timeout cleanup kills its process tree."""
-    ordinary_command = [sys.executable, str(Path(__file__).resolve()), "_measure",
-                        json.dumps([sys.executable, "-c", "print('ordinary')"],
-                                   separators=(",", ":"))]
-    ordinary = run_wrapper(ordinary_command, 5)
-    if ordinary.returncode != 0:
-        raise RuntimeError(f"ordinary measurement failed: {ordinary.stderr.strip()}")
-    try:
-        measured = json.loads(ordinary.stdout)
-        ordinary_stdout = base64.b64decode(measured["stdout"], validate=True)
-    except (ValueError, KeyError) as error:
-        raise RuntimeError("ordinary measurement returned invalid output") from error
-    if measured.get("returncode") != 0 or ordinary_stdout != b"ordinary\n":
-        raise RuntimeError("ordinary measurement did not preserve its successful command output")
-
-    coherent_manifest = {
-        "proof": {"source_tree_sha256": "source"},
-        "frontend": {"revision": "frontend", "tree": "frontend-tree"},
-        "compiler": {"stage": "stage1", "product": {"sha256": "compiler"},
-                     "executable": {"sha256": "driver"}},
-        "runtime": {"sha256": "runtime"},
-        "profile_hooks": {"sha256": "hooks"},
-        "target": "arm64-fixture", "optimization": "O2", "compile_mode": "strict",
-        "compiler_flags": ["-emit", "obj", "-O2"],
-    }
-    require_compatible_products(coherent_manifest, coherent_manifest, "fixture")
-    measurement_self_test()
-    mismatched_manifest = dict(coherent_manifest)
-    mismatched_manifest["frontend"] = {"revision": "stale-frontend", "tree": "stale-tree"}
-    try:
-        require_compatible_products(coherent_manifest, mismatched_manifest, "fixture")
-    except RuntimeError as error:
-        if "frontend" not in str(error):
-            raise
-    else:
-        raise RuntimeError("proof/replay products with different frontend revisions were accepted")
-
-    with tempfile.TemporaryDirectory(prefix="elisa-perf-luna-self-test-") as temporary:
-        directory = Path(temporary)
-        stable = directory / "identity-control"
-        stable.write_bytes(b"stable input")
-        identities = {stable: file_identity(stable)}
-        if identities[stable] != {"sha256": hashlib.sha256(b"stable input").hexdigest(),
-                                  "size_bytes": len(b"stable input")}:
-            raise RuntimeError("benchmark input identity is incorrect")
-        require_unchanged_inputs(identities)
-        stable.write_bytes(b"mutated input")
-        try:
-            require_unchanged_inputs(identities)
-        except RuntimeError as error:
-            if "input changed" not in str(error):
-                raise
-        else:
-            raise RuntimeError("benchmark input mutation was not refused")
-        target = directory / "fake-proof"
-        pid_file = directory / "child.pid"
-        target.write_text(
-            "#!/usr/bin/env python3\n"
-            "import subprocess, sys, time\n"
-            "child = subprocess.Popen(['sleep', '60'])\n"
-            "open(sys.argv[1], 'w').write(str(child.pid))\n"
-            "time.sleep(60)\n",
-            encoding="utf-8",
-        )
-        target.chmod(0o755)
-        command = [sys.executable, str(Path(__file__).resolve()), "_measure",
-                   json.dumps([str(target), str(pid_file)], separators=(",", ":"))]
-        try:
-            run_wrapper(command, 2)
-        except RuntimeError as error:
-            if "timed out" not in str(error):
-                raise
-        else:
-            raise RuntimeError("watchdog did not time out the sleeping fake executable")
-        if not pid_file.exists():
-            raise RuntimeError("fake executable did not start its child before timeout")
-        child_pid = int(pid_file.read_text(encoding="utf-8"))
-        deadline = time.monotonic() + 3
-        while process_is_running(child_pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if process_is_running(child_pid):
-            raise RuntimeError(f"target child {child_pid} survived process-group cleanup")
-
-
-def check_exit(result: dict, expected: int, label: str) -> None:
-    if result["returncode"] != expected:
-        stderr = result["stderr"].decode("utf-8", errors="replace")[-2000:]
-        raise RuntimeError(f"{label}: expected exit {expected}, got {result['returncode']}; {stderr}")
-
-
-def proof_report(result: dict, expected_status: str, label: str,
-                 must_unproven: tuple[str, ...] = (),
-                 must_prove: tuple[str, ...] = (),
-                 must_find: tuple[str, ...] = ()) -> dict:
-    try:
-        report = json.loads(result["stdout"])
-    except (ValueError, KeyError) as error:
-        raise RuntimeError(f"{label}: unexpected proof report or replay state") from error
-    if not isinstance(report, dict) or not isinstance(report.get("replay"), dict):
-        raise RuntimeError(f"{label}: proof report has an invalid top-level schema")
-    if (not isinstance(report.get("goals"), list)
-            or not isinstance(report.get("findings"), list)
-            or not isinstance(report.get("functions"), list)):
-        raise RuntimeError(f"{label}: proof report is missing goal, finding, or function arrays")
-    if report.get("status") != expected_status:
-        raise RuntimeError(f"{label}: expected status {expected_status}, got {report.get('status')}")
-    replay = report.get("replay", {})
-    if replay.get("gaps") != 0 or replay.get("certificates") != replay.get("replayed"):
-        raise RuntimeError(f"{label}: proof report contains replay gaps or mismatched counts")
-    if any(not isinstance(goal, dict) for goal in report["goals"]):
-        raise RuntimeError(f"{label}: proof report contains an invalid goal record")
-    if any(goal.get("proven") and goal.get("replay_status") != "replayed"
-           for goal in report["goals"]):
-        raise RuntimeError(f"{label}: a claimed proof lacks replay status")
-    goals = report.get("goals", [])
-    functions = report["functions"]
-    if any(not isinstance(function, dict) for function in functions):
-        raise RuntimeError(f"{label}: proof report contains an invalid function record")
-    for name in must_unproven:
-        matches = [function for function in functions if function.get("name") == name]
-        if not matches or not any(function.get("open_goals", 0) > 0 for function in matches):
-            raise RuntimeError(f"{label}: adversarial function {name!r} has no open goals")
-    for name in must_prove:
-        if not any(function.get("name") == name and function.get("proved") is True
-                   for function in functions):
-            raise RuntimeError(f"{label}: positive control function {name!r} was not proven")
-    findings = {finding.get("name") for finding in report.get("findings", [])}
-    if not set(must_find) <= findings:
-        missing = sorted(set(must_find) - findings)
-        raise RuntimeError(f"{label}: expected refusal findings are missing: {missing}")
-    if must_find:
-        claimed_functions = {function.get("name") for function in functions
-                             if function.get("proved") is True}
-        if set(must_find) & claimed_functions:
-            raise RuntimeError(f"{label}: adversarial functions were claimed proven: {sorted(set(must_find) & claimed_functions)}")
-    return report
-
-
-def semantic_workload_metrics(result: dict, report: dict, label: str) -> dict:
-    """Return semantic workload size only for a complete, replay-closed proof report."""
-    try:
-        summary = report["summary"]
-        replay = report["replay"]
-        declarations = report["declaration_details"]
-        goals = report["goals"]
-        certificates = report["certificates"]
-        if not all(isinstance(value, dict) for value in (summary, replay)):
-            raise ValueError("summary/replay is not an object")
-        if not all(isinstance(value, list) for value in (declarations, goals, certificates)):
-            raise ValueError("declarations/goals/certificates is not an array")
-        declaration_count = summary["declarations"]
-        obligation_count = summary["obligations"]
-        certificate_count = replay["certificates"]
-        replayed_count = replay["replayed"]
-        replay_gaps = replay["gaps"]
-        proven_count = summary["proven"]
-        unproven_count = summary["unproven"]
-        if any(type(value) is not int or value < 0 for value in (
-                declaration_count, obligation_count, certificate_count,
-                replayed_count, replay_gaps, proven_count, unproven_count)):
-            raise ValueError("count field is missing or invalid")
-        if declaration_count != len(declarations) or obligation_count != len(goals):
-            raise ValueError("declaration/obligation arrays are incomplete")
-        if certificate_count != len(certificates) or replayed_count != certificate_count or replay_gaps != 0:
-            raise ValueError("certificate replay is incomplete")
-        if proven_count + unproven_count != obligation_count:
-            raise ValueError("obligation totals are incomplete")
-        status = report.get("status")
-        if status == "proved" and unproven_count == 0 and proven_count == obligation_count:
-            classification = "proved"
-        elif status == "failed" and unproven_count > 0:
-            classification = "refusal"
-        else:
-            raise ValueError("report outcome is neither a complete proof nor a refusal")
-    except (KeyError, TypeError, ValueError) as error:
-        raise RuntimeError(f"{label}: incomplete semantic workload report: {error}") from error
-
-    certificate_bytes = len(json.dumps(
-        certificates, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8"))
-    return {
-        "classification": classification,
-        "declarations": declaration_count,
-        "verified_declarations": sum(1 for item in declarations
-                                      if isinstance(item, dict) and item.get("verified") is True),
-        "obligations": obligation_count,
-        "proof_bytes": len(result["stdout"]),
-        "certificate_count": certificate_count,
-        "certificate_bytes_compact_json": certificate_bytes,
-        "replayed_count": replayed_count,
-        "replay_gaps": replay_gaps,
-        "complete": True,
-    }
-
-
-def replay_result(result: dict, expected_status: str, expected_reason: str | None,
-                  label: str) -> dict:
-    try:
-        replay = json.loads(result["stdout"])
-    except (ValueError, KeyError) as error:
-        raise RuntimeError(f"{label}: unexpected portable replay output") from error
-    if not isinstance(replay, dict):
-        raise RuntimeError(f"{label}: replay result has an invalid top-level schema")
-    if replay.get("format") != "elisa-proof-replay-result-v1" or replay.get("status") != expected_status:
-        raise RuntimeError(f"{label}: unexpected replay result format or status")
-    if expected_status == "replayed":
-        summary = replay.get("summary", {})
-        if not isinstance(summary, dict):
-            raise RuntimeError(f"{label}: replay result is missing its summary")
-        if summary.get("theorems", 0) <= 0 or summary.get("not_replayed") != 0:
-            raise RuntimeError(f"{label}: replay result does not cover every exported theorem")
-    elif replay.get("reason") != expected_reason:
-        raise RuntimeError(f"{label}: expected refusal reason {expected_reason!r}, got {replay.get('reason')!r}")
-    trust = replay.get("trust", {})
-    if not isinstance(trust, dict):
-        raise RuntimeError(f"{label}: replay result has an invalid trust record")
-    if trust.get("kernel") != "checked" or trust.get("source_authenticated") is not False:
-        raise RuntimeError(f"{label}: replay trust record does not preserve the kernel boundary")
-    return replay
-
-
-def record_measurements(samples: list[dict]) -> dict:
-    times = [sample["wall_seconds"] for sample in samples]
-    user_cpu = [sample["user_cpu_seconds"] for sample in samples]
-    system_cpu = [sample["system_cpu_seconds"] for sample in samples]
-    rss = [sample["peak_rss_kib"] for sample in samples]
-    ordered_times = sorted(times)
-    p95_index = max(0, math.ceil(0.95 * len(ordered_times)) - 1)
-    return {
-        "rounds": len(samples),
-        "median_wall_seconds": round(statistics.median(times), 6),
-        "p95_wall_seconds": round(ordered_times[p95_index], 6),
-        "median_user_cpu_seconds": round(statistics.median(user_cpu), 6),
-        "median_system_cpu_seconds": round(statistics.median(system_cpu), 6),
-        "peak_rss_kib": int(max(rss)),
-    }
-
-
-def measurement_self_test() -> None:
-    samples = [
-        {"wall_seconds": float(value), "user_cpu_seconds": float(value) / 2,
-         "system_cpu_seconds": float(value) / 4, "peak_rss_kib": value * 10}
-        for value in range(1, 8)
-    ]
-    measured = record_measurements(samples)
-    if (measured["rounds"] != 7 or measured["median_wall_seconds"] != 4.0
-            or measured["p95_wall_seconds"] != 7.0
-            or measured["median_user_cpu_seconds"] != 2.0
-            or measured["median_system_cpu_seconds"] != 1.0):
-        raise RuntimeError(f"measurement summary statistics are incorrect: {measured}")
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -611,7 +338,7 @@ def main() -> int:
 
     if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
         try:
-            self_test_process_group_cleanup()
+            self_test_process_group_cleanup(Path(__file__).resolve())
             measurement_self_test()
             manifest_self_test()
         except (OSError, RuntimeError) as error:
