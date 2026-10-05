@@ -176,18 +176,30 @@ byte-for-byte: `examples/perf_luna_accept.elisa` (input SHA-256
 `5bb1c84d7baf95c9853e448062184a3427b298d80b205ed7cd9ac8032a7cd454`) proved 1/2 with its one
 certificate replayed. The focused script and Python compilation passed. This is bounded real
 theorem/report equivalence for one accepted and one refused fixture; stale-product and broader
-dependency-mutation controls remain open.
+dependency-mutation controls are covered by the controls below.
 
-`scripts/test_report_cache_identity.py` also replaces the fake proof executable at the same path
-after caching a report. The binary digest changes, the old report is not returned, and the new
+`scripts/test_report_cache_identity.py` replaces the fake proof executable at the same path after
+caching a report. The binary digest changes, the old report is not returned, and the new
 prefetched result matches an uncached run byte-for-byte. This exercises stale-product invalidation
-in the identity/cache harness; it is not a real verifier-binary replacement test.
+in the identity/cache harness.
+
+A separate real-product control copies two strict O2 proof executables to one temporary path. It
+prefetches with binary SHA-256 `549ae6…`, verifies a cache hit without launching the verifier,
+replaces that executable in place with SHA-256 `8c63c6…`, then observes cache-key change from
+`3be169…` to `558d7d…` and exactly one fresh verifier invocation. The replacement report is
+`proved`, and its `(return code, JSON)` equals a direct uncached run of the replacement product.
+The tested fixture is `examples/perf_luna_accept.elisa`; both products and the cache directory were
+temporary.
 
 The real equivalence test also creates a temporary root fixture that includes a separate `Limit`
 module. Changing its constant from 0 to 1 leaves the root file bytes/path unchanged, changes the
 report and cache key, and yields a new complete 2/2 replayed report. After prefetching the changed
 dependency, the cache hit matched the uncached verifier bytes exactly. This is one real included-
-source mutation control; other dependency classes and a real executable replacement remain open.
+source mutation control. `scripts/test_report_cache_missing_nested_dependency.py` adds a nested
+missing-path control: `root.elisa` includes `nested/outer.elisa`, which includes initially absent
+`nested/limits.elisa`; creating the terminal dependency changes the key, replaces a cached failed
+report with a complete proof, and the new cache hit equals fresh CLI output. It is registered in
+the normal Python suite. More complex dependency classes remain open.
 
 P-03 passed a controlled strict O2 initial build followed by an identical no-op. The no-op kept
 main/replay binaries, runtime object, hook products and manifests unchanged, with identical hashes,
@@ -250,9 +262,16 @@ candidate extraction, replay goal/depth/report work, and arena helpers as hotspo
 instrumented discovery signals, not speed claims. The raw JSON, sidecars, exact identity records,
 and commands are in `/private/tmp/elisa-p06-profile-20261005-recovered/` (`balance-final-functions.json`,
 `lexer-final-functions.json`, and `identity-final-after-profile.json`). The earlier `ad1888…`
-profiles remain historical and are not attributed to the current source. No optimization or paired
-uninstrumented speedup is established yet; the known `track` 300-second timeout remains a separate
-bounded failure and was not repeated.
+profiles remain historical and are not attributed to the current source. The first paired candidate,
+commit `013fa61`, inlines parenthesis stripping in `proof_negated_operand`. Twelve alternating
+strict O2 uninstrumented pairs used the same pinned Stage1 compiler SHA `f77278c7…`, runtime and
+target; baseline proof product SHA was `ba640c47…`, and candidate SHA was `4d3ff968…`. Full JSON
+stdout was byte-identical on all three inputs. Median wall times were balance 74.021 -> 72.377 ms,
+kernel core 32.756 -> 32.780 ms, and lexer refusal 188.268 -> 181.972 ms; only the 3.34% lexer
+reduction had non-overlapping observed ranges. The focused contradiction-scan regression passed.
+This is a bounded candidate result, not a broad speedup claim; stack detail and further profile-guided
+optimizations remain open. The known `track` 300-second timeout remains a separate bounded failure
+and was not repeated.
 
 ## P-07 current census
 
