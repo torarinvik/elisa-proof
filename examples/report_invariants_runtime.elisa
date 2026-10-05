@@ -12,6 +12,7 @@ module ElisaProof:
             kind: sview
             name: mutable sview
             line: mutable u32
+            verification_reason: sview
 
         struct ProofGoalAttempt:
             goal: Ast::Expr
@@ -65,6 +66,49 @@ include "../src/proof/model/report_invariants.elisa"
 
 using ElisaProof
 
+# Characterize the rejected aggregate proposal, including its dependency on report-owned
+# scheduling metadata. This is test-only code; it is deliberately not an admission rule.
+def candidate_aggregate_source_gate(report: ProofReport&) -> bool:
+    required: mutable usize = 0
+    for declaration in report.source_declarations |required, report|:
+        match declaration:
+            Ast::Decl.Func(name, _, _, body, _, _, position):
+                scheduled: mutable bool = false
+                for summary in report.declaration_details |name, position, scheduled|:
+                    scheduled <- summary.kind == "function" and summary.verification_reason != "not-checked" if summary.name == name and summary.line == position.line
+                has_ensure: mutable bool = false
+                has_return: mutable bool = false
+                for statement in body |has_ensure, has_return|:
+                    match statement:
+                        Ast::Stmt.Contract(kind, _, _):
+                            has_ensure <- true if kind == "ensure" or kind == "ensures"
+                        Ast::Stmt.Return(_, _):
+                            has_return <- true
+                        _:
+                            pass
+                required <- required + 1 if scheduled and has_ensure and has_return
+            _:
+                pass
+    return report.obligations.usize() >= required
+
+def source_function_with_postcondition_is(report: ProofReport&, index: usize, expected_name: sview) -> bool:
+    return false if index >= report.source_declarations.count
+    match report.source_declarations[index]:
+        Ast::Decl.Func(name, _, _, body, _, _, _):
+            has_ensure: mutable bool = false
+            has_return: mutable bool = false
+            for statement in body |has_ensure, has_return|:
+                match statement:
+                    Ast::Stmt.Contract(kind, _, _):
+                        has_ensure <- true if kind == "ensure" or kind == "ensures"
+                    Ast::Stmt.Return(_, _):
+                        has_return <- true
+                    _:
+                        pass
+            return name == expected_name and has_ensure and has_return
+        _:
+            return false
+
 const FAILURE_WITHOUT_FINDING_ACCEPTED: i64 = 1
 const FINDING_WITHOUT_FAILURE_ACCEPTED: i64 = 2
 const OPEN_GOAL_MARKED_COMPLETE: i64 = 3
@@ -89,6 +133,8 @@ const DUPLICATED_EVENT_PRE_LEDGER_REJECTED: i64 = 31
 const DUPLICATED_EVENT_ADMITTED: i64 = 32
 const TWO_EVENT_PRE_LEDGER_REJECTED: i64 = 33
 const OMITTED_OPEN_OBLIGATION_WITH_ATTEMPT_ADMITTED: i64 = 34
+const SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED: i64 = 35
+const SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_CONTROL_REJECTED: i64 = 36
 
 def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     report: mutable ProofReport = ProofReport{declarations: 0, obligations: 0, proven: 0, failed: 0, findings: [], source_declarations: [], declaration_details: [], goal_attempts: [], obligation_inventory: [], certificates: [], theorem_summaries: []}
@@ -107,7 +153,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     # not just equal lengths.
     report.declarations <- SINGLE_REPORTED_ITEM
     report.source_declarations.push(Ast::Decl.Invalid)
-    valid_invalid_summary: ProofDeclarationSummary = ProofDeclarationSummary{kind: "invalid", name: "", line: 0}
+    valid_invalid_summary: ProofDeclarationSummary = ProofDeclarationSummary{kind: "invalid", name: "", line: 0, verification_reason: "not-checked"}
     report.declaration_details.push(valid_invalid_summary)
     return 11 if not proof_report_source_admission_invariants_consistent(report)
     report.declaration_details.pop()
@@ -118,7 +164,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 13 if proof_report_source_admission_invariants_consistent(report)
     report.declaration_details.clear()
     report.declarations <- SINGLE_REPORTED_ITEM
-    report.declaration_details.push(ProofDeclarationSummary{kind: "alias", name: "forged", line: 9})
+    report.declaration_details.push(ProofDeclarationSummary{kind: "alias", name: "forged", line: 9, verification_reason: "not-checked"})
     return 14 if proof_report_source_admission_invariants_consistent(report)
     report.source_declarations.clear()
     report.declaration_details.clear()
@@ -149,7 +195,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     report.obligation_inventory.push(ProofObligationEntry{identity: 0, proven: true})
     report.declarations <- SINGLE_REPORTED_ITEM
     report.source_declarations.push(Ast::Decl.Invalid)
-    report.declaration_details.push(ProofDeclarationSummary{kind: "invalid", name: "", line: 0})
+    report.declaration_details.push(ProofDeclarationSummary{kind: "invalid", name: "", line: 0, verification_reason: "not-checked"})
     return PROVEN_WITHOUT_ATTEMPT_ADMITTED if proof_report_source_admission_invariants_consistent(report)
     goal: Ast::Expr = Ast::Expr.BoolLit(true, Ast::pos_at_line(0))
     report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 0, name: "", rule: "goal", proven: true, has_certificate: true, certificate_index: 0})
@@ -253,4 +299,96 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     report.obligation_inventory.pop()
     report.obligations <- report.obligations - 1
     return OMITTED_OPEN_OBLIGATION_WITH_ATTEMPT_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+
+    # Candidate-control setup: two source functions each have one required postcondition event.
+    report.findings.clear()
+    report.declarations <- 2
+    report.obligations <- 2
+    report.proven <- 2
+    report.failed <- 0
+    report.source_declarations.clear()
+    report.declaration_details.clear()
+    report.goal_attempts.clear()
+    report.certificates.clear()
+    report.obligation_inventory.clear()
+    source_position: Ast::Pos = Ast::pos_at_line(10)
+    source_contract: Ast::Stmt = Ast::Stmt.Contract("ensure", Ast::Expr.BoolLit(true, source_position), source_position)
+    source_return: Ast::Stmt = Ast::Stmt.Return(Ast::Expr.IntLit(1, source_position), source_position)
+    source_body: darray[Ast::Stmt] = [source_contract, source_return]
+    first_source_function: Ast::Decl = Ast::Decl.Func("source_first", [], Ast::Expr.Absent, source_body, [], [], source_position)
+    second_position: Ast::Pos = Ast::pos_at_line(20)
+    second_contract: Ast::Stmt = Ast::Stmt.Contract("ensure", Ast::Expr.BoolLit(true, second_position), second_position)
+    second_return: Ast::Stmt = Ast::Stmt.Return(Ast::Expr.IntLit(2, second_position), second_position)
+    second_source_body: darray[Ast::Stmt] = [second_contract, second_return]
+    second_source_function: Ast::Decl = Ast::Decl.Func("source_second", [], Ast::Expr.Absent, second_source_body, [], [], second_position)
+    report.source_declarations.push(first_source_function)
+    report.source_declarations.push(second_source_function)
+    report.declaration_details.push(ProofDeclarationSummary{kind: "function", name: "source_first", line: 10, verification_reason: "verified"})
+    report.declaration_details.push(ProofDeclarationSummary{kind: "function", name: "source_second", line: 20, verification_reason: "verified"})
+    report.obligation_inventory.push(ProofObligationEntry{identity: 0, proven: true})
+    report.obligation_inventory.push(ProofObligationEntry{identity: 1, proven: true})
+    first_source_goal: Ast::Expr = Ast::Expr.BoolLit(true, source_position)
+    second_source_goal: Ast::Expr = Ast::Expr.BoolLit(true, second_position)
+    report.goal_attempts.push(ProofGoalAttempt{goal: first_source_goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 10, name: "source_first", rule: "goal", proven: true, has_certificate: true, certificate_index: 0})
+    report.goal_attempts.push(ProofGoalAttempt{goal: second_source_goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 1, kernel_facts_start: 0, kernel_facts_count: 0, line: 20, name: "source_second", rule: "goal", proven: true, has_certificate: true, certificate_index: 1})
+    report.certificates.push(ProofGoalCertificate{goal: first_source_goal, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 10, name: "source_first", rule: "goal", replayed: true})
+    report.certificates.push(ProofGoalCertificate{goal: second_source_goal, facts_start: 0, facts_count: 0, kernel_goal: 1, kernel_facts_start: 0, kernel_facts_count: 0, line: 20, name: "source_second", rule: "goal", replayed: true})
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_CONTROL_REJECTED if not proof_report_source_admission_invariants_consistent(report)
+
+    # Bypass 1: mutate only report-owned scheduling metadata, then omit the second function's
+    # attempt, certificate, ledger event, and counts. The proposed gate now derives a minimum
+    # of one instead of two, despite both source declarations and contracts remaining present.
+    report.declaration_details[1] <- ProofDeclarationSummary{kind: "function", name: "source_second", line: 20, verification_reason: "not-checked"}
+    report.goal_attempts.pop()
+    report.certificates.pop()
+    report.obligation_inventory.pop()
+    report.obligations <- report.obligations - 1
+    report.proven <- report.proven - 1
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if report.source_declarations.count != 2 or report.declaration_details.count != 2
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if not source_function_with_postcondition_is(report, 0, "source_first") or not source_function_with_postcondition_is(report, 1, "source_second")
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if not candidate_aggregate_source_gate(report)
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if not proof_report_source_admission_invariants_consistent(report)
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if not proof_report_obligation_inventory_consistent(report) or not proof_report_proven_attempts_consistent(report)
+
+    # Bypass 2: leave every source status untouched, but let an unrelated function's valid
+    # event compensate for the omitted source_second event in the aggregate lower bound.
+    report.declarations <- 3
+    report.obligations <- 3
+    report.proven <- 3
+    report.source_declarations.clear()
+    report.declaration_details.clear()
+    report.goal_attempts.clear()
+    report.certificates.clear()
+    report.obligation_inventory.clear()
+    unrelated_position: Ast::Pos = Ast::pos_at_line(15)
+    unrelated_return: Ast::Stmt = Ast::Stmt.Return(Ast::Expr.IntLit(3, unrelated_position), unrelated_position)
+    unrelated_body: darray[Ast::Stmt] = [unrelated_return]
+    unrelated_function: Ast::Decl = Ast::Decl.Func("unrelated", [], Ast::Expr.Absent, unrelated_body, [], [], unrelated_position)
+    report.source_declarations.push(first_source_function)
+    report.source_declarations.push(unrelated_function)
+    report.source_declarations.push(second_source_function)
+    report.declaration_details.push(ProofDeclarationSummary{kind: "function", name: "source_first", line: 10, verification_reason: "verified"})
+    report.declaration_details.push(ProofDeclarationSummary{kind: "function", name: "unrelated", line: 15, verification_reason: "verified"})
+    report.declaration_details.push(ProofDeclarationSummary{kind: "function", name: "source_second", line: 20, verification_reason: "verified"})
+    report.obligation_inventory.push(ProofObligationEntry{identity: 0, proven: true})
+    report.obligation_inventory.push(ProofObligationEntry{identity: 1, proven: true})
+    report.obligation_inventory.push(ProofObligationEntry{identity: 2, proven: true})
+    unrelated_goal: Ast::Expr = Ast::Expr.BoolLit(true, unrelated_position)
+    report.goal_attempts.push(ProofGoalAttempt{goal: first_source_goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 10, name: "source_first", rule: "goal", proven: true, has_certificate: true, certificate_index: 0})
+    report.goal_attempts.push(ProofGoalAttempt{goal: unrelated_goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 1, kernel_facts_start: 0, kernel_facts_count: 0, line: 15, name: "unrelated", rule: "goal", proven: true, has_certificate: true, certificate_index: 1})
+    report.goal_attempts.push(ProofGoalAttempt{goal: second_source_goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 2, kernel_facts_start: 0, kernel_facts_count: 0, line: 20, name: "source_second", rule: "goal", proven: true, has_certificate: true, certificate_index: 2})
+    report.certificates.push(ProofGoalCertificate{goal: first_source_goal, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 10, name: "source_first", rule: "goal", replayed: true})
+    report.certificates.push(ProofGoalCertificate{goal: unrelated_goal, facts_start: 0, facts_count: 0, kernel_goal: 1, kernel_facts_start: 0, kernel_facts_count: 0, line: 15, name: "unrelated", rule: "goal", replayed: true})
+    report.certificates.push(ProofGoalCertificate{goal: second_source_goal, facts_start: 0, facts_count: 0, kernel_goal: 2, kernel_facts_start: 0, kernel_facts_count: 0, line: 20, name: "source_second", rule: "goal", replayed: true})
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_CONTROL_REJECTED if not proof_report_source_admission_invariants_consistent(report)
+    report.goal_attempts.pop()
+    report.certificates.pop()
+    report.obligation_inventory.pop()
+    report.obligations <- report.obligations - 1
+    report.proven <- report.proven - 1
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if report.source_declarations.count != 3 or report.declaration_details.count != 3
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if not source_function_with_postcondition_is(report, 0, "source_first") or not source_function_with_postcondition_is(report, 2, "source_second")
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if not candidate_aggregate_source_gate(report)
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if not proof_report_source_admission_invariants_consistent(report)
+    return SOURCE_REQUIRED_EXECUTABLE_OBLIGATION_OMISSION_ADMITTED if not proof_report_obligation_inventory_consistent(report) or not proof_report_proven_attempts_consistent(report)
     return 0

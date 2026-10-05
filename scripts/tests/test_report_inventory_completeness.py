@@ -69,7 +69,8 @@ def main() -> None:
     # mutates its report rows/counters, and returns nonzero if any mutation remains admitted.
     mutation = subprocess.run([str(INVARIANT_HARNESS)], capture_output=True, timeout=30)
     assert mutation.returncode == 0, (
-        "actual shared report-admission mutation harness rejected its controls: "
+        "R-004 bypass characterization failed: the harness did not reproduce both "
+        "report-owned scheduling-status and aggregate-offset bypasses: "
         f"exit={mutation.returncode}, stderr={mutation.stderr[:500]!r}"
     )
 
@@ -106,7 +107,7 @@ def main() -> None:
     assert unsupported["verification_state"] == "unsupported"
     assert any(finding["status"] == "unsupported" for finding in unsupported["findings"])
 
-    print("report inventory: source controls and shared admission mutation harness passed")
+    print("R-004 audit: both proposed-gate bypasses reproduced; existing CLI inventory checks passed (source completeness remains open)")
 
 
 if __name__ == "__main__":
