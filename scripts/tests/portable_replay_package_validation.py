@@ -32,6 +32,20 @@ for index, invalid_utf8 in enumerate((b"\xff", b"\xc3", b"\xed\xa0\x80", b"\xf4\
     package_bytes = package_bytes.replace(b'"r006-utf8-probe"',
                                           b'"r006-' + invalid_utf8 + b'-probe"', 1)
     refused(package_bytes, "invalid-utf8-%d" % index, "malformed", "utf8")
+# The JSON parser accepts escaped UTF-16 pairs and rejects any unpaired or misordered surrogate
+# as malformed JSON. Encode as ASCII so the package contains the exact JSON escape sequences.
+paired = copy.deepcopy(base)
+paired["source"]["path"] = "probe-\ud83d\ude00"
+pair_bytes = json.dumps(paired, separators=(",", ":")).encode("ascii")
+code, pair_result = replay_text(pair_bytes, "escaped-surrogate-pair")
+assert code == 0 and pair_result["status"] == "replayed", pair_result
+for index, malformed_surrogates in enumerate(("\ud800", "\udc00", "\ud800A", "\ud800\ud800",
+                                               "\udc00\udc00", "\udc00\ud800")):
+    claim = copy.deepcopy(base)
+    claim["source"]["path"] = "probe-" + malformed_surrogates
+    malformed_bytes = json.dumps(claim, separators=(",", ":")).encode("ascii")
+    refused(malformed_bytes, "escaped-surrogate-invalid-%d" % index,
+            "malformed", "json")
 extra = with_theorem(base, assumption)
 extra["kernel"]["nodes"][0]["proof"] = True
 refused(extra, "extra-node-key", "malformed", "node-schema")
