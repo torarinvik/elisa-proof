@@ -10,6 +10,7 @@ CASES = (
     (ROOT / "test/repro/minimal_conditional_ensure_replay_gap.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
     (ROOT / "test/repro/minimal_conditional_positive_conjunct_replay.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
     (ROOT / "test/repro/minimal_conditional_signed_unit_shift_replay.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
+    (ROOT / "test/repro/minimal_conditional_signed_unit_shift_near_max.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
     (ROOT / "test/repro/minimal_slide_inner_replay_gap.elisa", {"certificates": 6, "replayed": 6, "gaps": 0}),
 )
 
@@ -60,7 +61,8 @@ assert any(
 
 for name in ("minimal_conditional_missing_conjunct_refusal.elisa",
              "minimal_conditional_overflow_refusal.elisa",
-             "minimal_conditional_signed_unit_shift_wrong_bound_refusal.elisa"):
+             "minimal_conditional_signed_unit_shift_wrong_bound_refusal.elisa",
+             "minimal_conditional_signed_unit_shift_overflow_guard_refusal.elisa"):
     source = ROOT / "test/repro" / name
     run = subprocess.run([BINARY, "--json", str(source)], capture_output=True, text=True, timeout=20)
     report = json.loads(run.stdout)
