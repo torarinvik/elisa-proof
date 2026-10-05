@@ -88,6 +88,13 @@ def main() -> None:
         and goal["proven"]
         for goal in source_control["goals"]
     )
+    literal_goal = next(
+        goal for goal in source_control["goals"]
+        if goal["name"] == "source_inventory_literal_postcondition" and goal["rule"] == "goal"
+    )
+    assert literal_goal["rule"] == "goal" and literal_goal["proven"]
+    assert literal_goal["replay_status"] == "replayed"
+    assert literal_goal["goal"]["right"]["line"] == 8
 
     code, verified = run_report(ROOT / "examples/verified.elisa")
     assert code == 0
