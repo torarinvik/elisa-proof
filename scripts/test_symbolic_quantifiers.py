@@ -56,6 +56,23 @@ if positive:
     check(positive["replay"]["gaps"] == 0 and positive["replay"]["replayed"] == positive["replay"]["certificates"],
           f"positive fixture has replay gaps: {positive['replay']}")
 
+triggered = report(ROOT / "examples/quantifier_trigger_instance.elisa")
+check(triggered is not None, "goal-triggered scalar instance produced no report")
+if triggered:
+    check(triggered["summary"]["proven"] == triggered["summary"]["obligations"],
+          f"goal-triggered scalar instance stayed open: {triggered['summary']}")
+    check(triggered["replay"]["gaps"] == 0 and triggered["replay"]["certificates"] == triggered["replay"]["replayed"],
+          f"goal-triggered scalar instance lacks checked replay evidence: {triggered['replay']}")
+
+trigger_controls = report(ROOT / "examples/rejected_quantifier_trigger_instance.elisa")
+check(trigger_controls is not None, "goal-triggered scalar adversarial fixture produced no report")
+if trigger_controls:
+    for name in ("trigger_free_search_is_refused", "captured_trigger_is_refused", "nested_call_capture_is_refused",
+                 "nested_array_capture_is_refused", "out_of_range_trigger_is_refused"):
+        check(any(item.get("name") == name and item.get("kind") == "ensure-unproven"
+                  for item in trigger_controls["findings"]), f"trigger control {name} was not refused")
+    check(trigger_controls["replay"]["gaps"] == 0, f"trigger controls have replay gaps: {trigger_controls['replay']}")
+
 negative = report(ROOT / "examples/rejected_symbolic_quantifier.elisa")
 check(negative is not None, "adversarial fixture produced no report")
 if negative:
