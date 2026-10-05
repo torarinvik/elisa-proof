@@ -275,6 +275,7 @@ def main():
         "available_counters": list(MEASUREMENT_KEYS),
         "results": results,
         "unavailable_counters": [
+            "goal_cache_key_fact_candidates (field/counter absent from this source and report schema)",
             "per-goal fact visits outside goal-cache-key hashing",
             "predicate/term-comparison counts and total symbolic solver work",
             "branch/fork count and branch-join work",
