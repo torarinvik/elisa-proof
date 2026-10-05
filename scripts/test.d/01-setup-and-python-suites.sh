@@ -62,6 +62,7 @@ run_py_test() {
 }
 run_py_test test_report_cache_identity.py
 run_py_test test_p05_package_restart.py
+run_py_test test_conditional_ensure_replay_gap.py
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
 # The downstream assertions still check the report's expected shape; this adapter checks that the
