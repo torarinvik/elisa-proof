@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 
@@ -45,6 +46,103 @@ def recipes_digest(recipe: Path) -> str:
         check=True, capture_output=True, text=True,
     )
     return result.stdout.strip()
+
+
+def run_outside_closure_build_control(base: Path) -> None:
+    """Exercise build.sh reuse decisions with an isolated fixture and deterministic tools."""
+    project = base / "fixture"
+    compiler = project / "compiler"
+    proof = project / "proof"
+    tools = project / "tools"
+    for directory in (compiler / "src", compiler / "elisacore_std", compiler / "test/parity",
+                      proof / "src", proof / "examples", proof / "scripts", tools):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh", "link_flags.sh",
+                 "build_manifest.py", "compiler_environment.py"):
+        shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
+    (compiler / "src/front.elisa").write_text("frontend\n")
+    (compiler / "elisacore_std/placeholder").write_text("fixture\n")
+    (compiler / "test/parity/profile_hooks.c").write_text("void profile_hook(void) {}\n")
+    subprocess.run(["git", "init", "-q", str(compiler)], check=True)
+    subprocess.run(["git", "-C", str(compiler), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(compiler), "-c", "user.name=Build test",
+                    "-c", "user.email=build-test@example.invalid", "commit", "-qm", "fixture"], check=True)
+    revision = subprocess.run(["git", "-C", str(compiler), "rev-parse", "HEAD"],
+                              check=True, capture_output=True, text=True).stdout.strip()
+    (proof / "ELISA_COMPILER_REV").write_text(revision + "\n")
+    (proof / "src/main.elisa").write_text('include "./shared.elisa"\nmain\n')
+    (proof / "src/replay_main.elisa").write_text("replay\n")
+    (proof / "src/shared.elisa").write_text("shared\n")
+    (proof / "src/unrelated.elisa").write_text("outside closure\n")
+    (proof / "examples/verified.elisa").write_text("fixture\n")
+
+    compiler_log = project / "compiler.log"
+    clang_log = project / "clang.log"
+    mock_compiler = tools / "mock-elisac"
+    mock_compiler.write_text("""#!/usr/bin/env python3
+import pathlib, sys
+args = sys.argv[1:]
+output = pathlib.Path(args[args.index('-o') + 1])
+source = pathlib.Path(args[-1])
+with open(__import__('os').environ['MOCK_COMPILER_LOG'], 'a') as log:
+    log.write(source.name + '\\n')
+output.write_bytes(('object:' + source.name).encode())
+""")
+    mock_clang = tools / "clang"
+    mock_clang.write_text("""#!/usr/bin/env python3
+import os, pathlib, sys
+args = sys.argv[1:]
+if args == ['--version']:
+    print('fixture clang 1')
+elif args == ['-dumpmachine']:
+    print('x86_64-fixture-linux')
+elif args == ['-print-resource-dir']:
+    print('/fixture/clang/resources')
+else:
+    output = pathlib.Path(args[args.index('-o') + 1])
+    if '-c' in args:
+        with open(os.environ['MOCK_CLANG_LOG'], 'a') as log:
+            log.write('hook\\n')
+        output.write_bytes(b'hook-object')
+    else:
+        with open(os.environ['MOCK_CLANG_LOG'], 'a') as log:
+            log.write('link\\n')
+        output.write_bytes(b'fixture-binary')
+""")
+    for executable in (mock_compiler, mock_clang):
+        executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    environment = dict(os.environ, ELISA_COMPILER_BIN=str(mock_compiler),
+                       ELISA_COMPILER_SRC=str(compiler), ELISA_COMPILER_REV=revision,
+                       ELISA_CLANG=str(mock_clang), ELISA_PROOF_PRODUCTS="all",
+                       ELISA_PROOF_OBJECT_CACHE="0", MOCK_COMPILER_LOG=str(compiler_log),
+                       MOCK_CLANG_LOG=str(clang_log))
+    build = proof / "scripts/build.sh"
+    initial = subprocess.run([str(build)], cwd=proof, env=environment,
+                             capture_output=True, text=True)
+    assert initial.returncode == 0, initial.stderr
+    assert compiler_log.read_text().splitlines() == ["main.elisa", "replay_main.elisa"]
+    assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
+    products = [proof / "build/elisa-proof", proof / "build/elisa-proof-replay"]
+
+    def product_state() -> list:
+        artifacts = [artifact for path in products for artifact in
+                     (path, path.with_name(path.name + ".manifest.json"),
+                      path.with_name(path.name + ".manifest.json.sha256"))]
+        return [(artifact.read_bytes(), artifact.stat().st_mtime_ns) for artifact in artifacts]
+
+    before = product_state()
+
+    (proof / "src/unrelated.elisa").write_text("outside closure edited\n")
+    after_edit = subprocess.run([str(build)], cwd=proof, env=environment,
+                                check=True, capture_output=True, text=True)
+    assert "product src/main.elisa is unchanged" in after_edit.stderr
+    assert "product src/replay_main.elisa is unchanged" in after_edit.stderr
+    assert compiler_log.read_text().splitlines() == ["main.elisa", "replay_main.elisa"]
+    assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
+    after = product_state()
+    assert after == before, (initial.stderr, after_edit.stderr)
 
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
@@ -132,4 +230,5 @@ with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
         assert subprocess.run(check).returncode == 0
         output.write_bytes(b"tampered binary")
         assert subprocess.run(check).returncode == 1
-print("build dependency closure: unrelated edits are excluded and transitive includes invalidate")
+    run_outside_closure_build_control(base / "orchestration")
+print("build dependency closure: unrelated edits preserve both end-to-end products; transitive includes invalidate")

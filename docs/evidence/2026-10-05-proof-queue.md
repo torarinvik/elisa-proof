@@ -103,6 +103,15 @@ product. Evidence: `/private/tmp/elisa-proof-p03-refresh3-acceptance.json`; buil
 `/private/tmp/elisa-proof-p03-refresh3-build.trace` and
 `/private/tmp/elisa-proof-p03-refresh3-noop.trace`.
 
+The focused `scripts/test_build_dependency_closure.py` control now also runs `scripts/build.sh`
+twice in a temporary proof/compiler fixture with deterministic stub compiler and clang tools.
+After the first build created both main and replay products, editing `src/unrelated.elisa`
+outside both include closures caused the next build to report both products unchanged. Compiler,
+hook-compile, and link logs had no new entries; binary, manifest, checksum, and binary mtime
+remained unchanged. This verifies the real orchestration's outside-closure skip decision; stub
+tools do not establish compiler or theorem semantics. The control passed on 2026-10-05 via
+`python3 scripts/test_build_dependency_closure.py`.
+
 ## P-04–P-06 architecture and profiling
 
 P-04 now has a proof-side v1 identity envelope that validates the proof build manifest and binds
