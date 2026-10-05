@@ -49,7 +49,8 @@ live-facts peak, goal-cache hits/misses, kernel nodes/shared nodes/children, and
 of every solver operation or a process-wide memory census. Kernel/report sizes describe produced
 artifacts, not CPU work.
 
-Still unavailable at the source revision measured:
+Still unavailable at the source revision measured (the first item is absent from both the
+checked source tree and report schema; it was not silently treated as zero):
 
 - `goal_cache_key_fact_candidates` and total per-goal fact visits;
 - predicate/term comparisons and total symbolic solver work;
