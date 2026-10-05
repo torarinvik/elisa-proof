@@ -126,11 +126,25 @@ def contains_bare_shadow(root):
         return node["left"] < len(nodes) and contains_bare_shadow(node["left"]) or node["right"] < len(nodes) and contains_bare_shadow(node["right"])
     return False
 assert any(nodes[node["left"]]["kind"] == "unary" and contains_bare_shadow(node["left"]) for node in nested), nested
+region_shadow = [node for node in nested if nodes[node["left"]]["kind"] == "binary" and nodes[nodes[node["left"]]["left"]]["kind"] == "ident" and nodes[nodes[node["left"]]["left"]]["name"] == "REGION_DEPTH"]
+assert region_shadow, nested
 '
 qualified_constant_status=${PIPESTATUS[1]}
 set -e
 if [[ "$qualified_constant_status" -ne 0 ]]; then
     printf 'proof test matrix failed: static constant spelling in resource traces\n' >&2
+    exit 1
+fi
+
+# A region-derived scalar and a moved aggregate both shadow same-spelled root constants. The
+# former stays a bare local in a nested value expression; the latter remains a local field place
+# and is rejected after move, never rewritten as the static root constant.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_moved_qualified_constant_shadow.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert ("resource-use-after-move", "moved_shadow_caller") in {(finding["kind"], finding["name"]) for finding in report["findings"]}; nodes = report["kernel"]["nodes"]; args = [node for node in nodes if node["kind"] == "resource-call-arg" and node["name"] == "value"]; assert any(nodes[node["left"]]["kind"] == "binary" and nodes[nodes[node["left"]]["left"]]["kind"] == "field" and nodes[nodes[nodes[node["left"]]["left"]]["left"]]["kind"] == "ident" and nodes[nodes[nodes[node["left"]]["left"]]["left"]]["name"] == "SIGNED_DEPTH" for node in args), args'
+moved_qualified_shadow_status=${PIPESTATUS[1]}
+set -e
+if [[ "$moved_qualified_shadow_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a moved local shadow was qualified as a static constant\n' >&2
     exit 1
 fi
 
