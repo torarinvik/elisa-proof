@@ -749,6 +749,13 @@ worst-case memory evidence remain open, so R-006 is not complete. Commit `c87fc1
 focused malformed-package-Boolean control; it does not establish exhaustive Boolean-field or
 all-decoder coverage.
 
+**JSON nesting boundary follow-up (2026-10-05):** Commit `4da00dd9` pins the portable parser's
+existing maximum JSON container depth of 256. Nested source arrays at depth 255 and 256 proceed to
+the package source-schema refusal; depth 257 returns structured `malformed/json`. The test and
+strict O2 replay identities are recorded in `docs/evidence/2026-10-05-r006-decoder-boundary-inventory.md`
+(`93a3e2f0`). This verifies the exact cap boundary, not parser allocation/peak-memory behavior or
+the full set of decoder fields.
+
 **Progress (2026-10-05, structure-aware matrix):** Commit `8f1cbf66` adds 28 fresh-process
 malformed-package cases across nested schema types, theorem-root integer encodings, child indices,
 out-of-arena references, cycles, forward references, and an 8 MiB path string. Each invocation has
@@ -778,6 +785,8 @@ evidence.
 **Progress (2026-10-05):** The executable tactic harness now mutates one disjunction-case child after construction and confirms that the sibling and parent fact arrays retain their original sizes. The focused harness compiled and ran successfully against the pinned Stage1/runtime; exact identities are in `docs/evidence/2026-10-05-r007-sibling-context-mutation.md`. This covers fact-array isolation for this tactic construction path only; stale context IDs, post-validation arena mutation, escaping eigenvariables, distinct binder IDs and broader assumption-discharge behavior remain open.
 
 **Progress (2026-10-05, follow-up):** Commits `7a215424` and `69fc8338` add targeted runtime tests: a valid branch certificate is accepted, then either a child’s captured initial facts are mutated or the left child is given its sibling’s context; composed replay must refuse the mutation while preserving sibling isolation. A nested portable-branch control also passed an isolated proof CLI build. Evidence is recorded in `docs/evidence/2026-10-05-r007-sibling-context-mutation.md` (refreshed by `75caccaa`). These checks do not establish a general immutable-context implementation, arbitrary AST backing-store protection, stale generation safety, concurrency, or all tactic/scratch paths.
+
+**Quantifier escape follow-up (2026-10-05):** Commits `8037346a` and `038cf854` add a finite universal positive control and an outer-scope adversarial goal. Independent replay accepts `forall x in [1]: x == 1` but refuses to prove free `x == 1` from that quantified fact. The focused kernel arena harness passed against its recorded pinned Stage1/runtime pair; evidence is in `docs/evidence/2026-10-05-r007-quantifier-binder-escape.md`. This is one name-based finite-universal escape shape. Binder IDs, general alpha-renaming/shadowing, existential introduction, post-validation mutation, and other context routes remain open.
 
 #### R-008 — Establish a complete trusted-rule/dependency register
 
@@ -1134,6 +1143,14 @@ errors and zero replay gaps, with every generated certificate independently repl
 identities and focused commands are recorded in [R-042 quotient slice evidence](docs/evidence/2026-10-05-r042-unsigned-quotient-slice.md).
 This closes the narrow quotient-bound slice; no width matrix, other arithmetic operation, or full
 integrated-suite claim is implied.
+
+**Unsigned u8 shift boundary follow-up (2026-10-05):** Commits `e8d17819`, `1ec99e4b`,
+`8e4d6e25`, and `5bf08af1` add a strict O2 source/replay slice: `1 << 4 == 16` proves and
+replays; negative counts emit the expected diagnostic; a shift by the u8 width and a false
+high-bit-right-shift claim remain unproved. Source and kernel guards agree on these cases, so no
+semantic change was indicated. The exact product identities are in
+`docs/evidence/2026-10-05-r042-u8-shift-boundaries.md`. This does not establish oversized runtime
+shift behavior, the true high-bit result, other widths/signs, or bitwise/cast parity.
 
 **Signed overflow boundary follow-up (2026-10-05):** Focused source and kernel audit found matching
 fail-closed handling for divide-by-zero and `MIN_I64 / -1` / `MIN_I64 % -1`. The interval rule also
@@ -1553,6 +1570,9 @@ appearing on `main`.
 | `4eb4fec1` — scalar witness name index | A hashed lookup narrows one scalar-witness name-resolution path; a runtime marker-dispatch fixture exercises it. | Collision/duplicate/name-normalization adversaries, comparison against the scan path, broad call-site coverage, and a paired profile proving lower end-to-end work without outcome drift. Treat as a candidate optimization, not a speedup claim. Continue R-019/R-023. |
 | `7084c68d` — unsigned quotient slice integrated | A matched strict Stage1 O2 proof/replay pair independently replayed same-width unsigned `x / d <= x` with variable/literal divisors and a high-bit `u64` dividend; five negative controls stayed unproved. | Only this narrow quotient property is closed. Other widths/operations, complete arithmetic matrix, exact-current integrated census, and broader R-042 remain open. See [`docs/evidence/2026-10-05-r042-unsigned-quotient-slice.md`](docs/evidence/2026-10-05-r042-unsigned-quotient-slice.md). |
 | `f6e18613`, `605710a9`, `6776977c`, `9793a98f`, `b5793019` — signed division/remainder boundaries | Safe negative-divisor cases prove; zero divisors and `MIN_I64 / -1` or `% -1` stay unproved, with exact diagnostic-site and independent replay checks. | This is only the `i64` division/remainder edge slice; widths, casts, shifts, bitwise operations, overflow modes, and cross-route semantic parity remain open. See [`docs/evidence/2026-10-05-r042-signed-division-boundaries.md`](docs/evidence/2026-10-05-r042-signed-division-boundaries.md). |
+| `4da00dd9`, `93a3e2f0` — portable JSON depth boundary | Depths 255 and 256 reach structured source-schema refusal; depth 257 reaches structured malformed-JSON refusal at the pinned cap. | Does not cover parser allocation/peak memory, CPU near the cap, or other decoder fields. Continue R-006. |
+| `8037346a`, `038cf854` — finite universal escape control | Independent replay accepts the quantified positive control and refuses one attempt to use its bound name as a free outer-scope fact. | Binder identity, general shadowing/alpha-renaming, existential rules, mutation and other context routes remain open. Continue R-007. |
+| `e8d17819`, `1ec99e4b`, `8e4d6e25`, `5bf08af1` — unsigned u8 shift boundaries | A safe small shift proves and replays; negative and width-sized shifts and a false high-bit result stay unproved; producer and kernel guards agree. | Other widths, oversized execution behavior, true high-bit result, casts, bitwise operations and cross-route parity remain open. Continue R-042. |
 | `90a38a3e`, `1fda811c` — conditional conjunct replay | Exact primitive positive conjuncts of a stable `and` guard now replay through the fallback rule; root 48 proves and forged/missing/overflow-sensitive cases refuse. | Root 51 still needs a signed-arithmetic derivation; current evidence used an older Stage1 product and does not close the broader conditional-call/replay inventory. Rebuild on the latest compiler before current claims. |
 | `576a090f` — benchmark harness responsibility split | The overlong Luna benchmark driver is split into coherent process, validation, and orchestration modules under the source-size limit. | This is maintainability/iteration groundwork, not a verifier speedup; broaden real workload coverage and measure end-to-end test-loop savings under R-011/R-018. |
 
