@@ -181,6 +181,7 @@ run_py_test test_disequality_strictness.py
 run_py_test test_or_chains.py
 run_py_test test_quantifier_oracle.py
 run_py_test test_guard_and_flag_facts.py
+run_py_test test_bool_local_branch_fact.py
 run_py_test test_min_max_abs_summaries.py
 run_py_test test_literal_count.py
 run_py_test test_engine_state.py
