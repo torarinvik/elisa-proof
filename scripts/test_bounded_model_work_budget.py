@@ -7,6 +7,21 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 FIXTURE = ROOT / "examples/bounded_model_work_budget.elisa"
+STRESS_CLAUSE = "requires ModelBudgetConstants::C == ModelBudgetConstants::C"
+UNDER_BUDGET_STRESS_COUNT = 12
+OVER_BUDGET_STRESS_COUNT = 20
+
+
+def stress_clause_count(function_name: str) -> int:
+    source = FIXTURE.read_text(encoding="utf-8")
+    function_start = source.index(f"def {function_name}(")
+    next_function = source.find("\ndef ", function_start + 1)
+    function_source = source[function_start:] if next_function < 0 else source[function_start:next_function]
+    return sum(line.strip() == STRESS_CLAUSE for line in function_source.splitlines())
+
+
+assert stress_clause_count("bounded_model_under_work_budget") == UNDER_BUDGET_STRESS_COUNT
+assert stress_clause_count("bounded_model_over_work_budget") == OVER_BUDGET_STRESS_COUNT
 
 
 result = subprocess.run(
