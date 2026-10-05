@@ -102,9 +102,13 @@ All invocations are fresh processes. “Warm repeat” means another run after w
 primed the OS file cache; it is not a persistent decision-cache hit or local session. Internal
 timings for import, parse, semantics, VC generation, search, encoding, replay and reporting remain
 unavailable. The measured corpus is narrow, and no incremental speedup is established.
-Runner schema v2 labels external CLI wall time, child CPU time, and harness JSON decode separately;
-only the first two are proof-process measurements, and none substitutes for missing internal
-phase hooks.
+Runner schema v3 preserves the full serialized `proof_report_measurements` object alongside
+external CLI wall time, child CPU time, and harness JSON decode. A one-round smoke run against the
+fresh no-cache product above completed all three fixtures with full reports and zero replay gaps:
+`real_small` 2/2, `real_refusal` 1/2, and `adversarial` 49/78 proven. Raw output is
+`/private/tmp/elisa-p01-schema-v3-20261005/baseline.json`; this checks the new capture fields, not
+the timing acceptance gate. Internal import/parse/search/replay/report phase hooks remain
+unavailable.
 
 ## P-02 cache identity and P-03 orchestration
 
