@@ -551,7 +551,7 @@ Important remaining gaps are concrete:
 
 - Portable output still emits `source.authenticated: false` in [package_output.elisa](src/app/package_output.elisa). Independent abstract replay and authenticated program correctness are separate capabilities.
 - P-04 has artifact envelopes/storage controls, but no completed typed frontend artifact pipeline, semantic dependency discovery, reverse invalidation, or verifier reuse. P-05 has restart/replay tests, not a completed incremental verification session.
-- The P-00 historical crash disappeared from some fresh products, but its causal defect was not isolated. The P-07 evidence still records two refused `Slide.inner` replay roots. Refresh both before describing either as current or fixed.
+- The P-00 historical crash remains unexplained. The exact-current R-001 census completed both historical crash workloads without a crash, while mocap `track` now has 89 replay gaps, including two current `Slide.inner` roots. This does not establish a fix or cause; see [`docs/evidence/2026-10-05-r001-current-census.md`](docs/evidence/2026-10-05-r001-current-census.md).
 - Large fact contexts, qualified rewriting, field equality, composed call summaries, and repeated certificate replay need bounded current measurements. Old timeouts and memory captures motivate investigations; they are not measurements of this checkout.
 - Protocol validation exists, but its present test helper implements only a small schema-keyword subset. A passing shape check is not validation of every semantic cross-field invariant.
 - Coverage is heterogeneous. A successful kernel-core fixture is valuable; it is not a proof of complete kernel soundness, compiler correctness, or every source adapter.
@@ -582,6 +582,8 @@ These have the highest ROI because every other feature depends on trustworthy ou
 **Change:** Reuse `scripts/p07_support_census.py`, `scripts/p01_baseline.py`, and current refusal tests to classify every known P-00/P-07 failure against one immutable product. Include historical qualified rewrites, field equality, conditional-return gaps, composed summaries, difference-closure limits, and representative real projects. Record complete obligations, not only successful certificates.
 
 **Gate:** Every input has a complete report or explicit crash/timeout/memory-limit record; manifests match inputs and binaries. Produce a tracked compact census with no assertion that historical findings are current without reproduction. Depends on coherent existing build provenance.
+
+**Status:** Six-input gate met. The strict O2 product and all input hashes are recorded in [`docs/evidence/2026-10-05-r001-current-census.md`](docs/evidence/2026-10-05-r001-current-census.md), alongside complete report digests or the explicit field-equality timeout, changed-versus-prior outcomes, and focused qualified-rewrite, conditional-return, composed-summary, and difference-closure controls. P-00 cause analysis and the current P-07 replay/support limits remain open.
 
 #### R-002 — Close or contain the historical qualified-rewrite corruption
 
