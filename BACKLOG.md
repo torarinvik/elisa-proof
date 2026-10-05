@@ -147,7 +147,7 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 | ID | Task | ROI | Done when |
 | --- | --- | --- | --- |
 | K-01 (T0) | `abs`, `min`, `max` builtins as known pure functions with exact summaries | Frequent, trivial, currently opaque | Each has positive and off-by-one examples |
-| K-02 (T0) | `x != y` facts feed strictness (`a <= b` and `a != b` give `a < b`) | Common after equality guards | Rule in producer and replay |
+| K-02 (T0, DONE 2026-10-05) | `x != y` facts feed strictness (`a <= b` and `a != b` give `a < b`) | Common after equality guards | `scripts/test_disequality_strictness.py` on the O2 build: matching/reversed/negated/unsigned/branch cases prove (11 goals, zero replay gaps); unrelated disequality, disequality alone and a two-step strengthening stay unproven |
 | K-03 (T0) | Early-return guards as facts for the rest of the body (`return if i >= n`) in every statement position, not only at top level | Guard-clause style is the house style | Nested guards inside loops and ifs produce facts |
 | K-04 (T0) | `bool` locals as fact carriers: `ok: bool = i < n; if ok:` gives `i < n` in the branch | Common readability refactor that loses proofs today | Positive example plus a reassigned-flag refusal |
 | K-05 (T0) | `char` range facts (`'0' <= c <= '9'` implies `c - '0' <= 9`) | Every lexer | Digit-parse example proves |
