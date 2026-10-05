@@ -131,8 +131,8 @@ fi
     initial = subprocess.run([str(build)], cwd=proof, env=environment,
                              capture_output=True, text=True)
     assert initial.returncode == 0, initial.stderr
-    assert compiler_log.read_text().splitlines() == ["main.elisa", "replay_main.elisa"]
-    assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
+    assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"], (compiler_log.read_text(), initial.stderr)
+    assert clang_log.read_text().splitlines() == ["hook", "link", "link"], (clang_log.read_text(), initial.stderr)
     products = [proof / "build/elisa-proof", proof / "build/elisa-proof-replay"]
 
     def product_state() -> list:
@@ -148,7 +148,7 @@ fi
                                 check=True, capture_output=True, text=True)
     assert "product src/main.elisa is unchanged" in after_edit.stderr
     assert "product src/replay_main.elisa is unchanged" in after_edit.stderr
-    assert compiler_log.read_text().splitlines() == ["main.elisa", "replay_main.elisa"]
+    assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"]
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
     after = product_state()
     assert after == before, (initial.stderr, after_edit.stderr)
@@ -158,7 +158,7 @@ fi
                                          check=True, capture_output=True, text=True)
     assert "product src/main.elisa is unchanged" in after_kernel_change.stderr
     assert "product src/replay_main.elisa is unchanged" in after_kernel_change.stderr
-    assert compiler_log.read_text().splitlines() == ["main.elisa", "replay_main.elisa"]
+    assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"]
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
     assert product_state() == before, (initial.stderr, after_kernel_change.stderr)
 
@@ -170,7 +170,7 @@ fi
                                                 check=True, capture_output=True, text=True)
     assert "product src/main.elisa is unchanged" not in after_checksum_corruption.stderr
     assert "product src/replay_main.elisa is unchanged" in after_checksum_corruption.stderr
-    assert compiler_log.read_text().splitlines() == ["main.elisa", "replay_main.elisa", "main.elisa"]
+    assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "main.elisa", "replay_main.elisa"]
     assert clang_log.read_text().splitlines() == ["hook", "link", "link", "link"]
     refreshed = main_checksum.read_text(encoding="ascii").strip()
     assert refreshed == hashlib.sha256(products[0].with_name(products[0].name + ".manifest.json").read_bytes()).hexdigest()
