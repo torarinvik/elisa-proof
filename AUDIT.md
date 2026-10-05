@@ -11329,3 +11329,15 @@ index probe also refused its generated binder's lower-bound goal. That is unrela
 propagation and remains outside K-03.
 
 Evidence: `scripts/test_nested_early_return_guards.py`.
+
+## Source-defined math helper summaries
+
+The min/max/abs summary probe passes on the strict O2 product built with pinned compiler
+revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`: all 19 positive proof obligations
+replay, while five wrong-side or off-by-one claims remain unproven. The covered helpers are
+ordinary source declarations, not compiler name-level builtins. `min_i64` and `max_i64`
+summaries compose through `clamp`; `abs_i32` uses widening, and `abs_small` states an explicit
+range precondition. No unbounded `abs_i64` summary is claimed across signed-minimum overflow.
+
+Evidence: `scripts/test_min_max_abs_summaries.py`, `examples/min_max_abs_summaries.elisa`,
+and `examples/rejected_min_max_abs_summaries.elisa`.
