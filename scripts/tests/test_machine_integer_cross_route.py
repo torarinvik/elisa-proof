@@ -15,7 +15,8 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATION_ROOT = ROOT / "build/elisa-proof-generations"
+GENERATION_ROOT = Path(os.environ.get(
+    "ELISA_PROOF_GENERATION_ROOT", ROOT / "build/elisa-proof-generations"))
 TIMEOUT_SECONDS = 90
 OUTPUT_LIMIT = 8 * 1024 * 1024
 
@@ -92,13 +93,16 @@ def resolve_pair():
     compiler = proof_manifest["compiler"]
     compiler_product = Path(compiler["product"]["path"])
     runtime = Path(proof_manifest["runtime"]["path"])
-    assert compiler["stage"] == "stage1" and compiler["stage1_revision"]
+    assert compiler["stage"] == "stage1"
     assert hashlib.sha256(compiler_product.read_bytes()).hexdigest() == compiler["product"]["sha256"]
     assert hashlib.sha256(runtime.read_bytes()).hexdigest() == proof_manifest["runtime"]["sha256"]
     assert hashlib.sha256(proof.read_bytes()).hexdigest() == products["elisa-proof"]["binary_sha256"]
     assert hashlib.sha256(replay.read_bytes()).hexdigest() == products["elisa-proof-replay"]["binary_sha256"]
     compiler_root = compiler_product.parent.parent
-    assert (compiler_root / "SNAPSHOT").is_file()
+    freshness = run(["bash", str(compiler_root / "scripts/assert_stage1_fresh.sh"),
+                     str(compiler_product)], cwd=compiler_root,
+                    label="Stage1 compiler provenance")
+    assert freshness.returncode == 0, freshness.stderr[-2000:]
     return generation, proof, replay, compiler_product, compiler_root, compiler, proof_manifest
 
 
@@ -147,8 +151,11 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
         "def contextual_local(value: i8) -> i8:\n"
         "    incremented: i8 = value + 1\n"
         "    return incremented\n"
+        "def contextual_i16_local(value: i16) -> bool:\n"
+        "    incremented: i16 = value + 1\n"
+        "    return incremented > value\n"
         "def main() -> i32:\n"
-        "    return 0 if contextual_add(126) == 127 and contextual_square(10) == 100 and contextual_local(126) == 127 and not (255u8 + 1u8 == 0u8) else 1\n",
+        "    return 0 if contextual_add(126) == 127 and contextual_square(10) == 100 and contextual_local(126) == 127 and contextual_i16_local(32766) and not (255u8 + 1u8 == 0u8) else 1\n",
         encoding="utf-8",
     )
     executable = directory / "source-runtime"
@@ -160,6 +167,31 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
         "the compiler must execute in-range signed i8 addition and multiplication while "
         f"keeping the suffix-only expression false; got {executed.returncode}"
     )
+
+    # Signed arithmetic is checked, not modular: an overflowing typed local must trap.
+    # Keep that runtime behavior separate from the safe-execution controls above.
+    for suffix, type_name, maximum, minimum in (("i8", "i8", 127, -128),
+                                                  ("i16", "i16", 32767, -32768)):
+        overflow_source = directory / f"signed-overflow-{suffix}.elisa"
+        overflow_source.write_text(
+            f"def overflow_local(value: {type_name}) -> {type_name}:\n"
+            f"    incremented: {type_name} = value + 1\n"
+            "    return incremented\n"
+            "def main() -> i32:\n"
+            f"    return 0 if overflow_local({maximum}) == {minimum} else 1\n",
+            encoding="utf-8",
+        )
+        overflow_executable = directory / f"signed-overflow-{suffix}"
+        overflow_compile = run(
+            [str(compiler_product), "-emit", "exe", "-O2", "-o", str(overflow_executable),
+             str(overflow_source)], cwd=compiler_root,
+            label=f"{suffix} overflow runtime compile",
+        )
+        assert overflow_compile.returncode == 0, overflow_compile.stderr[-2000:]
+        overflow_run = run([str(overflow_executable)], label=f"{suffix} overflow execution")
+        assert overflow_run.returncode != 0, (
+            f"signed {suffix} overflow must trap instead of wrapping to {minimum}"
+        )
 
     report_run = run([str(proof_binary), "--json", str(source)], env=env,
                      label="source import and producer")
@@ -261,6 +293,7 @@ print(
     "guarded typed-local i8 addition and signed add/multiply prove through producer, tactic, "
     "certificate, and portable package replay, "
     "and exhaustive typed-u8 "
-    f"kernel arithmetic passes ({generation}; Stage1 {compiler_identity['stage1_revision']}; "
+    f"kernel arithmetic passes ({generation}; Stage1 "
+    f"{compiler_identity.get('stage1_revision') or compiler_identity['source_revision']}; "
     f"compiler {compiler_identity['product']['sha256']}; runtime {manifest['runtime']['sha256']})"
 )
