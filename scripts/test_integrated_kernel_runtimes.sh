@@ -45,6 +45,6 @@ if ! "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/k
     exit 1
 fi
 if ! "$standalone_probe_dir/kernel-tagged-comparison-admission"; then
-    printf 'proof test matrix failed: malformed tagged operands or mixed-width comparison controls failed\n' >&2
+    printf 'proof test matrix failed: tagged comparison positive, whole-arena malformed, mixed-width, or decoder-root controls failed\n' >&2
     exit 1
 fi
