@@ -66,6 +66,7 @@ for name in ("minimal_conditional_missing_conjunct_refusal.elisa",
              "minimal_conditional_signed_unit_shift_missing_premise_refusal.elisa",
              "minimal_conditional_signed_unit_shift_near_max_refusal.elisa",
              "minimal_conditional_signed_unit_shift_near_min_refusal.elisa",
+             "minimal_conditional_signed_unit_shift_near_min_positive_refusal.elisa",
              "minimal_conditional_signed_unit_shift_wrong_width_refusal.elisa",
              "minimal_conditional_signed_unit_shift_wrong_sort_refusal.elisa"):
     source = ROOT / "test/repro" / name
