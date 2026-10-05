@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: rebaselined on 2026-10-05 against committed proof HEAD `d0b946d6` (latest-main R-006 validation evidence; source code baseline includes `90a38a3e` and `27f2a3ea`). This is the reviewed source baseline for this plan update, not a claim that the dirty working tree or shared build products match it. The current worktree still has in-flight qualified-call replay, certificate-validation, CLI responsibility-boundary and ignore-rule edits, plus agent workspace state; those edits are excluded until validated and committed. Section 23.17 is the current ranked execution order; §23.16 and R-001–R-090 retain detailed designs, definitions and acceptance gates. Sections 0A and 5–22 retain architecture and historical evidence. A Stage1 build made while source inputs changed is not qualification evidence. This documentation update does not rebuild shared products or claim a full-suite pass. Historical measurements apply only to their recorded source/product identities.
+Status: rebaselined on 2026-10-05 against committed proof HEAD `2638f329`. This is the reviewed committed baseline for this plan update, not a claim that the dirty working tree or shared build products match it. The worktree still contains uncommitted call-witness validation/test changes, the CLI responsibility split, and `.gitignore` updates; none are represented as committed or qualified here. The adjacent compiler checkout is clean at `bc8def2eadf41dd088adce22b4d3d9e74aadfee9` and its Stage1 product passes provenance verification, while the installed `~/.elisac/elisac-stage1` wrapper points to the older `7b27fa31` snapshot. Select the explicit verified product and matching runtime for builds. Section 23.17 is the active ranked execution order; §23.16 and R-001–R-090 retain detailed designs, definitions and acceptance gates. A Stage1 build made while source inputs changed is not qualification evidence. This update does not claim that the whole latest proof HEAD has a matched build or that the full suite passed. Historical measurements apply only to their recorded source/product identities.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -828,6 +828,16 @@ passes with 10 source-matched tables and 169 entries. This catches undocumented 
 additions but does not prove producer soundness, constructor privacy across all APIs, or transitive
 trust closure; R-008 remains open.
 
+**Private producer follow-up (2026-10-05):** Commit `55442e1b` moves the ordinary goal-certificate
+appender `proof_add_goal_attempt` into the module's private section. The inventory regression now
+also fails when a discovered `ProofGoalCertificate` appender is declared public. Existing
+cross-file callers compiled in a strict Stage1 O2 proof build, the quantifier tactic runtime
+retained kernel trace/certificate replay, and the inventory still reports 10 tables and 169
+source-matched entries. Build identities and focused scope are in
+`docs/evidence/2026-10-05-r008-private-certificate-producer.md` (`767b569a`). The other four
+appenders were already private. This protects producer visibility only; it does not complete the
+trust graph, prove source premise soundness, or make report structures immutable.
+
 #### R-009 — Automate soundness-incident and artifact invalidation policy
 
 **Change:** Version rule semantics and source-admission identities; introduce a documented affected-version registry and cache/package refusal or mandatory-replay policy. Preserve reproducer, exact product, trust boundary and downstream theorem impact for every confirmed incident. Reuse existing identity controls.
@@ -1612,7 +1622,7 @@ appearing on `main`.
 | `005884de`, `c45385d2` — nested binder shadowing | Same-named nested finite universals replay; outer substitution rewrites the inner range but preserves its body; capture-prone free-name substitution refuses. | This is focused name-based shadowing coverage, not stable binder IDs or general alpha-renaming. Post-check mutation and broader context routes remain open. Continue R-007. |
 | `e8d17819`, `1ec99e4b`, `8e4d6e25`, `5bf08af1` — unsigned u8 shift boundaries | A safe small shift proves and replays; negative and width-sized shifts and a false high-bit result stay unproved; producer and kernel guards agree. | Other widths, oversized execution behavior, casts, bitwise operations and cross-route parity remain open. Continue R-042. |
 | `23025f3d`, `8110f017` — true high-bit u8 right shift | `128u8 >> 1u8 == 64u8` proves and independently replays; the width-sized refusal remains closed. Producer and kernel use matching unsigned same-sort rules. | One `u8` right-shift value is covered; other counts, widths, left shift, casts, bitwise operations and cross-route parity remain open. See [`docs/evidence/2026-10-05-r042-u8-highbit-shift.md`](docs/evidence/2026-10-05-r042-u8-highbit-shift.md). |
-| `71ede8b4` — signed unit-shift implication in conditional replay | The kernel accepts only the exact `(x + 1) < y ⇒ x < (y - 1)` shape, checks matching signed widths and primitive comparisons, requires both expressions to be safe, then derives the consequent with the linear arithmetic checker. The source fixture closes the prior `Slide.inner` root-51 replay gap; wrong-bound, missing-conjunct, overflow and wrong-guard controls remain refused. | This is a narrow implication rule, not general conditional arithmetic. Audit fixed-width safety premises and source-to-certificate correspondence; add adversarial near-min/max and width/sort mutations, then rerun a matched pair using the current compiler before claiming current integration. Continue R-003/R-042. |
+| `71ede8b4`, `fcbc4b95`, `ee9ba097` — signed unit-shift implication in conditional replay | Only the exact `(x + 1) < y ⇒ x < (y - 1)` positive-conjunction shape is admitted; range safety is established from source facts before the guard is used as an arithmetic premise. A matched current-Stage1 pair replays `Slide.inner` 6/6 including roots 48 and 51, with wrong-guard/missing-conjunct/overflow/wrong-bound controls refused. `3f7cee74` adds near-maximum positive and overflow-guard negative controls on another matched current-Stage1 pair. | Narrow rule only. The boundary pair's prover source is `b7f5dd74`, not current `ed9e0390`; rebuild the full current pair. More widths, lower-edge positives, mixed sorts, reversed comparisons and all source-to-kernel routes remain open. An exploratory `count > I64_MIN` premise produced a replay gap; see `docs/evidence/2026-10-05-r042-signed-shift-i64-edges.md`. Continue R-003/R-042. |
 | `90a38a3e`, `1fda811c` — conditional conjunct replay | Exact primitive positive conjuncts of a stable `and` guard now replay through the fallback rule; root 48 proves and forged/missing/overflow-sensitive cases refuse. | The original evidence predates the signed-shift extension and used an older Stage1 product. Root 51 is now closed by the narrow `71ede8b4` slice, but broader conditional-call/replay inventory and current-compiler integration remain open. |
 | `576a090f` — benchmark harness responsibility split | The overlong Luna benchmark driver is split into coherent process, validation, and orchestration modules under the source-size limit. | This is maintainability/iteration groundwork, not a verifier speedup; broaden real workload coverage and measure end-to-end test-loop savings under R-011/R-018. |
 
@@ -2095,7 +2105,7 @@ A useful feature closes a real gap with checked evidence. An optimization saves 
 ## 23.17 Re-ranked high-ROI program after the latest committed tranche
 
 This section supersedes the execution order in §23.16; the earlier section remains the detailed
-design and adversarial-gate catalog. Its rebaseline is proof HEAD `bf2c7158` plus the committed
+design and adversarial-gate catalog. Its rebaseline is proof HEAD `2638f329` plus the committed
 evidence named below. The worktree may contain later in-flight edits, and a commit hash does not
 mean a single coherent proof/replay product was built from it. Do not benchmark or make current
 support claims until product provenance is freshly checked.
@@ -2107,8 +2117,11 @@ bin/elisac-stage1` reports current, and that product has SHA-256
 `~/.elisac/elisac-stage1` wrapper instead points to snapshot `7b27fa31`; it is not the latest
 compiler and its snapshot does not have the current checkout's provenance file. For fresh work,
 select the explicitly checked `../Elisa-compiler/bin/elisac-stage1` and matching runtime, and record
-both identities. This is compiler-input evidence only, not evidence that Elisa-Proof was rebuilt
-with it. The cited R-003 matched pair still needs qualification under this product.
+both identities. This is compiler-input evidence only, not evidence that all of Elisa-Proof at
+`ed9e0390` was rebuilt with it. The bounded R-003 root-51 slice has a matched current-Stage1 pair at
+proof commit `fcbc4b95` (`ee9ba097`); it closes that root only. A newer focused edge-test pair at
+proof commit `b7f5dd74` exercised the added near-maximum and overflow-guard fixtures. Neither pair
+is a matched build of the complete current proof HEAD; see the evidence notes and P0.3/P0.5.
 
 ### Ranking rules
 
@@ -2132,12 +2145,15 @@ with it. The cited R-003 matched pair still needs qualification under this produ
 | Groundwork now present | Why it has high ROI | Remaining evidence or implementation |
 | --- | --- | --- |
 | Source-call witness reconstruction and qualified-target checks (`078aeb9f`, `57572c60`, current R-003/R-005 follow-ups) | Closes a dangerous gap between a generated call summary and the source call it claims to model. | Exact callee/caller declaration identity, all argument and place bindings, state epochs, alias/effect/frame provenance, and conditional/control-flow witness replay. |
-| Decoder schema and mutation defenses (`c87fc1b9`, `db6f8e5b`, `5118536c`, R-006 evidence) | Structured mutation tests cover 28 fields/shapes; bounded fresh-process byte mutation checks 512 deterministic mutations while replaying all 16 positives, retaining/minimizing unexpected seeds. | Three mutations were valid encodings and replayed. This is not coverage-guided fuzzing; every decoder path/valid maximum, cap-adjacent CPU/RSS behavior, and publication fault coverage remain open. |
+| Decoder schema and mutation defenses (`c87fc1b9`, `db6f8e5b`, `5118536c`, `1f580f73`, `3f973b55`, `270a1e67`, theorem-cap commits through `a6fb5a42`; R-006) | The matrix includes an unknown theorem-reachable node tag and exact/one-over 65,536 theorem count; the bounded raw-byte run checks 512 mutations and all 16 positive packages in resource-capped processes. | Different immutable corpus snapshots observed three and one valid-mutated encodings respectively; both replayed fully. This remains deterministic, not coverage-guided fuzzing. Every decoder field/valid maximum, cap-adjacent CPU/RSS, source-import fuzzing, and real publication crash recovery remain open. |
 | Build preparation and generation-pinned pair publication (`1abf91e3`, `2d7f2aac`, `b7f26cf9`, `04b91100`, `bf2c7158`; R-015 evidence) | Same-root locking and staged preparation preserve prior outputs on failed builds; an immutable matched generation with atomic `CURRENT` pointer and pair resolver now rejects incomplete/mixed/tampered pairs. | Legacy consumers still read sequential compatibility paths; migrate each to resolve and pin one generation. Immutable source snapshots, multi-root writer coordination, real-build crash/restart tests, and old-generation retention policy remain open. |
 | Tactic sibling/mutation/stale-context adversarial tests (`c864a3c3`, `7a215424`, `69fc8338`) | Demonstrates that selected context substitution and mutation attacks are caught. | Stable semantic context and binder IDs, immutable validated inputs, general arena-generation checks and complete route coverage are not implemented by tests alone. |
+| Report-admission inventory checks and result ledger (`93e3a83b`, `2638f329`, R-004) | Declaration summaries are checked against ordered parsed-source inventory; counted obligations require attempts; proven attempts are bound to a matching retained result/certificate ledger. Stage1 mutations rejected tampered declarations, obligations, attempts, roots, findings, ledger rows and totals. | The ledger accounts for calls to `proof_obligation`; it does not independently derive the expected obligations from source, so a checker path that omits recording one entirely remains undetected. Coordinated AST+report rewriting is outside the tested threat model. All admission routes, source-body/path classification and independent source enumeration remain open. |
+| Private certificate producers (`55442e1b`, `767b569a`, R-008) | All five discovered `ProofGoalCertificate` appenders are private; a source inventory regression rejects public visibility. Existing cross-file callers compile and quantifier tactic trace/certificate replay still succeeds on Stage1. | Source visibility and one runtime control do not prove privacy enforcement or producer soundness, cover every certificate-like type, close transitive trust, or prevent mutation through other APIs. Continue R-008. |
 | Profiler lifecycle summary and runtime allocation probe (`3dc4dad5`, `a5cba7a7`, `fab7dba0`, `5dfcebba`) | Synthetic analyzer calibration is complemented by a real Elisa probe for runtime allocation/reclaim/reset and the production lifetime analyzer; it separately reports logical-live, backing capacity and RSS peaks. | No matched uninstrumented baseline or overhead result, real prover profile, phase attribution, proof-arena census, or invalid-after-reset `sview` negative control. Reading a view while its region lives does not establish its lifetime invariant. |
 | Fact-growth scaling evidence (`13f5da2f`, R-013) | A 25-case one-axis harness varies relevant/irrelevant/duplicate facts and match-arm width; 24 cases prove and replay, and the 13-duplicate case refuses at the expected budget. Every process has wall/RSS bounds. | These are bounded sweeps, not asymptotic guarantees or paired optimization evidence; several key solver-work counters and per-goal allocation/time metrics remain absent. The products were built with the then-pinned `7b27fa31` compiler, not the current `bc8def2e` Stage1. Rebuild before current-product claims. |
 | Narrow signed/unsigned division slices (`7084c68d`, `f6e18613`, `605710a9`, `6776977c`, `9793a98f`, `b5793019`) | Protects high-risk division edge cases and confirms some exact properties independently replay. | Only selected `u64` quotient and `i64` division/remainder cases; do not extrapolate to other widths or machine operations. |
+| Bounded signed unit-shift conditional replay (`71ede8b4`, `fcbc4b95`, `ee9ba097`, boundary tests `3f7cee74`) | A current-Stage1 matched pair closes `Slide.inner` roots 48/51 with 6/6 replay and negative controls; the focused boundary pair additionally proves a safe near-maximum case and refuses an overflowing guard at `wrap-guard-goal`. | This is one exact i64 implication shape; the edge-test proof source predates current HEAD. No general conditional arithmetic or all-width guarantee. An exploratory lower-bound premise at `I64_MIN` led to a replay gap; the open reproducer and next action are recorded in the boundary evidence. |
 | Semantic benchmark reporting and scalar witness hash lookup (`e972dc02`, `4eb4fec1`, related R-019 tests) | Gives the measurement harness useful classification and a candidate for reducing repeated lookup work. | A complete current corpus and evidence that this index reduces real end-to-end work without outcome drift are still missing. |
 
 ### Priority 0 — restore a trustworthy, exact-current verification boundary
@@ -2183,31 +2199,36 @@ the queue and put its minimized reproducer first.
 7. **P0.7 — Close producer/replay gaps without losing valid paths (R-003).** Preserve the narrow
    root-48 positive-conjunct rule and its negative controls. Root 51 now has a narrowly shaped,
    fixed-width-safe signed unit-shift replay rule (`71ede8b4`, hardened against circular guard
-   range evidence by `fcbc4b95`); its old matched evidence is not current-compiler evidence. Trace
-   every remaining conditional-return gap from
-   source CFG node through VC, witness, certificate and replay. Add the smallest rule preserving
-   branch identity or refuse before emitting incomplete evidence. Rebuild the exact current snapshot
-   on the newest provenance-checked Stage1 before accepting the candidate as current behavior.
+   range evidence by `fcbc4b95`); `ee9ba097` records a matched current-Stage1 pair for that bounded
+   root. Added near-maximum and overflowed-guard controls (`3f7cee74`) also pass on a matched current
+   Stage1 pair, but its prover source is older than the current HEAD. Trace every remaining
+   conditional-return gap from source CFG node through VC, witness, certificate and replay. Add
+   only the smallest branch-preserving rule or refuse before emitting incomplete evidence. The
+   integrated latest-HEAD pair remains required before a current whole-product claim.
 8. **P0.8 — Bind every call proof to exact source semantics (R-005).** Validate caller and callee
    IDs, exact call node, ordered/named actuals, generic instantiation, value/reference mode, places,
    aliasing, widths/sorts, state version, contract digest, effect row and footprint. Differentially
    mutate each field and require both focused and package replay to refuse the forged trace.
-9. **P0.9 — Make obligation completeness structural (R-004).** Derive declaration and executable
-   path inventory from admitted source, then account for every path as checked, refused, unsupported,
-   or explicitly unreachable under checked premises. Delete/duplicate/forge a declaration, body,
-   branch, VC, attempt, proof root, refusal, and total independently; all CLI, cache, tactic, repair,
-   and package routes must reject missing or inconsistent inventory.
+9. **P0.9 — Make obligation completeness structural (R-004).** The first report-inventory gate
+   (`93e3a83b`) compares declaration summaries with ordered parsed-source inventory, requires an
+   attempt for every counted obligation, and validates proven attempts against a sequential matching
+   certificate ledger. Stage1 mutations rejected tampered declaration, obligation, attempt, root,
+   finding and aggregate fields. Extend this to executable-path inventory and classifications
+   (checked/refused/unsupported/checked-unreachable), independently derive body/branch counts, and
+   exercise every CLI, cache, tactic, repair and package admission route. Whole-AST plus whole-report
+   coordinated rewriting is not covered by the current threat model; document or close it explicitly.
 10. **P0.10 — Give checked contexts immutable identity (R-007).** Add semantic context and binder
     IDs plus arena generations; constructors remain private, and validation binds to immutable
     snapshots. Extend the three branch mutation regressions with stale handles, same-spelled nested
     binders, post-check AST mutation, escaped eigenvariables, failed branches, nested tactics,
     scratch reuse, and concurrent access. Compare accepted certificates to a simple independent
     context-membership oracle.
-11. **P0.11 — Finish decoder/parser adversarial coverage (R-006/R-088).** The 28-case structured
-    matrix plus 512 deterministic raw-byte mutations (`5118536c`) now run in bounded fresh
-    processes; all 16 positive packages replay, and three mutations that stayed valid encodings
-    replayed successfully. This is not coverage-guided fuzzing. Extend with generated valid source
-    and packages, mutate one byte/field at a time, and cover every tag, Boolean/integer encoding, span,
+11. **P0.11 — Finish decoder/parser adversarial coverage (R-006/R-088).** The structured matrix now
+    includes unknown theorem-reachable tags and exact/one-over theorem count; a matched pair checked
+    512 deterministic raw-byte mutations in fresh bounded processes and replayed all 16 positives.
+    Three valid-mutated encodings replayed in one immutable snapshot; one did in the later boundary
+    slice. This is not coverage-guided fuzzing. Extend with generated valid source and packages,
+    mutate one byte/field at a time, and cover every tag, Boolean/integer encoding, span,
     object key, UTF-8/surrogate rule, version, count, length, reference, root and checksum. Impose
     process CPU/RSS bounds; retain seeds and assert structured refusal, no panic, no partial `proved`,
     and no partial cache publication.
@@ -2257,7 +2278,10 @@ These are measurement gates, not optimization claims. Complete them before broad
     The landed relevant/irrelevant/duplicate-fact and match-width sweep (`13f5da2f`) is a useful
     first slice only: add explicit fact-visit/comparison, branch-copy/join and allocation counters
     before using it to choose an index or cache redesign; rerun on the current compiler and matched
-    products. Do not call its 25 samples a general complexity bound.
+    products. Add a durable positive near-`i64::MIN` premise case (`count > I64_MIN`) and isolate the
+    replay gap observed during the signed-shift boundary experiment; a conservative gap is not a
+    false proof, but it is a concrete arithmetic coverage/performance target. Do not call its 25
+    samples a general complexity bound.
 20. **P1.8 — Establish coherent paired baselines (R-011/R-015).** Use at least seven alternating
     baseline/candidate rounds after warmup, with source and executable manifests checked before and
     after each batch. Compare exact semantic JSON, trust roots, declaration/obligation inventory,
