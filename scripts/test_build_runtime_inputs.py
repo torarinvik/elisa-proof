@@ -28,7 +28,18 @@ def resolve(compiler, home, **variables):
                           env=environment, capture_output=True, text=True, timeout=5)
 
 
-with tempfile.TemporaryDirectory(prefix="elisa-runtime-input-") as directory:
+def stage1_classification(compiler, home, **variables):
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("ELISA_RUNTIME_OBJ", "ELISA_COMPILER_SRC", "ELISA_COMPILER_ROOT")}
+    environment.update({"HOME": str(home), **{key: str(value) for key, value in variables.items()}})
+    command = ('source "$1"; elisa_resolve_runtime_obj "$2" 0; '
+               'printf "stage1=%s\\n" "$COMPILER_IS_STAGE1"')
+    return subprocess.run(["bash", "-c", command, "runtime-test",
+                           str(ROOT / "scripts/runtime_inputs.sh"), str(compiler)],
+                          env=environment, capture_output=True, text=True, timeout=5)
+
+
+with tempfile.TemporaryDirectory(prefix="elisa runtime input ") as directory:
     temp = Path(directory)
     source_root = temp / "compiler-source"
     home = temp / "home"
@@ -42,6 +53,17 @@ with tempfile.TemporaryDirectory(prefix="elisa-runtime-input-") as directory:
     touch(bare_stage1)
     run = resolve(bare_stage1, home, ELISA_COMPILER_SRC=source_root)
     assert run.returncode == 0 and run.stdout == f"runtime={source_runtime}\n", (run.stdout, run.stderr)
+
+    # ELISA_COMPILER_ROOT is the canonical override when both source-root spellings exist.
+    root_precedence = temp / "root-precedence"
+    root_runtime = root_precedence / "build/runtime/elisacore_runtime.o"
+    source_alias = temp / "source-alias"
+    source_alias_runtime = source_alias / "build/runtime/elisacore_runtime.o"
+    touch(root_runtime)
+    touch(source_alias_runtime)
+    run = resolve(bare_stage1, home, ELISA_COMPILER_ROOT=root_precedence,
+                  ELISA_COMPILER_SRC=source_alias)
+    assert run.returncode == 0 and run.stdout == f"runtime={root_runtime}\n", (run.stdout, run.stderr)
 
     # A binary that embeds the freshness-guarded wrapper path keeps that wrapper's root.
     wrapper = source_root / "scripts/elisac_stage1.sh"
@@ -59,11 +81,26 @@ with tempfile.TemporaryDirectory(prefix="elisa-runtime-input-") as directory:
     run = resolve(wrapper, home)
     assert run.returncode == 0 and run.stdout == f"runtime={source_runtime}\n", (run.stdout, run.stderr)
 
+    # A known but incomplete wrapper must not silently borrow the unrelated HOME runtime.
+    broken_wrapper_root = temp / "broken wrapper root"
+    broken_wrapper = broken_wrapper_root / "scripts/elisac_stage1.sh"
+    touch(broken_wrapper)
+    run = resolve(broken_wrapper, home)
+    expected_wrapper_runtime = broken_wrapper_root / "build/runtime/elisacore_runtime.o"
+    assert run.returncode == 2 and run.stdout == "runtime=\n", (run.returncode, run.stdout, run.stderr)
+    assert run.stderr == f"Stage1 wrapper runtime object not found: {expected_wrapper_runtime}\n", run.stderr
+
     # A bare installed compiler keeps its HOME runtime when no source root is known.
     installed_stage1 = temp / "installed/elisac-stage1"
     touch(installed_stage1)
     run = resolve(installed_stage1, home)
     assert run.returncode == 0 and run.stdout == f"runtime={home_runtime}\n", (run.stdout, run.stderr)
+
+    # Unrecognized compiler names remain unclassified, matching compiler provenance logic.
+    unknown_compiler = temp / "bin/custom-compiler"
+    touch(unknown_compiler)
+    unknown = stage1_classification(unknown_compiler, home, ELISA_COMPILER_SRC=source_root)
+    assert unknown.returncode == 0 and unknown.stdout == "stage1=0\n", (unknown.stdout, unknown.stderr)
 
     # Stage0 never acquires an unrelated Stage1 runtime implicitly.
     stage0 = temp / "bin/elisac-stage0"
@@ -119,4 +156,4 @@ with tempfile.TemporaryDirectory(prefix="elisa-runtime-input-") as directory:
     assert build.stderr == f"Elisa runtime object not found: {missing_override}\n", build.stderr
     assert not invocation_marker.exists(), "invalid explicit runtime invoked the compiler"
 
-print("build runtime inputs: explicit, source-root, wrapper, installed, and stage0 cases passed")
+print("build runtime inputs: precedence, spaces, wrapper failures, installed, stage0, and unknown cases passed")
