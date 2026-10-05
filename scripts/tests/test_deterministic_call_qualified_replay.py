@@ -107,7 +107,18 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
         Ast::Expr.Call(marker_callee, marker_arguments, marker_names, position):
             return 3 if marker_arguments.count != 1
             match marker_arguments[0]:
-                Ast::Expr.Call(_, arguments, argument_names, call_position):
+                Ast::Expr.Call(call_callee, arguments, argument_names, call_position):
+                    forged_position: Ast::Pos = call_position
+                    forged_position.offset <- forged_position.offset + 1
+                    position_forged_call: Ast::Expr = Ast::Expr.Call(call_callee, arguments, argument_names, forged_position)
+                    position_forged_arguments: darray[Ast::Expr] = [position_forged_call]
+                    position_forgery: Ast::Expr = Ast::Expr.Call(marker_callee, position_forged_arguments, marker_names, position)
+                    position_encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(position_forgery, &report, original.name)
+                    return 9 if not position_encoded.known
+                    report.fact_traces[trace_index] <- ProofFactTrace{expression: position_forgery, kernel_expression: position_encoded.root, kind: original.kind, line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
+                    return 10 if proof_replay_fact_trace_entry(&report, trace_index)
+                    report.fact_traces[trace_index] <- original
+                    return 11 if not proof_replay_fact_trace_entry(&report, trace_index)
                     wrong_module: Ast::Expr = Ast::Expr.Scope(Ast::Expr.Ident("Elsewhere", call_position), "Inner", call_position)
                     forged_callee: Ast::Expr = Ast::Expr.Scope(wrong_module, "bounded", call_position)
                     forged_call: Ast::Expr = Ast::Expr.Call(forged_callee, arguments, argument_names, call_position)
@@ -152,7 +163,7 @@ def main() -> None:
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 
-    print("qualified deterministic-call replay: qualified owner accepted; same-leaf wrong-module forgery rejected")
+    print("qualified deterministic-call replay: qualified owner accepted; wrong call-span and same-leaf wrong-module forgeries rejected")
 
 
 if __name__ == "__main__":
