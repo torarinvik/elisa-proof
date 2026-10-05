@@ -84,6 +84,16 @@ def require_unchanged_inputs(identities: dict[Path, dict]) -> None:
             raise RuntimeError(f"benchmark input changed during measurement: {path}")
 
 
+def verify_build_snapshot(binaries: dict, manifests: dict, identities: dict[Path, dict]) -> None:
+    """Bind parsed manifest contents to the exact files measured by this run."""
+    for label, pair in binaries.items():
+        for role, binary in zip(("proof", "replay"), pair):
+            current = read_build_manifest(binary, f"{label}/{role}")
+            if current != manifests[label][role]:
+                raise RuntimeError(f"{label}/{role} build manifest changed while creating benchmark snapshot")
+    require_unchanged_inputs(identities)
+
+
 def measured_child(command: list[str]) -> int:
     """Run one tool and emit its exact streams plus per-child process metrics.
 
@@ -365,9 +375,11 @@ def run(args: argparse.Namespace) -> dict:
                 raise RuntimeError(f"{label} executable is missing or not executable: {binary}")
 
     product_contexts = {}
+    product_manifests = {}
     for label, (proof_binary, replay_binary) in binaries.items():
         proof_manifest = read_build_manifest(proof_binary, f"{label}/proof")
         replay_manifest = read_build_manifest(replay_binary, f"{label}/replay")
+        product_manifests[label] = {"proof": proof_manifest, "replay": replay_manifest}
         product_contexts[label] = require_compatible_products(
             proof_manifest, replay_manifest, label
         )
@@ -388,6 +400,7 @@ def run(args: argparse.Namespace) -> dict:
     identities = {path: file_identity(path) for pair in binaries.values() for path in pair}
     identities.update({path: file_identity(path) for path in manifest_paths})
     identities.update({source: file_identity(source) for _, source, _, _ in FIXTURES})
+    verify_build_snapshot(binaries, product_manifests, identities)
 
     entries = []
     with tempfile.TemporaryDirectory(prefix="elisa-proof-perf-luna-") as temporary:

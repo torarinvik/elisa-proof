@@ -200,6 +200,23 @@ class ProductIdentityTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "different frontends or toolchains"):
                     benchmark.run(args)
 
+    def test_manifest_is_revalidated_after_file_identity_snapshot(self) -> None:
+        binaries = {
+            "baseline": (Path("baseline-proof"), Path("baseline-replay")),
+            "candidate": (Path("candidate-proof"), Path("candidate-replay")),
+        }
+        original = manifest()
+        changed = manifest()
+        changed["binary"] = {"sha256": "changed-binary"}
+        manifests = {
+            label: {role: original for role in ("proof", "replay")}
+            for label in binaries
+        }
+        with mock.patch.object(benchmark, "read_build_manifest", return_value=changed):
+            with mock.patch.object(benchmark, "require_unchanged_inputs"):
+                with self.assertRaisesRegex(RuntimeError, "changed while creating benchmark snapshot"):
+                    benchmark.verify_build_snapshot(binaries, manifests, {})
+
 
 class SamplingTests(unittest.TestCase):
     @staticmethod

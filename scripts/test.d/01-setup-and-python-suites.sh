@@ -224,6 +224,7 @@ run_py_test test_negated_guard_orders.py
 run_py_test test_nested_early_return_guards.py
 run_py_test test_portable_replay.py
 python3 "$ROOT_DIR/scripts/tests/test_portable_package_string_budget.py"
+python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark.py"
 python3 "$ROOT_DIR/scripts/perf_luna_benchmark.py" --self-test
 run_py_test test_linear_certificates.py
 run_py_test test_smt_oracle.py
