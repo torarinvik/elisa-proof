@@ -1582,7 +1582,8 @@ appearing on `main`.
 | `4da00dd9`, `93a3e2f0` — portable JSON depth boundary | Depths 255 and 256 reach structured source-schema refusal; depth 257 reaches structured malformed-JSON refusal at the pinned cap. | Does not cover parser allocation/peak memory, CPU near the cap, or other decoder fields. Continue R-006. |
 | `8037346a`, `038cf854` — finite universal escape control | Independent replay accepts the quantified positive control and refuses one attempt to use its bound name as a free outer-scope fact. | Binder identity, general shadowing/alpha-renaming, existential rules, mutation and other context routes remain open. Continue R-007. |
 | `e8d17819`, `1ec99e4b`, `8e4d6e25`, `5bf08af1` — unsigned u8 shift boundaries | A safe small shift proves and replays; negative and width-sized shifts and a false high-bit result stay unproved; producer and kernel guards agree. | Other widths, oversized execution behavior, true high-bit result, casts, bitwise operations and cross-route parity remain open. Continue R-042. |
-| `90a38a3e`, `1fda811c` — conditional conjunct replay | Exact primitive positive conjuncts of a stable `and` guard now replay through the fallback rule; root 48 proves and forged/missing/overflow-sensitive cases refuse. | Root 51 still needs a signed-arithmetic derivation; current evidence used an older Stage1 product and does not close the broader conditional-call/replay inventory. Rebuild on the latest compiler before current claims. |
+| `71ede8b4` — signed unit-shift implication in conditional replay | The kernel accepts only the exact `(x + 1) < y ⇒ x < (y - 1)` shape, checks matching signed widths and primitive comparisons, requires both expressions to be safe, then derives the consequent with the linear arithmetic checker. The source fixture closes the prior `Slide.inner` root-51 replay gap; wrong-bound, missing-conjunct, overflow and wrong-guard controls remain refused. | This is a narrow implication rule, not general conditional arithmetic. Audit fixed-width safety premises and source-to-certificate correspondence; add adversarial near-min/max and width/sort mutations, then rerun a matched pair using the current compiler before claiming current integration. Continue R-003/R-042. |
+| `90a38a3e`, `1fda811c` — conditional conjunct replay | Exact primitive positive conjuncts of a stable `and` guard now replay through the fallback rule; root 48 proves and forged/missing/overflow-sensitive cases refuse. | The original evidence predates the signed-shift extension and used an older Stage1 product. Root 51 is now closed by the narrow `71ede8b4` slice, but broader conditional-call/replay inventory and current-compiler integration remain open. |
 | `576a090f` — benchmark harness responsibility split | The overlong Luna benchmark driver is split into coherent process, validation, and orchestration modules under the source-size limit. | This is maintainability/iteration groundwork, not a verifier speedup; broaden real workload coverage and measure end-to-end test-loop savings under R-011/R-018. |
 
 The detailed acceptance sequence below is retained for reference; §23.17 is the authoritative
@@ -2064,17 +2065,20 @@ A useful feature closes a real gap with checked evidence. An optimization saves 
 ## 23.17 Re-ranked high-ROI program after the latest committed tranche
 
 This section supersedes the execution order in §23.16; the earlier section remains the detailed
-design and adversarial-gate catalog. Its baseline is proof HEAD `d0b946d6` plus the committed
+design and adversarial-gate catalog. Its rebaseline is proof HEAD `71ede8b4` plus the committed
 evidence named below. The worktree may contain later in-flight edits, and a commit hash does not
 mean a single coherent proof/replay product was built from it. Do not benchmark or make current
 support claims until product provenance is freshly checked.
 
-**Compiler preflight for the next validation:** the adjacent `Elisa-compiler` checkout was clean at
-revision `bc8def2eadf41dd088adce22b4d3d9e74aadfee9`; its Stage1 provenance check reported current,
-and `bin/elisac-stage1` had SHA-256
-`96eca8200bb268ea5cc1635a66d6b0da0cd85611331319c3227362d9421c2947`. This is the newest verified
-compiler input observed while updating this plan, not evidence that Elisa-Proof was rebuilt with
-it. The cited R-003 matched pair still needs qualification under this product.
+**Compiler preflight for the next validation:** the adjacent `Elisa-compiler` checkout is clean at
+revision `bc8def2eadf41dd088adce22b4d3d9e74aadfee9`; its `scripts/stage1_provenance.py check .
+bin/elisac-stage1` reports current, and that product has SHA-256
+`96eca8200bb268ea5cc1635a66d6b0da0cd85611331319c3227362d9421c2947`. The installed
+`~/.elisac/elisac-stage1` wrapper instead points to snapshot `7b27fa31`; it is not the latest
+compiler and its snapshot does not have the current checkout's provenance file. For fresh work,
+select the explicitly checked `../Elisa-compiler/bin/elisac-stage1` and matching runtime, and record
+both identities. This is compiler-input evidence only, not evidence that Elisa-Proof was rebuilt
+with it. The cited R-003 matched pair still needs qualification under this product.
 
 ### Ranking rules
 
@@ -2102,6 +2106,7 @@ it. The cited R-003 matched pair still needs qualification under this product.
 | Same-root build locking, staged preparation, and failed-link preservation (`1abf91e3`, `2d7f2aac`, `b7f26cf9`, `04b91100`; R-015 evidence) | Avoids two common sources of misleading or unusable proof/replay binaries. | Publication still consists of sequential renames; crash recovery, immutable source snapshots and separate-root writer coordination remain open. |
 | Tactic sibling/mutation/stale-context adversarial tests (`c864a3c3`, `7a215424`, `69fc8338`) | Demonstrates that selected context substitution and mutation attacks are caught. | Stable semantic context and binder IDs, immutable validated inputs, general arena-generation checks and complete route coverage are not implemented by tests alone. |
 | Profiler lifecycle summary and known-event analyzer calibration (`3dc4dad5`, `a5cba7a7`, `fab7dba0`) | Makes capture quality and logical-live versus retained-capacity measures less ambiguous. | Calibration is synthetic. There is no calibrated real proof-engine allocation profile, lifetime/sview probe, phase attribution, or overhead result. |
+| Fact-growth scaling evidence (`13f5da2f`, R-013) | A 25-case one-axis harness varies relevant/irrelevant/duplicate facts and match-arm width; 24 cases prove and replay, and the 13-duplicate case refuses at the expected budget. Every process has wall/RSS bounds. | These are bounded sweeps, not asymptotic guarantees or paired optimization evidence; several key solver-work counters and per-goal allocation/time metrics remain absent. The products were built with the then-pinned `7b27fa31` compiler, not the current `bc8def2e` Stage1. Rebuild before current-product claims. |
 | Narrow signed/unsigned division slices (`7084c68d`, `f6e18613`, `605710a9`, `6776977c`, `9793a98f`, `b5793019`) | Protects high-risk division edge cases and confirms some exact properties independently replay. | Only selected `u64` quotient and `i64` division/remainder cases; do not extrapolate to other widths or machine operations. |
 | Semantic benchmark reporting and scalar witness hash lookup (`e972dc02`, `4eb4fec1`, related R-019 tests) | Gives the measurement harness useful classification and a candidate for reducing repeated lookup work. | A complete current corpus and evidence that this index reduces real end-to-end work without outcome drift are still missing. |
 
@@ -2210,6 +2215,10 @@ These are measurement gates, not optimization claims. Complete them before broad
     irrelevant premises, duplicate facts, branches, equality width, goals, AST size, certificate DAG,
     package bytes and dependency fanout. Include exact cap and one-over fixtures; publish observed
     work, CPU, RSS and confidence range rather than extrapolating asymptotics from a single point.
+    The landed relevant/irrelevant/duplicate-fact and match-width sweep (`13f5da2f`) is a useful
+    first slice only: add explicit fact-visit/comparison, branch-copy/join and allocation counters
+    before using it to choose an index or cache redesign; rerun on the current compiler and matched
+    products. Do not call its 25 samples a general complexity bound.
 20. **P1.8 — Establish coherent paired baselines (R-011/R-015).** Use at least seven alternating
     baseline/candidate rounds after warmup, with source and executable manifests checked before and
     after each batch. Compare exact semantic JSON, trust roots, declaration/obligation inventory,
