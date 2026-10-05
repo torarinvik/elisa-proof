@@ -198,6 +198,27 @@ def malformed_case(package, label, reason=None):
         assert result["reason"] == reason, (label, result)
 
 
+# Keep a bounded positive control in this structure-aware runner as well as in the
+# enclosing package test: the malformed mutations below must not disturb valid replay.
+positive, _ = run_fresh(with_theorem(base, assumption), "structure-positive-control",
+                        must_refuse=False)
+assert positive["status"] == "replayed" and positive["summary"] == {
+    "theorems": 1, "replayed": 1, "not_replayed": 0
+}, positive
+
+# Every node record has three required textual metadata fields, independent of node kind.
+# Mutate each field's JSON type on the theorem's reachable conclusion node; reject at schema
+# admission, before a theorem result can be partially reported. These field-type mutations
+# are distinct from the existing numeric payload, index, and unknown-kind cases below.
+for field, value in (("operator", []), ("name", None), ("secondary_name", 7)):
+    malformed = with_theorem(base, assumption)
+    malformed["kernel"]["nodes"][assumption["conclusion"]][field] = value
+    result, _ = run_fresh(malformed, "node-text-schema-" + field, must_refuse=True)
+    assert result["reason"] == "node-schema", (field, result)
+    assert result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, (field, result)
+    assert result["theorems"] == [], (field, result)
+
+
 # Deeply nested wrong-typed payloads stress parser recursion while ensuring the strict
 # package reader, not theorem comparison, must refuse each structure.
 nest_template = compact_seed(base).decode("ascii")
@@ -285,7 +306,8 @@ large["source"]["path"] = "x" * (8 * 1024 * 1024)
 result, workload_seconds = run_fresh(large, "oversized-string", must_refuse=True)
 assert workload_seconds < WALL_LIMIT_SECONDS, workload_seconds
 
-print("R-006 structured package fuzz: 5 nesting depths, 8 exact-index boundaries, 5 child-indexes, "
+print("R-006 structured package fuzz: positive replay control, 3 node text-schema mutations, "
+      "5 nesting depths, 8 exact-index boundaries, 5 child-indexes, "
       "1 unknown reachable node tag, 4 child ranges, 2 node refs, 2 cycles, 1 forward ref, "
       "and 1 8-MiB parser workload passed; "
       "peak wall %.3fs, CPU %.3fs, RSS %d bytes (limits: %ds CPU, %d bytes RSS, %ds wall)" %
