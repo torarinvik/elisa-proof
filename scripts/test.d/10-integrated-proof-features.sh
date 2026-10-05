@@ -16,6 +16,7 @@ run_py_test test_quantifier_dispatch.py
 run_py_test test_quantifier_endpoint_sorts.py
 run_py_test test_local_call_result_binding.py
 run_py_test test_capture_result_alias.py
+run_py_test test_mutable_local_resources.py
 run_py_test test_integer_unit_refutation.py
 run_py_test test_null_store_identity.py
 run_py_test test_global_constant_relevance.py
