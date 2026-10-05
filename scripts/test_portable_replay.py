@@ -139,7 +139,7 @@ def export(example):
 
 def replay_text(text, name):
     path = WORK / (name + ".json")
-    path.write_text(text)
+    path.write_bytes(text) if isinstance(text, bytes) else path.write_text(text)
     run = subprocess.run([str(REPLAY), str(path)], capture_output=True, text=True, timeout=120)
     result = json.loads(run.stdout)
     assert result["format"] == "elisa-proof-replay-result-v1", result
@@ -156,7 +156,7 @@ def replay(package, name):
 
 
 def refused(package_or_text, name, status, reason):
-    if isinstance(package_or_text, str):
+    if isinstance(package_or_text, (str, bytes)):
         code, result = replay_text(package_or_text, name)
     else:
         code, result = replay(package_or_text, name)
@@ -511,6 +511,25 @@ refused(dag, "exponential-dag", "over-budget", "identity-budget")
 text = json.dumps(with_theorem(base, assumption))
 refused(text.replace('{"format": ', '{"format": "elisa-proof-package-v1", "format": ', 1),
         "duplicate-key", "malformed", "package-schema")
+# Boolean fields accept only JSON booleans. Similar-looking values must fail as a structured
+# source-schema error before any kernel package is admitted.
+for malformed_boolean in (0, 1, None, "false", [], {}):
+    claim = with_theorem(base, assumption)
+    claim["source"]["authenticated"] = malformed_boolean
+    refused(claim, "authenticated-type-%s" % (type(malformed_boolean).__name__,),
+            "malformed", "source-schema")
+# Raw malformed UTF-8 anywhere in the package is rejected before JSON parsing. Exercise overlong,
+# truncated, surrogate, out-of-range, stray-continuation, and invalid-lead encodings in a
+# presentation string so the refusal cannot be attributed to theorem identity mismatch.
+for index, invalid_utf8 in enumerate((b"\xff", b"\xc3", b"\xed\xa0\x80", b"\xf4\x90\x80\x80",
+                                      b"\x80", b"\xc0\xaf")):
+    claim = copy.deepcopy(assumption)
+    claim["name"] = "r006-utf8-probe"
+    package_bytes = json.dumps(with_theorem(base, claim), separators=(",", ":"),
+                               ensure_ascii=False).encode("utf-8")
+    package_bytes = package_bytes.replace(b'"r006-utf8-probe"',
+                                          b'"r006-' + invalid_utf8 + b'-probe"', 1)
+    refused(package_bytes, "invalid-utf8-%d" % index, "malformed", "utf8")
 extra = with_theorem(base, assumption)
 extra["kernel"]["nodes"][0]["proof"] = True
 refused(extra, "extra-node-key", "malformed", "node-schema")
