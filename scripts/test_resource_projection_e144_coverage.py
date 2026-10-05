@@ -45,6 +45,20 @@ assert any(
     for goal in positive["goals"]
 ), "typed aggregate copy resource-safety certificate did not replay"
 
+fixed_array = report("resource_projection_e144_fixed_array_copy", 0, "proved")
+assert fixed_array["summary"]["semantic_errors"] == 0, fixed_array["summary"]
+assert fixed_array["summary"]["obligations"] > 0, fixed_array["summary"]
+assert fixed_array["summary"]["proven"] == fixed_array["summary"]["obligations"], fixed_array["summary"]
+assert fixed_array["trust"]["trusted_assumptions"] == [], fixed_array["trust"]
+assert fixed_array["replay"]["certificates"] == fixed_array["replay"]["replayed"], fixed_array["replay"]
+assert fixed_array["replay"]["gaps"] == 0, fixed_array["replay"]
+assert any(
+    goal["name"] == "resource_projection_e144_fixed_array_copy"
+    and goal["rule"] == "resource-safety" and goal["proven"]
+    and goal.get("replay_status") == "replayed"
+    for goal in fixed_array["goals"]
+), "fixed-array aggregate copy resource-safety certificate did not replay"
+
 mutable_write = report("rejected_resource_projection_e144_mutable_field_write", 1, "failed")
 assert any(
     finding["name"] == "rejected_resource_projection_e144_mutable_field_write"
