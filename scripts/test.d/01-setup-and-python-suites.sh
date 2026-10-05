@@ -163,6 +163,7 @@ run_py_test test_call_result_width.py
 run_py_test test_adt_library.py
 run_py_test test_adt_parser.py
 run_py_test test_match_refuted_arms.py
+run_py_test test_match_exhaustiveness.py
 run_py_test test_chained_pure_calls.py
 run_py_test test_dispatcher_budget.py
 run_py_test test_qualified_constants.py
