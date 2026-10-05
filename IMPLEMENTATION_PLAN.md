@@ -2146,14 +2146,15 @@ evidence named below; it is retained as a historical snapshot, not the current b
 single coherent proof/replay product was built from it. Do not benchmark or make current support
 claims until product provenance is freshly checked.
 
-**Compiler preflight for the next validation:** the adjacent `Elisa-compiler` checkout is clean at
+**Historical compiler preflight (original §23.17 snapshot only; superseded by §23.18):** the
+adjacent `Elisa-compiler` checkout was recorded as clean at
 revision `bc8def2eadf41dd088adce22b4d3d9e74aadfee9`; its `scripts/stage1_provenance.py check .
-bin/elisac-stage1` reports current, and that product has SHA-256
+bin/elisac-stage1` reported current at that time, and that product's SHA-256 was
 `96eca8200bb268ea5cc1635a66d6b0da0cd85611331319c3227362d9421c2947`. The installed
-`~/.elisac/elisac-stage1` wrapper instead points to snapshot `7b27fa31`; it is not the latest
-compiler and its snapshot does not have the current checkout's provenance file. For fresh work,
-select the explicitly checked `../Elisa-compiler/bin/elisac-stage1` and matching runtime, and record
-both identities. This is compiler-input evidence only, not evidence that all of Elisa-Proof at
+`~/.elisac/elisac-stage1` wrapper instead pointed to snapshot `7b27fa31`; it was not the latest
+compiler and its snapshot did not have the checkout's provenance file. At that time, fresh work
+was directed to select the explicitly checked `../Elisa-compiler/bin/elisac-stage1` and matching
+runtime and record both identities. This is compiler-input evidence only, not evidence that all of Elisa-Proof at
 `ed9e0390` was rebuilt with it. The bounded R-003 root-51 slice has a matched current-Stage1 pair at
 proof commit `fcbc4b95` (`ee9ba097`); it closes that root only. A newer focused edge-test pair at
 proof commit `b7f5dd74` exercised the added near-maximum and overflow-guard fixtures. Neither pair
