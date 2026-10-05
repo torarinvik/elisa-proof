@@ -45,6 +45,36 @@ replay in the same focused command.
 | `minimal_conditional_signed_unit_shift_missing_premise_refusal.elisa` | Removes the source premise `at < count`; body/ensure remains unproved, with zero replay gaps. |
 | `minimal_conditional_overflow_refusal.elisa` | Unbounded source inputs; ensure refused with complete replay. |
 
-These tests check fail-closed behavior at the available product identities. The unsigned-sort
-gap needs separate producer/replay follow-up. A fresh matched build from the audited branch head,
-the broader R-003 inventory, and the full R-042 integer matrix remain open.
+These initial checks used an earlier matching product pair and exposed the unsigned producer/replay
+gap. Follow-up remediation and validation against a fresh pair from this branch are recorded below.
+
+## Producer/replay guard agreement follow-up
+
+Commit `f915072c2b3aab191ef2bad7ffe183e8a563b6d5` adds a narrow source-producer guard for the
+exact fallback shape recognized by the kernel's signed unit-shift rule. If that shape carries an
+unsigned width witness, the producer records the goal as unproved before its generic mathematical
+integer search can emit a goal certificate. The existing kernel rule remains signed-only. Signed
+instances continue through the range-checked source and replay paths.
+
+A fresh matched strict O2 pair was built from a clean worktree at proof HEAD
+`f915072c2b3aab191ef2bad7ffe183e8a563b6d5`, source tree
+`51d6d770b5212386b9b9f73fe70d0b13025793071139da4aa52a133a320c2cef`, and frontend revision
+`7b27fa312c5af923f044f6ee0e5e1de4f811f595` / tree
+`ab8926f6080a13d21b06606af251e6f0027c2db5`. Both products were built strict O2 with the clean
+Stage1 compiler at `bc8def2eadf41dd088adce22b4d3d9e74aadfee9`; their shared pair generation is
+`55467af5b6364627a786bbbd47d393b1`.
+
+| Product | Build identity | SHA-256 |
+| --- | --- | --- |
+| Proof CLI | `dc80e3c7aae30670c6de595b975a64dcb133209aa7ce2afadf808bc3004772b1` | `ff098da001445ff7d257ff865e58bf274382587b78fd914c712c4f7ffed7034b` |
+| Portable replay | `2323aa202d3e38f0085f020cda64740aaaa441daf5c63d3a78ff2405612e737e` | `bc0a1cbff0dc419833d21e875d1892cd24c3ce6a41b43e22fd0afbb748b81c0c` |
+
+Validation against these products:
+
+- `ELISA_PROOF_BIN="$PWD/build/elisa-proof" ELISA_PROOF_REPLAY_BIN="$PWD/build/elisa-proof-replay" python3 scripts/test_conditional_ensure_replay_gap.py` passed. The positive source fixture proved with 2/2 internal replays; `Slide.inner` roots 48 and 51 both replay; every negative control, including u64, failed with zero gaps and complete replay.
+- Exporting the positive fixture with `build/elisa-proof --package` and replaying it with `build/elisa-proof-replay` returned `replayed`, 2/2 theorems, zero not-replayed.
+- The u64 control now reports `failed`, one certificate replayed, zero gaps, and declaration reason `body-unverified`; its unsupported goal has no emitted goal certificate. Signed near-min/max and wrong-width controls remain ordinary unproved obligations with complete replay.
+- `git diff --check` passed before the evidence update; the final evidence-only change is also whitespace-checked before commit.
+
+This closes the producer/replay disagreement for this exact unsigned fallback shape only. The
+broader R-003 inventory, generalized conditional replay, and full R-042 integer matrix remain open.

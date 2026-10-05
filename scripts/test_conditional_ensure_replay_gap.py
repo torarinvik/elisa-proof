@@ -80,6 +80,8 @@ for name in ("minimal_conditional_missing_conjunct_refusal.elisa",
     assert declaration["verification_reason"] != "replay-gap", (source, declaration)
     if name == "minimal_conditional_signed_unit_shift_wrong_sort_refusal.elisa":
         assert declaration["verification_reason"] == "body-unverified", (source, declaration)
+        failed_goal = next(item for item in report["goals"] if not item.get("proven"))
+        assert failed_goal["replay_status"] == "not_certified" and failed_goal["certificate_id"] is None, failed_goal
     assert declaration["verified"] is False, (source, declaration)
     assert any(item.get("kind") == "ensure-unproven" and item.get("name") == "inner"
                for item in report["findings"]), (source, report["findings"])
