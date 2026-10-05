@@ -20,3 +20,19 @@ assumption discharge soundness.
 
 The mutation test checks array-count independence after a child mutation. It does not attempt to
 forge a solved child or replay a mutated certificate; those remain separate gates.
+
+## Stale child-context mutation
+
+The same harness now takes a successfully closed disjunction case, replaces the left child's
+`initial_facts` with a copy of the right sibling's context, and requires
+`proof_tactic_kernel_branch_transition_replay` to refuse it. The parent branch transition checks
+the exact ordered hypotheses generated for each side, so a valid child cannot be attached to a
+sibling context. No implementation defect was observed in this path.
+
+- Proof source revision: `d2c2aa19c09cf3a92f79e4508a23247116c3b729`.
+- Compiler and runtime identities are the same pinned Stage1 and runtime listed above.
+- O0 object SHA-256: `007670330059755a39ac57e2ebfd967c607b5acc554f9055971a10032c9943c2`.
+- Executed harness SHA-256: `9821d5070e3930d629715daad8661256dbc777db2698a43e8b00f137d6902abf` (exit 0).
+
+This checks one tactic branch API and one mutation. It does not establish global context identity,
+mutability guarantees, or eigenvariable discipline.
