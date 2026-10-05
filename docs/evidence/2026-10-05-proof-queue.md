@@ -83,6 +83,17 @@ found no file matching `d734fd75…`. The 74f binary reproduction therefore esta
 retained manifest-bound binary crashes, but does not reproduce the exact measured executable or
 establish the cause.
 
+LLDB on the exact 51-byte qualified-return reproducer and binary `74f498…` stopped at
+`proof_qualified_body_rewrite +384`, an indexed store into the rewritten statement array. The
+array base register pointed into the arena and another register held statement index `0x2f`, but
+the array index register held `0x16fdfa010`, a stack address, causing the invalid write. This
+narrowly identifies corrupted or mis-threaded append-index state in the body rewrite; it is not
+evidence of a stale AST handle dereference. Source history contains region-check-related changes
+to how the rewritten body is copied back, making a borrow/region interaction plausible, but the
+crashing binary was built from dirty source and the exact cause remains unproven. Full registers,
+disassembly, and the minimized repro are retained under
+`/private/tmp/p00-qualified-constant-min-20261005/`.
+
 The current strict O0 product has SHA-256
 `1a1ea6eac860ffc3854f7bd209135f4513ce97780639853a0c1993b323ea2d8e`; its manifest SHA-256 is
 `cf25f6bd4155207cbca7dba5734d7eb74c0c91758a25a167f196a522999990f6`. It binds source digest
