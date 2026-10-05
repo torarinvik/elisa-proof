@@ -155,6 +155,7 @@ run_py_test test_source_admission_matrix.py
 run_py_test test_negated_conjunction_fallthrough.py
 run_py_test test_or_chain_loop_update.py
 run_py_test test_correlated_disjunction.py
+run_py_test tests/test_correlated_disjunction_consumer_resolution.py
 run_py_test test_closed_width_formulas.py
 run_py_test test_parameter_heavy_return_analysis.py
 run_py_test test_numeric_cast_operator.py
