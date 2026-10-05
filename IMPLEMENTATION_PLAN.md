@@ -619,6 +619,16 @@ parameter/range/alias/resource boundary inventory and the rest of this gate.
 
 **Gate:** Truncation, overflow lengths, cyclic terms, unknown tags, invalid UTF-8 policy, malformed Boolean payloads and incompatible versions produce bounded structured rejection. Fuzz parser and checker together; retain minimized failures.
 
+**Progress (2026-10-05):** A source audit of the portable replay path found existing caps and checks
+for package file size, exact object schemas (including duplicate keys), numeric encodings, copied
+node strings, node/child/theorem/hypothesis counts, identity bytes, node shapes, child spans,
+cycles, forward references, theorem roots and rule dispatch. Existing focused tests include those
+malformed shapes and selected count limits. The inventory note
+`docs/evidence/2026-10-05-r006-decoder-boundary-inventory.md` records these controls and limits
+its claims to source review: it did not run the tests or validate a current binary. Fuzzing,
+invalid-UTF8/parser-resource policy, complete decoder/ID inventory, systematic boundary cases and
+measured worst-case memory remain open, so R-006 is not complete.
+
 #### R-007 — Freeze typed contexts and control assumption discharge
 
 **Change:** Establish immutable/versioned checked environments, distinct binder IDs, capture-avoiding substitution and exact context membership. Audit branches and tactics for leaked assumptions, reused scratch handles and mutation after checking. Share term storage only under explicit lifetime and context rules.
