@@ -310,6 +310,9 @@ os.execv('/bin/mv', ['mv', *args])
     assert repaired_pair[0]["proof"] == repaired_pair[1]["proof"]
     print("build publication: competing writer=2; second-link failure=42 preserved pair; "
           "interrupted replay rename=88 exposed mismatched source digest; later build repaired pair")
+    print("build publication source trees: installed-proof="
+          f"{interrupted_pair[0]['proof']['source_tree_sha256']}; installed-replay="
+          f"{interrupted_pair[1]['proof']['source_tree_sha256']}")
 
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
