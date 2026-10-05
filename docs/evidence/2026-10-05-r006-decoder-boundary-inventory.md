@@ -32,6 +32,10 @@ pair of individually valid strings whose aggregate exceeds the copied-string bud
 This source audit did not execute those tests or rebuild a product. The tests' source locations
 show intended coverage but do not establish behavior for the current binary.
 
+A separate isolated Luna review on `codex/plan-r006-reader-audit` also found no substantiated
+narrow malformed-input fix and did not change or test code; its concise cross-check is
+`docs/evidence/2026-10-05-r006-package-decoder-audit.md` (commit `5d72139c`).
+
 ## R-006 work still required
 
 - The plan's full decoder inventory spans `src/portable/`, `src/proof/kernel_replay/` and

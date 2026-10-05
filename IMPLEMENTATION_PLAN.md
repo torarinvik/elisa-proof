@@ -627,9 +627,11 @@ node strings, node/child/theorem/hypothesis counts, identity bytes, node shapes,
 cycles, forward references, theorem roots and rule dispatch. Existing focused tests include those
 malformed shapes and selected count limits. The inventory note
 `docs/evidence/2026-10-05-r006-decoder-boundary-inventory.md` records these controls and limits
-its claims to source review: it did not run the tests or validate a current binary. Fuzzing,
-invalid-UTF8/parser-resource policy, complete decoder/ID inventory, systematic boundary cases and
-measured worst-case memory remain open, so R-006 is not complete.
+its claims to source review: it did not run the tests or validate a current binary. A separate
+Luna audit, recorded in `docs/evidence/2026-10-05-r006-package-decoder-audit.md`, found no
+additional narrow fix. Fuzzing, invalid-UTF8/parser-resource policy, complete decoder/ID
+inventory, systematic boundary cases and measured worst-case memory remain open, so R-006 is not
+complete.
 
 #### R-007 — Freeze typed contexts and control assumption discharge
 
