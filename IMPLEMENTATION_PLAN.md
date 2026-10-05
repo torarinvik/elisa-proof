@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: updated execution roadmap, initially inspected on 2026-10-05 at clean proof HEAD `cd42c89c`. Section 23 defines the next high-ROI execution order; [BACKLOG.md](BACKLOG.md) retains the themed feature inventory and completion records. Sections 0A and 5–22 retain implementation evidence and architectural requirements. This is a plan, not a claim that every preceding milestone is complete or that the current full suite has been rerun. Historical measurements apply only to their recorded products.
+Status: rebaselined on 2026-10-05 against implementation HEAD `15560c60aab2` (the source baseline immediately before this plan-only update). Section 23 defines the current ranked execution order; [BACKLOG.md](BACKLOG.md) retains the themed feature inventory and completion records. Sections 0A and 5–22 retain architecture and historical evidence. A follow-up expansion of the qualified-call regression test is uncommitted and has not yet been validated from a stable source snapshot. One fresh Stage1 run of the earlier committed harness returned success, but source changed during that compilation, so treat it only as a smoke signal. This documentation update did not rebuild shared products or run the full suite. Historical measurements apply only to their recorded products.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -10,7 +10,7 @@ Scheduling update: §23 now carries the next ordered backlog. The P-00–P-07 ev
 
 ### Audit baseline and limits
 
-The 2026-10-05 audit used proof HEAD `13d686b2`, frontend pin `4c479ad1`, and a strict O2 arm64 macOS binary whose recorded source digest matched the dirty working tree. Evidence is retained locally under `build/audit-20261005/`; that ignored directory is not a durable release record. Copy reviewed summaries and minimized regressions into tracked evidence when completing the corresponding task.
+An earlier 2026-10-05 audit used proof HEAD `13d686b2`, frontend pin `4c479ad1`, and a strict O2 arm64 macOS binary whose recorded source digest matched the dirty working tree. This is historical profiling context, not a current product baseline. Evidence is retained locally under `build/audit-20261005/`; that ignored directory is not a durable release record. Copy reviewed summaries and minimized regressions into tracked evidence when completing the corresponding task.
 
 - `kernel_comparison_runtime.elisa` and mocap `src/tools/track.elisa` each produced SIGSEGV and no JSON in three ordinary runs. Debugger runs stopped at the same invalid write; a link map identifies `proof_qualified_body_rewrite`. This localizes the symptom, not whether the source, compiler lowering, or runtime is responsible.
 - `field_equality_runtime.elisa` exceeded a 20-second audit bound. This is not a measured completion time or the product's configured timeout.
@@ -537,17 +537,36 @@ The final measure is not “how many goals say proved.” It is how much useful 
 
 ## 23. Current high-ROI execution roadmap (2026-10-05)
 
-This section supersedes scheduling in §0, §0A and §20, while preserving their acceptance requirements. It defines **90 ordered work packages**. Order reflects risk removed, breadth of useful verification enabled, and total engineering cost; it is not an invitation to implement every subsystem simultaneously. Finish a small measurable vertical slice and commit it before starting the next. A reproducible false acceptance or memory-corruption defect preempts the queue.
+This section supersedes scheduling in §0, §0A and §20, while preserving their acceptance requirements. It defines **90 durable work packages** plus the finer-grained ranked execution ladder in §23.16. The R-IDs are stable tracking identities, not a promise to execute numerically. The ladder reflects current reproduced failures, trust risk, breadth of useful verification, expected cost reduction, and dependency order. Finish a small measurable vertical slice and commit it before starting the next. A reproducible false acceptance, crash in a current supported product, or memory-corruption defect preempts the queue.
 
 ### 23.1 What the next program builds on
 
-The inspected checkout is clean at `cd42c89c`; the local branch is seven commits ahead of its upstream tracking branch. That is an inventory observation, not authorization to push, merge other branches, or publish a release. This documentation update did not rebuild products or run the full proof/compiler matrices.
+The committed implementation baseline for this update is `15560c60aab2`. Commit `57572c60` adds
+qualified deterministic-call replay validation and a source-level forged-module regression. The
+committed version of its regression returned success once under a fresh Stage1 check, but the source
+tree advanced during compilation; an uncommitted expansion now adds forged-summary controls. Count
+the implementation as landed but do not close the validation gate until the expanded test passes
+from an immutable source snapshot. Do not overwrite or stage that test edit. This plan-only change
+does not rebuild shared products or run the full proof/compiler matrices.
 
-Recent checked-in gains include source-derived deterministic call-witness replay, an explicitly capped 32-name difference-closure search with boundary/over-bound regressions, and an agent protocol schema gate. Existing work also includes portable packages, report/build identity controls, immutable declaration-artifact envelopes, qualified-constant regressions, scalar-witness indexes, and paired performance harnesses. Extend these foundations. Do not schedule their existence as new deliverables.
+The recent high-ROI tranche added source-derived deterministic call-witness replay, including
+qualified-call target validation; a separately named, explicitly capped 32-name difference-closure
+search; bounded scalar quantifier triggers; typed unsigned quotient-bound replay and a subsequent
+search-order fix; exhaustive enum-match fact replay; strict portable UTF-8 and package-size checks;
+report verdict/proven-attempt invariants; a compact JSON route; agent protocol schema checks; and a
+provenance-guarded paired benchmark. It also reorganized the portable replay test suite by
+responsibility and added fact-growth and arithmetic soundness controls. These are foundations, not
+blanket evidence that each broad feature is complete: extend their source-boundary, negative,
+coverage, and performance gates rather than re-listing the landed feature as new work.
 
-During this documentation pass, other work advanced the branch through `239ba817` and modified call-witness replay. Those implementation changes are outside this documentation task and are not validated here. The themed backlog additionally records completed W-01 linear-oracle reconstruction, W-02 symbolic-range rules (with further instance work open), W-03 indexed framing and C-01 bounded difference closure. R-025/R-049/R-057/R-070 extend those capabilities; they must not reopen completed work under new IDs. Before executing any R task, reconcile its scope with current BACKLOG.md evidence and retire already-satisfied subrequirements.
+Older roadmap revisions inspected `239ba817`; that historical checkpoint is superseded by the
+`d10085aae1da` baseline above. The themed backlog additionally records completed W-01 linear-oracle
+reconstruction, W-02 symbolic-range rules (with further instance work open), W-03 indexed framing
+and C-01 bounded difference closure. R-025/R-049/R-057/R-070 extend those capabilities; they must
+not reopen completed work under new IDs. Before executing any R task, reconcile its scope with
+current BACKLOG.md evidence and retire already-satisfied subrequirements.
 
-Important remaining gaps are concrete:
+Important remaining gaps, based on committed source and tracked evidence, are concrete:
 
 - Portable output still emits `source.authenticated: false` in [package_output.elisa](src/app/package_output.elisa). Independent abstract replay and authenticated program correctness are separate capabilities.
 - P-04 has artifact envelopes/storage controls, but no completed typed frontend artifact pipeline, semantic dependency discovery, reverse invalidation, or verifier reuse. P-05 has restart/replay tests, not a completed incremental verification session.
@@ -556,6 +575,11 @@ Important remaining gaps are concrete:
 - Protocol validation exists, but its present test helper implements only a small schema-keyword subset. A passing shape check is not validation of every semantic cross-field invariant.
 - Coverage is heterogeneous. A successful kernel-core fixture is valuable; it is not a proof of complete kernel soundness, compiler correctness, or every source adapter.
 - Trust, source completeness, verdict correctness, proof coverage, latency, and memory must be measured separately. Increasing “proven” counts alone is not the optimization objective.
+- The unsigned-division red gate was traced to producer search ordering, not a kernel replay mismatch. Commit `15560c60` tries the narrow quotient rule before recursive symbolic/quantified tiers that could exhaust shared work. A fresh isolated Stage1 build proved/replayed all three positive quotient bounds and kept all five negative controls open; focused division, remainder, and signed-variable-divisor checks passed. The shared proof binary still has the older `12c634…` digest, and the proof/replay pair remains mismatched, so this capability is source-level fixed but still needs a coherent pair rebuild and integrated-suite confirmation. Do not mark all of R-042 complete; the broader machine-integer matrix remains open.
+- The last tracked R-011 evidence found valid individual proof/replay manifests but different proof-source-tree hashes. The benchmark correctly refused to measure them. Until one immutable Stage1 build produces a matched product pair, do not use those executables for portable-package integration or performance claims.
+- The source-size guard currently fails because `src/app/cli.elisa` is 614 lines, above the repository's 600-line responsibility boundary. Split by behavior with an explicit namespace/API boundary; do not create arbitrary numbered fragments. Preserve this as a maintenance gate, not a reason to delay soundness fixes.
+- Call-summary, loop, and resource features have meaningful partial implementations, but high-value holes remain: conditional result transport through named/forwarded calls, a loop invariant combined with early break and a verified call, and a caller-place witness preserved through a forwarded by-reference argument. These should be small source-bound vertical slices with replay and adversarial controls, not broad rewrites.
+- Instrumented profiles identify replay validation, root checks, witness extraction, and arena helpers as candidates, but the captures are incomplete/dropped and do not establish uninstrumented bottlenecks. The expensive field-equality workload also needs minimization and current-product reproduction before selecting congruence versus interning work.
 
 ### 23.2 Work-package contract and priority rules
 
@@ -610,6 +634,15 @@ source-level cause and qualified regression.
 
 **Gate:** Original valid roots independently replay; wrong guards, missing conjuncts, overflow-sensitive variants and forged branch certificates refuse. A conservative refusal can contain the defect but must remain listed as a capability gap until useful proof is restored.
 
+**Current execution note (2026-10-05):** Commit `57572c60` adds
+`proof_replay_deterministic_qualified_target`, which permits a qualified function witness only
+when the source declaration name is globally unique and the declaration is in the requested
+module, plus a regression that forges a wrong-module callee. The committed Stage1 harness returned
+success once, but the source tree advanced while it compiled and the test file now has an
+uncommitted forged-summary expansion. Validate the final test source from an immutable tree before
+closing this slice. This narrow change does not close the census's conditional `Slide.inner` roots,
+nor the complete call-site/argument/state binding gate in R-005.
+
 #### R-004 — Make whole-program admission completeness structural
 
 **Change:** Audit `certificate_admission.elisa`, report aggregation and declaration scheduling for paths where missing bodies, skipped branches, unsupported nodes, semantic errors or truncated checks disappear from the verdict. Represent expected obligation inventory and completed checks explicitly; tie each exported theorem to a checked root.
@@ -635,6 +668,13 @@ six-class/twelve-route source-admission matrix passed on strict O2 product SHA-2
 [`docs/evidence/2026-10-05-r004-proven-attempt-inventory.md`](docs/evidence/2026-10-05-r004-proven-attempt-inventory.md).
 This still does not bind a complete expected obligation inventory to the original AST or prove
 that every unsupported path has a recorded attempt, so R-004 remains open.
+
+The latest continuation (`e83c4369`, documented at `d10085aa`) binds the `proven` count to the
+recorded successful-attempt inventory, in addition to declaration and finding counts. The source
+gate and mutation harness reject a deleted successful attempt and a success counter without a
+matching attempt. This closes a report-consistency subcase only; expected obligations must still
+be derived from the original admitted source/declaration schedule and reconciled against every
+terminal status, including unsupported and skipped paths.
 
 #### R-005 — Audit source-derived boundary facts and call witnesses
 
@@ -777,6 +817,10 @@ sentinel classes plus proof-byte/obligation/replay-count reporting remain to be 
 **Gate:** Compact and full routes agree on conclusions, assumptions, unresolved goals and replay. Large refusal reports stay bounded without silently truncating proof-critical data. Optional presentation truncation has an explicit marker and retrieval path.
 
 **Progress (2026-10-05):** Added an explicit `--summary-json` presentation route. It keeps status, verification state, source byte count and FNV-1a source fingerprint, declaration and obligation totals, replay-confirmed proven/unproven totals, finding-status counts, semantic diagnostic counts, trusted boundary facts, replayed certificate count and the empty trusted-assumption ledger. It sets `details.omitted: true` and names `--json` as the authoritative full-evidence route. Positive and refusal comparisons are recorded in [R-016 compact report evidence](docs/evidence/2026-10-05-r016-compact-report.md). This bounds serialized presentation size for the exercised reports; retained report memory, streaming, and a large-refusal stress bound remain unmeasured and are not claimed complete.
+
+The route is now checked in as `019cea37` and has focused positive/refusal coverage in
+`scripts/test_report_summary.py`. Extend parity tests to the full source/trust/replay dependency
+surface before relying on the compact route for batch tooling.
 
 #### R-017 — Set ratcheted, workload-specific performance gates
 
@@ -945,6 +989,16 @@ Prioritize constructs appearing in the current census over speculative language 
 **Change:** Specify and implement signed/unsigned arithmetic, casts, comparisons, division/remainder, shifts and bitwise operations for each supported width and target-sized type. Separate mathematical integers from machine values; attach wrap/overflow facts explicitly.
 
 **Gate:** Boundary matrix includes min/max, high-bit unsigned, divide-by-zero, signed-min division, invalid shifts and narrowing. Source, tactic, repair and portable replay agree; no heuristic reinterpretation via `i64`.
+
+**Progress (2026-10-05):** The required positive assertions initially failed on manifested proof
+binary `12c634…`, despite zero replay gaps. Diagnosis found that the producer tried the narrow
+unsigned quotient theorem only after recursive symbolic and quantified searches could consume the
+shared budget. Commit `15560c60` moves that sound, width-aware rule earlier; the kernel rule was
+already checked and required no semantic change. A fresh isolated Stage1 build proved and replayed
+the three positive cases and preserved all five negative controls; unsigned-division,
+unsigned-remainder, and signed variable-divisor focused tests passed. The shared executable has
+not yet been rebuilt, so rebuild proof/replay together and rerun the full integrated matrix before
+counting this subfeature closed. R-042 remains open for the rest of the width/sign/operation matrix.
 
 #### R-043 — Make float/string/character boundaries explicit
 
@@ -1256,19 +1310,48 @@ Dogfooding runs throughout the roadmap; these ordered packages deepen its guaran
 
 ### 23.13 Concrete first execution cycles
 
-Do not spend the first cycle designing all 90 packages. Use this ordered sequence:
+The previous cycle order is superseded by this current execution order. The detailed ranked slices
+and their local acceptance gates are in §23.16. In summary:
 
-1. **Cycle 1 — current truth:** R-001 and R-015; freeze exact products, rerun the small known-failure corpus and publish current coverage/cost evidence. Reconcile historical evidence, including whether the two conditional gaps still exist.
-2. **Cycle 2 — admission reliability:** R-002–R-005, prioritizing any reproduced unsafe behavior; land one minimized fix at a time. If historical cause remains unresolved, retain it as an incident and work on independently measurable current defects.
-3. **Cycle 3 — cost visibility:** R-010–R-014; add cheap counters and an allocation profile for the largest current complete workload plus the dominant timeout. Keep collector overhead and partial captures visible.
-4. **Cycle 4 — one dominant optimization:** choose R-019, R-023, R-024, R-025, R-026 or R-027 from the profile. Require exact conclusion/trust equivalence and repeatable uninstrumented improvement before claiming a gain.
-5. **Cycle 5 — incremental vertical slice:** R-028–R-032 on a two-module program with calls, constants and one refusal. Demonstrate body edit, contract edit, comment edit, missing dependency, restart and cancellation against cold checking.
-6. **Cycle 6 — coverage with controlled cost:** close the largest real-code root cause through R-037–R-054; show newly verified declarations, unchanged adversarial outcomes and bounded cost.
-7. Repeat the evidence/profile/feature loop; introduce expressive math and agent workflows as their dependencies permit. Keep kernel/specification dogfood and incident regression growth continuous.
+1. **Cycle 0 — freeze a trustworthy baseline:** review/land or reject the in-progress R-003
+   candidate; make one coherent Stage1 proof/replay build; refresh the small failure census and
+   preserve exact manifests. Do not benchmark or claim replay integration from a mismatched pair.
+2. **Cycle 1 — close live correctness reds:** reproduce and fix the unsigned-division positive
+   regression; close current producer/replay gaps and source-bound call witnesses; strengthen
+   whole-program obligation admission. Keep P-00's historical crash as a separately tracked
+   incident unless a current product reproduces it.
+3. **Cycle 2 — harden the trust boundary:** finish context/binder isolation, decoder fuzz and
+   resource limits, root-to-source trust dependencies, and semantic artifact invalidation.
+4. **Cycle 3 — make costs observable:** define complete counters and budgets, expand the versioned
+   corpus, integrate the profiler without dropped/partial captures, and measure allocation,
+   refusal, report and build/test costs.
+5. **Cycle 4 — optimize exactly one measured hot path:** use counter/profile evidence to choose
+   replay reuse, congruence/equality indexing, fact indexing, branch deltas, sparse arithmetic
+   evidence, or scratch reclamation. Compare complete outcomes and trust before/after; require
+   paired uninstrumented data.
+6. **Cycle 5 — deliver practical semantic slices:** conditional call-result transport; one
+   collection traversal with invariant/break/helper; forwarded-reference framing and region-view
+   lifetime; then effects/errors and checked ADT induction, each with source/replay controls.
+7. **Cycle 6 — make edits and proofs reusable:** typed frontend artifacts, reverse invalidation,
+   persistent certificates, a generation-safe local session, deterministic agent queries and
+   proof-text round-tripping.
+8. **Cycle 7 — dogfood and qualify:** prove selected verifier/kernel data-structure properties,
+   verify a bounded compiler pass against an independently stated model, run an independent
+   checker where feasible, and qualify exact products on supported platforms. Keep temporal and
+   concurrency claims explicitly staged behind their semantic foundations.
 
 ### 23.14 Performance objectives and stop conditions
 
 These are proposed engineering targets to ratify on the R-011 reference machines, not measured current capabilities:
+
+Performance is a first-class acceptance dimension, but there is not yet a reliable current
+end-to-end baseline for every workload. First make measurements complete and comparable; then
+ratchet limits from that baseline. For each optimization, name the predicted dominant operation and
+complexity, measure it directly, change one cause at a time, and require identical full outcomes,
+obligation inventories, trust dependencies, and independent replay. Use instrumented profiles to
+locate work and uninstrumented paired runs to claim speed. Report p50/p95, variance, CPU, RSS,
+live/retained arena state, work counters, output/proof bytes, and censored timeout/OOM outcomes.
+Report per-workload regressions; do not hide them in an aggregate geometric mean.
 
 | Workflow | Initial target | Required accompanying evidence |
 | --- | --- | --- |
@@ -1293,6 +1376,303 @@ Each completed cycle updates a compact scorecard:
 - **Usefulness:** verified declarations/contracts on pinned real code; unresolved obligations by root cause; annotations and manual proof steps saved.
 - **Independence:** replay completeness, source-authentication status, checker dependencies, solver-free and AI-free replay support.
 - **Performance:** cold/warm/edit p50/p95, CPU, peak RSS/live nodes, bytes, allocations, scans, replay work and cache miss reasons.
+
+## 23.16 Ranked implementation ladder after the recent high-ROI tranche
+
+This is the executable order for the next set of small commits. Each row maps to an existing R
+package unless marked as a maintenance gate; it does not create duplicate feature work. The R
+sections above remain the detailed semantic design and adversarial acceptance contract. A task is
+not complete because its code exists: attach the exact source/product identity, tests, replay and
+cost evidence specified here. If a new false-acceptance or current-product crash appears, pause the
+performance queue and move that defect to the front.
+
+### Phase 0 — trustworthy inputs and exact-current behavior
+
+1. **Review the landed qualified-call change and test expansion (R-003/R-005).** The source patch is
+   committed as `57572c60`; the test's forged-summary expansion is still uncommitted. Check exact
+   owner/argument/state provenance and run all positive and mutated-trace cases from one immutable
+   source snapshot before closing this slice; otherwise revise or discard only the follow-up while
+   preserving the reproducer.
+2. **Check Stage1 and all build inputs (R-015).** Record compiler binary hash/revision, frontend
+   revision, runtime/ABI, flags, target, source-tree digest, and build recipe. Reject stale Stage0
+   or mismatched Stage1 provenance before compiling or measuring.
+3. **Build proof and replay products atomically from one committed snapshot (R-015).** Use the
+   product-pair build path; verify both manifests and executable digests, and require matching
+   proof source, compiler, frontend, runtime, target, optimization, and options. Keep products in
+   fresh paths so no concurrent agent can replace a measured binary.
+4. **Refresh the exact-current census (R-001).** Run the qualified-constant reproducer, `Slide.inner`
+   conditional cases, call-summary/transport gaps, field-equality positive/refusal cases, recent
+   arithmetic gates, kernel core, and representative real-code inputs. Record every complete
+   report, refusal, timeout, memory stop, crash, and replay gap; do not call an incomplete report a
+   pass.
+5. **Integrate the unsigned quotient search-order fix (R-042).** The producer-order diagnosis and
+   fix are committed as `15560c60`; an isolated Stage1 build proved/replayed three positive
+   quotient bounds while five negatives stayed open. Rebuild a matched proof/replay pair and rerun
+   the script against that exact product. Confirm the success is not hidden by the previous
+   binary's stale source manifest or by a test-only isolated harness.
+6. **Keep unsigned-division adversarial controls fail-closed (R-042).** Preserve zero divisor,
+   mismatched width, signed negative dividend, unrelated ceiling, and potentially wrapping sum
+   refusals under the same source facts. Add wrong divisor type/cast, high-bit, and equality-boundary
+   controls; each report and standalone replay must agree.
+7. **Expand the rest of machine arithmetic semantics (R-042).** After the quotient slice integrates,
+   work through width/sign-specific remainder, casts, shifts, bitwise operations, signed-minimum
+   division, and overflow behavior. State which operations wrap, trap, or are unsupported; never
+   infer mathematical-integer laws from an `i64` representation.
+8. **Resolve the current R-003 replay inventory.** Trace each current conditional `Slide.inner`
+   root and each qualified/nested call witness from source node through producer trace to replay.
+   Either add the narrow missing derivation with mutations or make the producer refuse before
+   emitting a partial certificate. Keep a useful supported positive case; don't disguise a gap as
+   a blanket unsupported result.
+
+### Phase 1 — prove admission and source correspondence fail closed
+
+9. **Bind every call witness to its exact source call (R-005).** Replay the caller declaration,
+   call-site node, callee identity, formal-to-actual map, argument position, type/width, place,
+   source expression, and pre/post state version. Test same-typed swapped arguments, namespace
+   collisions, shadowing, parentheses, nested reference actuals, stale contracts, and alias changes.
+10. **Derive the expected obligation inventory from admitted input (R-004).** Compare source
+    declarations and supported executable paths with scheduled VCs, completed solver attempts,
+    replayed roots, refusals, and unsupported markers. Missing body, branch, imported dependency,
+    or unreachable unsupported operation must prevent unconditional `proved`.
+11. **Mutation-test every verdict count and route (R-004).** Delete a declaration, obligation,
+    attempt, successful proof, finding, or replay record; forge totals; duplicate IDs; and test CLI,
+    focused goal, tactic, repair, cache, and package routes. Require structural rejection, not just
+    inconsistent display text.
+12. **Give checked contexts and binders stable semantic identity (R-007).** Test stale context IDs,
+    alpha-renaming, same-spelled nested binders, eigenvariable escape, assumption discharge,
+    sibling contamination, arena-generation reuse, and mutation after validation. No name-only
+    equality may substitute for binder/declaration identity.
+13. **Complete portable and kernel decoder boundary tests (R-006).** Add structure-aware generated
+    truncation, duplicate/unknown tags, integer overflow, hostile lengths, escaped surrogate,
+    malformed Boolean, child-span, forward-reference, cycle, and version mutations. Check bounded
+    CPU/RSS as well as structured rejection; retain minimized corpus seeds for every finding.
+14. **Fuzz source import and certificate replay together (R-006/R-088).** Mutate valid source,
+    reports, and proof packages with exact one-field semantic corruptions. Assert no panic, crash,
+    partial proved output, or timeout escape; whenever producer output is accepted, replay it in a
+    fresh process with no AI/solver.
+15. **Publish the transitive trust graph (R-008).** Starting from each admitted root, report the
+    exact checker rule, adapter premises, source model, compiler/frontend guarantee, runtime/ABI
+    assumptions, package version, and external dependencies. Audit every theorem constructor;
+    keep trusted constructors private and unsupported assumptions explicit.
+16. **Version soundness incidents and invalidate old artifacts (R-009).** Add a semantic rule
+    version registry and a confirmed-incident format. Test pre-fix proof packages and cached reports
+    against post-fix builds; require replay under the new checker or explicit refusal/migration.
+    Cosmetic schema changes must not masquerade as semantic invalidation.
+17. **Dispose of P-00 with source-level evidence (R-002).** Attempt to recover the measured crashing
+    product/source identity, compare generated indexed-store/lifetime code, and determine whether a
+    current source/compiler reproducer exists. Close only with a causal fix and O0/O2 Stage0/Stage1
+    plus platform regressions, or a durable unresolved-incident record naming unavailable evidence
+    and affected product identities. A crash disappearing is not a causal explanation.
+
+### Phase 2 — establish performance truth before optimizing
+
+18. **Define a stable measurement schema (R-010).** Give each phase and counter a precise owner,
+    unit, denominator, scope, overflow policy, and inclusive/exclusive definition. Start with integer
+    work counters; use a monotonic clock only through a real compiler/runtime API. Counter failure
+    must not affect verifier status.
+19. **Instrument search work directly (R-012).** Count goals, visited states, fact scans, equality
+    comparisons, candidate rejections, substitutions, rewrites, branch splits, generated terms,
+    certificate nodes, replay edges, cache hits/misses, and scratch bytes. Make all accumulated
+    work arithmetic checked and keep producer, replay, parser, and memory ceilings independent.
+20. **Return actionable budget refusals (R-012).** At every exact and one-over boundary, report
+    stage, dimension, observed work, configured limit, and whether any safe partial evidence exists.
+    Exhaustion must yield `unknown`/`timeout`/`unsupported`, never `false` and never partial
+    `proved`. Confirm the existing 32-name difference-closure behavior remains unchanged.
+21. **Version one representative benchmark corpus (R-011).** Pin small interactive, large complete,
+    expensive refusal, field equality, composed call, loops/resources, arithmetic/fact growth,
+    symbolic quantifier, portable replay, report serialization, no-op/edit, and kernel-core cases.
+    Store source hashes, expected outcomes, obligation/certificate counts, and product identities.
+22. **Create coherent baseline/candidate snapshots (R-011/R-015).** Use at least seven alternating
+    measured pairs after warm-up with the same Stage1/frontend/runtime/target/options. Verify full
+    JSON, trust, declaration inventory, certificate count, and replay before comparing time; reject
+    changed binaries or manifests before and after the run.
+23. **Report a full cost vector for every benchmark (R-011).** Include cold and warm wall time,
+    p50/p95, CPU, peak RSS, proof/package/report bytes, obligations, replay count, phase/work
+    counters, and cache miss reasons. Treat crash, timeout, OOM, incomplete profile, and measurement
+    cancellation as censored outcomes—not fast successes.
+24. **Make profiler captures complete and useful (R-014).** Use the available Elisa profiler on a
+    large successful proof, a costly refusal, and a small interaction. Record dropped/truncated
+    events, capture bounds and instrumented overhead; classify expected nonzero verifier exits
+    correctly instead of labelling complete refusal captures partial. Never infer uninstrumented
+    speed from an instrumented profile.
+25. **Publish fact-growth scaling curves (R-013).** Sweep relevant and irrelevant facts, duplicate
+    facts, branch count, equality-graph width, and theorem depth independently around exact budget
+    edges. Report actual counters and time/RSS; distinguish linear, quadratic, and capped work.
+    Preserve the 12-duplicate proof / 13-duplicate refusal and the richer mixed-fact fixture.
+26. **Measure large refusal and timeout behavior (R-013/R-016).** Bound parsing, search, replay,
+    diagnostic construction, and serialization separately. Prove that timeout/memory limits cannot
+    leak incomplete `proved` output, and that every omitted presentation field has an explicit
+    marker and authoritative retrieval route.
+27. **Prove summary/full report semantic parity (R-016).** Compare verdict, trust assumptions,
+    exact obligation/proven/unproven counts, replay status, and source identity for positive,
+    negative, unsupported, and timeout inputs. Then profile peak retained report memory and bytes;
+    a smaller JSON document alone is not proof of lower memory.
+28. **Measure the actual edit/build/test loop (R-018).** Separately time clean build, no-op build,
+    comment-only edit, one prover-file edit, one fixture edit, unrelated source edit, and replay-only
+    change. Count compiler, link, runtime-hook, manifest, and test invocations; report cold cache
+    and validated-hit costs separately.
+29. **Finish dependency-selective build/test scheduling (R-018).** Prove transitive closure and
+    runtime/flag invalidation with real builds; map tests to source/feature dependencies; rerun only
+    sound focused tests on a narrow edit but retain a full exact-commit release suite. Corrupt cache
+    and manifest controls must force rebuilds.
+30. **Restore the 600-line responsibility limit.** Split `src/app/cli.elisa` (currently 614 lines)
+    into coherent CLI parsing, dispatch/report, or protocol responsibilities with intentional
+    public/private boundaries. Preserve behavior byte-for-byte where practical, and run the source
+    length guard, CLI/protocol tests, and strict Stage1 build. Do not create numbered private files.
+31. **Set ratcheted performance budgets (R-017).** From the accepted baseline, set workload-specific
+    p95 latency, throughput, RSS/live-allocation and replay budgets. Start with the stated allocation
+    and dominant-phase CPU reduction targets only where profiles identify removable work; record
+    platform/variance and permit documented evidence-based revisions, never soundness relaxations.
+
+### Phase 3 — optimize only the measured dominant cost
+
+32. **Attribute the replay hot path (R-027).** On balance, lexer, kernel core, and portable replay,
+    measure node/edge visits and repeated root/witness checks. Determine whether cost comes from
+    duplicate traversal, witness rediscovery, equality work, or report duplication before editing.
+33. **Pilot exact-context replay memoization (R-027/R-007).** Cache only immutable checked nodes
+    under full source, context, rule-version, and arena-generation identity. Mutated premises,
+    stale generations, DAG cycles, wrong sources, and omitted witness steps must still fail.
+    Measure nodes avoided, memory retained, and replay CPU with complete parity.
+34. **Minimize and attribute field equality (R-023).** Reproduce current completion/timeout under a
+    bounded resource envelope. Separate AST normalization, structural equality, candidate scans,
+    certificate production, and replay; only then choose congruence indexing versus term sharing.
+    Keep wrong-field, changed-state, sort/width, binder, and overloaded/effectful-call negatives.
+35. **Add immutable-frame indexes only if scans dominate (R-019).** Pilot equality/complement and
+    scalar-width indexes on the measured fact-heavy workload. Compare against a retained scan
+    implementation under hash collisions, malformed markers, reordering, and late relevant facts.
+    Index hits select candidates; only replayable evidence establishes a fact.
+36. **Add branch deltas only if context copying dominates (R-021).** Replace full fact-array copies
+    with immutable parents plus explicit additions/removals on one branch-heavy case. Test siblings,
+    loop writes, early return, and failed branches for nonleakage; show memory proportional to the
+    delta without regressing proof completeness.
+37. **Pilot typed term interning only if repeated equality dominates (R-020).** Start with immutable
+    leaf/operator terms, including sort, width, declaration, binder, effect, and context identity.
+    Force hash collisions and generation mismatch; measure hit rate, allocation saved, retention,
+    and total latency before expanding the pilot.
+38. **Cache normalization/substitution only with complete semantic keys (R-022).** Include overload,
+    type, region, source declaration, checker/rule version, and float mode as applicable. Test
+    included-definition edits, shadowing, recursive cycles, cancellation, cached/uncached reports,
+    and bounded eviction.
+39. **Reduce arithmetic certificate size using sparse evidence (R-025).** Pilot one linear/difference
+    case with sparse coefficients and explicit derivation edges; replay exact integer/width/wrap
+    side conditions. Compare proof bytes and replay work, and retain min-value, overflow and
+    one-over-node-bound refusals.
+40. **Reclaim scratch by proof lifetime (R-026).** Separate immutable terms/certificates from
+    obligation-local search arenas and release scratch after certificate compaction. Stress repeated
+    obligations, long-lived sessions, cancellation, returned sviews, and store-generation reuse;
+    validate retained memory and absence of dangling handles.
+41. **Optimize the build/test pipeline from its profile (R-018).** If include hashing/closure
+    dominates, reduce unnecessary key inputs with dependency evidence; if process startup dominates,
+    batch only compatible tests; if compilation dominates, coordinate compiler-side incremental
+    support. Keep each optimization isolated and prove stale dependency/runtime changes still
+    invalidate all affected products.
+
+### Phase 4 — highest-utility source semantics, one vertical slice at a time
+
+42. **Transport conditional call results through named arguments (R-039).** Instantiate the
+    verified callee relation with exact formal-to-actual substitution, including branch guards and
+    widths. Prove one real `call_result_order_transport_gap` case; swapped arguments, shadowing,
+    altered branch result, false contract, and aliasing writes stay unproved.
+43. **Verify one loop traversal with all control edges (R-038/R-040/R-041).** Use a collection
+    traversal with an explicit invariant, an early break, and a verified helper. Generate separate
+    initiation, preservation, exit, frame, and decrease obligations. Reject missing updates,
+    off-by-one bounds, invalid break facts, and a nondecreasing same-SCC recursive call.
+44. **Finish total-versus-partial recursion discipline (R-041/R-056).** Require a checked structural
+    or well-founded decrease before recursive unfolding in logical summaries. Test mutual recursion,
+    lexicographic measures, negative measures, false structural descent, and cyclic proof-summary
+    dependencies.
+45. **Add an abstract collection model used by real code (R-044/E-01/E-02).** Begin with one
+    dynamic-array length/index/push transition and one quantified prefix property. Tie every model
+    step to source width, mutation epoch, reallocation, and resource frame; reject stale views,
+    invalid indices, and incorrect element/count postconditions.
+46. **Prove forwarded-reference framing (R-046/R-049).** Track a caller-place witness through a
+    wrapper to a verified mutating callee, then preserve facts about disjoint fields. Alias two
+    actuals, forward an unknown index, alter the callee footprint, and forge a place/epoch witness;
+    require exact replay rejection.
+47. **Close region and string-view lifetime boundaries (R-047/R-050).** Specify `new[r]`, reference
+    versus plain-value destinations, mutation/reallocation invalidation, returned `sview` backing
+    storage, and region escape. Test shorter-lived backing, wrong region, stale view after resize,
+    and value/reference confusion with Stage1 source semantics as the model.
+48. **Compose effect and exceptional summaries (R-051/R-052).** Verify one handled and one
+    unhandled effect through a wrapper, plus one error/cleanup path. Replay transitive effect
+    identity and handler transitions; reject omitted callee effects, spoofed extern rows, leaked
+    capabilities, skipped cleanup, and false exceptional postconditions.
+49. **Grow checked ADTs from one useful parametric enum (R-055/R-056).** Source-bind a complete
+    `Option[T]`-like constructor inventory, generate a motive-checked split, then prove a structural
+    induction lemma. Omitted/duplicate constructors, bad type arguments, non-positive recursion,
+    skipped cases, and escaped induction hypotheses refuse.
+50. **Create reusable math/data lemmas only after the model is stable (R-058/R-061).** Add a
+    terminating proof-producing simplifier and a small order/length/lookup-update library. Record
+    theorem dependencies and widths; test rewrite cycles, conditional-premise omission, integer
+    overflow, and off-by-one variants.
+51. **Add checked refinements and abstract module interfaces (R-062/R-063).** Demonstrate one range
+    or nonzero refinement and one representation-hiding library contract. Mutating writes invalidate
+    refinements; body changes preserve client proofs only when exported interface obligations remain
+    checked.
+
+### Phase 5 — dependable interaction, reuse, and practical proof coverage
+
+52. **Make refusal explanations evidence-backed (R-068).** Record actual attempted tiers, candidates,
+    premises, resources/effects, dependencies, and budget usage. Test that “unknown” is never
+    phrased as false and that every explanation corresponds to a reproducible attempt.
+53. **Validate counterexamples against source semantics (R-072).** Replay a candidate model through
+    widths, branch conditions, calls, ownership, and effects. Keep invalid solver assignments
+    labeled unvalidated; minimize valid witnesses without changing their meaning.
+54. **Finish a strict goal/session protocol (R-064/R-065).** Validate the full schema and semantic
+    cross-field invariants for IDs, counts, replay, generations, assumptions, pagination, and unknown
+    fields. Use compact snapshot IDs and deltas only when reconstructed context exactly matches the
+    full report.
+55. **Round-trip human proof text into checked terms (R-066).** Parse a small `have`/`apply`/`cases`/
+    `rewrite`/`calc` subset, elaborate outside the kernel, serialize proof terms, and replay without
+    AI. Missing/ambiguous steps remain open; printed `qed` appears only after replay.
+56. **Isolate AI repair candidates (R-069).** Run edits in immutable child snapshots, diff contracts
+    and assumptions explicitly, invalidate dependent proofs, and accept only exact replayed results.
+    Reject silent precondition strengthening, weaker postconditions, dropped obligations, and
+    changed trust assumptions as “fixes.”
+57. **Prove a real tokenizer/parser property end to end (R-074/J-01).** Choose a bounded but useful
+    Elisa implementation; prove token boundaries/consumption, bounds, error paths, and resource
+    preservation. Include malformed-input counterexamples and publish annotation count, unresolved
+    roots, proof bytes, replay time, and total checking cost.
+58. **Package two reusable verified components (R-081).** Start with a buffer/sequence and a parser
+    helper, each with source model, contracts, replayable lemmas, trust summary, and versioned
+    dependencies. Demonstrate independent clients and correct invalidation after an interface edit.
+
+### Phase 6 — dogfooding and release assurance
+
+59. **Prove kernel arena invariants without circular admission (R-082/R-083).** Establish bounds,
+    generation ownership, immutable-context assumptions, DAG acyclicity, binder scope, and checked
+    index arithmetic for a small required declaration set. The theorem set and transitive trusted
+    dependencies must be printed and manually reviewed.
+60. **Formalize rule soundness separately from implementation correctness (R-084/R-085).** State
+    semantics for the admitted fragment; prove core rule preservation in an explicit trusted
+    foundation, then relate implementation acceptance to derivations. Do not claim self-hosted
+    self-verification removes compiler, runtime, bootstrap, or source-adapter trust.
+61. **Verify one compiler pass against an independent model (R-086).** Begin with a small constant
+    folding or lexer invariant, use a separately stated evaluator/specification, and check pass
+    preconditions/postconditions on Stage1. Minimize every proof-discovered compiler bug into
+    Stage0/Stage1 differential regressions.
+62. **Cross-check with a genuinely independent replay path (R-087).** Implement a small
+    representation/control-flow-independent checker for a fully specified rule subset. Differential
+    test every generated certificate in that subset; minimize disagreements and treat any mismatch
+    as a release blocker.
+63. **Expand mutation/differential qualification (R-088).** Generate valid small source/proof pairs
+    and one-step corruptions; compare producer/replay, cache/no-cache, serial/parallel, and Stage0/
+    Stage1 behavior. Mutation survivors require explicit justification, not just a high aggregate
+    score.
+64. **Stage bounded execution and concurrency only behind explicit models (R-073/R-075–R-080).**
+    Introduce one bit-precise bounded checker and one synchronization protocol only after their
+    source semantics and evidence format are fixed. A bounded success stays bounded; safety never
+    implies liveness without fairness/progress proof.
+65. **Qualify a release from immutable products (R-089).** Run the complete exact-commit matrix on
+    supported macOS/Linux targets, verify package replay with no solver/AI, publish the support and
+    trust matrix, review all soundness incidents, and meet ratcheted workload latency/RSS gates.
+    Unsupported features and known refusals stay visible in release notes.
+
+**Re-ranking rule:** review this ladder after every five to ten committed slices or whenever a new
+red soundness test appears. Promote a new task only with a reproducer, source location, trust impact,
+estimated cost, dependency, and falsifiable acceptance gate. Mark a parent R-package complete only
+when every required child slice and its original gate are satisfied; a faster run or a higher
+proved-count is not sufficient by itself.
 - **Reliability:** crashes, timeouts, interrupted/canceled publications, cross-platform disagreements and malformed-input rejection.
 - **Maintainability:** responsibility-based module boundaries, under-600-line source compliance, public/private theorem authority and completed evidence-linked commits.
 

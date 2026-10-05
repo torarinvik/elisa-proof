@@ -157,10 +157,6 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 
 ## Execution order
 
-1. A-01, A-02, A-03 first. Every later choice uses the census.
-2. B-01 through B-08 and K-01 through K-08, in census order.
-3. Tier 1 in this order: C-01, D-01, D-02, E-01, E-03, C-02/C-03, H-03, D-04, E-02, F-02, I-03, I-01.
-4. J-01 once E-01, E-02, E-03 and D-02 land. It is the headline result and validates the stack.
-5. Tier 2, and tier-3 items only after their plan §21 decision is recorded.
-
-Re-rank after every ten landed tasks using the census delta. A task whose census impact came in under a third of its estimate is a signal to re-measure before the next one ("the obvious refactor is usually not what the cluster needs").
+The themed tables above preserve feature ideas and their completion evidence; their original
+numbered order is historical and must not override the current schedule. The authoritative
+prioritized queue is [IMPLEMENTATION_PLAN.md §23.16](IMPLEMENTATION_PLAN.md#2316-ranked-implementation-ladder-after-the-recent-high-roi-tranche), with architecture and soundness gates in plan §§3, 19, 22, and 23. Reconcile every backlog item with current code/tests before starting it, because some entries have since been completed or narrowed. Re-rank after every five to ten committed slices using exact-current census deltas, source/product provenance, trust risk, measured cost, and proof coverage. Do not optimize from stale timings or increase proof coverage by weakening expected outcomes.
