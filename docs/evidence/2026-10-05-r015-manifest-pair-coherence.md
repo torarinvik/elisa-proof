@@ -28,9 +28,30 @@ Failure injection then makes the replay link command exit 42 after the proof pro
 Before the staging change, the proof product could have been published before a later replay
 failure. Commits `3df1134c` and `37c9d862` now prepare all requested binaries, manifests and
 checksums before the final publication loop. The injected replay failure leaves the complete old
-product state unchanged. The test does not kill the process during final renames: those renames
-remain sequential and can leave a partial pair if interrupted at that exact point. No pair-wide
-atomicity claim is made.
+product state unchanged.
+
+Commit `95e74c94` adds failure injection through a temporary `mv` shim. It exits 88 before the
+replay binary's first final rename, after the proof binary, manifest and checksum have all been
+installed. The fixture observes proof source-tree digest
+`4b9149408d4cae8b283041a9d70dd099a2a082b400cc479f37bfb7e53dc06597` beside replay source-tree
+digest `f8d72f8ae8d94962620711a4164f92e898f63792323172797c373c2a11c34647`. Both individual
+manifest checksums remain valid, so the per-product checksum check alone does not protect paired
+readers. The pair-level provenance check can reject the source-tree mismatch. A later ordinary
+build repairs the pair and restores shared provenance.
+
+## Versioned-directory design boundary
+
+A versioned directory and one atomic `build/current` symlink could preserve the existing command
+spellings with stable aliases such as `build/elisa-proof -> current/elisa-proof`; each generation
+would contain both binaries and their adjacent manifests/checksums. That alone does not make a
+multi-file read atomic: a caller can read the proof alias before the pointer switch and the replay
+alias or sidecar after it. The current manifest schema has no pair-generation identifier, and
+existing callers pass the established binary paths independently. Safe adoption therefore needs
+both a generation ID recorded in each manifest and a reader contract that resolves/pins one
+generation for all members, or checks the pointer did not change and retries. Consumer-wide pinning
+and migration of existing output directories were outside this bounded change, so the pointer
+layout was not implemented. Stable output path spellings alone are not sufficient evidence of
+pair safety.
 
 ## Validation
 
