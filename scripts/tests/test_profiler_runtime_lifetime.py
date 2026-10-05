@@ -18,6 +18,8 @@ COMPILER_ROOT = ROOT.parent / "Elisa-compiler"
 STAGE1 = COMPILER_ROOT / "bin" / "elisac-stage1"
 RUNTIME = COMPILER_ROOT / "build" / "runtime" / "elisacore_runtime.o"
 PROBE = ROOT / "examples" / "proof_allocation_lifetime.elisa"
+POST_RESET_VIEW_NEGATIVE = ROOT / "examples" / "rejected_sview_after_region_destroy.elisa"
+PROOF_BIN = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build" / "elisa-proof"))
 
 
 def run(command: list[str], *, env: dict[str, str], timeout: int = 900) -> str:
@@ -35,6 +37,8 @@ def run(command: list[str], *, env: dict[str, str], timeout: int = 900) -> str:
 def main() -> None:
     if not STAGE1.is_file() or not RUNTIME.is_file():
         raise SystemExit("R-014 requires the compiler checkout's Stage1 and matching runtime")
+    if not PROOF_BIN.is_file():
+        raise SystemExit("R-014 post-reset sview control requires ELISA_PROOF_BIN or build/elisa-proof")
 
     env = os.environ.copy()
     env.update({
@@ -46,6 +50,25 @@ def main() -> None:
     })
     run(["python3", str(COMPILER_ROOT / "scripts" / "stage1_provenance.py"),
          "check", str(COMPILER_ROOT), str(STAGE1)], env=env, timeout=30)
+
+    # This is a verifier-side safety control, not a runtime dereference of stale
+    # storage. The valid runtime probe below separately reads its view before
+    # destroying the backing region.
+    negative = subprocess.run(
+        [str(PROOF_BIN), "--json", str(POST_RESET_VIEW_NEGATIVE)],
+        cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, timeout=900, check=False,
+    )
+    assert negative.returncode == 1, (
+        f"post-reset sview control was not refused (exit {negative.returncode}):\n"
+        f"{negative.stdout[-12000:]}"
+    )
+    negative_report = json.loads(negative.stdout)
+    assert negative_report["status"] == "failed", negative_report.get("status")
+    assert any(finding["kind"] in {
+        "region-use-after-destroy", "region-destroy-live-borrow"
+    } for finding in negative_report.get("findings", [])), negative_report.get("findings")
+    assert negative_report["replay"]["gaps"] == 0, negative_report["replay"]
 
     with tempfile.TemporaryDirectory(prefix="elisa-r014-profiler-") as temporary:
         work = Path(temporary)
@@ -127,6 +150,7 @@ def main() -> None:
         assert repetition["peak_rss_bytes"] is None or repetition["peak_rss_bytes"] > 0
 
         print("R-014 real profiler runtime-lifetime probe OK")
+        print("  post-reset sview control: verifier refusal, zero replay gaps")
         print(f"  runtime event kinds: {dict(sorted(Counter(e['kind'] for e in events).items()))}")
         print("  explicit workload: alloc 32, alloc 64, reclaim 32, reuse 16, region reset")
         print(f"  peak logical live bytes: {metrics['peak_logical_live_bytes']}")
