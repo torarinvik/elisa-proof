@@ -1,16 +1,13 @@
 """Persisted packages are replayed afresh; disk metadata is never an admission proof."""
 import copy
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
 
+from portable_replay_support import BINARY as PRODUCER, REPLAY
 
 ROOT = Path(__file__).resolve().parents[1]
-PRODUCER = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
-
 
 def run_replay(package_path):
     # This invocation starts a new process with no producer-side report/search state.
