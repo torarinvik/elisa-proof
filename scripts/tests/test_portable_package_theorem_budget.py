@@ -1,15 +1,19 @@
 """Portable theorem count cap accepts the exact limit and refuses one over up front."""
 
 import json
-import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROOF = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
+# The test lives below scripts/, so expose the shared resolver before importing it.
+# It selects both executables from one published generation, or accepts a complete
+# explicit pair through ELISA_PROOF_BIN and ELISA_PROOF_REPLAY_BIN.
+sys.path.insert(0, str(ROOT / "scripts"))
+from portable_replay_support import BINARY as PROOF, REPLAY
+
 THEOREM_LIMIT = 65536
 
 
