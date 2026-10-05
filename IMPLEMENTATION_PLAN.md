@@ -5036,8 +5036,9 @@ regression.
 
 ### 23.23.1 Exact starting state and audit findings
 
-The last committed proof-tree revision inspected for this refresh is `4967197b` (`test: verify typed
-local integer overflow routes`). The shared checkout also contains uncommitted and untracked changes
+The last committed proof-tree revision inspected for this refresh is `63dba677` (`Bound portable
+package JSON scan work`), after `4967197b` (`test: verify typed local integer overflow routes`). The
+shared checkout also contains uncommitted and untracked changes
 from parallel audit work; they are not part of that commit, are not one qualified source snapshot,
 and must not be combined or described as landed without ownership review and a fresh matched build.
 The compiler revision most recently freshness-checked in these investigations is Stage1
@@ -5052,7 +5053,7 @@ qualify later dirty source or another generation.
 | `late_success` has a replay-provenance gap | On a fresh Stage1 pair, the targeted report was `proved_with_replay_gaps` with one gap in five certificates, at `ensure opaque(accepted)`; producer-side scans occurred while replay-side disjunction work was zero. Candidate pruning was not the cause. | Do not count as proved or optimize disjunction for this symptom. Identify and align the precise call-summary/fact-trace rule, then preserve an open-only budget control. |
 | Source obligation inventory remains narrow | Commit `3eccfc76` adds plural and mismatched literal postcondition coverage; it does not independently enumerate every supported source obligation family. | Keep module-level “proved” gated on an independently derived expected set, not report-internal counters. |
 | Signed integer overflow behavior is checked/trapping | The R-042 cross-route test added in `4967197b` confirms signed `i8` and `i16` overflow traps under the tested compiler. It is not modular signed wraparound. Guarded local reasoning and the tested refusal routes remain narrow evidence, not a complete bit-vector semantics. | Specify trap semantics separately from unsigned modular behavior; never use signed wrap identities as an optimization or proof rule. |
-| Package parsing has a plausible work-amplification hotspot | A 2.2 MiB deeply nested, wrong-root package took about 0.42 s to reject in one probe because the shared DOM parser recounts container members. A preflight work estimate was proposed, but is not established by a committed, current-pair regression here. | Keep the existing depth boundary; validate any work estimate against accepted deep inputs, malformed inputs, and worst-case shapes before landing it. |
+| Package parser scan amplification (`63dba677`) | The reader performs numeric-token validation and tracks maximum JSON nesting in one bounded preflight before DOM allocation. It rejects when the conservative estimate `input_bytes × maximum_nesting` exceeds eight times the 64 MiB package-input cap, without changing the parser's 256-level syntax limit. Against a matched Stage1 pair, exact/one-over scan work, exact/over depth, broad arrays/objects, escaped token-like strings, malformed and inadmissible packages, CPU/wall/RSS/output limits, the 61-case mutation campaign, theorem/string budgets, and P-05 fresh-process restart passed. | This is a deterministic bound on the parser's repeated container-count scan estimate, not a formal bound on all parser/runtime costs. The broad portable suite still stops at the independent `pure_unfolding` producer fixture (`source.admissible=false`); general decoder assurance and other allocators remain open. |
 | Repeated `requires` in the bounded-work example are deliberate | They exercise model-work consumption; they are not evidence that normal user obligations are accidentally duplicated. | Preserve the workload meaning and make its generated/annotated structure auditable. |
 
 Status terms in this section are strict: **confirmed** means reproduced against named source and
@@ -5135,11 +5136,12 @@ sound paths can still be measured on immutable snapshots.
     “type-bound,” compiler-validated, generated, opaque, extern, builtin, assumption and cache-hit
     facts. For each, state what source data the kernel reconstructs, which axiom it relies on, and
     the exact rejection mutation. Labels and producer booleans never constitute premises.
-16. **A16 — Bound package parser work before expensive allocation.** Measure member-count rescans,
-    nesting, escaping and repeated keys; design a deterministic work estimate or single-pass parser
-    path. Test the exact accepted depth boundary, near-boundary accepted files, one-over work,
-    wrong-root nesting, broad arrays and adversarial objects. Rejection must be bounded without
-    rejecting valid boundary inputs.
+16. **A16 — Bound package parser work before expensive allocation. [LANDED: `63dba677`; retain
+    as a release invariant.]** A one-pass preflight now bounds estimated member-count rescans before
+    DOM allocation. The regression covers exact/one-over work, exact/over parser depth, broad arrays
+    and objects, escaped token-like strings, malformed/inadmissible outcomes and resource ceilings.
+    Future parser changes must preserve those controls and remeasure the estimate if container
+    counting or the 64 MiB input cap changes; this does not close general decoder assurance.
 17. **A17 — Convert each incident into a permanent minimal test.** Keep the original repro, reduced
     repro, neighboring valid example and mutation of the key premise. Assert status, exact obligation
     identity, replay counts/gaps, certificate publication and exit code; run in a fresh process
