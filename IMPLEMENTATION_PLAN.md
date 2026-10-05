@@ -616,6 +616,16 @@ source-level cause and qualified regression.
 
 **Gate:** Deleting an obligation, changing counts, omitting a declaration, introducing an unreachable unsupported operation or failing an imported dependency cannot yield unconditional program `proved`. Coverage and certificate counts remain explanatory data, not theorem authority.
 
+**Progress (2026-10-05):** Report admission now checks that the recorded declaration count equals
+the emitted declaration-detail inventory and that findings agree with the failure counter
+(`src/proof/model/report_invariants.elisa`). The source-admission matrix passed on the strict O2
+product from root revision `e9d27ef6` (SHA-256
+`394b47e0c3b4cccf566c5143144658cd93aa954a095ae72135e0afd1d05c7628`): six malformed classes
+were refused across all twelve CLI routes, while the suite's admissible incomplete-goal controls
+remained available. This covers parse, import, semantic and proposition-formation refusals, not
+structural mutation of the report inventory. R-004 remains open until omission/deletion/count
+mutations and unreachable unsupported operations are shown to fail closed.
+
 #### R-005 — Audit source-derived boundary facts and call witnesses
 
 **Change:** Extend the recent source-derived witness work in `check/function_contracts_and_frames.elisa` and `replay/boundary_trace_shapes.elisa`. Inventory initial facts about parameter types, ranges, calls, aliases, effects and resources; replay exact owner, argument position, state version and declaration identity instead of trusting producer bookkeeping.
