@@ -228,7 +228,6 @@ fi
 # only the compile; linking, signing and the manifest below run as usual.
 # ELISA_PROOF_OBJECT_CACHE=0 disables it.
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
-compiler_digest=""
 BUILD_RECIPES=("$ROOT_DIR/scripts/build.sh" "$ROOT_DIR/scripts/compiler_snapshot.sh" \
     "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/compiler_environment.py" \
     "$ROOT_DIR/scripts/verify_product_pair.py")
@@ -241,16 +240,18 @@ compiler_files=()
 for compiler_file in "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER"; do
     [[ -n "$compiler_file" && -f "$compiler_file" ]] && compiler_files+=("$compiler_file")
 done
-if [[ ${#compiler_files[@]} -gt 0 ]]; then
-    compiler_digest="$(shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n')"
-fi
+compiler_digest_of() {
+    [[ ${#compiler_files[@]} -gt 0 ]] || return 0
+    shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n'
+}
 compiler_environment_digest="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --effective-env-digest)"
 compiler_target_triple="$("$CLANG_TOOL" -dumpmachine)"
 object_key_of() {
-    local main="$1" dependencies
-    [[ -n "$compiler_digest" ]] || return 0
+    local main="$1" dependencies current_compiler_digest
+    current_compiler_digest="$(compiler_digest_of)"
+    [[ -n "$current_compiler_digest" ]] || return 0
     dependencies="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --dependency-root "$SNAPSHOT_ROOT" --dependency-main "$main")" || return $?
-    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1"
+    { printf '%s\n' "$RESOLVED_REV" "$current_compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1"
         printf '%s\n' "$dependencies"; } | shasum -a 256 | cut -d' ' -f1
 }
 build_identity_of() {
@@ -284,6 +285,27 @@ build_identity_of() {
         --identity-compiler-product "$COMPILER_PRODUCT" --identity-clang "$CLANG_TOOL" \
         "${identity_args[@]}" \
         --identity-link-flags="$flags" --identity-output "${PRODUCT_OUTPUTS[$index]}"
+}
+assert_stage1_fresh() {
+    local freshness_check
+    [[ "$COMPILER_IS_STAGE1" -eq 1 && -n "${stage1_root:-}" ]] || return 0
+    freshness_check="$stage1_root/scripts/assert_stage1_fresh.sh"
+    [[ -x "$freshness_check" ]] || return 0
+    bash "$freshness_check" "$COMPILER_PRODUCT"
+}
+assert_build_inputs_unchanged() {
+    local boundary="$1" index current_object_key current_identity
+    assert_stage1_fresh || return $?
+    for index in "${!PRODUCT_MAINS[@]}"; do
+        current_object_key="$(object_key_of "${PRODUCT_MAINS[$index]}")" || return $?
+        current_identity="$(build_identity_of "$index" "$current_object_key")" || return $?
+        if [[ "$current_object_key" != "${OBJECT_KEYS[$index]}" || \
+              "$current_identity" != "${BUILD_IDENTITIES[$index]}" ]]; then
+            printf 'build: compiler, source, recipe, or link inputs changed during %s; refusing to cache or publish mixed-provenance output\n' \
+                "$boundary" >&2
+            return 2
+        fi
+    done
 }
 compile_object() {
     local main="$1" object="$2"
@@ -379,16 +401,23 @@ else
     done
 fi
 [[ "$compile_status" -eq 0 ]] || exit "$compile_status"
-for index in "${COMPILE_INDICES[@]}"; do
-    object_key="${OBJECT_KEYS[$index]}"
-    if [[ "$OBJECT_CACHE" != "0" && -n "$object_key" ]]; then
-        mkdir -p "$OBJECT_CACHE"
-        cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN"
-        mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
-        shasum -a 256 "$OBJECT_CACHE/$object_key.o" | cut -d' ' -f1 > "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN"
-        mv -f "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o.sha256"
-    fi
-done
+fi
+# A compiler/runtime/recipe replacement during a compile must not be recorded under the
+# identity captured before compilation. Validate before publishing any object-cache entry.
+if ! assert_build_inputs_unchanged "compilation"; then
+    exit 2
+fi
+if [[ "$compile_count" -gt 0 ]]; then
+    for index in "${COMPILE_INDICES[@]}"; do
+        object_key="${OBJECT_KEYS[$index]}"
+        if [[ "$OBJECT_CACHE" != "0" && -n "$object_key" ]]; then
+            mkdir -p "$OBJECT_CACHE"
+            cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN"
+            mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
+            shasum -a 256 "$OBJECT_CACHE/$object_key.o" | cut -d' ' -f1 > "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN"
+            mv -f "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o.sha256"
+        fi
+    done
 fi
 for index in "${!PRODUCT_MAINS[@]}"; do
     [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] && continue
@@ -432,6 +461,11 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --output "$MANIFEST_TEMP"
     shasum -a 256 "$MANIFEST_TEMP" | cut -d' ' -f1 > "$(manifest_checksum_temp_of "$index")"
 done
+# Linking and manifest generation also take time. Revalidate at the publication boundary so
+# a moved toolchain cannot make a stale intermediate manifest or generation authoritative.
+if ! assert_build_inputs_unchanged "linking and manifest generation"; then
+    exit 2
+fi
 # The immutable generation is authoritative for paired consumers. Its directory rename and
 # CURRENT pointer replacement occur inside one filesystem; compatibility paths below are still
 # replaced separately and therefore are explicitly not a transactional pair.

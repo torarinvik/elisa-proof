@@ -78,6 +78,7 @@ run_py_test tests/test_scalar_witness_name_index.py
 run_py_test remote/test_object_cache_key.py
 run_py_test test_build_dependency_closure.py
 run_py_test test_build_manifest_sidecar_integrity.py
+run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
