@@ -28,6 +28,7 @@ Consumers are all kernel modules unless the row names specific ones. Structural 
 | `typed-int` | scalar | `value` = typed bit pattern; `name` = exact primitive integer sort | `kernel_typed_arithmetic.elisa`, `kernel_contextual_constants.elisa` |
 | `bool` | scalar | `value` in {0,1} | `proof/kernel.elisa`, `check/kernel_proposition_environment.elisa` |
 | `float` | scalar | always rejected: NaN breaks reflexive equality | none |
+| `opaque-float-literal` | leaf | `name` = exact source spelling; valid only as a direct comparison operand, with no numeric value or scalar witness | `proof/kernel.elisa` |
 | `string` | scalar | `name` = literal text | `proof/kernel.elisa`, `check/kernel_proposition_environment.elisa` |
 | `char` | scalar | `name` = literal text | `proof/kernel.elisa` |
 | `ident` | scalar | `name` = identifier | `proof/kernel.elisa` |
