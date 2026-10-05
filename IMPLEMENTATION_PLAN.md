@@ -746,7 +746,7 @@ sentinel classes plus proof-byte/obligation/replay-count reporting remain to be 
 
 **Gate:** Publish scaling curves and expected asymptotic work counters; beyond configured bounds the system terminates predictably. Do not eliminate stress coverage by simplifying away all duplicated facts before their relevant cost boundary is exercised.
 
-**Progress (2026-10-05):** Added a separate paired fact-growth fixture and focused regression probe with repeated facts plus relevant bounds and a parameter relation; the probe encodes exact proof/refusal, no-partial-certificate/model, and replay expectations. Python syntax validation passed, but the probe could not run because this checkout has no `build/elisa-proof`; semantic outcomes and replay remain unverified. No scaling measurements are claimed. See [`docs/evidence/2026-10-05-r013-fact-growth.md`](docs/evidence/2026-10-05-r013-fact-growth.md). R-013 remains open.
+**Progress (2026-10-05):** Added a paired fact-growth fixture with repeated facts and theorem-relevant integer bounds, plus a focused regression probe. On validation product SHA-256 `394b47e0c3b4cccf566c5143144658cd93aa954a095ae72135e0afd1d05c7628`, 12 duplicates prove/replay and 13 refuse at the goal budget with no partial certificate/model or replay gap. No scaling measurements are claimed. See [`docs/evidence/2026-10-05-r013-fact-growth.md`](docs/evidence/2026-10-05-r013-fact-growth.md). R-013 remains open.
 
 #### R-014 — Make allocation lifecycle observable
 
