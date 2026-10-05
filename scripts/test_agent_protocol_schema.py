@@ -63,7 +63,8 @@ def main():
     else:
         raise AssertionError("v2 schema accepted protocol_version 1")
     emitter = (ROOT / "src/app/report_output_integrated_helpers.elisa").read_text()
-    assert 'protocol_version' in emitter and '2,' in emitter
+    escaped_quote = chr(92) + '"'
+    assert escaped_quote + 'protocol_version' in emitter and ':2,' + escaped_quote + 'status' in emitter
     print("v1 compatibility and v2 version marker validated")
 
 

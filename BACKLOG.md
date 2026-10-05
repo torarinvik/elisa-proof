@@ -120,7 +120,7 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 | H-02 (T1) | `proof` blocks with `have`, `cases`, `induction`, `apply lemma` in source, lowered to the existing tactic protocol | One proof language for humans and agents | Every tactic in `action_protocol.operations` has source syntax and a test |
 | H-03 (T1) | Goal explanation: for each unproven goal, list the facts that almost proved it and the missing fact | The single most useful thing for repair | JSON `near_miss` field; tested on the rejected examples |
 | H-04 (T1) | LSP server: diagnostics, hover shows facts at a line, code action inserts a suggested `requires` | Adoption; the feedback loop moves into the editor | VS Code extension running on the examples folder |
-| H-05 (T1) | Stable agent protocol v2 with a versioned JSON schema file and compatibility tests | Agents break silently on field changes today | `schema/elisa-proof-v2.json`; old reports validate against v1 |
+| H-05 (T1, DONE 2026-10-05) | Stable agent protocol v2 with a versioned JSON schema file and compatibility tests | Agents break silently on field changes today | `schema/elisa-proof-v2.json`; old reports validate against v1 |
 | H-06 (T2) | Proof-state diff between runs, so an agent sees exactly which goals changed after an edit | Faster agent repair loops | `--diff old.json` output tested |
 | H-07 (T1) | Human-readable report mode with source excerpts and carets, grouped by function | Humans read terminals, not JSON | Snapshot tests of the text output |
 
