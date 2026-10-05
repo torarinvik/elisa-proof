@@ -217,6 +217,7 @@ run_py_test test_vector_index_arithmetic.py
 run_py_test test_adt_recursive_payload.py
 run_py_test test_call_sum_premise.py
 run_py_test test_nested_conditional_split.py
+run_py_test test_conditional_result_branchwise.py
 run_py_test test_goal_disjunct_split.py
 run_py_test test_include_constant_scope.py
 run_py_test test_include_function_scope.py

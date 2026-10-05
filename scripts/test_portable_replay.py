@@ -38,6 +38,7 @@ POSITIVE = {
     "leaving_branch_join": {"goal", "index-upper"},
     "linear_disequality_refuted": {"goal", "resource-safety"},
     "closed_goal_width_uniform": {"goal", "resource-safety"},
+    "conditional_result_branchwise_probe": {"goal", "resource-safety"},
 }
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
@@ -199,6 +200,52 @@ for example, rules in POSITIVE.items():
                                        capture_output=True, text=True, timeout=120).stdout)
     replayed_goals = [goal for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed"]
     assert len(package["theorems"]) == len(replayed_goals), (example, len(package["theorems"]), len(replayed_goals))
+
+# The new branchwise conditional-result rule must decline a resealed goal with a bad result arm,
+# and one whose left disjunct uses a nearby but different guard. The serialized node identities
+# are changed, the theorem statement and fingerprint are recomputed, and the kernel still refuses.
+conditional_package = copy.deepcopy(packages["conditional_result_branchwise_probe"])
+conditional_theorem = next(t for t in conditional_package["theorems"]
+                           if t["name"] == "conditional_result_both_arms" and t["rule"] == "goal")
+kernel_nodes = conditional_package["kernel"]["nodes"]
+conditional_goal = kernel_nodes[conditional_theorem["conclusion"]]
+assert conditional_goal["kind"] == "binary" and conditional_goal["operator"] == "or", conditional_goal
+left_comparison = kernel_nodes[conditional_goal["left"]]
+right_comparison = kernel_nodes[conditional_goal["right"]]
+assert left_comparison["kind"] == "binary" and right_comparison["kind"] == "binary", (left_comparison, right_comparison)
+left_conditional = kernel_nodes[left_comparison["left"]]
+right_conditional = kernel_nodes[right_comparison["left"]]
+assert left_conditional["kind"] == "if" and right_conditional["kind"] == "if", (left_conditional, right_conditional)
+
+bad_arm = copy.deepcopy(conditional_package)
+bad_nodes = bad_arm["kernel"]["nodes"]
+bad_theorem = copy.deepcopy(conditional_theorem)
+bad_conditional = bad_nodes[left_comparison["left"]]
+bad_value = append_node(bad_arm, "int", value="256")
+bad_if = append_node(bad_arm, "if", left=bad_conditional["left"], right=bad_conditional["right"],
+                     auxiliary=bad_value)
+bad_left = append_node(bad_arm, "binary", "<", bad_if, left_comparison["right"])
+bad_right = append_node(bad_arm, "binary", "==", bad_if, right_comparison["right"])
+bad_goal = append_node(bad_arm, "binary", "or", bad_left, bad_right)
+bad_theorem["conclusion"] = bad_goal
+refused(with_theorem(bad_arm, reseal(bad_arm, bad_theorem)), "conditional-result-bad-arm", "rejected", "kernel-rejected")
+
+altered_guard = copy.deepcopy(conditional_package)
+altered_nodes = altered_guard["kernel"]["nodes"]
+altered_theorem = copy.deepcopy(conditional_theorem)
+altered_goal = altered_nodes[conditional_theorem["conclusion"]]
+altered_left = altered_nodes[altered_goal["left"]]
+altered_right = altered_nodes[altered_goal["right"]]
+source_if = altered_nodes[altered_left["left"]]
+source_guard = altered_nodes[source_if["left"]]
+two = append_node(altered_guard, "int", value="2")
+other_guard = append_node(altered_guard, "binary", "==", source_guard["left"], two)
+other_if = append_node(altered_guard, "if", left=other_guard, right=source_if["right"], auxiliary=source_if["auxiliary"])
+other_left = append_node(altered_guard, "binary", "<", other_if, altered_left["right"])
+altered_root = append_node(altered_guard, "binary", "or", other_left, altered_goal["right"])
+altered_theorem["conclusion"] = altered_root
+refused(with_theorem(altered_guard, reseal(altered_guard, altered_theorem)),
+        "conditional-result-altered-guard", "rejected", "kernel-rejected")
 
 # Replay scratch (quantifier binder markers) is not exported: the arena ends at the last root.
 quantified = packages["collection_quantifier"]
