@@ -23,8 +23,15 @@ def main() -> None:
                   "summary": {"obligations": 1, "proven": 1, "unproven": 0,
                               "semantic_errors": 0},
                   "declaration_details": [{"verified": True}], "goals": [{}],
-                  "measurements": {"goal_cache_hits": 1, "goal_cache_misses": 2,
-                                   "control_flow_steps": 3, "live_facts_peak": 4},
+                  "measurements": {"format": "elisa-proof-measurements-v1",
+                                   "goal_cache_hits": 1, "goal_cache_misses": 2,
+                                   "control_flow_steps": 3, "live_facts_peak": 4,
+                                   "certificate_facts": 5, "largest_certificate_facts": 4,
+                                   "repeated_certificate_fact_roots": 2, "fact_traces": 6,
+                                   "kernel_nodes": 7, "kernel_nodes_shared": 3,
+                                   "kernel_children": 8, "report_bytes": 900,
+                                   "heaviest_functions": [{"name": "work", "goal_attempts": 1,
+                                                           "certificate_kernel_facts": 4}]},
                   "replay": {"certificates": 1, "replayed": 1, "gaps": 0}}
         binary.write_text("#!/usr/bin/env python3\nimport json,sys\nprint(" +
                           repr(json.dumps(report)) + ")\nsys.stdout.write(' ' * 100000)\n", encoding="utf-8")
@@ -49,7 +56,7 @@ def main() -> None:
                                                 rounds=2, warmup_runs=1))
         finally:
             MODULE.FIXTURES = old
-        assert result["schema"] == "elisa-proof-p01-baseline-v2"
+        assert result["schema"] == "elisa-proof-p01-baseline-v3"
         assert result["binary"]["sha256"] == MODULE.identity(binary)["sha256"]
         assert result["build"]["available"] is True
         assert result["build"]["target"] == "test-target"
@@ -113,6 +120,10 @@ def main() -> None:
         assert measurements[0]["goal_cache_misses"] == 2
         assert measurements[0]["control_flow_steps"] == 3
         assert measurements[0]["live_facts_peak"] == 4
+        assert measurements[0]["proof_report_measurements"] == report["measurements"]
+        assert measurements[0]["proof_report_measurements"]["kernel_nodes_shared"] == 3
+        assert measurements[0]["proof_report_measurements"]["report_bytes"] == 900
+        assert measurements[0]["proof_report_measurements"]["heaviest_functions"][0]["name"] == "work"
         old_output_limit = MODULE.MAX_OUTPUT_BYTES
         try:
             MODULE.MAX_OUTPUT_BYTES = 1024

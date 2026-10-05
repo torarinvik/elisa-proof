@@ -3,10 +3,12 @@
 The baseline runner in `scripts/p01_baseline.py` does not build or modify the proof product. It
 checks the adjacent manifest and checksum against the selected executable, requires proof-source,
 frontend, compiler, runtime, target, optimization, and compile-mode identities, and spools each
-bounded report to disk so large JSON cannot deadlock a pipe. Runner schema v2 records seven rounds
-after one warm-up, invocation wall and child CPU time, peak RSS, report bytes,
-declaration/obligation counters, and certificate replay completeness. It separately times decoding
-the captured JSON in the Python harness.
+bounded report to disk so large JSON cannot deadlock a pipe. Runner schema v3 records seven rounds
+after one warm-up, invocation wall and child CPU time, peak RSS, declaration/obligation counters,
+and certificate replay completeness. Each run row also preserves the complete serialized proof
+report `measurements` object, including report bytes, kernel/certificate counters, and the
+heaviest-function summary. It separately times decoding the captured JSON in the Python harness.
+The runner schema is v3; earlier captured output remains in its original schema.
 
 ## Current result (2026-10-05)
 
@@ -38,8 +40,10 @@ measurements do not demonstrate incremental declaration reuse or a speedup.
 ## Counter coverage and remaining P-01 work
 
 Serialized proof-report counters include goal-cache hits/misses, control-flow steps, peak live
-facts, declaration/obligation totals, replay totals, and report bytes. The baseline records them
-for every invocation. Each runner row's `phase_timings_seconds` distinguishes proof CLI invocation
+facts, declaration/obligation totals, replay totals, and report bytes. The baseline preserves the
+entire CLI `measurements` object for every invocation, including kernel node/child totals,
+certificate-fact reuse counts, fact traces, and heaviest functions. Each runner row's
+`phase_timings_seconds` distinguishes proof CLI invocation
 wall time and child CPU time from Python JSON decoding. The invocation wall includes process
 launch, wait polling, and captured-output handling; it is not an internal proof-stage timer.
 `phase_timing_availability` names internal timings that remain unavailable: source import,

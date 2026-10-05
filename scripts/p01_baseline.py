@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = "elisa-proof-p01-baseline-v2"
+SCHEMA = "elisa-proof-p01-baseline-v3"
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 FIXTURES = (
     ("real_small", ROOT / "examples/perf_luna_accept.elisa"),
@@ -215,6 +215,9 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
             1 for item in declarations if item.get("verified") is True),
         "goals": len(goals), "replay_certificates": replay.get("certificates"),
         "replayed": replay.get("replayed"), "replay_gaps": replay.get("gaps"),
+        # Preserve the complete CLI measurement object. This keeps newly emitted serialized
+        # counters available to baseline consumers without implying internal timing coverage.
+        "proof_report_measurements": measurements,
         "goal_cache_hits": measurements.get("goal_cache_hits"),
         "goal_cache_misses": measurements.get("goal_cache_misses"),
         "control_flow_steps": measurements.get("control_flow_steps"),
