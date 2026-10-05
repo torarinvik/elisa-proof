@@ -130,9 +130,18 @@ recipes and misses after recipe changes. Report-cache controls cover included-so
 `proof_float_mode` changes, runtime target changes, payload corruption, and fake-runner
 cached-versus-uncached output equality. Remote object-cache controls cover compiler/runtime,
 source trees, arguments, target, effective toolchain environment and cache recipe changes.
-Focused tests, Python compilation, remote shell syntax, and diff checks passed. The fake runner
-does not establish real theorem-set equivalence; that remains an acceptance item alongside stale
-product and broader dependency-mutation controls.
+
+The real CLI equivalence control `scripts/test_report_cache_real_equivalence.py` prefetched each
+fixture with `prefetch_reports.run_one`, required an actual cache hit without launching the
+verifier, then compared the cached JSON bytes with a fresh uncached run. On the strict O2 binary
+SHA-256 `549ae6fbae4e9a4d09373a537eec6c13f3701747d8a8d95ed8bce11d308e6d36`, both reports matched
+byte-for-byte: `examples/perf_luna_accept.elisa` (input SHA-256
+`b98bc4c879e7ca4279515ade0c248d125f9323a1f3e01f9bed389fc9a818354b`) proved 2/2 obligations with
+2/2 replayed; `examples/perf_luna_refusal.elisa` (input SHA-256
+`5bb1c84d7baf95c9853e448062184a3427b298d80b205ed7cd9ac8032a7cd454`) proved 1/2 with its one
+certificate replayed. The focused script and Python compilation passed. This is bounded real
+theorem/report equivalence for one accepted and one refused fixture; stale-product and broader
+dependency-mutation controls remain open.
 
 P-03 passed a controlled strict O2 initial build followed by an identical no-op. The no-op kept
 main/replay binaries, runtime object, hook products and manifests unchanged, with identical hashes,
