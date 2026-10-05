@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: proposed execution roadmap, grounded in the repository inspected on 2026-09-28. This document is a plan, not a statement that the planned features are implemented or verified. Existing uncommitted implementation work must be validated separately.
+Status: updated execution roadmap, inspected on 2026-10-05 at clean proof HEAD `cd42c89c`. [BACKLOG.md](BACKLOG.md) carries the current prioritized feature queue; sections 0A and 5–22 retain the implementation evidence and architectural requirements it builds upon. This is a plan, not a claim that every preceding milestone is complete or that the current full suite has been rerun. Historical measurements apply only to their recorded products.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -121,7 +121,7 @@ The current executable is written in Elisa. [src/main.elisa](src/main.elisa) imp
 
 ### 2.2 Known work that must not be hidden by the roadmap
 
-The repository is dirty with ongoing implementation changes. The checked-in proof HEAD observed during planning is `162bd5d`; the working compiler frontend pin is `1c948fd4`. These identifiers describe this planning snapshot, not a permanent requirement to remain on those revisions.
+Historical planning snapshot: the repository was dirty at proof HEAD `162bd5d`, with frontend pin `1c948fd4`. This paragraph and the following prior-run findings retain their original context; the 2026-10-05 plan-update inspection found a clean tree at `cd42c89c`. Neither snapshot establishes a current full-suite baseline.
 
 The preceding audit run reported 1,896 obligations, 1,003 proven obligations, and zero replay gaps, but an overall unsupported/failed result. Its validator rejected missing verification of `proof_kernel_replay_constant_comparison` and `proof_kernel_replay_direct_literal_comparison`. A new recursive comparison helper exceeded a fact snapshot limit and had an unproven recursive-call precondition. These are prior-run observations to reproduce, not a freshly certified baseline. Finding counts are not interchangeable with unique obligation counts.
 
@@ -493,7 +493,7 @@ Maintain a soundness incident procedure: preserve reproducer, contain the affect
 
 ## 20. Execution order and first actionable backlog
 
-**Superseded ordering:** §0A P-00–P-07 controls execution. Group W remains the feature backlog after reliability and safe incremental infrastructure. The original ordering follows for reference.
+**Superseded ordering:** §0A controls P-00–P-07, and BACKLOG.md carries the feature queue that follows. The original ordering follows for reference; completed foundations must be reused rather than rebuilt.
 
 The critical path is M0 → M1 → M2/M3/M4 → M5/M6/M7. M8–M10 grow alongside these foundations. M11 follows faithful execution semantics. M12 follows mature resource/effect support. M13 is continuous. Do not defer all user-facing improvements until the final milestone, and do not expand concurrency before the sequential source model is dependable.
 
