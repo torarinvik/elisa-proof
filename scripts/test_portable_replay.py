@@ -38,6 +38,7 @@ POSITIVE = {
     "leaving_branch_join": {"goal", "index-upper"},
     "linear_disequality_refuted": {"goal", "resource-safety"},
     "closed_goal_width_uniform": {"goal", "resource-safety"},
+    "replay_qualified_constant_argument": {"resource-safety"},
 }
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
@@ -199,6 +200,33 @@ for example, rules in POSITIVE.items():
                                        capture_output=True, text=True, timeout=120).stdout)
     replayed_goals = [goal for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed"]
     assert len(package["theorems"]) == len(replayed_goals), (example, len(package["theorems"]), len(replayed_goals))
+
+# A nested arithmetic argument may carry a source-resolved root constant, but an unresolved
+# identifier in the same expression must remain a refusal. Corrupt only the shadowed local leaf
+# in the portable resource trace; do not turn arbitrary names into static values.
+shadow_trace = copy.deepcopy(packages["replay_qualified_constant_argument"])
+shadow_nodes = shadow_trace["kernel"]["nodes"]
+shadow_children = shadow_trace["kernel"]["children"]
+shadow_leaf = None
+for lend in shadow_nodes:
+    if lend["kind"] not in ("resource-call", "resource-call-lend") or lend["name"] != "accept_signed":
+        continue
+    for arg_id in shadow_children[lend["children_start"]:lend["children_start"] + lend["auxiliary"]]:
+        arg = shadow_nodes[arg_id]
+        if arg["kind"] != "resource-call-arg" or arg["name"] != "value":
+            continue
+        expression = arg["left"]
+        if expression >= len(shadow_nodes) or shadow_nodes[expression]["kind"] != "unary":
+            continue
+        arithmetic = shadow_nodes[expression]["left"]
+        if arithmetic >= len(shadow_nodes) or shadow_nodes[arithmetic]["kind"] != "binary":
+            continue
+        leaf = shadow_nodes[arithmetic]["left"]
+        if leaf < len(shadow_nodes) and shadow_nodes[leaf]["kind"] == "ident" and shadow_nodes[leaf]["name"] == "SIGNED_DEPTH":
+            shadow_leaf = leaf
+assert shadow_leaf is not None, "shadowed constant trace was not found"
+shadow_nodes[shadow_leaf]["name"] = "UNRESOLVED_SHADOW_VALUE"
+refused(shadow_trace, "unresolved-shadowed-resource-value", "rejected", "kernel-rejected")
 
 # Replay scratch (quantifier binder markers) is not exported: the arena ends at the last root.
 quantified = packages["collection_quantifier"]

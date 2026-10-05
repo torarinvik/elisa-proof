@@ -105,6 +105,27 @@ def spell(index):
     return node["name"] if node["kind"] == "ident" else node["kind"]
 spelled = [spell(node["left"]) for node in nodes if node["kind"] == "resource-call-arg" and node["name"] == "remaining"]
 assert spelled == ["binary", "Limits::DEPTH", "QualifiedArgument::LOCAL_DEPTH", "absent::ROOT_DEPTH", "LOCAL_DEPTH", "QualifiedArgument::LOCAL_DEPTH"], spelled
+nested = [node for node in nodes if node["kind"] == "resource-call-arg" and node["name"] == "value" and node["left"] < len(nodes)]
+def contains_qualified_constant(root):
+    node = nodes[root]
+    if node["kind"] == "scope":
+        return spell(root) == "absent::SIGNED_DEPTH" or contains_qualified_constant(node["left"])
+    if node["kind"] == "unary" or node["kind"] == "paren":
+        return node["left"] < len(nodes) and contains_qualified_constant(node["left"])
+    if node["kind"] == "binary":
+        return node["left"] < len(nodes) and contains_qualified_constant(node["left"]) or node["right"] < len(nodes) and contains_qualified_constant(node["right"])
+    return False
+assert any(nodes[node["left"]]["kind"] == "unary" and contains_qualified_constant(node["left"]) for node in nested), nested
+def contains_bare_shadow(root):
+    node = nodes[root]
+    if node["kind"] == "ident":
+        return node["name"] == "SIGNED_DEPTH"
+    if node["kind"] == "unary" or node["kind"] == "paren":
+        return node["left"] < len(nodes) and contains_bare_shadow(node["left"])
+    if node["kind"] == "binary":
+        return node["left"] < len(nodes) and contains_bare_shadow(node["left"]) or node["right"] < len(nodes) and contains_bare_shadow(node["right"])
+    return False
+assert any(nodes[node["left"]]["kind"] == "unary" and contains_bare_shadow(node["left"]) for node in nested), nested
 '
 qualified_constant_status=${PIPESTATUS[1]}
 set -e
