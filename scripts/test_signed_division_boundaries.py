@@ -46,14 +46,9 @@ for name in negative:
     assert (name, "ensure-unproven") in findings, (name, findings)
 
 zero_diagnostics = {
-    diagnostic["message"]
+    diagnostic["line"]: diagnostic["message"]
     for diagnostic in report["semantic_diagnostics"]
     if diagnostic["message"] in {"division by zero", "modulo by zero"}
 }
-assert zero_diagnostics == {"division by zero", "modulo by zero"}, report["semantic_diagnostics"]
-assert not any(
-    diagnostic["message"] in {"division by zero", "modulo by zero"}
-    and diagnostic["line"] in {18, 23}
-    for diagnostic in report["semantic_diagnostics"]
-), report["semantic_diagnostics"]
+assert zero_diagnostics == {31: "division by zero", 35: "modulo by zero"}, report["semantic_diagnostics"]
 print("signed division boundaries: safe cases replay; minimum overflow and zero-divisor controls refuse")
