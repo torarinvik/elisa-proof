@@ -822,11 +822,15 @@ sentinel corpus or tied to internal phase/work counters.
 
 **Gate:** Known allocation/reclamation probes produce expected counts and high-water marks; dropped events and truncated captures are explicit. Instrumented proof output agrees with uninstrumented output. Never count instrumentation overhead as target cost.
 
-**Progress (2026-10-05):** Commits `3dc4dad5` and `a5cba7a7` add a capture summarizer and a
-regression ensuring capture-quality fields remain independent. This is reporting infrastructure,
-not calibrated proof-engine allocation evidence: known-count probes, complete captures from
-successful and refused workloads, phase attribution, profiler overhead, and live/retained memory
-measurements remain open.
+**Progress (2026-10-05):** Commits `3dc4dad5` and `a5cba7a7` add a bounded reader for existing
+allocation-capture artifacts and a regression ensuring capture-quality fields remain independent.
+It preserves per-repetition event counts, completeness, dropped-event counts, lifetime availability,
+logical live-byte peaks, and backing-capacity peaks as distinct fields. A synthetic probe covers
+complete, dropped, truncated, and malformed captures. The reader was exercised against an existing
+compiler memory artifact (six workload groups, 18 complete captures), which verifies producer-schema
+compatibility only; those runs do not measure the proof assistant. Proof-workload captures,
+source/store/phase attribution, RSS separation, overhead measurement, and known proof
+allocation/reclamation probes remain open. See [R-014 allocation summary evidence](docs/evidence/2026-10-05-r014-allocation-summary.md).
 
 #### R-015 — Isolate builds, products and evidence snapshots
 
