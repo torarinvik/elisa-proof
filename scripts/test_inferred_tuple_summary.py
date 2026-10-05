@@ -30,7 +30,10 @@ negative = report("rejected_inferred_tuple_summary.elisa", 1)
 assert negative["status"] == "failed"
 refused = {row["name"] for row in negative["findings"] if row["kind"] == "ensure-unproven"}
 assert refused == {"wrong_inferred_tuple_value", "wrong_inferred_tuple_boolean",
-                   "unverified_tuple_source", "unverified_inferred_tuple_value"}
+                   "unverified_tuple_source", "unverified_inferred_tuple_value",
+                   "stale_inferred_tuple_value"}
+assert any(row["name"] == "stateful_tuple_source" and row["kind"] == "function"
+           and row["verified"] for row in negative["declaration_details"])
 assert any(row["name"] == "unverified_inferred_tuple_value"
            and row["kind"] == "function-summary-unverified" for row in negative["findings"])
-print("inferred tuples: checked scalar summaries replay; false claims and unchecked callees refuse")
+print("inferred tuples: checked summaries replay; false claims, unchecked callees and stale state refuse")
