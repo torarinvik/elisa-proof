@@ -5036,9 +5036,9 @@ regression.
 
 ### 23.23.1 Exact starting state and audit findings
 
-The last committed proof-tree revision inspected for this refresh is `49963e53` (`Document bounded
-model stress fixture`), after `fea36cd5` (`Record P-01 identity recheck evidence`) and `63dba677`
-(`Bound portable package JSON scan work`). The
+The last committed proof-tree revision inspected for this refresh is `5596eefc` (`Validate benchmark
+goal result parity`), after `49963e53` (`Document bounded model stress fixture`), `fea36cd5`
+(`Record P-01 identity recheck evidence`) and `63dba677` (`Bound portable package JSON scan work`). The
 shared checkout also contains uncommitted and untracked changes
 from parallel audit work; they are not part of that commit, are not one qualified source snapshot,
 and must not be combined or described as landed without ownership review and a fresh matched build.
@@ -5060,6 +5060,7 @@ no proof/replay validation after this change may claim fresh-Stage1 status until
 | P-01 build identity could drift after its initial preflight | Commit `e8142cf5` revalidates the selected executable's checksum-bound build manifest after all samples and rejects any changed identity. `python3 scripts/test_p01_baseline.py` mutates an otherwise valid manifest mid-run and confirms that no baseline report is accepted; the focused test passed both before and after integration. | This closes one measurement-integrity race for the single-binary P-01 runner. It is not a paired performance result, a proof/replay semantic comparison, or a current end-to-end baseline. |
 | P-02 benchmark summaries could contradict per-goal results | Commit `5596eefc` requires every obligation row to carry a real Boolean `proven` value and checks that the row-derived proved/unproven totals exactly match the summary. Adversarial tests reject both contradiction directions and integer `1`; the 24-test P-02 suite, 7 hardening tests and P-01 baseline test passed. | This hardens benchmark semantic-parity validation only. No proof build or benchmark run occurred, so it establishes neither a speedup nor current-product performance. |
 | Repeated `requires` in the bounded-work example are deliberate | Commit `49963e53` documents the fixture as intentional stress input and pins 12 copies in the proving function and 20 in the over-budget function in `scripts/test_bounded_model_work_budget.py`. The focused test passed against the selected immutable pair at proof HEAD `9184f6a2`; only comments/test guards changed in `49963e53`. | The run did not build or validate a pair at current proof HEAD, and it is not a performance result. Keep the exact counts and budget outcomes; never deduplicate the stressors as ordinary cleanup. |
+| The 600-line proof-source maintainability gate currently fails | `scripts/test.d/09-names-and-scale.sh` enforces at most 600 lines for every Elisa source under `src`; the current source census reports `src/proof/replay/source_call_coverage.elisa` at 645 lines. | Extract one cohesive responsibility into a well-named module with deliberate public/private boundaries, not mechanically numbered shards; rerun the line guard and focused replay tests. |
 
 Status terms in this section are strict: **confirmed** means reproduced against named source and
 product identities; **source-established risk** means the semantic mismatch is demonstrated in code
