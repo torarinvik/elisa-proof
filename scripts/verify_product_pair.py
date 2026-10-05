@@ -12,12 +12,23 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
 
 
 PRODUCTS = ("elisa-proof", "elisa-proof-replay")
+BUILD_IDENTITY_FIELDS = (
+    "frontend",
+    "compiler",
+    "runtime",
+    "profile_hooks",
+    "target",
+    "optimization",
+    "compile_mode",
+    "compiler_flags",
+)
 
 
 def sha256(path: Path) -> str:
@@ -55,6 +66,104 @@ def read_manifest(binary: Path, generation: str) -> dict:
     return manifest
 
 
+def shared_build_identity(manifest: dict) -> dict:
+    """Return the build inputs that must be identical for both executable roles.
+
+    Per-product binary hashes and build_identity values are intentionally excluded: each
+    executable has a different entry point and dependency closure. Their shared toolchain,
+    frontend, runtime, target, and compilation policy are not product-specific.
+    """
+    missing = [field for field in BUILD_IDENTITY_FIELDS if field not in manifest]
+    if missing:
+        raise ValueError(f"build manifest is missing shared identity fields: {', '.join(missing)}")
+    if manifest.get("schema") != "elisa-proof-build-manifest-v1":
+        raise ValueError("build manifest has an unsupported schema")
+
+    frontend = manifest["frontend"]
+    compiler = manifest["compiler"]
+    runtime = manifest["runtime"]
+    profile_hooks = manifest["profile_hooks"]
+    if not isinstance(frontend, dict) or not isinstance(compiler, dict):
+        raise ValueError("build manifest has malformed frontend/compiler identity")
+    if not isinstance(runtime, dict) or not isinstance(profile_hooks, dict):
+        raise ValueError("build manifest has malformed runtime/profile-hook identity")
+
+    frontend_revision = frontend.get("revision")
+    frontend_tree = frontend.get("tree")
+    if not isinstance(frontend_revision, str) or not frontend_revision:
+        raise ValueError("build manifest has no frontend revision")
+    if not isinstance(frontend_tree, str) or re.fullmatch(r"[0-9a-f]{40}", frontend_tree) is None:
+        raise ValueError("build manifest has no valid frontend tree identity")
+
+    stage = compiler.get("stage")
+    if stage not in ("stage0", "stage1"):
+        raise ValueError("build manifest has an invalid compiler stage")
+    compiler_identity = {
+        "stage": stage,
+        "stage1_revision": compiler.get("stage1_revision"),
+        "source_revision": compiler.get("source_revision"),
+        "source_dirty": compiler.get("source_dirty"),
+    }
+    if any(field not in compiler for field in ("stage1_revision", "source_revision", "source_dirty")):
+        raise ValueError("build manifest is missing compiler source provenance")
+    if compiler_identity["stage1_revision"] is not None and not isinstance(compiler_identity["stage1_revision"], str):
+        raise ValueError("build manifest has malformed Stage1 revision")
+    if compiler_identity["source_revision"] is not None and not isinstance(compiler_identity["source_revision"], str):
+        raise ValueError("build manifest has malformed compiler source revision")
+    if compiler_identity["source_dirty"] is not None and not isinstance(compiler_identity["source_dirty"], bool):
+        raise ValueError("build manifest has malformed compiler dirty-source flag")
+    for role in ("executable", "product"):
+        artifact = compiler.get(role)
+        if not isinstance(artifact, dict):
+            raise ValueError(f"build manifest has no compiler {role} identity")
+        digest = artifact.get("sha256")
+        size = artifact.get("bytes")
+        if (not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or not isinstance(size, int) or isinstance(size, bool) or size <= 0):
+            raise ValueError(f"build manifest has an invalid compiler {role} identity")
+        compiler_identity[role] = {"sha256": digest, "bytes": size}
+
+    def linked_artifact_identity(name: str, artifact: dict) -> dict:
+        if "sha256" not in artifact:
+            raise ValueError(f"build manifest is missing {name} digest")
+        digest = artifact.get("sha256")
+        size = artifact.get("bytes")
+        if digest is None and size is None:
+            if artifact.get("path") is not None:
+                raise ValueError(f"build manifest has an incomplete {name} identity")
+            return {"sha256": None, "bytes": None}
+        if (not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or not isinstance(size, int) or isinstance(size, bool) or size <= 0):
+            raise ValueError(f"build manifest has an invalid {name} identity")
+        return {"sha256": digest, "bytes": size}
+
+    if not isinstance(manifest["target"], str) or not manifest["target"]:
+        raise ValueError("build manifest has no target identity")
+    if not isinstance(manifest["optimization"], str) or not manifest["optimization"]:
+        raise ValueError("build manifest has no optimization identity")
+    if not isinstance(manifest["compile_mode"], str) or not manifest["compile_mode"]:
+        raise ValueError("build manifest has no compile-mode identity")
+    flags = manifest["compiler_flags"]
+    if not isinstance(flags, list) or any(not isinstance(flag, str) for flag in flags):
+        raise ValueError("build manifest has malformed compiler flags")
+
+    return {
+        "frontend": {"revision": frontend_revision, "tree": frontend_tree},
+        "compiler": compiler_identity,
+        "runtime": linked_artifact_identity("runtime", runtime),
+        "profile_hooks": linked_artifact_identity("profile hooks", profile_hooks),
+        "target": manifest["target"],
+        "optimization": manifest["optimization"],
+        "compile_mode": manifest["compile_mode"],
+        "compiler_flags": flags,
+    }
+
+
+def require_matching_build_identity(proof: dict, replay: dict) -> None:
+    if shared_build_identity(proof) != shared_build_identity(replay):
+        raise ValueError("proof and replay manifests describe different toolchain/build identities")
+
+
 def failpoint(name: str) -> None:
     if os.environ.get("ELISA_PROOF_PUBLISH_FAIL_AT") == name:
         raise RuntimeError(f"injected publication failure at {name}")
@@ -75,6 +184,7 @@ def publish(arguments: argparse.Namespace) -> int:
     staged_pair = [read_manifest(binary, generation) for binary in sources]
     if staged_pair[0].get("proof") != staged_pair[1].get("proof"):
         raise ValueError("proof and replay manifests describe different source snapshots")
+    require_matching_build_identity(staged_pair[0], staged_pair[1])
 
     final = root / generation
     if final.exists():
@@ -133,6 +243,7 @@ def resolve(arguments: argparse.Namespace) -> int:
     pair = [read_manifest(binary, generation) for binary in binaries]
     if pair[0].get("proof") != pair[1].get("proof"):
         raise ValueError("proof and replay products do not share source provenance")
+    require_matching_build_identity(pair[0], pair[1])
     result = {
         "pair_generation": generation,
         "products": {
