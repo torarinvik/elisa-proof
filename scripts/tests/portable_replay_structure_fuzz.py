@@ -85,6 +85,8 @@ def run_fresh(data, label, must_refuse=True):
                        (summary.get("theorems", 0) > 0 and summary.get("not_replayed") == 0))
     if must_refuse:
         valid = valid and child.returncode == 1 and result.get("status") != "replayed"
+        theorem_results = result.get("theorems", [])
+        valid = valid and all(theorem.get("status") != "replayed" for theorem in theorem_results)
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     # CPU times are cumulative for this test process; CPU_LIMIT is also enforced by
     # RLIMIT_CPU for each fresh replay child, while wall time is independently polled.
