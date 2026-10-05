@@ -406,13 +406,14 @@ refused = {
     "struct_equality_premise",
     "local_struct_equality_premise",
     "constructed_aggregate",
-    "call_congruence",
     "cross_width",
     "wrapping_operand",
 }
 claimed = {goal["name"] for goal in report["goals"] if goal["proven"] and goal["rule"] != "resource-safety"}
 if refused & claimed:
     raise SystemExit("dogfood failed: congruence admitted %s" % sorted(refused & claimed))
+if "call_congruence" not in claimed:
+    raise SystemExit("dogfood failed: checked pure-call congruence positive control did not prove")
 if refused - {finding["name"] for finding in report["findings"]}:
     raise SystemExit("dogfood failed: an adversarial congruence goal produced no diagnostic")
 # Builtin fixed-array indexing carries scalar witnesses (101a785), so this one proves by design.

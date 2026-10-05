@@ -302,14 +302,19 @@ with open(withdrawn, encoding="utf-8") as handle:
     report = json.load(handle)
 if report["status"] != "failed" or report["replay"]["gaps"]:
     raise SystemExit("dogfood failed: collection builtin boundary fixture did not fail cleanly")
-# Stage0 describes this as a builtin `push` error; the pinned self-hosted frontend reports the
-# same safety fact as a region-escape diagnostic. Assert the invariant rather than a frontend
-# wording: exactly one hard error, naming the local arena and the longer-lived destination.
-if report["summary"]["semantic_errors"] != 1 or not any(
-    diagnostic["actual"] == "scratch"
-    and "longer-lived region" in diagnostic["message"]
-    for diagnostic in report["semantic_diagnostics"]
-):
+# Stage0 describes this as a builtin `push` error; the self-hosted frontend can report both the
+# allocation-specific error and the underlying region escape. Assert the safety invariant rather
+# than an exact diagnostic count or wording, while requiring the report count to match its rows.
+diagnostics = report["semantic_diagnostics"]
+has_push_escape = any(
+    diagnostic["name"] == "push" and "darray push allocates into" in diagnostic["message"]
+    for diagnostic in diagnostics
+)
+has_region_escape = any(
+    diagnostic["actual"] == "scratch" and "longer-lived region" in diagnostic["message"]
+    for diagnostic in diagnostics
+)
+if report["summary"]["semantic_errors"] != len(diagnostics) or not (has_push_escape or has_region_escape):
     raise SystemExit("dogfood failed: unsafe nested-region growth was not diagnosed by the compiler")
 if {f["kind"] for f in report["findings"]} != {"borrow-write-conflict", "borrow-call-opaque"}:
     raise SystemExit("dogfood failed: a builtin write escaped the borrow rules")
