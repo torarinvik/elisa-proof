@@ -32,6 +32,16 @@ fi
 "$runtime_dir/congruence-runtime"
 printf 'dogfood congruence_runtime: participating formers carried equalities and excluded formers refused\n'
 
+# Marker-query caching must preserve strict malformed-marker and overload-veto behavior.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/primitive-witness-marker-runtime.o" "$ROOT_DIR/examples/kernel_primitive_witness_marker_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/primitive-witness-marker-runtime" "$runtime_dir/primitive-witness-marker-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/primitive-witness-marker-runtime" "$runtime_dir/primitive-witness-marker-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/primitive-witness-marker-runtime"
+printf 'dogfood primitive_witness_marker_runtime: malformed and overloaded marker controls refused; witnessed scalar replay passed\n'
+
 # Propositional fact projection is exercised against the kernel directly: a conjunction entails
 # each conjunct, a negated disjunction entails each negated disjunct, a double negation cancels,
 # and the dual forms - a disjunction, a negated conjunction - must stay refused in both signs.

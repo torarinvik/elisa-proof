@@ -1,9 +1,8 @@
-"""Pin the deterministic full-fact traversal reduction in primitive comparisons.
+"""Pin the context-local, read-only marker decode cache used by scalar-witness queries.
 
-This is a source-level operation counter, not a wall-clock or runtime-call claim:
-the comparison's two scalar-witness checks short-circuit, so the old second
-filter runs only when the left operand is witnessed. Runtime verdict and replay
-equivalence are covered by the focused proof and portable replay suites.
+This source-level query-plan guard is not a runtime timing claim. Proof reports,
+proven/replay outcomes, and adversarial forged-marker refusals remain the runtime
+acceptance criteria.
 """
 from pathlib import Path
 import re
@@ -39,17 +38,26 @@ def main() -> None:
     marker_source = REPLAY / "witness_marker_facts.elisa"
     primitive = function_body(integrated, "proof_kernel_replay_primitive_comparison")
     scalar_wrapper = function_body(congruence, "proof_kernel_replay_scalar_term_witnessed")
-    filter_facts = function_body(marker_source, "proof_kernel_replay_witness_marker_facts")
+    cache_builder = function_body(congruence, "proof_kernel_replay_witness_marker_cache")
     candidate = function_body(marker_source, "proof_kernel_replay_witness_marker_candidate")
     marker_names = function_body(marker_source, "proof_kernel_replay_witness_marker_name")
+    budget = function_body(congruence, "proof_kernel_replay_scalar_term_witnessed_budget")
+    element_budget = function_body(congruence, "proof_kernel_replay_scalar_element_remaining_budget")
 
-    # Count actual full-list filter call sites in the kernel source. The scalar
-    # wrapper has one, and the optimized paired path creates one shared ordered
-    # marker list before testing either root.
-    assert len(re.findall(r"proof_kernel_replay_witness_marker_facts\s*\(", scalar_wrapper)) == 1
-    assert len(re.findall(r"proof_kernel_replay_witness_marker_facts\s*\(", primitive)) == 1
-    assert "for fact in facts" in filter_facts and "markers.push(fact)" in filter_facts
-    assert "proof_kernel_replay_witness_marker_candidate(nodes, fact)" in filter_facts
+    # Decode each candidate through the existing strict readers once, then pass this
+    # query-local immutable record array through recursion and both comparison operands.
+    assert len(re.findall(r"proof_kernel_replay_witness_marker_cache\s*\(", scalar_wrapper)) == 1
+    assert len(re.findall(r"proof_kernel_replay_witness_marker_cache\s*\(", primitive)) == 1
+    assert "for fact in facts" in cache_builder
+    assert "proof_kernel_replay_witness_marker_candidate(nodes, fact)" in cache_builder
+    for reader in (
+        "proof_kernel_replay_untrusted_operator_marker",
+        "proof_kernel_replay_marker_argument",
+        "proof_kernel_replay_unsigned_marker_info",
+        "proof_kernel_replay_element_marker",
+    ):
+        assert len(re.findall(rf"{reader}\s*\(", cache_builder)) == 1, reader
+        assert reader not in budget and reader not in element_budget
     assert "fact >= nodes.count" in candidate and 'nodes[fact].kind != "call"' in candidate
     assert "callee >= nodes.count" in candidate and 'nodes[callee].kind == "ident"' in candidate
     expected_markers = {
@@ -60,8 +68,17 @@ def main() -> None:
     }
     assert set(re.findall(r'"(__elisa_[a-z_]+)"', marker_names)) == expected_markers
 
-    # Verify the paired path retains the prior independent per-operand depth
-    # budget and the left-to-right `and` short circuit.
+    # The cache carries parsed payloads only, not a proof result, and its lifetime
+    # is the local query: recursive calls reuse it; no cache lives in a workspace.
+    assert "darray[ProofKernelReplayWitnessMarker]" in scalar_wrapper
+    assert "darray[ProofKernelReplayWitnessMarker]" in primitive
+    assert "markers" in budget and "for fact in facts" not in budget
+    assert "markers" in element_budget and "for fact in facts" not in element_budget
+    assert "proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers" in budget
+    assert "proof_kernel_replay_scalar_element_remaining_budget(nodes, children, markers" in budget
+
+    # The paired path retains the independent per-operand depth budget and the
+    # left-to-right `and` short circuit while sharing only decoded marker records.
     assert "not ElisaProofKernelCore::depth_valid(0)" in primitive
     assert "PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH == 0" in primitive
     assert "budget: usize = PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH" in primitive
@@ -73,21 +90,10 @@ def main() -> None:
                      r"proof_kernel_replay_scalar_term_witnessed_budget\([^\n]+right",
                      primitive), primitive
 
-    # Deterministic filter-pass counter for the same valid-depth comparison:
-    # old left check always scans once; its right check scans only if left passes.
-    # New implementation scans once before the checks; it does not share the
-    # witness recursion's budget between operands.
-    cases = ((False, 1, 1), (True, 2, 1))
-    for left_witnessed, previous_passes, optimized_passes in cases:
-        old_count = 1 + int(left_witnessed)
-        new_count = 1
-        assert (old_count, new_count) == (previous_passes, optimized_passes)
-        assert old_count - new_count == int(left_witnessed)
-
-    # Early depth/budget rejection performs no filter pass in either version.
+    # Early depth/budget rejection occurs before cache construction.
     assert "return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH" in scalar_wrapper
     assert "return false if not ElisaProofKernelCore::depth_valid(0) or PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH == 0" in primitive
-    print("primitive comparison witness-filter passes: left-fail 1->1; left-pass 2->1; exhausted 0->0")
+    print("scalar witness query cache: exact marker readers are decoded once per immutable query context")
 
 
 if __name__ == "__main__":

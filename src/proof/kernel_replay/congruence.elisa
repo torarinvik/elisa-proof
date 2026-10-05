@@ -167,12 +167,11 @@ extend ElisaProofKernelReplay:
             return (false, 0) if not protocol.known or protocol.node.kind != "string" or protocol.node.name == ""
             return (true, term_node.node.left)
 
-        def proof_kernel_replay_scalar_witnessed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], name: sview) -> bool:
+        def proof_kernel_replay_scalar_witnessed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, markers: darray[ProofKernelReplayWitnessMarker], name: sview) -> bool:
             return false if name == ""
-            for fact in facts |fact, nodes, children, name|:
-                return true if proof_kernel_replay_scalar_marker_name(nodes, children, fact) == name
-                marker: (known: bool, name_root: usize, width: i64) = proof_kernel_replay_unsigned_marker_info(nodes, children, fact, 0)
-                return true if marker.known and proof_kernel_replay_ident_matches(nodes, marker.name_root, name)
+            for marker in markers |marker, nodes, name|:
+                return true if marker.kind == PROOF_KERNEL_REPLAY_WITNESS_PRIMITIVE_SCALAR and proof_kernel_replay_ident_name(nodes, marker.root) == name
+                return true if marker.kind == PROOF_KERNEL_REPLAY_WITNESS_UNSIGNED_TYPE and proof_kernel_replay_ident_matches(nodes, marker.root, name)
             return false
 
         # A container whose declared element type the producer resolved to a primitive scalar.
@@ -210,6 +209,29 @@ extend ElisaProofKernelReplay:
                 return (false, 0, 0, 0) if not marked_width.known or marked_width.value < ElisaProofKernelCore::PROOF_KERNEL_FIXED_WIDTH_MIN or marked_width.value > ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS
                 width <- marked_width.value
             return (true, term_node.node.left, depth.value, width)
+
+        # Decode marker facts once for one immutable witness-query context. The cached entries
+        # contain only payloads accepted by the same fail-closed readers used by replay; malformed
+        # lookalikes are omitted. Callers discard this array when the query returns, so it cannot
+        # survive a node/fact mutation or be reused for another certificate.
+        def proof_kernel_replay_witness_marker_cache(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize]) -> darray[ProofKernelReplayWitnessMarker]:
+            markers: mutable darray[ProofKernelReplayWitnessMarker] = []
+            for fact in facts |fact, nodes, children, markers|:
+                continue if not proof_kernel_replay_witness_marker_candidate(nodes, fact)
+                marker_name: sview = nodes[nodes[fact].left].name
+                if marker_name == "__elisa_untrusted_operator_type":
+                    marker: (known: bool, term: usize) = proof_kernel_replay_untrusted_operator_marker(nodes, children, fact)
+                    markers.push(ProofKernelReplayWitnessMarker{kind: PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_OPERATOR, root: marker.term, depth: 0}) if marker.known
+                elif marker_name == "__elisa_primitive_scalar_type":
+                    marker: (known: bool, root: usize) = proof_kernel_replay_marker_argument(nodes, children, fact, "__elisa_primitive_scalar_type")
+                    markers.push(ProofKernelReplayWitnessMarker{kind: PROOF_KERNEL_REPLAY_WITNESS_PRIMITIVE_SCALAR, root: marker.root, depth: 0}) if marker.known
+                elif marker_name == "__elisa_unsigned_type_bound":
+                    marker: (known: bool, name_root: usize, width: i64) = proof_kernel_replay_unsigned_marker_info(nodes, children, fact, 0)
+                    markers.push(ProofKernelReplayWitnessMarker{kind: PROOF_KERNEL_REPLAY_WITNESS_UNSIGNED_TYPE, root: marker.name_root, depth: 0}) if marker.known
+                elif marker_name == "__elisa_primitive_scalar_element":
+                    marker: (known: bool, root: usize, depth: i64, width: i64) = proof_kernel_replay_element_marker(nodes, children, fact)
+                    markers.push(ProofKernelReplayWitnessMarker{kind: PROOF_KERNEL_REPLAY_WITNESS_SCALAR_ELEMENT, root: marker.root, depth: marker.depth}) if marker.known
+            return markers
 
         # Peel a pure chain of source subscripts and return its base container plus every index
         # term. Record-field element witnesses are matched against that exact base and field.
@@ -257,18 +279,19 @@ extend ElisaProofKernelReplay:
             requires depth <= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             return -1 if not ElisaProofKernelCore::depth_valid(depth) or depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             budget: usize = PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH - depth
-            return proof_kernel_replay_scalar_element_remaining_budget(nodes, children, facts, root, subscripts, depth, budget)
+            markers: darray[ProofKernelReplayWitnessMarker] = proof_kernel_replay_witness_marker_cache(nodes, children, facts)
+            return proof_kernel_replay_scalar_element_remaining_budget(nodes, children, markers, root, subscripts, depth, budget)
 
-        def proof_kernel_replay_scalar_element_remaining_budget(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, subscripts: mutable darray[usize]&, depth: usize, budget: usize) -> i64:
+        def proof_kernel_replay_scalar_element_remaining_budget(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, markers: darray[ProofKernelReplayWitnessMarker], root: usize, subscripts: mutable darray[usize]&, depth: usize, budget: usize) -> i64:
             requires depth <= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             requires budget > 0
             decreases budget
             return -1 if not ElisaProofKernelCore::depth_valid(depth)
             return -1 if depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             return -1 if not proof_kernel_replay_valid(nodes, root)
-            for fact in facts |fact, nodes, children, root|:
-                marker: (known: bool, root: usize, depth: i64, width: i64) = proof_kernel_replay_element_marker(nodes, children, fact)
-                return marker.depth if marker.known and proof_kernel_replay_expr_equal(nodes, children, marker.root, root, 0)
+            for marker in markers |marker, nodes, children, root|:
+                continue if marker.kind != PROOF_KERNEL_REPLAY_WITNESS_SCALAR_ELEMENT
+                return marker.depth if proof_kernel_replay_expr_equal(nodes, children, marker.root, root, 0)
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
             return -1 if not located.known
             node: ElisaProofKernelCore::ProofKernelNode = located.node
@@ -277,28 +300,27 @@ extend ElisaProofKernelReplay:
                 container: mutable usize = 0
                 subscripts: mutable darray[usize] = []
                 return -1 if not proof_kernel_replay_indexed_container_path(nodes, children, node.left, &container, &subscripts, depth + 1) or subscripts.count == 0
-                for fact in facts |nodes, children, node, container, subscripts, root|:
-                    marker: (known: bool, root: usize, depth: i64, width: i64) = proof_kernel_replay_element_marker(nodes, children, fact)
-                    continue if not marker.known
+                for marker in markers |nodes, children, node, container, subscripts, root|:
+                    continue if marker.kind != PROOF_KERNEL_REPLAY_WITNESS_SCALAR_ELEMENT
                     field: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, marker.root)
                     continue if not field.known or field.node.kind != "field" or field.node.name != node.name
                     continue if not proof_kernel_replay_expr_equal(nodes, children, field.node.left, container, 0)
                     return -1 if marker.depth < subscripts.count.i64()
                     return -1 if budget <= 1 and subscripts.count > 0
-                    for subscript in subscripts |nodes, children, facts, depth, budget|:
-                        return -1 if not proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, facts, subscript, depth + 1, budget: budget - 1)
+                    for subscript in subscripts |nodes, children, markers, depth, budget|:
+                        return -1 if not proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, subscript, depth + 1, budget: budget - 1)
                     return marker.depth - subscripts.count.i64()
                 return -1
             if node.kind == "index":
                 return -1 if budget <= 1
-                remaining: i64 = proof_kernel_replay_scalar_element_remaining_budget(nodes, children, facts, node.left, subscripts, depth + 1, budget: budget - 1)
+                remaining: i64 = proof_kernel_replay_scalar_element_remaining_budget(nodes, children, markers, node.left, subscripts, depth + 1, budget: budget - 1)
                 return -1 if remaining < 1
                 subscripts.push(node.right)
                 return remaining - 1
             if node.kind == "index-n":
                 return -1 if node.children_count == 0 or not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                 return -1 if budget <= 1
-                remaining: i64 = proof_kernel_replay_scalar_element_remaining_budget(nodes, children, facts, node.left, subscripts, depth + 1, budget: budget - 1)
+                remaining: i64 = proof_kernel_replay_scalar_element_remaining_budget(nodes, children, markers, node.left, subscripts, depth + 1, budget: budget - 1)
                 return -1 if remaining < node.children_count.i64()
                 for offset in 0..<node.children_count |offset, children, node, subscripts|:
                     argument: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start + offset)
@@ -332,10 +354,10 @@ extend ElisaProofKernelReplay:
             requires depth <= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             budget: usize = PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH - depth
-            markers: darray[usize] = proof_kernel_replay_witness_marker_facts(nodes, facts)
+            markers: darray[ProofKernelReplayWitnessMarker] = proof_kernel_replay_witness_marker_cache(nodes, children, facts)
             return proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, root, depth, budget)
 
-        def proof_kernel_replay_scalar_term_witnessed_budget(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, depth: usize, budget: usize) -> bool:
+        def proof_kernel_replay_scalar_term_witnessed_budget(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, markers: darray[ProofKernelReplayWitnessMarker], root: usize, depth: usize, budget: usize) -> bool:
             requires depth <= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             requires budget > 0
             decreases budget
@@ -344,17 +366,15 @@ extend ElisaProofKernelReplay:
             return false if not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return false if not proof_kernel_replay_arena_shape_valid(node)
-            for fact in facts |fact, nodes, children, root|:
-                untrusted: (known: bool, root: usize) = proof_kernel_replay_untrusted_operator_marker(nodes, children, fact)
-                return false if untrusted.known and proof_kernel_replay_untrusted_operator_applies(nodes, children, untrusted.root, root, depth + 1)
+            for marker in markers |marker, nodes, children, root, depth|:
+                return false if marker.kind == PROOF_KERNEL_REPLAY_WITNESS_UNTRUSTED_OPERATOR and proof_kernel_replay_untrusted_operator_applies(nodes, children, marker.root, root, depth + 1)
             return true if proof_kernel_replay_congruent_scalar_literal(node)
             # Bare identifiers use the name-matching witness scan, which checks both primitive
             # scalar and unsigned-width markers. Let it handle primitive markers here too instead
             # of parsing every fact once by structural equality and again by name.
-            return proof_kernel_replay_scalar_witnessed(nodes, children, facts, node.name) if node.kind == "ident"
-            for fact in facts |fact, nodes, children, root|:
-                argument: (known: bool, root: usize) = proof_kernel_replay_marker_argument(nodes, children, fact, "__elisa_primitive_scalar_type")
-                return true if argument.known and proof_kernel_replay_expr_equal(nodes, children, argument.root, root, 0)
+            return proof_kernel_replay_scalar_witnessed(nodes, markers, node.name) if node.kind == "ident"
+            for marker in markers |marker, nodes, children, root|:
+                return true if marker.kind == PROOF_KERNEL_REPLAY_WITNESS_PRIMITIVE_SCALAR and proof_kernel_replay_expr_equal(nodes, children, marker.root, root, 0)
             # A collection literal's count is its own length, a `usize` whatever its elements are.
             return true if node.kind == "field" and node.name == "count" and node.left < nodes.count and nodes[node.left].kind == "array"
             if node.kind == "call":
@@ -363,21 +383,21 @@ extend ElisaProofKernelReplay:
                 callee: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
                 return false if not proof_kernel_replay_arena_shape_valid(callee) or callee.kind != "field" or not proof_kernel_replay_integer_cast_target(callee.name)
                 return false if budget <= 1
-                return proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, facts, callee.left, depth + 1, budget: budget - 1)
+                return proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, callee.left, depth + 1, budget: budget - 1)
             if node.kind == "index" or node.kind == "index-n" or node.kind == "field":
                 subscripts: mutable darray[usize] = []
                 return false if budget <= 1
-                return false if proof_kernel_replay_scalar_element_remaining_budget(nodes, children, facts, root, &subscripts, depth + 1, budget: budget - 1) != 0
+                return false if proof_kernel_replay_scalar_element_remaining_budget(nodes, children, markers, root, &subscripts, depth + 1, budget: budget - 1) != 0
                 return false if budget <= 1 and subscripts.count > 0
-                for subscript in subscripts |subscript, nodes, children, facts, depth, budget|:
-                    return false if not proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, facts, subscript, depth + 1, budget: budget - 1)
+                for subscript in subscripts |subscript, nodes, children, markers, depth, budget|:
+                    return false if not proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, subscript, depth + 1, budget: budget - 1)
                 return true
             return false if not proof_kernel_replay_congruent_former(node)
             operands: mutable darray[usize] = []
             return false if not proof_kernel_replay_congruence_operands(nodes, children, root, &operands)
-            for operand in operands |operand, nodes, children, facts, depth, budget|:
+            for operand in operands |operand, nodes, children, markers, depth, budget|:
                 return false if budget <= 1
-                return false if not proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, facts, operand, depth + 1, budget: budget - 1)
+                return false if not proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, operand, depth + 1, budget: budget - 1)
             return true
 
         # Operand roots of a participating former, in a fixed order. A malformed or
