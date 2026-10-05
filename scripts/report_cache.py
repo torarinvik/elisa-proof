@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import time
@@ -18,11 +19,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BINARY = ROOT / "build/elisa-proof"
-REPORT_CACHE_SCHEMA = b"elisa-proof-report-cache-v2\0"
+REPORT_CACHE_SCHEMA = b"elisa-proof-report-cache-v3\0"
 INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"', re.MULTILINE)
+PENDING_WAIT_SECONDS = 10.0
+REPORT_CACHE_RECIPES = (
+    Path(__file__).resolve(),
+    ROOT / "scripts/prefetch_reports.py",
+)
 
 
-def _report_inputs(path, binary):
+def _report_inputs(path, binary, recipe_files=None):
     """Return the complete identity inputs for one report.
 
     Reports depend on the fixture and every textually included file, the exact executable, and
@@ -64,13 +70,19 @@ def _report_inputs(path, binary):
         if key not in orchestration_env and
         (key.startswith(("ELISA_", "LD_", "DYLD_")) or key in ("LANG", "LC_ALL"))
     }
+    recipe_inputs = []
+    for recipe in recipe_files if recipe_files is not None else REPORT_CACHE_RECIPES:
+        recipe_path = Path(os.path.realpath(str(recipe)))
+        recipe_inputs.append((str(recipe_path), hashlib.sha256(recipe_path.read_bytes()).hexdigest()))
     return {
-        "schema": 2,
+        "schema": 3,
         "fixture": os.path.realpath(str(path)),
         "inputs": sorted(inputs),
         "binary": executable,
         "binary_sha256": binary_digest,
+        "target": {"system": platform.system(), "machine": platform.machine()},
         "environment": relevant_env,
+        "cache_recipes": sorted(recipe_inputs),
     }
 
 
@@ -158,9 +170,30 @@ def heavy_slot(path, lock_dir=None, force=False):
         time.sleep(0.5)  # poll-ok: waiting for a local heavy-fixture slot
 
 
-def cache_key(path, binary=DEFAULT_BINARY) -> str:
-    payload = json.dumps(_report_inputs(path, binary), sort_keys=True, separators=(",", ":")).encode("utf-8")
+def cache_key(path, binary=DEFAULT_BINARY, recipe_files=None) -> str:
+    payload = json.dumps(_report_inputs(path, binary, recipe_files), sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(REPORT_CACHE_SCHEMA + payload).hexdigest()
+
+
+def _read_cached_entry(entry):
+    try:
+        payload_bytes = Path(entry + ".json").read_bytes()
+        digest = Path(entry + ".sha256").read_text(encoding="ascii").strip()
+        status = int(Path(entry + ".rc").read_text(encoding="ascii").strip())
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return None
+        if hashlib.sha256(payload_bytes).hexdigest() != digest:
+            return None
+        payload = payload_bytes.decode("utf-8")
+        report = json.loads(payload)
+        if not isinstance(report, dict):
+            return None
+        expected = 0 if report.get("status") == "proved" else 1 if report.get("status") == "failed" else None
+        if expected is None or status != expected:
+            return None
+        return status, payload
+    except (OSError, ValueError, TypeError, UnicodeDecodeError):
+        return None
 
 
 def _cached(binary, path):
@@ -170,21 +203,18 @@ def _cached(binary, path):
     key = cache_key(path, binary)
     entry = os.path.join(cache, key)
     pending = os.path.join(cache, "pending", key)
-    # A prefetch that is still running this fixture finishes it sooner than a second run would.
-    while os.path.exists(pending) and not os.path.exists(entry + ".rc"):
-        time.sleep(0.5)  # poll-ok: local file from our own prefetcher
-    if not os.path.exists(entry + ".rc"):
-        return None
-    try:
-        with open(entry + ".json", encoding="utf-8") as out, open(entry + ".rc", encoding="utf-8") as rc:
-            status, payload = int(rc.read().strip()), out.read()
-        report = json.loads(payload)
-        expected = 0 if report.get("status") == "proved" else 1 if report.get("status") == "failed" else None
-        if expected is None or status != expected:
-            return None
-        return status, payload
-    except (OSError, ValueError, TypeError):
-        return None
+    hit = _read_cached_entry(entry)
+    if hit is not None or not os.path.exists(pending):
+        return hit
+    # A prefetch may publish a report while a reader arrives. Wait only for a bounded interval;
+    # crashed prefetchers can leave markers behind indefinitely.
+    deadline = time.monotonic() + PENDING_WAIT_SECONDS
+    while os.path.exists(pending) and time.monotonic() < deadline:
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        hit = _read_cached_entry(entry)
+        if hit is not None:
+            return hit
+    return None
 
 
 def json_run(path, binary=DEFAULT_BINARY, timeout=600):
