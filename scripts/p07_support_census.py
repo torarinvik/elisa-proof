@@ -19,10 +19,12 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof")).resolve()
+MAX_OUTPUT_BYTES = 256 * 1024 * 1024
 
 
 def sha256(path: Path) -> str:
@@ -73,8 +75,16 @@ def identity() -> dict:
     }
 
 
-def source_site(finding: dict, fallback: Path) -> str:
-    source = Path(finding.get("file") or fallback).name
+def source_site(finding: dict, fallback: Path, files: list | None = None) -> str:
+    file_value = finding.get("file")
+    if isinstance(file_value, int) and isinstance(files, list) and 0 <= file_value < len(files):
+        source = Path(files[file_value]).name
+    elif isinstance(file_value, str) and file_value:
+        source = Path(file_value).name
+    else:
+        source = fallback.name
+        if isinstance(file_value, int):
+            source += f"[file={file_value}]"
     line = finding.get("file_line", finding.get("line", 0))
     function = finding.get("function", finding.get("name", "?"))
     return f"{source}:{line} {function} {finding.get('kind', 'unknown')}"
@@ -121,47 +131,97 @@ def process_rss_kib(pid: int) -> int | None:
         return None
 
 
+def partial_report_metadata(report: object) -> dict:
+    if not isinstance(report, dict):
+        return {}
+    return {
+        key: report.get(key)
+        for key in ("status", "verification_state", "summary", "replay")
+        if key in report
+    }
+
+
+def rank_unsupported_kinds(results: list[dict]) -> list[dict]:
+    affected_inputs = defaultdict(set)
+    sites_by_kind = defaultdict(set)
+    for result in results:
+        if result.get("error") is not None:
+            continue
+        for site in result.get("unsupported_sites", []):
+            kind = site.rsplit(" ", 1)[-1]
+            affected_inputs[kind].add(result["input"])
+            sites_by_kind[kind].add(site)
+    return [
+        {"kind": kind, "site_count": len(sites),
+         "affected_inputs": sorted(affected_inputs[kind]),
+         "input_count": len(affected_inputs[kind])}
+        for kind, sites in sorted(sites_by_kind.items(),
+                                  key=lambda item: (-len(affected_inputs[item[0]]),
+                                                    -len(item[1]), item[0]))
+    ]
+
+
 def run(path: Path, timeout: int, rss_limit_kib: int) -> dict:
     started = time.monotonic()
-    try:
-        proc = subprocess.Popen([str(BINARY), "--json", str(path)], stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, start_new_session=True)
-    except OSError as error:
-        return {"input": str(path), "input_sha256": sha256(path),
-                "seconds": round(time.monotonic() - started, 3),
-                "error": f"execution-error: {error}"}
-    peak_rss_kib = 0
-    stop_reason = None
-    while proc.poll() is None:
-        rss = process_rss_kib(proc.pid)
-        if rss is not None:
-            peak_rss_kib = max(peak_rss_kib, rss)
-        if time.monotonic() - started >= timeout:
-            stop_reason = "timeout"
-        elif peak_rss_kib >= rss_limit_kib:
-            stop_reason = "rss-limit"
-        if stop_reason:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            break
-        time.sleep(0.025)
-    stdout, stderr = proc.communicate()
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        try:
+            proc = subprocess.Popen([str(BINARY), "--json", str(path)], stdout=stdout_file,
+                                    stderr=stderr_file, start_new_session=True)
+        except OSError as error:
+            return {"input": str(path), "input_sha256": sha256(path),
+                    "seconds": round(time.monotonic() - started, 3),
+                    "error": f"execution-error: {error}"}
+        peak_rss_kib = 0
+        stop_reason = None
+        while proc.poll() is None:
+            rss = process_rss_kib(proc.pid)
+            if rss is not None:
+                peak_rss_kib = max(peak_rss_kib, rss)
+            output_bytes = (os.fstat(stdout_file.fileno()).st_size
+                            + os.fstat(stderr_file.fileno()).st_size)
+            if time.monotonic() - started >= timeout:
+                stop_reason = "timeout"
+            elif peak_rss_kib >= rss_limit_kib:
+                stop_reason = "rss-limit"
+            elif output_bytes > MAX_OUTPUT_BYTES:
+                stop_reason = "output-limit"
+            if stop_reason:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                break
+            time.sleep(0.025)
+        proc.wait()
+        stdout_bytes = os.fstat(stdout_file.fileno()).st_size
+        stderr_bytes = os.fstat(stderr_file.fileno()).st_size
+        if stop_reason is None and stdout_bytes + stderr_bytes > MAX_OUTPUT_BYTES:
+            stop_reason = "output-limit"
+        stdout_file.seek(0)
+        stdout = stdout_file.read(MAX_OUTPUT_BYTES + 1)
+        stderr_file.seek(max(0, stderr_bytes - 2000))
+        stderr_tail = stderr_file.read()
     elapsed = round(time.monotonic() - started, 3)
     common = {"input": str(path), "input_sha256": sha256(path), "seconds": elapsed,
-              "peak_rss_kib": peak_rss_kib, "exit_code": proc.returncode}
+              "peak_rss_kib": peak_rss_kib, "exit_code": proc.returncode,
+              "stdout_bytes": stdout_bytes, "stderr_bytes": stderr_bytes,
+              "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+              "stdout_sha256_bytes": len(stdout),
+              "stdout_sha256_complete": len(stdout) == stdout_bytes,
+              "stderr_tail_bytes": len(stderr_tail),
+              "stderr_tail_sha256": hashlib.sha256(stderr_tail).hexdigest()}
     if stop_reason:
         return {**common, "error": stop_reason,
-                "stderr": stderr[-2000:].decode("utf-8", errors="replace")}
+                "stderr": stderr_tail.decode("utf-8", errors="replace")}
     try:
         report = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        return {**common, "error": "invalid-json", "stdout_bytes": len(stdout),
-                "stderr": stderr[-2000:].decode("utf-8", errors="replace")}
+        return {**common, "error": "invalid-json",
+                "stderr": stderr_tail.decode("utf-8", errors="replace")}
     validation_error = validate_report(report, proc.returncode)
     if validation_error:
-        return {**common, "error": validation_error}
+        return {**common, "error": validation_error,
+                "partial_report": partial_report_metadata(report)}
 
     details = report.get("declaration_details", [])
     findings = report.get("findings", [])
@@ -172,7 +232,7 @@ def run(path: Path, timeout: int, rss_limit_kib: int) -> dict:
         if isinstance(declaration, dict) and declaration.get("verified") is False
     ] if isinstance(details, list) else []
     unsupported_sites = sorted({
-        source_site(finding, path)
+        source_site(finding, path, report.get("files"))
         for finding in findings
         if isinstance(finding, dict) and finding.get("status") == "unsupported"
     }) if isinstance(findings, list) else []
@@ -242,6 +302,7 @@ def main() -> int:
         "timeout_seconds_per_input": args.timeout_seconds,
         "rss_limit_kib_per_process": args.rss_limit_kib,
         "inputs": results,
+        "ranked_unsupported_kinds": rank_unsupported_kinds(results),
         "ranked_unverified_declarations": ranked_declarations,
         "ranked_unsupported_sites": ranked_sites,
     }
