@@ -40,6 +40,24 @@ def contextual_i8_square(value: i8) -> i8:
     requires value <= 2
     ensure result >= 0
     return value * value
+
+def contextual_i8_local_wrap_guard(value: i8) -> bool:
+    requires value < 127
+    ensure result == true
+    incremented: i8 = value + 1
+    return incremented > value
+
+def contextual_i8_local_overflow_claim(value: i8) -> bool:
+    requires value == 127
+    ensure result == true
+    incremented: i8 = value + 1
+    return incremented > value
+
+def contextual_i16_wrong_width_overflow_claim(value: i16) -> bool:
+    requires value == 32767
+    ensure result == true
+    incremented: i16 = value + 1
+    return incremented > value
 """
 
 
@@ -126,8 +144,11 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
         "    return value + 1\n"
         "def contextual_square(value: i8) -> i8:\n"
         "    return value * value\n"
+        "def contextual_local(value: i8) -> i8:\n"
+        "    incremented: i8 = value + 1\n"
+        "    return incremented\n"
         "def main() -> i32:\n"
-        "    return 0 if contextual_add(126) == 127 and contextual_square(10) == 100 and not (255u8 + 1u8 == 0u8) else 1\n",
+        "    return 0 if contextual_add(126) == 127 and contextual_square(10) == 100 and contextual_local(126) == 127 and not (255u8 + 1u8 == 0u8) else 1\n",
         encoding="utf-8",
     )
     executable = directory / "source-runtime"
@@ -150,11 +171,17 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
     safe_claim = [goal for goal in goals if goal["name"] == "imported_suffix_safe_boundary"]
     contextual_add = [goal for goal in goals if goal["name"] == "contextual_i8_add"]
     contextual_square = [goal for goal in goals if goal["name"] == "contextual_i8_square"]
+    contextual_local = [goal for goal in goals if goal["name"] == "contextual_i8_local_wrap_guard"]
+    i8_overflow = [goal for goal in goals if goal["name"] == "contextual_i8_local_overflow_claim"]
+    i16_wrong_width = [goal for goal in goals if goal["name"] == "contextual_i16_wrong_width_overflow_claim"]
     assert len(false_claim) == len(safe_claim) == 2, goals
     assert all(not goal["proven"] and goal["replay_status"] != "replayed" for goal in false_claim), false_claim
     assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in safe_claim), safe_claim
     assert contextual_add and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in contextual_add), contextual_add
     assert contextual_square and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in contextual_square), contextual_square
+    assert contextual_local and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in contextual_local), contextual_local
+    assert i8_overflow and all(not goal["proven"] and goal["replay_status"] != "replayed" for goal in i8_overflow), i8_overflow
+    assert i16_wrong_width and all(not goal["proven"] and goal["replay_status"] != "replayed" for goal in i16_wrong_width), i16_wrong_width
     assert report["replay"]["certificates"] == report["replay"]["replayed"], report["replay"]
 
     # Exercise the untrusted decision tactic against the very same source-bound
@@ -163,6 +190,9 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
     tactic_result(proof_binary, source, safe_claim[0], True, directory, env)
     tactic_result(proof_binary, source, contextual_add[0], True, directory, env)
     tactic_result(proof_binary, source, contextual_square[0], True, directory, env)
+    tactic_result(proof_binary, source, contextual_local[0], True, directory, env)
+    tactic_result(proof_binary, source, i8_overflow[0], False, directory, env)
+    tactic_result(proof_binary, source, i16_wrong_width[0], False, directory, env)
 
     package_source = directory / "safe-package.elisa"
     package_source.write_text(
@@ -177,14 +207,20 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
         "    requires value >= -2\n"
         "    requires value <= 2\n"
         "    ensure result >= 0\n"
-        "    return value * value\n",
+        "    return value * value\n"
+        "def package_contextual_i8_local(value: i8) -> bool:\n"
+        "    requires value < 127\n"
+        "    ensure result == true\n"
+        "    incremented: i8 = value + 1\n"
+        "    return incremented > value\n",
         encoding="utf-8",
     )
     package_run = run([str(proof_binary), "--package", str(package_source)], env=env,
                       label="safe theorem package export")
     package = json.loads(package_run.stdout)
     theorem_names = {item["name"] for item in package["theorems"] if item["rule"] == "goal"}
-    assert {"package_safe_boundary", "package_contextual_signed", "package_contextual_square"} <= theorem_names, theorem_names
+    assert {"package_safe_boundary", "package_contextual_signed", "package_contextual_square",
+            "package_contextual_i8_local"} <= theorem_names, theorem_names
     package_path = directory / "safe-package.json"
     package_path.write_text(package_run.stdout, encoding="utf-8")
     portable = run([str(replay_binary), str(package_path)], env=env,
@@ -198,7 +234,15 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
     rejected_package = json.loads(rejected_package_run.stdout)
     rejected_theorems = {item["name"] for item in rejected_package.get("theorems", [])
                          if item["rule"] == "goal"}
-    assert "imported_suffix_wrap_claim" not in rejected_theorems, rejected_package
+    assert {"imported_suffix_wrap_claim", "contextual_i8_local_overflow_claim",
+            "contextual_i16_wrong_width_overflow_claim"}.isdisjoint(rejected_theorems), rejected_package
+    rejected_package_path = directory / "rejected-claims-package.json"
+    rejected_package_path.write_text(rejected_package_run.stdout, encoding="utf-8")
+    rejected_portable = run([str(replay_binary), str(rejected_package_path)], env=env,
+                            label="portable replay without false claims")
+    rejected_portable_result = json.loads(rejected_portable.stdout)
+    assert rejected_portable_result["status"] == "replayed", rejected_portable_result
+    assert rejected_portable_result["summary"]["not_replayed"] == 0, rejected_portable_result
 
     # This existing kernel fixture exhaustively compares every pair of u8 values
     # for typed modular addition/subtraction against a wider-integer oracle.
@@ -213,8 +257,9 @@ with tempfile.TemporaryDirectory(prefix="elisa-r042-cross-route-") as temporary:
     assert kernel_run.returncode == 0, kernel_run.returncode
 
 print(
-    "R-042 cross-route: compiler rejects suffix-as-u8 overflow interpretation; "
-    "producer/tactic refuse it, contextual signed add/multiply source and package replay pass, "
+    "R-042 cross-route: suffix-only wrap, unguarded i8 overflow, and the i16 boundary stay unproved; "
+    "guarded typed-local i8 addition and signed add/multiply prove through producer, tactic, "
+    "certificate, and portable package replay, "
     "and exhaustive typed-u8 "
     f"kernel arithmetic passes ({generation}; Stage1 {compiler_identity['stage1_revision']}; "
     f"compiler {compiler_identity['product']['sha256']}; runtime {manifest['runtime']['sha256']})"
