@@ -202,6 +202,7 @@ run_py_test test_monotone_orders.py
 run_py_test test_replay_construct_arguments.py
 run_py_test test_negated_guard_orders.py
 run_py_test test_portable_replay.py
+run_py_test test_resource_projection_e144_coverage.py
 run_py_test test_linear_certificates.py
 run_py_test test_smt_oracle.py
 run_py_test test_symbolic_quantifiers.py
