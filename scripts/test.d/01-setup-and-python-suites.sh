@@ -210,6 +210,7 @@ run_py_test test_unsigned_resource_source_policy.py
 run_py_test test_fixed_array_constant_indices.py
 run_py_test test_return_branch_path_fact.py
 run_py_test test_kernel_inventory.py
+run_py_test test_portable_trust_inventory.py
 run_py_test test_unsigned_subtraction_upper.py
 run_py_test test_unsigned_or_goal.py
 run_py_test test_unsigned_sum_upper_shape.py
