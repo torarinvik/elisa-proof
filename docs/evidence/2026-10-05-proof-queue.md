@@ -55,6 +55,17 @@ regressions are `test/repro/minimal_conditional_ensure_replay_gap.elisa` and
 binary and accepts only full replay or explicit refusal. The responsible replay rule remains to be
 identified.
 
+A fresh strict O2 build with object caching disabled was produced at
+`/private/tmp/elisa-p07-fresh-20261005/elisa-proof`. Its manifest binds proof source digest
+`1f273bf1ec466404c40a5d3f86f0654a6c42df0679541f0f1b1fd06366411ee9`, frontend/Stage1 revision
+`7b27fa312c5af923f044f6ee0e5e1de4f811f595`, and target `arm64-apple-darwin27.0.0`; the binary SHA-256
+is `549ae6fbae4e9a4d09373a537eec6c13f3701747d8a8d95ed8bce11d308e6d36`, and manifest SHA-256 is
+`2fc62f277729d7b23b344a8cd4091bf62c03b143edbe734c172861257ca412bd`. The focused regression script
+passed on this fresh binary: the three-line conditional case remained one explicit gap, the
+`Slide.inner` slice remained two gaps, and the wrong-guard control stayed unproved with zero replay
+gaps. This confirms the outcome from a no-cache build of the recorded source tree; it does not
+identify the kernel branch-check failure.
+
 Commit `95daaea` factors the bounded unsigned literal/add/sub replay path while preserving its
 same-width checks, modulo-width arithmetic and refusal of malformed or unsupported nodes. The
 kernel comparison runtime passed a direct O0 compile/link/run after the initial refactor; that run
