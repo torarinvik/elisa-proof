@@ -24,8 +24,10 @@ def run_report(source: Path) -> tuple[int, dict]:
 
 
 def check_emitted_inventory(report: dict, *, proved: bool) -> None:
-    assert report["source_obligation_inventory"]["coverage"] == "partial"
-    assert report["source_obligation_inventory"]["whole_program"] is False
+    inventory = report["source_obligation_inventory"]
+    assert inventory["coverage"] == "partial"
+    assert inventory["whole_program"] is False
+    assert "Boolean-literal assert-by" in inventory["supported_subset"]
     summary = report["summary"]
     declarations = report["declaration_details"]
     goals = report["goals"]
@@ -125,7 +127,61 @@ def main() -> None:
     assert mismatch_goal["goal"]["left"]["value"] == 8
     assert mismatch_goal["goal"]["right"]["value"] == 7
 
+    # Boolean-literal assert-by goals and assert steps form the next bounded, source-derived
+    # family. Both source obligations must replay independently.
+    code, assert_by_positive = run_report(ROOT / "examples/source_obligation_assert_by_positive.elisa")
+    assert code == 0
+    check_emitted_inventory(assert_by_positive, proved=True)
+    assert_by_goals = [
+        goal for goal in assert_by_positive["goals"]
+        if goal["name"] == "source_assert_by_inventory_positive" and goal["rule"] == "goal"
+    ]
+    assert sorted(goal["line"] for goal in assert_by_goals) == [3, 4]
+    assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in assert_by_goals)
+    assert all(goal["goal"]["kind"] == "bool" and goal["goal"]["value"] is True for goal in assert_by_goals)
+
+    code, assert_by_false = run_report(ROOT / "examples/source_obligation_assert_by_false.elisa")
+    assert code == 1
+    check_emitted_inventory(assert_by_false, proved=False)
+    assert assert_by_false["summary"]["obligations"] > 0
+    false_goal = next(
+        goal for goal in assert_by_false["goals"]
+        if goal["name"] == "source_assert_by_inventory_false"
+        and goal["line"] == 3 and goal["rule"] == "goal"
+    )
+    assert not false_goal["proven"]
+    assert false_goal["goal"]["kind"] == "bool" and false_goal["goal"]["value"] is False
+    assert assert_by_false["summary"]["unproven"] > 0 or assert_by_false["summary"]["failed"] > 0
+
+    # The ordinary checker replays these equality goals. They are outside the literal-only
+    # source inventory slice, so the report stays explicitly partial rather than claiming
+    # whole-program source completeness or rejecting already replayed proofs.
+    code, nonliteral_assert_by = run_report(ROOT / "examples/source_obligation_assert_by_nonliteral.elisa")
+    assert code == 0
+    check_emitted_inventory(nonliteral_assert_by, proved=True)
+    nonliteral_goals = [
+        goal for goal in nonliteral_assert_by["goals"]
+        if goal["name"] == "source_assert_by_inventory_nonliteral" and goal["rule"] == "goal"
+    ]
+    assert len(nonliteral_goals) == 2
+    assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in nonliteral_goals)
+
+    # Namespace traversal must retain assert-by obligations, but bare-name report identities
+    # are insufficient to soundly match nested declarations, so admission fails closed.
+    code, module_assert_by = run_report(ROOT / "examples/source_obligation_assert_by_module.elisa")
+    assert code == 1
+    check_emitted_inventory(module_assert_by, proved=False)
+    source_inventory_findings = [
+        finding for finding in module_assert_by["findings"]
+        if finding["kind"] == "source-obligation-inventory"
+    ]
+    assert source_inventory_findings
+    assert source_inventory_findings[-1]["status"] == "unsupported"
+    assert module_assert_by["verification_state"] == "unsupported"
+
     code, verified = run_report(ROOT / "examples/verified.elisa")
+    # Legacy nonliteral goals stay checker/replay-owned while the source inventory identifies
+    # itself as partial; this slice must not turn an out-of-scope proposition into a regression.
     assert code == 0
     check_emitted_inventory(verified, proved=True)
     assert [(row["kind"], row["name"], row["line"]) for row in verified["declaration_details"]] == [
@@ -158,7 +214,7 @@ def main() -> None:
     assert unsupported["verification_state"] == "unsupported"
     assert any(finding["status"] == "unsupported" for finding in unsupported["findings"])
 
-    print("R-004 slice: source-owned and plural postconditions accepted; mismatched-return obligation retained; omission, duplicate, and false-claim mutations rejected; CLI inventory fixtures passed")
+    print("R-004 slices: literal-postcondition and BoolLit assert-by inventories validated; failed and unsupported rows retained; nonliteral formulas remain checker/replay-owned; omission, duplicate, source-mismatch, false-claim, and malformed-source mutations rejected")
 
 
 if __name__ == "__main__":
