@@ -21,6 +21,7 @@ started = time.monotonic()
 data = run(ROOT / "examples/long_difference_chain.elisa")
 elapsed = time.monotonic() - started
 assert data["status"] == "proved" and data["findings"] == [], data["findings"]
+assert data["summary"]["declarations"] == 5, data["summary"]  # Includes the 32-name boundary case.
 assert data["summary"]["proven"] == 10 and data["replay"] == {"certificates": 10, "replayed": 10, "gaps": 0}, data["replay"]
 # Budget: the thirty-two-name chain is the widest the limit is sized for and stays cheap.
 assert elapsed < 60, elapsed
