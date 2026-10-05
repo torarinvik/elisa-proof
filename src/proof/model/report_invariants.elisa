@@ -123,47 +123,51 @@ extend ElisaProof:
             return proof_report_proven_attempts_consistent(report)
 
         # Independent source inventory slice (R-004): unique top-level functions with exactly
-        # one ensure and one integer literal return. The accepted postconditions are `true` and
-        # `result == N` when N is exactly the returned literal. Other shapes remain partial.
-        def proof_source_literal_ensure_candidate(declaration: Ast::Decl) -> (known: bool, name: sview, contract_line: u32, literal_value: i64, equality_postcondition: bool):
+        # one ensure/ensures and one integer literal return. Store the substituted equality
+        # proposition even when it is false; dropping a mismatched return would hide an
+        # obligation instead of recording a source-derived proposition the kernel must reject.
+        def proof_source_literal_ensure_candidate(declaration: Ast::Decl) -> (known: bool, name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool):
             match declaration:
                 Ast::Decl.Func(name, _, _, body, _, _, _):
-                    return (false, "", 0, 0, false) if body.count != 2
+                    return (false, "", 0, 0, 0, false, false) if body.count != 2
                     has_ensure: mutable bool = false
                     has_return: mutable bool = false
-                    literal_value: mutable i64 = 0
+                    contract_value: mutable i64 = 0
+                    returned_value: mutable i64 = 0
+                    result_on_left: mutable bool = false
                     contract_line: mutable u32 = 0
                     equality_postcondition: mutable bool = false
-                    for statement in body |has_ensure, has_return, literal_value, contract_line, equality_postcondition|:
+                    for statement in body |has_ensure, has_return, contract_value, returned_value, result_on_left, contract_line, equality_postcondition|:
                         match statement:
                             Ast::Stmt.Contract(kind, expression, position):
-                                return (false, "", 0, 0, false) if kind != "ensure" or has_ensure or has_return
+                                return (false, "", 0, 0, 0, false, false) if (kind != "ensure" and kind != "ensures") or has_ensure or has_return
                                 match expression:
                                     Ast::Expr.BoolLit(value, _):
-                                        return (false, "", 0, 0, false) if not value
+                                        return (false, "", 0, 0, 0, false, false) if not value
                                     Ast::Expr.Binary(Ast::Expr.Ident("result", _), TokenKind.EqEq, Ast::Expr.IntLit(expected, _), _):
                                         equality_postcondition <- true
-                                        literal_value <- expected
+                                        result_on_left <- true
+                                        contract_value <- expected
                                     Ast::Expr.Binary(Ast::Expr.IntLit(expected, _), TokenKind.EqEq, Ast::Expr.Ident("result", _), _):
                                         equality_postcondition <- true
-                                        literal_value <- expected
+                                        contract_value <- expected
                                     _:
-                                        return (false, "", 0, 0, false)
+                                        return (false, "", 0, 0, 0, false, false)
                                 contract_line <- position.line
                                 has_ensure <- true
                             Ast::Stmt.Return(value, _):
-                                return (false, "", 0, 0, false) if has_return
+                                return (false, "", 0, 0, 0, false, false) if has_return
                                 match value:
                                     Ast::Expr.IntLit(returned, _):
                                         has_return <- true
-                                        return (false, "", 0, 0, false) if equality_postcondition and returned != literal_value
+                                        returned_value <- returned
                                     _:
-                                        return (false, "", 0, 0, false)
+                                        return (false, "", 0, 0, 0, false, false)
                             _:
-                                return (false, "", 0, 0, false)
-                    return (has_ensure and has_return, name, contract_line, literal_value, equality_postcondition)
+                                return (false, "", 0, 0, 0, false, false)
+                    return (has_ensure and has_return, name, contract_line, contract_value, returned_value, result_on_left, equality_postcondition)
                 _:
-                    return (false, "", 0, 0, false)
+                    return (false, "", 0, 0, 0, false, false)
 
         def proof_source_literal_ensure_count(declarations: darray[Ast::Decl]&, name: sview) -> usize:
             count: mutable usize = 0
@@ -179,17 +183,17 @@ extend ElisaProof:
                         pass
             return count
 
-        def proof_source_literal_ensure_inventory(declarations: darray[Ast::Decl]&) -> darray[(name: sview, contract_line: u32, literal_value: i64, equality_postcondition: bool)]:
-            inventory: mutable darray[(name: sview, contract_line: u32, literal_value: i64, equality_postcondition: bool)] = []
+        def proof_source_literal_ensure_inventory(declarations: darray[Ast::Decl]&) -> darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool)]:
+            inventory: mutable darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool)] = []
             for declaration in declarations |inventory|:
                 match declaration:
                     Ast::Decl.Func(_, _, _, _, _, _, _):
-                        candidate: (known: bool, name: sview, contract_line: u32, literal_value: i64, equality_postcondition: bool) = proof_source_literal_ensure_candidate(declaration)
+                        candidate: (known: bool, name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool) = proof_source_literal_ensure_candidate(declaration)
                         if candidate.known:
                             # Empty is an explicit fail-closed ambiguity marker; otherwise the
                             # inventory retains only the immutable source name, not a mutable AST
                             # body or any report-owned scheduling information.
-                            inventory.push((candidate.name, candidate.contract_line, candidate.literal_value, candidate.equality_postcondition) if proof_source_literal_ensure_count(declarations, candidate.name) == 1 else ("", 0, 0, false))
+                            inventory.push((candidate.name, candidate.contract_line, candidate.contract_value, candidate.returned_value, candidate.result_on_left, candidate.equality_postcondition) if proof_source_literal_ensure_count(declarations, candidate.name) == 1 else ("", 0, 0, 0, false, false))
                     # Module/scope members are outside this first bounded inventory. They are
                     # not silently flattened because that would make bare names ambiguous.
                     Ast::Decl.Module(_, _, _) | Ast::Decl.Scoped(_, _):
@@ -201,16 +205,21 @@ extend ElisaProof:
         # Check the claim stored on either a goal attempt or its certificate against the
         # source-derived postcondition. Checking both matters: a mutable attempt display goal
         # must not relabel a certificate for a different proposition as the source proof.
-        def proof_source_literal_ensure_goal_matches(goal: Ast::Expr, expected: (name: sview, contract_line: u32, literal_value: i64, equality_postcondition: bool)) -> bool:
+        def proof_source_literal_ensure_goal_matches(goal: Ast::Expr, expected: (name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool)) -> bool:
             match goal:
                 Ast::Expr.BoolLit(value, position):
                     return value and not expected.equality_postcondition and position.line == expected.contract_line
                 Ast::Expr.Binary(Ast::Expr.IntLit(left, left_position), TokenKind.EqEq, Ast::Expr.IntLit(right, right_position), _):
-                    return expected.equality_postcondition and left == expected.literal_value and right == expected.literal_value and (left_position.line == expected.contract_line or right_position.line == expected.contract_line)
+                    expected_left: mutable i64 = expected.contract_value
+                    expected_right: mutable i64 = expected.returned_value
+                    if expected.result_on_left:
+                        expected_left <- expected.returned_value
+                        expected_right <- expected.contract_value
+                    return expected.equality_postcondition and left == expected_left and right == expected_right and (left_position.line == expected.contract_line or right_position.line == expected.contract_line)
                 _:
                     return false
 
-        def proof_source_literal_ensure_coverage(inventory: darray[(name: sview, contract_line: u32, literal_value: i64, equality_postcondition: bool)]&, report: ProofReport&) -> bool:
+        def proof_source_literal_ensure_coverage(inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool)]&, report: ProofReport&) -> bool:
             for expected in inventory |report|:
                 return false if expected.name == ""
                 matching: mutable usize = 0

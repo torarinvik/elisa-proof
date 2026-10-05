@@ -96,6 +96,35 @@ def main() -> None:
     assert literal_goal["replay_status"] == "replayed"
     assert literal_goal["goal"]["right"]["line"] == 8
 
+    # `ensures` is the plural spelling of the same source construct and must receive an
+    # independently inventoried, replayed source obligation as well.
+    code, plural = run_report(ROOT / "examples/source_obligation_inventory_plural_ensures.elisa")
+    assert code == 0
+    check_emitted_inventory(plural, proved=True)
+    plural_goal = next(
+        goal for goal in plural["goals"]
+        if goal["name"] == "source_inventory_plural_ensures" and goal["rule"] == "goal"
+    )
+    assert plural_goal["proven"] and plural_goal["replay_status"] == "replayed"
+
+    # A false result==7 postcondition after returning 8 remains visible and makes the CLI
+    # reject the file. In particular, this source cannot disappear into a vacuous empty
+    # inventory and produce `proved`.
+    code, mismatched = run_report(ROOT / "examples/source_obligation_inventory_mismatched_return.elisa")
+    assert code == 1
+    check_emitted_inventory(mismatched, proved=False)
+    assert mismatched["summary"]["obligations"] > 0
+    assert mismatched["summary"]["unproven"] > 0 or mismatched["summary"]["failed"] > 0
+    mismatch_goals = [
+        goal for goal in mismatched["goals"]
+        if goal["name"] == "source_inventory_mismatched_return" and goal["rule"] == "goal"
+    ]
+    assert mismatch_goals and all(not goal["proven"] for goal in mismatch_goals)
+    mismatch_goal = mismatch_goals[0]
+    assert mismatch_goal["replay_status"] != "replayed"
+    assert mismatch_goal["goal"]["left"]["value"] == 8
+    assert mismatch_goal["goal"]["right"]["value"] == 7
+
     code, verified = run_report(ROOT / "examples/verified.elisa")
     assert code == 0
     check_emitted_inventory(verified, proved=True)
@@ -129,7 +158,7 @@ def main() -> None:
     assert unsupported["verification_state"] == "unsupported"
     assert any(finding["status"] == "unsupported" for finding in unsupported["findings"])
 
-    print("R-004 slice: source-owned positive control accepted; coordinated required-postcondition omission rejected; CLI inventory fixtures passed")
+    print("R-004 slice: source-owned and plural postconditions accepted; mismatched-return obligation retained; omission, duplicate, and false-claim mutations rejected; CLI inventory fixtures passed")
 
 
 if __name__ == "__main__":
