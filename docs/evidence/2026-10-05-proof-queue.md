@@ -78,6 +78,18 @@ audit assessment instead records binary SHA-256 `d734fd75…`, leaving the ident
 captured executable unresolved. This reproduction localizes the old failure to the retained
 manifest-bound binary; it does not establish the cause.
 
+The current strict O0 product has SHA-256
+`1a1ea6eac860ffc3854f7bd209135f4513ce97780639853a0c1993b323ea2d8e`; its manifest SHA-256 is
+`cf25f6bd4155207cbca7dba5734d7eb74c0c91758a25a167f196a522999990f6`. It binds source digest
+`1f273bf1ec466404c40a5d3f86f0654a6c42df0679541f0f1b1fd06366411ee9`, frontend/Stage1 `7b27fa…`,
+strict mode, and `arm64-apple-darwin27.0.0`. Serial runs produced complete JSON without a crash:
+`kernel_comparison_runtime.elisa` finished in 55.561 s with 3,831 obligations, 2,575 proven,
+2,575/2,575 certificates replayed and zero gaps; mocap `track.elisa` finished in 21.141 s with
+943 obligations, 926 proven, and 926/928 certificates replayed with the same two `Slide.inner`
+gaps. Input SHA-256 values were `905a041e…` and `2723d053…`, respectively. This adds a current
+O0 crash control after the lifetime-safe follow-up; the historical cause and Linux coverage remain
+open.
+
 Commit `95daaea` factors the bounded unsigned literal/add/sub replay path while preserving its
 same-width checks, modulo-width arithmetic and refusal of malformed or unsupported nodes. The
 kernel comparison runtime passed a direct O0 compile/link/run after the initial refactor; that run
