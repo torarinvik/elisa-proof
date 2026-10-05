@@ -228,6 +228,27 @@ def verify_fixed_controls(binary):
     return results
 
 
+def encode_evidence(payload):
+    """Keep the JSON concise: one compact record per case, readable metadata lines."""
+    entries = list(payload.items())
+    lines = ["{"]
+    for index, (key, value) in enumerate(entries):
+        suffix = "," if index + 1 < len(entries) else ""
+        encoded_key = json.dumps(key)
+        if key == "results":
+            lines.append(f"  {encoded_key}: [")
+            for row_index, row in enumerate(value):
+                row_suffix = "," if row_index + 1 < len(value) else ""
+                compact_row = json.dumps(row, sort_keys=True, separators=(",", ":"))
+                lines.append(f"    {compact_row}{row_suffix}")
+            lines.append(f"  ]{suffix}")
+        else:
+            compact_value = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            lines.append(f"  {encoded_key}: {compact_value}{suffix}")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True,
@@ -284,7 +305,7 @@ def main():
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    args.output.write_text(encode_evidence(payload))
     invalid = [row for row in results if row["outcome"] not in ("proved", "unknown/refused")]
     if invalid:
         raise RuntimeError(f"invalid scaling result(s), evidence retained at {args.output}: {invalid}")
