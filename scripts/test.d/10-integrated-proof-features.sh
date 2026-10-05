@@ -9,6 +9,7 @@ run_py_test test_required_reference_store.py
 run_py_test test_record_branch_state.py
 run_py_test test_disjunction_denial.py
 run_py_test test_typed_integer_summary_disjunction.py
+run_py_test test_typestate_resource_transition.py
 run_py_test test_integer_disjunction_denial.py
 run_py_test test_disjunctive_syllogism.py
 run_py_test test_false_left_search.py
