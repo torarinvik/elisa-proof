@@ -993,6 +993,14 @@ same immutable generation (or verify a stable pointer and retry). Immutable conc
 and source-mutation detection during preparation also remain open. Exact identities and outcomes
 are in [R-015 manifest-pair coherence evidence](docs/evidence/2026-10-05-r015-manifest-pair-coherence.md).
 
+**Independent-root control (2026-10-05):** `scripts/test_build_independent_roots.py` runs two builds
+concurrently from separate proof roots and compiler-source fixtures, pausing both at staged-manifest
+creation with mocked compiler/linker tools. It confirms distinct root-local locks, object/binary/
+manifest staging paths, source identities and pair generations; both published pairs resolve. This
+tests orchestration only and exposes no race in the exercised boundary. Real compiler concurrency,
+source mutation during snapshot preparation, failure recovery across roots and cross-filesystem
+coordination remain unverified. See [independent-root mocked evidence](docs/evidence/2026-10-05-r015-independent-roots-mocked.md).
+
 #### R-016 — Bound reporting and diagnostic materialization
 
 **Change:** Separate compact verdict/trust/repair summaries from opt-in full facts and AST dumps. Stream diagnostics or serialize interned references with explicit ownership; preserve complete authoritative obligation inventory and certificate export. Record serialization bytes and retained report memory.
