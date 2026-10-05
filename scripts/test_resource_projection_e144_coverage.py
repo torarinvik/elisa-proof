@@ -52,6 +52,14 @@ assert any(
     for finding in mutable_write["findings"]
 ), "write through immutable aggregate container was not refused by resource analysis"
 
+region_copy = report("rejected_resource_projection_e144_region_copy", 1, "failed")
+assert region_copy["summary"]["semantic_errors"] == 0, region_copy["summary"]
+assert any(
+    finding["name"] == "rejected_resource_projection_e144_region_copy"
+    and finding["kind"] == "region-alias-unsupported"
+    for finding in region_copy["findings"]
+), "region-carrying aggregate copy was not conservatively refused"
+
 for example in (
     "rejected_resource_projection_e144_shadow",
     "rejected_resource_projection_e144_cross_container",
@@ -67,4 +75,4 @@ for example in (
         for goal in negative["goals"]
     ), (example, "expected the shadowed/different container index-upper obligation to remain unproven")
 
-print("e144 resource projection coverage: typed copy replays; mutable write, shadow, and cross-container controls refuse")
+print("e144 resource projection coverage: typed copy replays; mutable write, region copy, shadow, and cross-container controls refuse")
