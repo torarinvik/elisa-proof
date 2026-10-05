@@ -5036,14 +5036,17 @@ regression.
 
 ### 23.23.1 Exact starting state and audit findings
 
-The last committed proof-tree revision inspected for this refresh is `63dba677` (`Bound portable
-package JSON scan work`), after `4967197b` (`test: verify typed local integer overflow routes`). The
+The last committed proof-tree revision inspected for this refresh is `49963e53` (`Document bounded
+model stress fixture`), after `fea36cd5` (`Record P-01 identity recheck evidence`) and `63dba677`
+(`Bound portable package JSON scan work`). The
 shared checkout also contains uncommitted and untracked changes
 from parallel audit work; they are not part of that commit, are not one qualified source snapshot,
 and must not be combined or described as landed without ownership review and a fresh matched build.
 The compiler revision most recently freshness-checked in these investigations is Stage1
-`541788548651d43dd466d0b5210955eb966eb18e`. A Stage1 pass against one detached snapshot does not
-qualify later dirty source or another generation.
+`541788548651d43dd466d0b5210955eb966eb18e`, but it is currently stale: the freshness guard now fails
+`source_tree_sha256` because `Elisa-compiler/src/parser/parser_stmt_pattern.elisa` is modified. A
+Stage1 pass against one detached snapshot does not qualify later dirty source or another generation;
+no proof/replay validation after this change may claim fresh-Stage1 status until reseeding succeeds.
 
 | Finding | Evidence and certainty | Immediate disposition |
 | --- | --- | --- |
@@ -5055,7 +5058,7 @@ qualify later dirty source or another generation.
 | Signed integer overflow behavior is checked/trapping | The R-042 cross-route test added in `4967197b` confirms signed `i8` and `i16` overflow traps under the tested compiler. It is not modular signed wraparound. Guarded local reasoning and the tested refusal routes remain narrow evidence, not a complete bit-vector semantics. | Specify trap semantics separately from unsigned modular behavior; never use signed wrap identities as an optimization or proof rule. |
 | Package parser scan amplification (`63dba677`) | The reader performs numeric-token validation and tracks maximum JSON nesting in one bounded preflight before DOM allocation. It rejects when the conservative estimate `input_bytes × maximum_nesting` exceeds eight times the 64 MiB package-input cap, without changing the parser's 256-level syntax limit. Against a matched Stage1 pair, exact/one-over scan work, exact/over depth, broad arrays/objects, escaped token-like strings, malformed and inadmissible packages, CPU/wall/RSS/output limits, the 61-case mutation campaign, theorem/string budgets, and P-05 fresh-process restart passed. | This is a deterministic bound on the parser's repeated container-count scan estimate, not a formal bound on all parser/runtime costs. The broad portable suite still stops at the independent `pure_unfolding` producer fixture (`source.admissible=false`); general decoder assurance and other allocators remain open. |
 | P-01 build identity could drift after its initial preflight | Commit `e8142cf5` revalidates the selected executable's checksum-bound build manifest after all samples and rejects any changed identity. `python3 scripts/test_p01_baseline.py` mutates an otherwise valid manifest mid-run and confirms that no baseline report is accepted; the focused test passed both before and after integration. | This closes one measurement-integrity race for the single-binary P-01 runner. It is not a paired performance result, a proof/replay semantic comparison, or a current end-to-end baseline. |
-| Repeated `requires` in the bounded-work example are deliberate | They exercise model-work consumption; they are not evidence that normal user obligations are accidentally duplicated. | Preserve the workload meaning and make its generated/annotated structure auditable. |
+| Repeated `requires` in the bounded-work example are deliberate | Commit `49963e53` documents the fixture as intentional stress input and pins 12 copies in the proving function and 20 in the over-budget function in `scripts/test_bounded_model_work_budget.py`. The focused test passed against the selected immutable pair at proof HEAD `9184f6a2`; only comments/test guards changed in `49963e53`. | The run did not build or validate a pair at current proof HEAD, and it is not a performance result. Keep the exact counts and budget outcomes; never deduplicate the stressors as ordinary cleanup. |
 
 Status terms in this section are strict: **confirmed** means reproduced against named source and
 product identities; **source-established risk** means the semantic mismatch is demonstrated in code
