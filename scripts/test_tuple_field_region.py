@@ -22,9 +22,10 @@ assert data["summary"]["proven"] == 9 and data["summary"]["failed"] == 0 and dat
 assert data["replay"]["gaps"] == 0 and data["replay"]["replayed"] == 9
 
 data = run(ROOT / "examples/rejected_tuple_field_region.elisa")
-assert data["summary"]["failed"] == 3 and data["replay"]["gaps"] == 0
+assert data["summary"]["failed"] == 5 and data["replay"]["gaps"] == 0
 assert [(f["name"], f["line"]) for f in data["findings"]] == [
-    ("unbounded_count", 13), ("small_overflow", 18), ("other_label", 23)], data["findings"]
+    ("unbounded_count", 19), ("small_overflow", 24), ("other_label", 29),
+    ("wrong_label", 34), ("reordered_label", 39)], data["findings"]
 
 with tempfile.TemporaryDirectory() as directory:
     # Malformed: a label that the callee does not declare adds no witness and proves nothing.
@@ -47,4 +48,4 @@ with tempfile.TemporaryDirectory() as directory:
     assert data["replay"]["gaps"] == 0, data["summary"]
     assert {f["kind"] for f in data["findings"]} <= {"control-flow-analysis-budget", "ensure-unproven"}, data["findings"]
 
-print("tuple field region: bound tuple labels keep their types; bounds still come only from summaries")
+print("tuple field region: ordered field summaries replay; wrong and reordered labels are refused")

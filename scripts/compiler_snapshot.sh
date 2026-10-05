@@ -53,12 +53,12 @@ if [[ ! -f "$SNAPSHOT_COMPILER/.rev" || "$(cat "$SNAPSHOT_COMPILER/.rev")" != "$
     printf '%s\n' "$RESOLVED_REV" > "$SNAPSHOT_COMPILER/.rev"
 fi
 
-# This repository's own sources are what is being built, so they are refreshed
-# from the working tree on every run.
-rm -rf "$SNAPSHOT_ROOT"
-mkdir -p "$SNAPSHOT_ROOT"
-cp -R "$SNAPSHOT_ROOT_DIR/src" "$SNAPSHOT_ROOT/src"
-cp -R "$SNAPSHOT_ROOT_DIR/examples" "$SNAPSHOT_ROOT/examples"
+# Refresh the working-tree inputs without replacing unchanged files. Besides
+# avoiding needless I/O, this keeps timestamps and inode identity stable for
+# downstream tools. --delete ensures removed sources cannot linger in a build.
+mkdir -p "$SNAPSHOT_ROOT/src" "$SNAPSHOT_ROOT/examples"
+rsync -ac --delete "$SNAPSHOT_ROOT_DIR/src/" "$SNAPSHOT_ROOT/src/"
+rsync -ac --delete "$SNAPSHOT_ROOT_DIR/examples/" "$SNAPSHOT_ROOT/examples/"
 
 export SNAPSHOT_ROOT SNAPSHOT_COMPILER
 export ELISA_COMPILER_PINNED_REV="$RESOLVED_REV"

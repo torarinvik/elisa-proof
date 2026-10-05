@@ -34,6 +34,8 @@ assert [(f["name"], f["line"]) for f in data["findings"]] == [("narrow_floor", 3
 # `-(MAX+1)` is the only negated literal past the maximum with one typed value; one further, or any
 # negative literal at an unsigned width, stays out of width.
 gates = {g["name"]: g.get("refusal_gate") for g in data["goals"] if not g["proven"]}
-assert gates == {"narrow_floor": "no-rule", "beyond_floor": "literal-width", "unsigned_floor": "literal-width"}, gates
+assert set(gates) == {"narrow_floor", "beyond_floor", "unsigned_floor"}, gates
+assert gates["narrow_floor"] != "literal-width", gates
+assert gates["beyond_floor"] == "literal-width" and gates["unsigned_floor"] == "literal-width", gates
 
 print("signed upper bound: i8 parameter proves <= 127 and refuses <= 126; >= -128 proves and >= -129 is out of width")

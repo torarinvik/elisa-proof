@@ -7,13 +7,14 @@ malformed variant keeps a goal the kernel proves on its own (goal 7 of verified.
 route that looked only at that goal would admit it.
 """
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = str(ROOT / "build/elisa-proof")
+BINARY = str(Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof")))
 BASE = (ROOT / "examples/verified.elisa").read_bytes()
 GOAL = "7"
 

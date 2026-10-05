@@ -36,6 +36,15 @@ elisa_default_stage0() {
         printf '%s\n' "$selected"
         return 0
     fi
+    selected="${ELISA_COMPILER_BIN:-}"
+    if [[ -n "$selected" && -x "$selected" ]] && elisa_compiler_is_stage0 "$selected"; then
+        printf '%s\n' "$selected"
+        return 0
+    fi
+    if [[ -n "${HOME:-}" && -x "$HOME/.elisac/elisac-stage0" ]]; then
+        printf '%s\n' "$HOME/.elisac/elisac-stage0"
+        return 0
+    fi
     core_root="${ELISA_STAGE0_CORE:-$root_dir/../../Go projects/Elisa-core}"
     if [[ -x "$core_root/compiler/bin/elisac" ]]; then
         printf '%s\n' "$(cd "$core_root" && pwd -P)/compiler/bin/elisac"

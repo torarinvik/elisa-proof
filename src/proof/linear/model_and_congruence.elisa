@@ -1,6 +1,9 @@
 const PROOF_LINEAR_MAX_MODEL_BIT_WIDTH: usize = 4096
 include "unsigned_span_descent.elisa"
 const PROOF_LINEAR_MAX_MODEL_ENUMERATION: usize = 65536
+const PROOF_LINEAR_MAX_MODEL_FACTS: usize = 64
+const PROOF_LINEAR_MAX_MODEL_FRAME_NODES: usize = 512
+const PROOF_LINEAR_MAX_MODEL_EVALUATION_WORK: usize = 200000
 const PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT: usize = 4
 
 extend ElisaProof:
@@ -56,6 +59,40 @@ extend ElisaProof:
                 _:
                     pass
             return false
+
+        # Enumeration limits alone do not bound model cost: each assignment evaluates every
+        # premise and recursive term, and name lookups scan the premise frame again. Count the
+        # complete supported frame before opening the Cartesian product; exceeding this budget
+        # only refuses the optimization and can never establish a theorem.
+        def proof_bounded_model_charge_expression(expression: Ast::Expr, remaining: mutable usize&, identifiers: mutable usize&, scopes: mutable usize&, depth: usize) -> bool:
+            return false if remaining == 0 or depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            remaining <- remaining - 1
+            return true if proof_type_marker_callee(expression)
+            match expression:
+                Ast::Expr.BoolLit(_, _) | Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(_, _):
+                    identifiers <- identifiers + 1
+                    return true
+                Ast::Expr.Scope(base, _, _):
+                    scopes <- scopes + 1
+                    return proof_bounded_model_charge_expression(base, remaining, identifiers, scopes, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    return proof_bounded_model_charge_expression(inner, remaining, identifiers, scopes, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_bounded_model_charge_expression(left, remaining, identifiers, scopes, depth + 1) and proof_bounded_model_charge_expression(right, remaining, identifiers, scopes, depth + 1)
+                _:
+                    return false
+
+        def proof_bounded_model_frame_nodes(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> (known: bool, count: usize, identifiers: usize, scopes: usize):
+            return (false, 0, 0, 0) if facts.count > PROOF_LINEAR_MAX_MODEL_FACTS
+            remaining: mutable usize = PROOF_LINEAR_MAX_MODEL_FRAME_NODES
+            identifiers: mutable usize = 0
+            scopes: mutable usize = 0
+            for fact in facts |remaining, identifiers, scopes|:
+                return (false, 0, 0, 0) if not proof_bounded_model_charge_expression(fact, &remaining, &identifiers, &scopes, 0)
+            return (false, 0, 0, 0) if not proof_bounded_model_charge_expression(goal, &remaining, &identifiers, &scopes, 0)
+            return (true, PROOF_LINEAR_MAX_MODEL_FRAME_NODES - remaining, identifiers, scopes)
 
     public:
         def proof_bounded_model_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
@@ -125,6 +162,8 @@ extend ElisaProof:
             return false if not proof_bounded_model_fragment(goal, facts, 0)
             for fact in facts:
                 return false if not proof_bounded_model_fragment(fact, facts, 0)
+            frame_nodes: (known: bool, count: usize, identifiers: usize, scopes: usize) = proof_bounded_model_frame_nodes(facts, goal)
+            return false if not frame_nodes.known
             names: mutable darray[sview] = []
             for fact in facts |names|:
                 proof_counterexample_collect_names(fact, &names, facts)
@@ -154,6 +193,18 @@ extend ElisaProof:
                 total <- total_width.value
                 lowers.push(bound.lower)
                 widths.push(width_with_end.value)
+            # Identifier pin resolution scans the premise frame; qualified-scope pin checks
+            # additionally compare each scope with every possible literal pin. Charge those
+            # repeated structural walks as well as the ordinary fact/goal evaluation. The
+            # multiplier covers validation and comparison passes in the structural helpers.
+            frame_size: i64 = frame_nodes.count.i64()
+            fact_count: i64 = facts.count.i64()
+            work_per_assignment: mutable i64 = frame_size * (fact_count + 1) * 16
+            work_per_assignment <- work_per_assignment + frame_nodes.identifiers.i64() * frame_size * 16
+            work_per_assignment <- work_per_assignment + frame_nodes.scopes.i64() * fact_count * frame_size * 16
+            if work_per_assignment == 0 or total > PROOF_LINEAR_MAX_MODEL_EVALUATION_WORK.i64() / work_per_assignment:
+                exhausted <- true
+                return false
             values: mutable darray[i64] = []
             values.resize(names.count)
             budget: mutable usize = PROOF_LINEAR_MAX_MODEL_ENUMERATION

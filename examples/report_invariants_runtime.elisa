@@ -1,20 +1,65 @@
 # Small executable boundary test for the report invariants. The model is intentionally reduced
 # to the report fields consumed by report_invariants.elisa, keeping this fast enough to run
 # independently of the full checker and kernel build.
+include "../../Elisa-compiler/src/parser/parser_tokens.elisa"
+include "../../Elisa-compiler/src/parser/ast_nodes.elisa"
 module ElisaProof:
     public:
         struct ProofFinding:
             kind: sview
 
+        struct ProofDeclarationSummary:
+            kind: sview
+            name: mutable sview
+            line: mutable u32
+
         struct ProofGoalAttempt:
+            goal: Ast::Expr
+            budget_exhausted: mutable bool
+            facts_start: usize
+            facts_count: usize
+            kernel_goal: usize
+            kernel_facts_start: usize
+            kernel_facts_count: usize
+            line: u32
+            name: sview
+            rule: sview
+            proven: bool
+            has_certificate: bool
+            certificate_index: usize
+
+        struct ProofGoalCertificate:
+            goal: Ast::Expr
+            facts_start: usize
+            facts_count: usize
+            kernel_goal: usize
+            kernel_facts_start: usize
+            kernel_facts_count: usize
+            line: u32
+            name: sview
+            rule: sview
+            replayed: mutable bool
+
+        struct ProofTheoremSummary:
+            name: sview
+            line: u32
+
+        struct ProofObligationEntry:
+            identity: usize
             proven: bool
 
         struct ProofReport:
+            declarations: mutable u32
             obligations: mutable u32
             proven: mutable u32
             failed: mutable u32
             findings: mutable darray[ProofFinding]
+            source_declarations: mutable darray[Ast::Decl]
+            declaration_details: mutable darray[ProofDeclarationSummary]
             goal_attempts: mutable darray[ProofGoalAttempt]
+            obligation_inventory: mutable darray[ProofObligationEntry]
+            certificates: mutable darray[ProofGoalCertificate]
+            theorem_summaries: mutable darray[ProofTheoremSummary]
 
 include "../src/proof/model/report_invariants.elisa"
 
@@ -25,12 +70,59 @@ const FINDING_WITHOUT_FAILURE_ACCEPTED: i64 = 2
 const OPEN_GOAL_MARKED_COMPLETE: i64 = 3
 const EMPTY_REPORT_REJECTED: i64 = 4
 const EMPTY_REPORT_MARKED_INCOMPLETE: i64 = 5
+const DECLARATION_WITHOUT_SUMMARY_ACCEPTED: i64 = 6
+const DECLARATION_INVENTORY_ADMITTED_FOR_FOCUSED_GOAL: i64 = 7
+const PROVEN_WITHOUT_ATTEMPT_ADMITTED: i64 = 8
+const REMOVED_PROVEN_ATTEMPT_ADMITTED: i64 = 9
+const PROVEN_ATTEMPT_COUNT_REJECTED: i64 = 10
 const SINGLE_REPORTED_ITEM: u32 = 1
+const COORDINATED_ATTEMPT_AND_TOTAL_DELETION_ADMITTED: i64 = 21
+const OBLIGATION_LEDGER_DELETION_ADMITTED: i64 = 22
+const OBLIGATION_RESULT_FORGERY_ADMITTED: i64 = 23
+const NON_GOAL_OPEN_OBLIGATION_REJECTED: i64 = 24
+const DUPLICATED_PROVEN_OBLIGATION_ADMITTED: i64 = 25
+const REORDERED_OBLIGATION_LEDGER_ADMITTED: i64 = 27
+const FORGED_OBLIGATION_IDENTITY_ADMITTED: i64 = 28
+const OMITTED_EVENT_PRE_LEDGER_REJECTED: i64 = 29
+const OMITTED_EVENT_ADMITTED: i64 = 30
+const DUPLICATED_EVENT_PRE_LEDGER_REJECTED: i64 = 31
+const DUPLICATED_EVENT_ADMITTED: i64 = 32
+const TWO_EVENT_PRE_LEDGER_REJECTED: i64 = 33
+const OMITTED_OPEN_OBLIGATION_WITH_ATTEMPT_ADMITTED: i64 = 34
 
 def main() -> i64 can[Memory.Allocate, Abort.Panic]:
-    report: mutable ProofReport = ProofReport{obligations: 0, proven: 0, failed: 0, findings: [], goal_attempts: []}
+    report: mutable ProofReport = ProofReport{declarations: 0, obligations: 0, proven: 0, failed: 0, findings: [], source_declarations: [], declaration_details: [], goal_attempts: [], obligation_inventory: [], certificates: [], theorem_summaries: []}
     return EMPTY_REPORT_REJECTED if not proof_report_failure_count_consistent(report)
     return EMPTY_REPORT_MARKED_INCOMPLETE if proof_report_source_has_unresolved_checks(report, false, 0)
+
+    # A report cannot hide a declaration that was present in the source but never represented
+    # in the admission inventory, even when no goal happened to be generated for it.
+    report.declarations <- SINGLE_REPORTED_ITEM
+    return DECLARATION_WITHOUT_SUMMARY_ACCEPTED if not proof_report_source_has_unresolved_checks(report, false, 0)
+    return DECLARATION_INVENTORY_ADMITTED_FOR_FOCUSED_GOAL if proof_report_source_admission_invariants_consistent(report)
+    report.declarations <- 0
+
+    # Establish one real source/summary correspondence, then delete, duplicate and forge its
+    # summary while keeping declaration totals aligned. Inventory admission must check identity,
+    # not just equal lengths.
+    report.declarations <- SINGLE_REPORTED_ITEM
+    report.source_declarations.push(Ast::Decl.Invalid)
+    valid_invalid_summary: ProofDeclarationSummary = ProofDeclarationSummary{kind: "invalid", name: "", line: 0}
+    report.declaration_details.push(valid_invalid_summary)
+    return 11 if not proof_report_source_admission_invariants_consistent(report)
+    report.declaration_details.pop()
+    return 12 if proof_report_source_admission_invariants_consistent(report)
+    report.declaration_details.push(valid_invalid_summary)
+    report.declaration_details.push(valid_invalid_summary)
+    report.declarations <- report.declarations + 1
+    return 13 if proof_report_source_admission_invariants_consistent(report)
+    report.declaration_details.clear()
+    report.declarations <- SINGLE_REPORTED_ITEM
+    report.declaration_details.push(ProofDeclarationSummary{kind: "alias", name: "forged", line: 9})
+    return 14 if proof_report_source_admission_invariants_consistent(report)
+    report.source_declarations.clear()
+    report.declaration_details.clear()
+    report.declarations <- 0
 
     report.failed <- SINGLE_REPORTED_ITEM
     return FAILURE_WITHOUT_FINDING_ACCEPTED if not proof_report_source_has_unresolved_checks(report, false, 0)
@@ -39,8 +131,126 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     report.findings.push(ProofFinding{kind: "proof-unknown"})
     return FINDING_WITHOUT_FAILURE_ACCEPTED if not proof_report_source_has_unresolved_checks(report, false, 0)
 
+    finding: ProofFinding = report.findings[0]
+    report.failed <- report.failed + 1
+    report.findings.push(finding)
+    return 18 if not proof_report_source_has_unresolved_checks(report, false, 0)
+    report.findings.pop()
+    report.failed <- report.failed - 1
+    return 19 if not proof_report_source_has_unresolved_checks(report, false, 0)
+    report.findings[0] <- ProofFinding{kind: "forged-finding"}
+    return 20 if not proof_report_source_has_unresolved_checks(report, false, 0)
+
     report.findings.clear()
+    # A successful counter without a recorded attempt has no checked root. Mutating the attempt
+    # inventory after success must also revoke the report's structural admission.
     report.obligations <- SINGLE_REPORTED_ITEM
-    report.goal_attempts.push(ProofGoalAttempt{proven: false})
+    report.proven <- SINGLE_REPORTED_ITEM
+    report.obligation_inventory.push(ProofObligationEntry{identity: 0, proven: true})
+    report.declarations <- SINGLE_REPORTED_ITEM
+    report.source_declarations.push(Ast::Decl.Invalid)
+    report.declaration_details.push(ProofDeclarationSummary{kind: "invalid", name: "", line: 0})
+    return PROVEN_WITHOUT_ATTEMPT_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    goal: Ast::Expr = Ast::Expr.BoolLit(true, Ast::pos_at_line(0))
+    report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 0, name: "", rule: "goal", proven: true, has_certificate: true, certificate_index: 0})
+    report.certificates.push(ProofGoalCertificate{goal: goal, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 0, name: "", rule: "goal", replayed: true})
+    return PROVEN_ATTEMPT_COUNT_REJECTED if not proof_report_source_admission_invariants_consistent(report)
+    original_certificate: ProofGoalCertificate = report.certificates[0]
+    report.certificates[0] <- ProofGoalCertificate{goal: original_certificate.goal, facts_start: original_certificate.facts_start, facts_count: original_certificate.facts_count, kernel_goal: 1, kernel_facts_start: original_certificate.kernel_facts_start, kernel_facts_count: original_certificate.kernel_facts_count, line: original_certificate.line, name: original_certificate.name, rule: original_certificate.rule, replayed: original_certificate.replayed}
+    return 15 if proof_report_source_admission_invariants_consistent(report)
+    report.certificates[0] <- original_certificate
+    attempt: ProofGoalAttempt = report.goal_attempts[0]
+    report.goal_attempts[0] <- ProofGoalAttempt{goal: attempt.goal, budget_exhausted: attempt.budget_exhausted, facts_start: attempt.facts_start, facts_count: attempt.facts_count, kernel_goal: attempt.kernel_goal, kernel_facts_start: attempt.kernel_facts_start, kernel_facts_count: attempt.kernel_facts_count, line: attempt.line, name: "forged", rule: attempt.rule, proven: attempt.proven, has_certificate: attempt.has_certificate, certificate_index: attempt.certificate_index}
+    return 16 if proof_report_source_admission_invariants_consistent(report)
+    report.goal_attempts[0] <- attempt
+    report.obligation_inventory.clear()
+    return OBLIGATION_LEDGER_DELETION_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    report.obligation_inventory.push(ProofObligationEntry{identity: 0, proven: true})
+    report.obligation_inventory[0] <- ProofObligationEntry{identity: 0, proven: false}
+    return OBLIGATION_RESULT_FORGERY_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    report.obligation_inventory[0] <- ProofObligationEntry{identity: 0, proven: true}
+
+    # A second, still-open source obligation keeps aggregate counts and attempt rows plausible.
+    # Replacing its false result with a duplicate proven result must fail the ledger sum check.
+    report.obligations <- report.obligations + 1
+    report.obligation_inventory.push(ProofObligationEntry{identity: 1, proven: false})
+    report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 1, name: "open", rule: "goal", proven: false, has_certificate: false, certificate_index: 0})
+    return 26 if not proof_report_source_admission_invariants_consistent(report)
+    first_obligation: ProofObligationEntry = report.obligation_inventory[0]
+    second_obligation: ProofObligationEntry = report.obligation_inventory[1]
+    # This is the pre-ledger source-admission predicate from the repository history. Keep the
+    # source attempts and aggregate counters valid while independently mutating only event rows,
+    # so these controls show the precise gap the ledger invariant closes.
+    return TWO_EVENT_PRE_LEDGER_REJECTED if not proof_report_failure_count_consistent(report) or not proof_report_declaration_inventory_consistent(report) or report.goal_attempts.count != report.obligations.usize() or not proof_report_proven_attempts_consistent(report)
+    report.obligation_inventory.pop()
+    return OMITTED_EVENT_PRE_LEDGER_REJECTED if not proof_report_failure_count_consistent(report) or not proof_report_declaration_inventory_consistent(report) or report.goal_attempts.count != report.obligations.usize() or not proof_report_proven_attempts_consistent(report)
+    return OMITTED_EVENT_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    report.obligation_inventory.push(second_obligation)
+    # Copy the first event verbatim into the second slot: same ordinal and same outcome.
+    report.obligation_inventory[1] <- first_obligation
+    return DUPLICATED_EVENT_PRE_LEDGER_REJECTED if not proof_report_failure_count_consistent(report) or not proof_report_declaration_inventory_consistent(report) or report.goal_attempts.count != report.obligations.usize() or not proof_report_proven_attempts_consistent(report)
+    return DUPLICATED_EVENT_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    report.obligation_inventory[1] <- second_obligation
+    report.obligation_inventory[0] <- second_obligation
+    report.obligation_inventory[1] <- first_obligation
+    return REORDERED_OBLIGATION_LEDGER_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    report.obligation_inventory[0] <- first_obligation
+    report.obligation_inventory[1] <- second_obligation
+    report.obligation_inventory[1] <- ProofObligationEntry{identity: 7, proven: false}
+    return FORGED_OBLIGATION_IDENTITY_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    report.obligation_inventory[1] <- second_obligation
+    report.obligation_inventory[1] <- ProofObligationEntry{identity: 1, proven: true}
+    return DUPLICATED_PROVEN_OBLIGATION_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    report.obligation_inventory[1] <- ProofObligationEntry{identity: 1, proven: false}
+    report.goal_attempts.pop()
+    report.obligations <- report.obligations - 1
+
+    # Deleting a successful attempt, its certificate and both aggregate totals together used
+    # to leave a self-consistent empty report. The independent obligation-result row must stop it.
+    report.goal_attempts.clear()
+    report.certificates.clear()
+    report.obligations <- 0
+    report.proven <- 0
+    return COORDINATED_ATTEMPT_AND_TOTAL_DELETION_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+    report.goal_attempts.push(attempt)
+    report.certificates.push(original_certificate)
+    report.obligations <- SINGLE_REPORTED_ITEM
+    report.proven <- SINGLE_REPORTED_ITEM
+
+    report.goal_attempts.push(attempt)
+    report.obligations <- report.obligations + 1
+    report.proven <- report.proven + 1
+    return 17 if proof_report_source_admission_invariants_consistent(report)
+    report.goal_attempts.pop()
+    report.obligations <- report.obligations - 1
+    report.proven <- report.proven - 1
+    report.goal_attempts.clear()
+    return REMOVED_PROVEN_ATTEMPT_ADMITTED if proof_report_source_admission_invariants_consistent(report)
+
+    report.proven <- 0
+    report.obligations <- SINGLE_REPORTED_ITEM
+    report.obligation_inventory.clear()
+    report.obligation_inventory.push(ProofObligationEntry{identity: 0, proven: false})
+    report.goal_attempts.push(ProofGoalAttempt{goal: Ast::Expr.BoolLit(true, Ast::pos_at_line(0)), budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 0, name: "", rule: "goal", proven: false, has_certificate: false, certificate_index: 0})
     return OPEN_GOAL_MARKED_COMPLETE if not proof_report_source_has_unresolved_checks(report, false, 0)
+
+    # A source obligation can be rejected before goal extraction (for example on an unsupported
+    # computed write place). Its result remains in the event ledger without inventing a goal row.
+    report.goal_attempts.clear()
+    report.certificates.clear()
+    return NON_GOAL_OPEN_OBLIGATION_REJECTED if not proof_report_source_admission_invariants_consistent(report)
+    return NON_GOAL_OPEN_OBLIGATION_REJECTED if not proof_report_source_has_unresolved_checks(report, false, 0)
+
+    # Removing an open ledger event and its aggregate total must not leave its goal attempt
+    # detached. This mutation used to satisfy the event-ledger count and proven-result checks.
+    report.obligations <- 0
+    report.obligation_inventory.clear()
+    report.obligation_inventory.push(ProofObligationEntry{identity: 0, proven: false})
+    report.obligation_inventory.push(ProofObligationEntry{identity: 1, proven: false})
+    report.obligations <- 2
+    report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 1, name: "open", rule: "goal", proven: false, has_certificate: false, certificate_index: 0})
+    report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 2, name: "open", rule: "goal", proven: false, has_certificate: false, certificate_index: 0})
+    report.obligation_inventory.pop()
+    report.obligations <- report.obligations - 1
+    return OMITTED_OPEN_OBLIGATION_WITH_ATTEMPT_ADMITTED if proof_report_source_admission_invariants_consistent(report)
     return 0

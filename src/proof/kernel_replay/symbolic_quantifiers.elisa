@@ -204,7 +204,9 @@ extend ElisaProofKernelReplay:
             return proof_kernel_replay_ident_name(nodes, nodes[fact].left)
 
         # The instance rule: the goal is a forall fact's body at one of the goal's own
-        # subscripts t, and the fact's range holds t.
+        # subscripts t, and the fact's range holds t. A scalar body can also select exactly one
+        # candidate by matching its binder-shaped trigger against the goal; that candidate is
+        # independently substituted and range-checked here.
         def proof_kernel_replay_symbolic_instance(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, depth: usize, remaining: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             requires remaining > 0
@@ -214,7 +216,6 @@ extend ElisaProofKernelReplay:
             return false if nodes[goal_root].kind == "quantifier"
             candidates: mutable darray[usize] = []
             proof_kernel_replay_symbolic_subscripts(nodes, children, goal_root, &candidates, 0)
-            return false if candidates.count == 0
             scanned: mutable usize = 0
             found: mutable bool = false
             for fact_root in facts |fact_root, nodes, children, facts, goal_root, candidates, depth, remaining, scanned, found|:
@@ -223,6 +224,17 @@ extend ElisaProofKernelReplay:
                 continue if not proof_kernel_replay_symbolic_range(nodes, fact_root)
                 quantifier: ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
                 range: ElisaProofKernelCore::ProofKernelNode = nodes[quantifier.left]
+                trigger: (matches: bool, found: bool, candidate: usize) = proof_kernel_replay_symbolic_trigger_match(nodes, children, quantifier.right, quantifier.name, goal_root, 0)
+                if trigger.matches and trigger.found:
+                    saved_nodes: usize = nodes.count
+                    saved_children: usize = children.count
+                    instance: usize = proof_kernel_replay_substitute(nodes, children, quantifier.right, quantifier.name, trigger.candidate, 0)
+                    matches: bool = proof_kernel_replay_expr_equal(nodes, children, instance, goal_root, 0)
+                    nodes.truncate(saved_nodes)
+                    children.truncate(saved_children)
+                    if matches and proof_kernel_replay_symbolic_side(nodes, children, facts, "<=", range.left, trigger.candidate, depth + 1, remaining: remaining - 1):
+                        found <- proof_kernel_replay_symbolic_side(nodes, children, facts, "<", trigger.candidate, range.right, depth + 1, remaining: remaining - 1)
+                    break if found
                 for candidate in candidates |candidate, nodes, children, facts, goal_root, quantifier, range, depth, remaining, found|:
                     break if found
                     saved_nodes: usize = nodes.count
@@ -235,6 +247,51 @@ extend ElisaProofKernelReplay:
                     continue if not proof_kernel_replay_symbolic_side(nodes, children, facts, "<=", range.left, candidate, depth + 1, remaining: remaining - 1)
                     found <- proof_kernel_replay_symbolic_side(nodes, children, facts, "<", candidate, range.right, depth + 1, remaining: remaining - 1)
             return found
+
+        # The pattern matcher varies only occurrences of the quantified binder. Its candidate is
+        # drawn from the target expression, and matching all repeated binder occurrences to one
+        # term prevents accidental independent instantiation. Unknown target shapes fail closed.
+        def proof_kernel_replay_symbolic_trigger_match(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, pattern_root: usize, binder: sview, target_root: usize, depth: usize) -> (matches: bool, found: bool, candidate: usize):
+            return (false, false, 0) if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return (false, false, 0) if not proof_kernel_replay_valid(nodes, pattern_root) or not proof_kernel_replay_valid(nodes, target_root)
+            pattern: ElisaProofKernelCore::ProofKernelNode = nodes[pattern_root]
+            target: ElisaProofKernelCore::ProofKernelNode = nodes[target_root]
+            if pattern.kind == "ident":
+                if pattern.name == binder:
+                    return (false, false, 0) if proof_kernel_replay_symbolic_mentions_name(nodes, children, target_root, binder, 0)
+                    return (true, true, target_root)
+                return (proof_kernel_replay_expr_equal(nodes, children, pattern_root, target_root, 0), false, 0)
+            if pattern.kind == "paren":
+                return (false, false, 0) if target.kind != "paren"
+                return proof_kernel_replay_symbolic_trigger_match(nodes, children, pattern.left, binder, target.left, depth + 1)
+            if pattern.kind == "unary":
+                return (false, false, 0) if target.kind != "unary" or pattern.operator != target.operator
+                return proof_kernel_replay_symbolic_trigger_match(nodes, children, pattern.left, binder, target.left, depth + 1)
+            if pattern.kind == "binary":
+                return (false, false, 0) if target.kind != "binary" or pattern.operator != target.operator
+                left_match: (matches: bool, found: bool, candidate: usize) = proof_kernel_replay_symbolic_trigger_match(nodes, children, pattern.left, binder, target.left, depth + 1)
+                return (false, false, 0) if not left_match.matches
+                right_match: (matches: bool, found: bool, candidate: usize) = proof_kernel_replay_symbolic_trigger_match(nodes, children, pattern.right, binder, target.right, depth + 1)
+                return (false, false, 0) if not right_match.matches
+                return (false, false, 0) if left_match.found and right_match.found and not proof_kernel_replay_expr_equal(nodes, children, left_match.candidate, right_match.candidate, 0)
+                return left_match if left_match.found
+                return right_match if right_match.found
+                return (true, false, 0)
+            return (proof_kernel_replay_expr_equal(nodes, children, pattern_root, target_root, 0), false, 0)
+
+        def proof_kernel_replay_symbolic_mentions_name(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, name: sview, depth: usize) -> bool:
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "ident":
+                return node.name == name
+            if node.kind == "paren" or node.kind == "unary":
+                return proof_kernel_replay_symbolic_mentions_name(nodes, children, node.left, name, depth + 1)
+            if node.kind == "binary":
+                return proof_kernel_replay_symbolic_mentions_name(nodes, children, node.left, name, depth + 1) or proof_kernel_replay_symbolic_mentions_name(nodes, children, node.right, name, depth + 1)
+            # Only closed integer/Boolean leaves are known not to carry a binder reference.
+            # Calls, collections, projections, and every future node kind fail closed.
+            return false if node.kind == "int" or node.kind == "bool"
+            return true
 
         def proof_kernel_replay_symbolic_subscripts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, candidates: mutable darray[usize]&, depth: usize) -> void:
             return if depth > 16 or candidates.count >= PROOF_KERNEL_REPLAY_SYMBOLIC_INSTANCE_CANDIDATES

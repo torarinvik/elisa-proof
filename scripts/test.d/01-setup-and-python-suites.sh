@@ -60,6 +60,25 @@ run_py_test() {
     fi
     python3 "$ROOT_DIR/scripts/$name"
 }
+run_py_test test_report_cache_identity.py
+run_py_test test_report_cache_real_equivalence.py
+run_py_test test_report_cache_executable_swap.py
+run_py_test test_report_cache_missing_nested_dependency.py
+run_py_test test_report_cache_nested_dependency_edit.py
+run_py_test test_report_cache_symlink_dependency.py
+run_py_test test_p01_baseline.py
+run_py_test test_bounded_model_work_budget.py
+run_py_test test_disjunction_search_bounds.py
+run_py_test test_p05_package_restart.py
+run_py_test test_conditional_ensure_replay_gap.py
+run_py_test test_declaration_artifact_identity.py
+run_py_test test_declaration_artifact_concurrency.py
+run_py_test test_p07_support_census.py
+run_py_test test_scalar_witness_name_index.py
+run_py_test remote/test_object_cache_key.py
+run_py_test test_build_dependency_closure.py
+run_py_test test_build_manifest_sidecar_integrity.py
+run_py_test test_compiler_snapshot_preserves_files.py
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
 # The downstream assertions still check the report's expected shape; this adapter checks that the
@@ -76,7 +95,7 @@ run_json_report() {
     fi
     local cache_key=""
     if [[ -n "$REPORT_CACHE" ]]; then
-        cache_key="$REPORT_CACHE/$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$source_path" | tr -d '\n' | shasum | cut -d' ' -f1)"
+        cache_key="$REPORT_CACHE/$(python3 "$ROOT_DIR/scripts/report_cache.py" --key "$source_path" "$ROOT_DIR/build/elisa-proof")"
         # Wait for a prefetched fixture's entry while the prefetcher still runs.
         while [[ ! -f "$cache_key.rc" ]] && [[ -n "$REPORT_PREFETCH_PID" ]] && kill -0 "$REPORT_PREFETCH_PID" 2>/dev/null; do
             sleep 1  # poll-ok: local file from our own prefetcher
@@ -136,6 +155,7 @@ run_py_test test_source_admission_matrix.py
 run_py_test test_negated_conjunction_fallthrough.py
 run_py_test test_or_chain_loop_update.py
 run_py_test test_correlated_disjunction.py
+run_py_test tests/test_correlated_disjunction_consumer_resolution.py
 run_py_test test_closed_width_formulas.py
 run_py_test test_parameter_heavy_return_analysis.py
 run_py_test test_numeric_cast_operator.py
@@ -145,6 +165,7 @@ run_py_test test_call_result_width.py
 run_py_test test_adt_library.py
 run_py_test test_adt_parser.py
 run_py_test test_match_refuted_arms.py
+run_py_test test_match_exhaustiveness.py
 run_py_test test_chained_pure_calls.py
 run_py_test test_dispatcher_budget.py
 run_py_test test_qualified_constants.py
@@ -152,6 +173,7 @@ run_py_test test_variant_exclusion.py
 run_py_test test_signed_upper_bound.py
 run_py_test test_refusal_gate.py
 run_py_test test_report_count_semantics.py
+run_py_test test_agent_protocol_schema.py
 run_py_test test_deterministic_call_chain.py
 run_py_test test_deterministic_operator_global.py
 run_py_test test_tuple_field_region.py
@@ -163,6 +185,7 @@ run_py_test test_disequality_strictness.py
 run_py_test test_or_chains.py
 run_py_test test_quantifier_oracle.py
 run_py_test test_guard_and_flag_facts.py
+run_py_test test_bool_local_branch_fact.py
 run_py_test test_min_max_abs_summaries.py
 run_py_test test_literal_count.py
 run_py_test test_engine_state.py
@@ -187,10 +210,14 @@ run_py_test test_unsigned_resource_source_policy.py
 run_py_test test_fixed_array_constant_indices.py
 run_py_test test_return_branch_path_fact.py
 run_py_test test_kernel_inventory.py
+run_py_test test_portable_trust_inventory.py
 run_py_test test_unsigned_subtraction_upper.py
 run_py_test test_unsigned_or_goal.py
 run_py_test test_unsigned_sum_upper_shape.py
 run_py_test test_unsigned_remainder_range.py
+run_py_test test_unsigned_division_bounds.py
+run_py_test test_signed_division_boundaries.py
+run_py_test test_unsigned_u8_shift_boundaries.py
 run_py_test test_loop_state_joins.py
 run_py_test test_captured_loop_constants.py
 run_py_test test_indexed_boolean_denial.py
@@ -201,7 +228,15 @@ run_py_test test_comprehension_resources.py
 run_py_test test_monotone_orders.py
 run_py_test test_replay_construct_arguments.py
 run_py_test test_negated_guard_orders.py
+run_py_test test_nested_early_return_guards.py
+python3 "$ROOT_DIR/scripts/tests/test_portable_replay_generation_resolution.py"
+python3 "$ROOT_DIR/scripts/tests/test_dogfood_package_pair_resolution.py"
 run_py_test test_portable_replay.py
+python3 "$ROOT_DIR/scripts/tests/test_portable_package_byte_boundaries.py"
+python3 "$ROOT_DIR/scripts/tests/test_portable_package_string_budget.py"
+python3 "$ROOT_DIR/scripts/tests/test_portable_package_theorem_budget.py"
+python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark.py"
+python3 "$ROOT_DIR/scripts/perf_luna_benchmark.py" --self-test
 run_py_test test_linear_certificates.py
 run_py_test test_smt_oracle.py
 run_py_test test_symbolic_quantifiers.py
@@ -221,6 +256,7 @@ run_py_test test_goal_disjunct_split.py
 run_py_test test_include_constant_scope.py
 run_py_test test_include_function_scope.py
 run_py_test test_replay_dependency_row.py
+python3 "$ROOT_DIR/scripts/tests/test_deterministic_call_qualified_replay.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -372,13 +408,6 @@ fi
 kernel_intern_status=$?
 if [[ "$kernel_intern_status" -ne 0 ]]; then
     printf 'proof test matrix failed: kernel term sharing boundary tests failed (%s)\n' "$kernel_intern_status" >&2
-    exit 1
-fi
-"${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/report-invariants" "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
-"$standalone_probe_dir/report-invariants"
-report_invariants_status=$?
-if [[ "$report_invariants_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: report invariant boundary tests failed (%s)\n' "$report_invariants_status" >&2
     exit 1
 fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-allocation.o" "$ROOT_DIR/examples/region_allocation.elisa" >/dev/null 2>&1

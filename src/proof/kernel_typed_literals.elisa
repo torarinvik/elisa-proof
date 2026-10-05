@@ -1,6 +1,40 @@
 # Source-neutral typed literal representation. Admission into the full arena
 # remains separate: callers must also establish independent source correspondence.
 extend ElisaProofKernelCore:
+    private:
+        def typed_integer_sort(name: sview) -> (known: bool, unsigned: bool, width: i64):
+            match name:
+                "u8":
+                    return (true, true, PROOF_KERNEL_U8_WIDTH)
+                "u16":
+                    return (true, true, PROOF_KERNEL_U16_WIDTH)
+                "u32":
+                    return (true, true, PROOF_KERNEL_U32_WIDTH)
+                "u64":
+                    return (true, true, PROOF_KERNEL_MACHINE_WORD_BITS)
+                "i8":
+                    return (true, false, PROOF_KERNEL_I8_WIDTH)
+                "i16":
+                    return (true, false, PROOF_KERNEL_I16_WIDTH)
+                "i32":
+                    return (true, false, PROOF_KERNEL_I32_WIDTH)
+                "i64":
+                    return (true, false, PROOF_KERNEL_I64_WIDTH)
+                _:
+                    return (false, false, 0)
+
+        def typed_integer_maximum(unsigned: bool, width: i64) -> (known: bool, value: u64):
+            return (false, 0) if width != PROOF_KERNEL_U8_WIDTH and width != PROOF_KERNEL_U16_WIDTH and width != PROOF_KERNEL_U32_WIDTH and width != PROOF_KERNEL_MACHINE_WORD_BITS
+            return (true, proof_kernel_signed_width_max(width).u64()) if not unsigned
+            return (true, PROOF_KERNEL_U8_MAX.u64()) if width == PROOF_KERNEL_U8_WIDTH
+            return (true, PROOF_KERNEL_U16_MAX.u64()) if width == PROOF_KERNEL_U16_WIDTH
+            return (true, PROOF_KERNEL_U32_MAX.u64()) if width == PROOF_KERNEL_U32_WIDTH
+            return (true, PROOF_KERNEL_U64_MAX) if width == PROOF_KERNEL_MACHINE_WORD_BITS
+            return (false, 0)
+
+        def typed_literal_payload_is_canonical(node: ProofKernelNode) -> bool:
+            return node.operator == "" and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.secondary_name == ""
+
     public:
         # Compute modulo 2^width without overflowing the host u64 intermediate.
         # Only explicit, matching unsigned sorts enter this rule.
@@ -18,6 +52,17 @@ extend ElisaProofKernelCore:
             difference: u64 = b.bits - a.bits
             return (true, maximum - difference + 1, a.width)
 
+        # Logical right shift is admitted only for explicit unsigned operands of
+        # one sort. Counts outside the value width refuse instead of inheriting
+        # the host's oversized-shift behavior.
+        def typed_unsigned_shift_right(left: ProofKernelNode, operator: sview, right: ProofKernelNode) -> (known: bool, bits: u64, width: i64):
+            return (false, 0, 0) if operator != ">>" or left.name != right.name
+            a = typed_literal_value(left)
+            b = typed_literal_value(right)
+            return (false, 0, 0) if not a.known or not b.known or not a.unsigned or not b.unsigned
+            return (false, 0, 0) if b.bits >= a.width
+            return (true, a.bits >> b.bits.i64(), a.width)
+
         def typed_literal_comparison(left: ProofKernelNode, operator: sview, right: ProofKernelNode) -> (known: bool, value: bool):
             return (false, false) if left.name != right.name
             a = typed_literal_value(left)
@@ -33,15 +78,13 @@ extend ElisaProofKernelCore:
 
         def typed_literal_value(node: ProofKernelNode) -> (known: bool, bits: u64, unsigned: bool, width: i64):
             return (false, 0, false, 0) if node.kind != "typed-int"
-            return (false, 0, false, 0) if node.operator != "" or node.left != 0 or node.right != 0 or node.auxiliary != 0 or node.children_start != 0 or node.children_count != 0 or node.secondary_name != ""
-            unsigned: bool = node.name == "u8" or node.name == "u16" or node.name == "u32" or node.name == "u64"
-            signed: bool = node.name == "i8" or node.name == "i16" or node.name == "i32" or node.name == "i64"
-            return (false, 0, false, 0) if not unsigned and not signed
-            width: i64 = 8 if node.name == "u8" or node.name == "i8" else 16 if node.name == "u16" or node.name == "i16" else 32 if node.name == "u32" or node.name == "i32" else 64
+            return (false, 0, false, 0) if not typed_literal_payload_is_canonical(node)
+            sort: (known: bool, unsigned: bool, width: i64) = typed_integer_sort(node.name)
+            return (false, 0, false, 0) if not sort.known
             # This node denotes a positive source token, not a unary expression.
             # Only u64 may have a negative i64 storage payload.
             return (false, 0, false, 0) if node.value < 0 and node.name != "u64"
             bits: u64 = node.value.u64()
-            maximum: u64 = 255 if unsigned and width == 8 else 65535 if unsigned and width == 16 else 4294967295 if unsigned and width == 32 else 18446744073709551615u64 if unsigned else proof_kernel_signed_width_max(width).u64()
-            return (false, 0, false, 0) if bits > maximum
-            return (true, bits, unsigned, width)
+            maximum: (known: bool, value: u64) = typed_integer_maximum(sort.unsigned, sort.width)
+            return (false, 0, false, 0) if not maximum.known or bits > maximum.value
+            return (true, bits, sort.unsigned, sort.width)

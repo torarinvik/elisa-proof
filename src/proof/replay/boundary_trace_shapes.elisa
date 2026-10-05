@@ -10,7 +10,11 @@ extend ElisaProof:
                     return true
                 "type-bound":
                     return true
+                "deterministic-call":
+                    return true
                 "variant-exclusion":
+                    return true
+                "match-exhaustiveness":
                     return true
                 "runtime-assert":
                     return true
@@ -55,4 +59,173 @@ extend ElisaProof:
                 return proof_replay_global_constant_fact_is_valid(report, trace)
             if trace.kind == "variant-exclusion":
                 return proof_replay_variant_exclusion_valid(report, trace)
+            if trace.kind == "match-exhaustiveness":
+                return proof_replay_match_exhaustiveness_valid(report, trace)
+            if trace.kind == "deterministic-call":
+                return proof_replay_deterministic_call_valid(report, trace)
             return true
+
+        # Deterministic-call scalar witnesses are source claims, not trusted type facts. Replay
+        # rebuilds the callee's call graph from declarations and accepts only an acyclic chain of
+        # effect-free, by-value functions. Any mutable global in this source currently makes the
+        # check conservative: that keeps a global read from being mistaken for a pure value.
+        def proof_replay_deterministic_parameter_type(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 96
+            match expression:
+                Ast::Expr.Unary(operator, inner, _):
+                    return true if operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut
+                    return proof_replay_deterministic_parameter_type(inner, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_deterministic_parameter_type(left, depth + 1) or proof_replay_deterministic_parameter_type(right, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_deterministic_parameter_type(inner, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_replay_deterministic_parameter_type(base, depth + 1)
+                _:
+                    return false
+
+        def proof_replay_deterministic_body_shape(body: darray[Ast::Stmt]&, depth: usize) -> bool:
+            return false if depth >= 96
+            for statement in body |depth|:
+                match statement:
+                    Ast::Stmt.Return(_, _):
+                        pass
+                    Ast::Stmt.Expr(_, _):
+                        pass
+                    Ast::Stmt.VarDecl(_, _, _, _):
+                        pass
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        return false if not proof_replay_deterministic_body_shape(then_body, depth + 1) or not proof_replay_deterministic_body_shape(else_body, depth + 1)
+                    Ast::Stmt.Contract(kind, _, _):
+                        return false if kind != "requires" and kind != "ensure" and kind != "decreases" and kind != "decreases*"
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |depth|:
+                            return false if not proof_replay_deterministic_body_shape(arm.body, depth + 1)
+                    _:
+                        return false
+            return true
+
+        def proof_replay_deterministic_body_mentions(body: darray[Ast::Stmt]&, name: sview, depth: usize) -> bool:
+            return true if depth >= 96
+            for statement in body |name, depth|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return true if proof_expr_mentions_name(returned, name)
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_expr_mentions_name(expression, name)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        return true if proof_expr_mentions_name(initializer, name)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_expr_mentions_name(condition, name) or proof_replay_deterministic_body_mentions(then_body, name, depth + 1) or proof_replay_deterministic_body_mentions(else_body, name, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_expr_mentions_name(scrutinee, name)
+                        for arm in arms |name, depth|:
+                            return true if proof_expr_mentions_name(arm.guard, name) or proof_replay_deterministic_body_mentions(arm.body, name, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_expr_mentions_name(expression, name)
+                    _:
+                        pass
+            return false
+
+        def proof_replay_deterministic_scalar_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return false if depth >= 96
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return true if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "int"
+                    return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uint"
+                    return true if name == "bool" or name == "char"
+                    source = proof_replay_effect_named_declaration(declarations, name, 0)
+                    return false if source.matches != 1
+                    match source.declaration:
+                        Ast::Decl.Alias(_, target, _):
+                            return proof_replay_deterministic_scalar_type(target, declarations, depth + 1)
+                        Ast::Decl.Enum(_, _, is_const, _, _):
+                            return is_const
+                        _:
+                            return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_deterministic_scalar_type(inner, declarations, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_replay_deterministic_scalar_type(base, declarations, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_replay_deterministic_scalar_type(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                _:
+                    return false
+            return false
+
+        # The producer can retain a witness for an explicitly qualified call. Replay admits
+        # that spelling only when the callee name is globally unique and its declaration is
+        # actually in the innermost qualified module. Ambiguous repeated names remain refused;
+        # this check never relies on the producer's call-resolution index.
+        def proof_replay_deterministic_qualified_target(declarations: darray[Ast::Decl]&, name: sview, qualifier: sview) -> bool:
+            return false if name == "" or qualifier == ""
+            source = proof_replay_effect_named_declaration(declarations, name, 0)
+            return false if source.matches != 1
+            match source.declaration:
+                Ast::Decl.Func(_, _, _, _, _, _, position):
+                    owner: mutable sview = ""
+                    owners: mutable usize = 0
+                    proof_replay_function_owner_module(declarations, name, position.line, "", &owner, &owners, 0)
+                    return owners == 1 and owner != "" and proof_replay_module_leaf_matches(owner, qualifier)
+                _:
+                    return false
+
+        def proof_replay_deterministic_function(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, active: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 32 or name == "" or any current in active where current == name
+            source = proof_replay_effect_named_declaration(declarations, name, 0)
+            return false if source.matches != 1
+            match source.declaration:
+                Ast::Decl.Func(_, parameters, return_type, body, effects, _, _):
+                    return false if effects.count != 0 or not proof_replay_deterministic_body_shape(body, 0)
+                    if return_type is scalar_return:
+                        return false if not proof_replay_deterministic_scalar_type(scalar_return, declarations, 0)
+                    else:
+                        return false
+                    for parameter in parameters:
+                        return false if parameter.is_mutable or proof_replay_deterministic_parameter_type(parameter.type_expression, 0) or not proof_replay_deterministic_scalar_type(parameter.type_expression, declarations, 0)
+                    for annotation in annotations |body, parameters|:
+                        if annotation.name == "__global_mutable":
+                            return false if proof_replay_deterministic_body_mentions(body, annotation.owner, 0)
+                            for parameter in parameters:
+                                return false if parameter.has_default and proof_expr_mentions_name(parameter.default_value, annotation.owner)
+                    calls: mutable darray[sview] = []
+                    return false if not proof_replay_source_calls(parameters, body, &calls)
+                    next_active: mutable darray[sview] = []
+                    next_active.extend(active)
+                    next_active.push(name)
+                    for called in calls |declarations, annotations, next_active, depth|:
+                        return false if not proof_replay_deterministic_function(declarations, annotations, called, next_active, depth + 1)
+                    return true
+                _:
+                    return false
+
+        def proof_replay_deterministic_call_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            marker = trace.expression
+            match marker:
+                Ast::Expr.Call(Ast::Expr.Ident(marker_name, _), arguments, _, _):
+                    return false if marker_name != "__elisa_primitive_scalar_type" or arguments.count != 1
+                    match arguments[0]:
+                        Ast::Expr.Call(callee_expression, call_arguments, _, _):
+                            callee: mutable sview = ""
+                            match callee_expression:
+                                Ast::Expr.Ident(name, _):
+                                    callee <- name
+                                Ast::Expr.Scope(base, name, _):
+                                    return false if not proof_replay_deterministic_qualified_target(report.source_declarations, name, proof_head_name(base))
+                                    callee <- name
+                                _:
+                                    return false
+                            for argument in call_arguments:
+                                # Reference and mutable-reference actuals remain disallowed
+                                # through wrappers such as parentheses/refinements too. The
+                                # producer sees the resolved source type; replay must not accept
+                                # a forged scalar-call marker by inspecting only the outer node.
+                                return false if proof_replay_deterministic_parameter_type(argument, 0)
+                            return false if not proof_replay_deterministic_call_source_site(report, trace, arguments[0])
+                            active: mutable darray[sview] = []
+                            return proof_replay_deterministic_function(report.source_declarations, report.source_annotations, callee, active, 0)
+                        _:
+                            return false
+                _:
+                    return false

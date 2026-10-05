@@ -21,6 +21,7 @@ started = time.monotonic()
 data = run(ROOT / "examples/long_difference_chain.elisa")
 elapsed = time.monotonic() - started
 assert data["status"] == "proved" and data["findings"] == [], data["findings"]
+assert data["summary"]["declarations"] == 5, data["summary"]  # Includes the 32-name boundary case.
 assert data["summary"]["proven"] == 10 and data["replay"] == {"certificates": 10, "replayed": 10, "gaps": 0}, data["replay"]
 # Budget: the thirty-two-name chain is the widest the limit is sized for and stays cheap.
 assert elapsed < 60, elapsed
@@ -29,6 +30,8 @@ data = run(ROOT / "examples/rejected_long_difference_chain.elisa")
 assert data["status"] == "failed" and data["replay"]["gaps"] == 0
 assert data["replay"]["certificates"] == data["replay"]["replayed"]
 failures = sorted((finding["kind"], finding["line"]) for finding in data["findings"])
-assert failures == [("ensure-unproven", 9), ("ensure-unproven", 22), ("ensure-unproven", 34), ("ensure-unproven", 42)], failures
+assert failures == [("ensure-unproven", 9), ("ensure-unproven", 22), ("ensure-unproven", 34), ("ensure-unproven", 42), ("ensure-unproven", 48)], failures
+assert data["replay"]["gaps"] == 0 and data["replay"]["certificates"] == data["replay"]["replayed"], data["replay"]
+assert any(finding["name"] == "thirty_three_name_difference" for finding in data["findings"]), data["findings"]
 
 print("long difference chain: bounds travel every link, and only the ones the facts imply")

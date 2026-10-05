@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Check the report's measurement section and the shape of the shared kernel arena."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 KEYS = (
     "declarations", "obligations", "goal_attempts", "certificates", "certificate_facts",
     "largest_certificate_facts", "repeated_certificate_fact_roots", "fact_traces",
-    "control_flow_steps", "live_facts_peak", "kernel_nodes", "kernel_nodes_shared",
+    "control_flow_steps", "live_facts_peak", "goal_cache_hits", "goal_cache_misses", "kernel_nodes", "kernel_nodes_shared",
     "kernel_children", "report_bytes",
 )
 # Kinds whose left/right/auxiliary fields are node references, in that order. Mirrors
@@ -24,7 +26,7 @@ REFERENCE_FIELDS = {
 
 def run(path, expected_exit):
     process = subprocess.run(
-        [str(ROOT / "build/elisa-proof"), "--json", str(path)],
+        [str(BINARY), "--json", str(path)],
         capture_output=True, text=True, timeout=120,
     )
     assert process.returncode == expected_exit, (str(path), process.returncode, process.stderr)
@@ -85,6 +87,7 @@ def main():
     # Every certificate re-encodes its facts, so a proved source with several goals shares terms.
     assert verified["measurements"]["kernel_nodes_shared"] > 0
     assert verified["measurements"]["control_flow_steps"] > 0 and verified["measurements"]["live_facts_peak"] > 0
+    assert verified["measurements"]["goal_cache_hits"] >= 0 and verified["measurements"]["goal_cache_misses"] > 0
 
     text, library = run(ROOT / "examples/adt_library.elisa", 0)
     check_measurements(text, library)
@@ -117,7 +120,7 @@ def main():
         malformed = Path(directory) / "malformed.elisa"
         malformed.write_text("def broken(:\n    return\n")
         process = subprocess.run(
-            [str(ROOT / "build/elisa-proof"), "--json", str(malformed)],
+            [str(BINARY), "--json", str(malformed)],
             capture_output=True, text=True, timeout=60,
         )
         assert process.returncode != 0

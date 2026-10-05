@@ -119,6 +119,17 @@ fi
 printf 'dogfood required_reference_replay: nullable, value, missing, shifted, duplicate and alias-collision origins rejected\n'
 
 
+# A parenthesized reference actual cannot be smuggled into a deterministic-call boundary trace.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/deterministic-call-trace-replay.o" "$SNAPSHOT_ROOT/examples/deterministic_call_trace_replay_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/deterministic-call-trace-replay" "$runtime_dir/deterministic-call-trace-replay.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/deterministic-call-trace-replay" "$runtime_dir/deterministic-call-trace-replay.o"
+fi
+"$runtime_dir/deterministic-call-trace-replay"
+printf 'dogfood deterministic_call_replay: wrapped reference actual rejected and source trace restored\n'
+
+
 # Corrupt a checked lemma-summary binding in memory and require independent replay to reject every
 # caller certificate that tries to consume the now-mismatched instantiated postcondition.
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/lemma-summary-replay.o" "$SNAPSHOT_ROOT/examples/lemma_summary_replay_runtime.elisa" >/dev/null 2>&1

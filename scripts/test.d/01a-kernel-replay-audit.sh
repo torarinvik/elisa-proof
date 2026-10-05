@@ -4,6 +4,7 @@
 # Peak memory grows with the audited kernel: 1,177,457 KB before the linear-certificate checker
 # (C-02/C-03), 1,219,217 KB after it; mocap-cleaner proof tiers and later kernel growth raise it.
 KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-4000000}"
+python3 "$ROOT_DIR/scripts/test_kernel_coverage_targets.py" || exit 1
 kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
 kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
 ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \

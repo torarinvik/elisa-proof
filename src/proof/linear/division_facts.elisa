@@ -17,8 +17,9 @@ extend ElisaProof:
         # Each side condition is itself proved from the facts, under the split budget. The
         # facts hold for truncating signed division of any value the source computes (the
         # operation traps rather than wraps; a divisor >= 1 excludes `MIN / -1`), and
-        # instantiating the name back gives the original goal. Unsigned terms are refused. The
-        # kernel mirror is `proof_kernel_replay_division_goal`.
+        # instantiating the name back gives the original goal. The signed interval abstraction
+        # below still refuses unsigned terms; the exact unsigned quotient upper-bound rule is
+        # separate. The kernel mirror is `proof_kernel_replay_division_goal`.
         def proof_division_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
             return false if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
             return false if not proof_comparison_goal_shape(goal)
@@ -88,6 +89,53 @@ extend ElisaProof:
             rewritten_facts.extend(added)
             return true if proof_goal_depth(rewritten_facts, rewritten_goal, annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
             return terms.count == 1 and proof_division_monotone(goal, terms[0], lower, upper)
+
+        # For unsigned fixed-width integers, floor division by a positive, same-width divisor
+        # returns a value no greater than its dividend. This direct rule avoids routing unsigned
+        # values through signed i64 intervals, where high-bit payloads would be misinterpreted.
+        # Both the dividend/result width and divisor width are checked independently; only an
+        # unsuffixed positive literal may inherit the operation's width, and it must fit.
+        def proof_unsigned_quotient_upper_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool:
+            quotient: mutable Ast::Expr = Ast::Expr.Invalid
+            dividend: mutable Ast::Expr = Ast::Expr.Invalid
+            divisor: mutable Ast::Expr = Ast::Expr.Invalid
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(left, TokenKind.LtEq, right, _):
+                    parts: (known: bool, dividend: Ast::Expr, percent: bool, divisor: Ast::Expr) = proof_division_parts(left)
+                    return false if not parts.known or parts.percent or not proof_expr_equal(parts.dividend, right)
+                    quotient <- left
+                    dividend <- parts.dividend
+                    divisor <- parts.divisor
+                Ast::Expr.Binary(left, TokenKind.GtEq, right, _):
+                    parts: (known: bool, dividend: Ast::Expr, percent: bool, divisor: Ast::Expr) = proof_division_parts(right)
+                    return false if not parts.known or parts.percent or not proof_expr_equal(parts.dividend, left)
+                    quotient <- right
+                    dividend <- parts.dividend
+                    divisor <- parts.divisor
+                _:
+                    return false
+            width: i64 = proof_unsigned_width_in_expression(quotient, facts)
+            return false if width == 0 or proof_unsigned_width_in_expression(dividend, facts) != width
+            return false if not proof_scalar_term_witnessed(dividend, facts, 0)
+            return false if not proof_unsigned_division_divisor_width_matches(divisor, facts, annotations, width, 0)
+            position: Ast::Pos = Ast::expr_pos(divisor)
+            one: Ast::Expr = Ast::Expr.IntLit(1, position)
+            return proof_goal_depth(facts, Ast::Expr.Binary(divisor, TokenKind.GtEq, one, position), annotations, operator_mask, depth, budget, split_depth + 1, exhausted)
+
+        def proof_unsigned_division_divisor_width_matches(divisor: Ast::Expr, facts: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, width: i64, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or width == 0
+            match proof_strip_parens(divisor):
+                Ast::Expr.IntLit(value, position):
+                    literal: (known: bool, bits: u64, unsigned: bool, width: i64) = proof_replay_numeric_literal_sort(annotations, position.line, position.column, value)
+                    if literal.known:
+                        return literal.unsigned and literal.width == width and literal.bits > 0
+                    return value > 0 and proof_unsigned_constants_fit(divisor, width, 0)
+                Ast::Expr.Ident(_, _):
+                    return proof_unsigned_width_in_expression(divisor, facts) == width and proof_scalar_term_witnessed(divisor, facts, 0)
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_division_divisor_width_matches(inner, facts, annotations, width, depth + 1)
+                _:
+                    return false
 
         # A goal linear in one bounded term `t` (`lower <= t <= upper`) holds when it holds with
         # `t` at the bound that makes it hardest: for `L >= R` a negative coefficient of `t` in

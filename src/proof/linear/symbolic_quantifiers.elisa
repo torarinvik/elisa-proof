@@ -185,7 +185,6 @@ extend ElisaProof:
             return false if proof_quantifier_kind(goal, annotations) != ""
             candidates: mutable darray[Ast::Expr] = []
             proof_symbolic_subscripts(goal, &candidates, 0)
-            return false if candidates.count == 0
             position: Ast::Pos = Ast::pos_at_line(0)
             scanned: mutable usize = 0
             for fact in facts |fact, facts, goal, candidates, annotations, operator_mask, depth, budget, split_depth, exhausted, scanned, position|:
@@ -194,6 +193,20 @@ extend ElisaProof:
                 continue if proof_quantifier_kind(fact, annotations) != "forall"
                 known: (known: bool, binder: sview, lower: Ast::Expr, upper: Ast::Expr, body: Ast::Expr) = proof_symbolic_range(fact)
                 continue if not known.known
+                # A scalar body such as `i <= limit` supplies its trigger from the matching
+                # goal shape (`n - 1 <= limit`). This selects one term from the goal; it never
+                # enumerates the symbolic range. Replay reconstructs this same substitution and
+                # checks both range bounds before admitting the instance.
+                trigger: (matches: bool, found: bool, candidate: Ast::Expr) = proof_symbolic_trigger_match(known.body, known.binder, goal, 0)
+                if trigger.matches and trigger.found:
+                    trigger_values: darray[Ast::Expr] = [trigger.candidate]
+                    trigger_names: darray[sview] = [known.binder]
+                    trigger_instance: Ast::Expr = proof_substitute(known.body, trigger_names, trigger_values)
+                    if proof_expr_equal(trigger_instance, goal):
+                        trigger_start: Ast::Expr = Ast::Expr.Binary(known.lower, TokenKind.LtEq, trigger.candidate, position)
+                        trigger_end: Ast::Expr = Ast::Expr.Binary(trigger.candidate, TokenKind.Lt, known.upper, position)
+                        if proof_symbolic_side_goal(facts, trigger_start, annotations, operator_mask, depth, budget, split_depth, exhausted):
+                            return true if proof_symbolic_side_goal(facts, trigger_end, annotations, operator_mask, depth, budget, split_depth, exhausted)
                 names: darray[sview] = [known.binder]
                 for candidate in candidates |candidate, names, known, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted, position|:
                     values: darray[Ast::Expr] = [candidate]
@@ -202,6 +215,48 @@ extend ElisaProof:
                     continue if not proof_symbolic_side_goal(facts, starts, annotations, operator_mask, depth, budget, split_depth, exhausted)
                     return true if proof_symbolic_side_goal(facts, Ast::Expr.Binary(candidate, TokenKind.Lt, known.upper, position), annotations, operator_mask, depth, budget, split_depth, exhausted)
             return false
+
+        # Match a bounded trigger pattern against the target. Only a binder occurrence may
+        # vary; every other subtree and every operator must match exactly. Reject a candidate
+        # containing the binder name because alpha-renaming is unavailable in this AST.
+        def proof_symbolic_trigger_match(pattern: Ast::Expr, binder: sview, target: Ast::Expr, depth: usize) -> (matches: bool, found: bool, candidate: Ast::Expr):
+            invalid: Ast::Expr = Ast::Expr.Invalid
+            return (false, false, invalid) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match pattern:
+                Ast::Expr.Ident(name, _):
+                    if name == binder:
+                        return (false, false, invalid) if proof_expr_is_invalid(target) or proof_expr_mentions_name(target, binder)
+                        return (true, true, target)
+                    return (proof_expr_equal(pattern, target), false, invalid)
+                Ast::Expr.Paren(inner, _):
+                    match target:
+                        Ast::Expr.Paren(target_inner, _):
+                            return proof_symbolic_trigger_match(inner, binder, target_inner, depth + 1)
+                        _:
+                            return (false, false, invalid)
+                Ast::Expr.Unary(operator, operand, _):
+                    match target:
+                        Ast::Expr.Unary(target_operator, target_operand, _):
+                            return (false, false, invalid) if operator != target_operator
+                            return proof_symbolic_trigger_match(operand, binder, target_operand, depth + 1)
+                        _:
+                            return (false, false, invalid)
+                Ast::Expr.Binary(left, operator, right, _):
+                    match target:
+                        Ast::Expr.Binary(target_left, target_operator, target_right, _):
+                            return (false, false, invalid) if operator != target_operator
+                            matched_left: (matches: bool, found: bool, candidate: Ast::Expr) = proof_symbolic_trigger_match(left, binder, target_left, depth + 1)
+                            return (false, false, invalid) if not matched_left.matches
+                            matched_right: (matches: bool, found: bool, candidate: Ast::Expr) = proof_symbolic_trigger_match(right, binder, target_right, depth + 1)
+                            return (false, false, invalid) if not matched_right.matches
+                            return (false, false, invalid) if matched_left.found and matched_right.found and not proof_expr_equal(matched_left.candidate, matched_right.candidate)
+                            return matched_left if matched_left.found
+                            return matched_right if matched_right.found
+                            return (true, false, invalid)
+                        _:
+                            return (false, false, invalid)
+                _:
+                    return (proof_expr_equal(pattern, target), false, invalid)
 
         def proof_symbolic_subscripts(expression: Ast::Expr, candidates: mutable darray[Ast::Expr]&, depth: usize) -> void:
             return if depth > 16 or candidates.count >= PROOF_SYMBOLIC_INSTANCE_CANDIDATES

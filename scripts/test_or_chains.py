@@ -27,8 +27,8 @@ assert data["replay"]["gaps"] == 0
 assert all(f["status"] != "proved" for f in data["findings"])
 assert sorted((f["name"], f["line"], f["refusal_gate"], f["status"]) for f in data["findings"]
               if f["kind"] == "ensure-unproven") == [
-    ("chain_does_not_tighten_range", 21, "no-rule", "unknown"), ("five_case_off_by_one", 26, "connective", "disproved"),
-    ("nested_uncovered_case", 11, "no-rule", "disproved"), ("no_disjunct_holds", 15, "connective", "disproved"),
+    ("chain_does_not_tighten_range", 21, "unknown", "unknown"), ("five_case_off_by_one", 26, "connective", "disproved"),
+    ("nested_uncovered_case", 11, "unknown", "disproved"), ("no_disjunct_holds", 15, "connective", "disproved"),
     ("six_case_budget", 33, "budget", "timeout"), ("uncovered_case", 6, "connective", "disproved")], data["findings"]
 
 print("or chains: chains up to five disjuncts split, chained goals introduce, uncovered cases and the six-case budget refused")

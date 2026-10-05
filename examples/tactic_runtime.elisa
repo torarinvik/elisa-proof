@@ -27,6 +27,13 @@ const UNSAFE_SIGNED_INCREMENT_ADMITTED: i64 = 136
 const UNSAFE_SIGNED_INCREMENT_MARKED_SOLVED: i64 = 137
 const DICTIONARY_QUANTIFIER_CAPTURE_ADMITTED: i64 = 138
 const FINITE_DICTIONARY_QUANTIFIER_REJECTED: i64 = 139
+const MUTATED_BRANCH_CONTEXT_ADMITTED: i64 = 140
+const NESTED_BRANCH_CONTROL_FAILED: i64 = 141
+const MUTATION_CHANGED_SIBLING_CONTEXT: i64 = 142
+const STALE_GOAL_CONTROL_FAILED: i64 = 143
+const MUTATED_BRANCH_GOAL_ADMITTED: i64 = 144
+const POSTCHECK_FACT_CONTROL_FAILED: i64 = 145
+const MUTATED_BRANCH_FACT_ADMITTED: i64 = 146
 
 def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     region r(65536):
@@ -44,18 +51,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
             scalar_x_facts.push(Ast::Expr.Call(Ast::Expr.Ident("__elisa_primitive_scalar_type", position), [x], [], position))
             scalar_x_facts.push(Ast::Expr.Call(Ast::Expr.Ident("__elisa_signed_type_bound", position), [x, Ast::Expr.IntLit(ElisaProofKernelCore::PROOF_KERNEL_I64_WIDTH, position)], [], position))
 
-            source_binding_report: mutable ProofReport = proof_empty_report()
-            source_binding_facts: mutable darray[Ast::Expr] = []
-            source_binding_fact: Ast::Expr = Ast::Expr.Binary(x, TokenKind.EqEq, zero, position)
-            proof_runtime_add_traced_fact(&source_binding_facts, &source_binding_report, source_binding_fact, "precondition", 1, "binding")
-            proof_add_goal_attempt(&source_binding_report, source_binding_facts, Ast::Expr.BoolLit(false, position), 1, "binding", "goal", false)
-            return 113 if not proof_tactic_source_state_matches(source_binding_report, 0, source_binding_facts, Ast::Expr.BoolLit(false, position))
-            return 114 if proof_tactic_source_state_matches(source_binding_report, 0, source_binding_facts, Ast::Expr.BoolLit(true, position))
-            forged_source_facts: darray[Ast::Expr] = [Ast::Expr.BoolLit(false, position)]
-            return 115 if proof_tactic_source_state_matches(source_binding_report, 0, forged_source_facts, Ast::Expr.BoolLit(false, position))
-            source_binding_report.goal_attempts.clear()
-            source_binding_report.goal_attempts.push(ProofGoalAttempt{goal: Ast::Expr.BoolLit(false, position), budget_exhausted: false, facts_start: source_binding_report.certificate_facts.count + 1, facts_count: 1, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 1, line: 1, name: "binding", rule: "goal", proven: false, has_certificate: false, certificate_index: 0})
-            return 116 if proof_tactic_source_state_matches(source_binding_report, 0, source_binding_facts, Ast::Expr.BoolLit(false, position))
+            return 113 if not proof_runtime_source_state_binding_controls(position)
 
             unsafe_implication: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Binary(x, TokenKind.GtEq, zero, position), TokenKind.FatArrow, Ast::Expr.Binary(Ast::Expr.Binary(x, TokenKind.Plus, one, position), TokenKind.GtEq, one, position), position)
             unsafe_implication_state: mutable ProofTacticState = proof_tactic_state(&scalar_x_facts, unsafe_implication)
@@ -103,15 +99,10 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
             return 111 if not proof_runtime_ast_matches_kernel(quantifier_report, quantifier, quantifier_root, 0)
             quantifier_report.kernel_nodes[quantifier_root].operator <- "exists"
             return 112 if proof_runtime_ast_matches_kernel(quantifier_report, quantifier, quantifier_root, 0)
-            source_quantifier_report: mutable ProofReport = proof_empty_report()
-            source_quantifier_report.source_annotations.extend(quantifier_annotations)
-            source_quantifier_facts: mutable darray[Ast::Expr] = []
-            proof_add_goal_attempt(&source_quantifier_report, source_quantifier_facts, quantifier, 1, "quantifier-binding", "quantifier-forall", false)
-            return 117 if not proof_tactic_source_state_matches(source_quantifier_report, 0, source_quantifier_facts, quantifier)
             forged_quantifier_statements: mutable darray[Ast::Stmt] = []
             forged_quantifier_statements.push(Ast::Stmt.VarDecl("i", Ast::Expr.Ident("bool", position), quantifier_range, position))
             forged_quantifier: Ast::Expr = Ast::Expr.Block(forged_quantifier_statements, Ast::Expr.Binary(Ast::Expr.Ident("i", position), TokenKind.GtEq, zero, position), quantifier_captures, position)
-            return 118 if proof_tactic_source_state_matches(source_quantifier_report, 0, source_quantifier_facts, forged_quantifier)
+            return 117 if not proof_runtime_quantifier_source_state_controls(quantifier, forged_quantifier, quantifier_annotations)
             quantifier_facts: mutable darray[Ast::Expr] = []
             quantifier_facts.push(quantifier)
             quantifier_state: mutable ProofTacticState = proof_tactic_state(&quantifier_facts, Ast::Expr.Binary(Ast::Expr.IntLit(1, position), TokenKind.GtEq, zero, position))
@@ -333,6 +324,67 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
             return 82 if not proof_tactic_kernel_trace_replay(&right_case, &annotations)
             return 64 if not proof_tactic_kernel_replay(&left_case, &annotations)
             return 65 if not proof_tactic_kernel_replay(&right_case, &annotations)
+
+            # A separately closed child must remain attached to the exact context generated
+            # for its side of a disjunction. Replacing its initial assumptions with the
+            # sibling's context is a stale-context mutation and must break branch replay.
+            stale_context_left: mutable ProofTacticState = left_case
+            stale_context_left.initial_facts <- proof_tactic_copy_facts(right_case.initial_facts)
+            return 111 if proof_tactic_kernel_branch_transition_replay(cases_state, &stale_context_left, &right_case, &annotations)
+
+            # Mutating a checked context slot in place preserves its length, but changes which
+            # disjunct the branch assumed. Replay must still bind the child to its original side.
+            postcheck_parent: mutable ProofTacticState = proof_tactic_state(&case_facts, Ast::Expr.Binary(x, TokenKind.EqEq, x, position))
+            postcheck_left: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, position))
+            postcheck_right: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, position))
+            return POSTCHECK_FACT_CONTROL_FAILED if not proof_tactic_cases(&postcheck_parent, &postcheck_left, &postcheck_right)
+            return POSTCHECK_FACT_CONTROL_FAILED if not proof_tactic_decide(&postcheck_left, &annotations)
+            return POSTCHECK_FACT_CONTROL_FAILED if not proof_tactic_decide(&postcheck_right, &annotations)
+            return POSTCHECK_FACT_CONTROL_FAILED if not proof_tactic_kernel_branch_certificate_replay(&postcheck_parent, &postcheck_left, &postcheck_right, &annotations)
+            postcheck_fact_count: usize = postcheck_left.initial_facts.count
+            postcheck_left.initial_facts[postcheck_left.initial_facts.count - 1] <- postcheck_right.initial_facts[postcheck_right.initial_facts.count - 1]
+            return POSTCHECK_FACT_CONTROL_FAILED if postcheck_left.initial_facts.count != postcheck_fact_count
+            return MUTATED_BRANCH_FACT_ADMITTED if proof_tactic_kernel_branch_transition_replay(postcheck_parent, &postcheck_left, &postcheck_right, &annotations)
+
+            # Child contexts must own independent fact arrays. Mutating one case after
+            # construction must not add its assumption to the sibling or parent context.
+            isolated_cases: mutable ProofTacticState = proof_tactic_state(&case_facts, Ast::Expr.Binary(x, TokenKind.EqEq, x, position))
+            isolated_left: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, position))
+            isolated_right: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, position))
+            return 108 if not proof_tactic_cases(&isolated_cases, &isolated_left, &isolated_right)
+            original_sibling_fact_count: usize = isolated_right.facts.count
+            original_parent_fact_count: usize = isolated_cases.facts.count
+            isolated_left.facts.push(Ast::Expr.BoolLit(false, position))
+            return 109 if isolated_right.facts.count != original_sibling_fact_count
+            return 110 if isolated_cases.facts.count != original_parent_fact_count
+
+            # A valid nested branch tree remains replayable, but changing a checked child's
+            # captured context afterwards must invalidate the composed certificate. The
+            # untouched sibling remains byte-for-byte the same expression context.
+            checked_parent: mutable ProofTacticState = proof_tactic_state(&empty, conjunction)
+            checked_left: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, position))
+            checked_right: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, position))
+            return NESTED_BRANCH_CONTROL_FAILED if not proof_tactic_split(&checked_parent, &checked_left, &checked_right)
+            return NESTED_BRANCH_CONTROL_FAILED if not proof_tactic_decide(&checked_left, &annotations)
+            return NESTED_BRANCH_CONTROL_FAILED if not proof_tactic_decide(&checked_right, &annotations)
+            return NESTED_BRANCH_CONTROL_FAILED if not proof_tactic_kernel_branch_certificate_replay(&checked_parent, &checked_left, &checked_right, &annotations)
+            sibling_before_mutation: mutable darray[Ast::Expr] = []
+            sibling_before_mutation.extend(checked_right.initial_facts)
+            checked_left.initial_facts.push(Ast::Expr.BoolLit(false, position))
+            return MUTATION_CHANGED_SIBLING_CONTEXT if not proof_expr_array_equal(checked_right.initial_facts, sibling_before_mutation)
+            return MUTATED_BRANCH_CONTEXT_ADMITTED if proof_tactic_kernel_branch_certificate_replay(&checked_parent, &checked_left, &checked_right, &annotations)
+
+            # A child certificate is bound to the goal that was checked as well as its facts.
+            # Replacing the captured AST after a successful branch replay must stale admission.
+            changed_goal_parent: mutable ProofTacticState = proof_tactic_state(&empty, conjunction)
+            changed_goal_left: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, position))
+            changed_goal_right: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.BoolLit(false, position))
+            return STALE_GOAL_CONTROL_FAILED if not proof_tactic_split(&changed_goal_parent, &changed_goal_left, &changed_goal_right)
+            return STALE_GOAL_CONTROL_FAILED if not proof_tactic_decide(&changed_goal_left, &annotations)
+            return STALE_GOAL_CONTROL_FAILED if not proof_tactic_decide(&changed_goal_right, &annotations)
+            return STALE_GOAL_CONTROL_FAILED if not proof_tactic_kernel_branch_certificate_replay(&changed_goal_parent, &changed_goal_left, &changed_goal_right, &annotations)
+            changed_goal_left.initial_goal <- Ast::Expr.BoolLit(false, position)
+            return MUTATED_BRANCH_GOAL_ADMITTED if proof_tactic_kernel_branch_certificate_replay(&changed_goal_parent, &changed_goal_left, &changed_goal_right, &annotations)
 
             rejected_state: mutable ProofTacticState = proof_tactic_state(&empty, Ast::Expr.Binary(one, TokenKind.EqEq, two, position))
             return 28 if proof_tactic_rewrite(&rejected_state, one, two)

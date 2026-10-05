@@ -80,6 +80,7 @@ if [[ "$loop_range_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: loop-derived collection bounds\n' >&2
     exit 1
 fi
+python3 "$ROOT_DIR/scripts/test_foreach_element_lower_bound.py"
 run_json_report "$ROOT_DIR/examples/for_invariant.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert any(origin and origin["kind"] == "loop-invariant" for goal in report["goals"] for origin in goal["fact_origins"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'
 for_invariant_probe_status=${PIPESTATUS[1]}
 if [[ "$for_invariant_probe_status" -ne 0 ]]; then

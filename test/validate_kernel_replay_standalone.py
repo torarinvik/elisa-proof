@@ -22,7 +22,7 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_binary_operands",
     "proof_kernel_replay_negated_operand",
     "proof_kernel_replay_integer_literal",
-    "proof_kernel_replay_name_pin",
+    "proof_kernel_replay_term_pin",
     "proof_kernel_replay_pinned_constant",
     "proof_kernel_replay_false_boolean_literal",
     "proof_kernel_replay_negated_true_boolean_literal",
@@ -113,6 +113,16 @@ def main() -> None:
         and "unsigned local" in finding["message"]
     ]
     require(not unsigned_findings, f"unsigned-local containment regressed: {unsigned_findings}")
+    pinned_proposition_type_findings = [
+        finding
+        for finding in report["findings"]
+        if finding["kind"] == "contract-proposition-type"
+        and finding["name"] == "proof_kernel_replay_unsigned_pinned_comparison"
+    ]
+    require(
+        not pinned_proposition_type_findings,
+        f"typed pinned-comparison contract formation regressed: {pinned_proposition_type_findings}",
+    )
     require(report["trust"]["trusted_assumptions"] == [], "standalone audit gained trusted assumptions")
     # Certificates re-encode the same facts; before terms were shared this arena held 379,288
     # nodes, over 8 times its shared size. Losing most of the sharing is a memory regression.

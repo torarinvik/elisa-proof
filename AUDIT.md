@@ -4,6 +4,52 @@ Passing the current suites is regression evidence, not completion of the full au
 The objective covers all existing implementation code, scripts, proof fixtures, and their
 assumptions about the compiler. No module below is yet certified as fully audited.
 
+## Weakness program — 2026-10-05 census
+
+The bounded six-input support census is recorded in
+[`docs/evidence/2026-10-05-proof-queue.md`](docs/evidence/2026-10-05-proof-queue.md) and is tied to
+the strict O2 product identities listed there. It is a local arm64 macOS sample, not a full-corpus
+coverage rate. Current completed reports include `kernel_core.elisa` at 37/37 obligations,
+mocap `balance.elisa` at 240/240, compiler `lexer.elisa` at 110/326 with 110/110 certificates
+replayed, and `kernel_comparison_runtime.elisa` at 2,544/3,800 with 2,544/2,544 certificates
+replayed in a separate 3 GiB bounded run. Mocap `track.elisa` has 926/943 obligations proved and
+two replay gaps among 928 certificates. `field_equality_runtime.elisa` exceeded its 60-second
+bound. These incomplete results are retained as open work, not removed from the denominator.
+
+| Plan weakness | Current evidence and next gate |
+| --- | --- |
+| W1 — no SMT backend | No solver-backed feature is counted in this census. Keep all answers independently kernel-checked; add an opt-in oracle only with replayable certificates and on/off census comparison. |
+| W2 — symbolic quantifiers | Symbolic quantifier support and its trigger-free refusal cases remain a separate feature gate; no broad coverage claim follows from this census. |
+| W3 — array/collection theory | Some bounded update and extent rules exist. Real-code support remains incomplete; repair source-justified collection cases with false-claim and malformed-certificate controls. |
+| W4 — weak automation | No near-miss or invariant-suggestion coverage metric is established here. Measure supported goals and preserve the unproven result when search exhausts its budget. |
+| W5 — thin real-code coverage | The listed real-code counts are the current baseline. The track replay gaps and unsupported lexer/kernel-comparison obligations require repair with source correspondence and negative controls. |
+| W6 — scale | The 3,800-obligation report completes under a 3 GiB cap, while the field-equality fixture times out at 60 seconds. Profile current code and bound each incomplete path before claiming scale. |
+
+The P-01 baseline is seven paired rounds on three fixtures, but phase timings, a retained session,
+Linux qualification, and the broader compiler/Core corpus remain open. See the active queue in
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md); no weakness is marked closed by this sample.
+
+## 2026-10-05 partial R-004: declaration inventory consistency
+
+`proof_report_source_has_unresolved_checks` now requires `report.declarations` to equal the
+number of recorded `declaration_details`. The recursive declaration scheduler increments the
+counter and records a summary for each declaration, including nested module and scope contents.
+This catches a report that loses a declaration summary while leaving the remaining obligations
+and replay certificates complete. The standalone `examples/report_invariants_runtime.elisa`
+harness mutates the count to model a missing summary and requires the report to remain incomplete;
+it compiled, linked and ran successfully with pinned Stage1. Strict O2 build product
+`build/elisa-proof` SHA-256 is
+`73e0af5e2057da569724dca13c5733691fcf71a77d5eb71c74b533cc7e67f8c2` (pinned Stage1 revision
+`7b27fa312c5af923f044f6ee0e5e1de4f811f595`). End-to-end `--json` checks on
+`examples/perf_luna_accept.elisa` (1 declaration, 2/2 obligations) and
+`examples/global_constant_module.elisa` (3 declarations, 2/2 obligations) both returned `proved`
+with zero replay gaps and matching declaration-summary counts.
+
+This is one report-integrity cross-check, not completion of R-004. The report still does not
+independently reconstruct the expected declaration inventory from the immutable source tree, and
+this change does not establish that every exported theorem is bound to a complete checked source
+root. The full suite and cross-platform gates were not run.
+
 ## 2026-10-04 checkpoint: Boolean summary disjunctions over signed call results
 
 The clamp-then-check regression reproduced on the existing main binary: 23 of 24
@@ -10384,36 +10430,90 @@ signed widths below 64. The same limitation remains for a *goal* written `>= -12
 
 ## Deterministic call witnesses (BACKLOG B-02)
 
-`proof_mark_deterministic_functions` classifies a function as deterministic when it is pure, or when it meets both of the following:
-- It is non-recursive and passes `proof_function_is_directly_pure` with its `requires` allowed. That means no effects, no `changes` or `preserves`, no mutable or mutable-typed parameter, and no read of a mutable global.
-- Every call it makes is to another deterministic function.
+At an executable call site of a verified deterministic callee with a scalar result,
+`proof_add_deterministic_call_witness` records a `deterministic-call` trace. Producer eligibility
+requires an acyclic call chain of effect-free functions, no `changes` or `preserves`, no mutable or
+mutable-typed callee parameter, and no read of a mutable global. The call has already executed, so
+its `requires` was discharged at that call site. Its result depends only on fixed by-value inputs;
+the marker gives that exact call term stable scalar identity while its arguments remain stable. It
+does not authorize unfolding or merging different calls by their arguments. The marker is never
+added in contract position, where a partial callee could be named outside its precondition.
 
-At an executable call site of a verified deterministic callee with a scalar result, `proof_add_deterministic_call_witness` records `__elisa_primitive_scalar_type(call)` and the declared signed width. It does this only when every argument is witnessed or is a value binding.
+Replay does not trust the producer's classification. `proof_replay_deterministic_call_valid`
+reconstructs the callee and helper call graph from source declarations, rejects recursive or
+unsupported body shapes, checks effect rows and parameter/result scalar types, and rejects mutable
+global reads. A direct in-memory mutation regression now also wraps a forged reference actual in
+parentheses; replay rejects it while the original trace still replays. The argument-shape check is
+recursive, so reference operators cannot be hidden below parentheses or refinements. The
+conservative subset may refuse safe functions with recursive calls, unsupported statements, or
+non-scalar parameters/results.
 
-The soundness argument:
-- The call ran, so its precondition was proved there.
-- The callee's result depends only on its by-value arguments, so the call text denotes one value for as long as those arguments do.
-- `proof_expr_call_stable` already requires stable arguments before it retains the term.
-- The witness is never added in contract position. There a partial callee could be named outside its precondition.
+R-005 remains broader than this B-02 hardening. Replay now requires one executable call expression
+with the trace owner name and line whose callee, ordered actuals and named-argument positions
+match the marker after independently replaying straight-line caller bindings up to that call. It
+then resolves the callee by unique source declaration and reconstructs its deterministic helper
+graph. The direct trace mutation harness changes a scalar actual while keeping a valid
+deterministic callee and kernel encoding; replay rejects the forged actual.
 
-This lets summaries survive a later call, as in `first = f(x); second = f(first)`.
+The current `ProofFactTrace` has no pre-call state-version or resolved caller-declaration identity
+field: deterministic-call traces leave `owner_line` at zero (the field is used by global-constant
+and function-summary traces). The current source walk fails closed for calls inside or after
+control-flow joins and unsupported statements. For straight-line sites, owner name, line and
+reconstructed call arguments recover a unique source site, but do not prove that an argument
+binding retains the same value at every later certificate that consumes the trace. Closing that
+remaining gap needs a deterministic-call trace version with an owner declaration line and source
+call identity, then independent replay of the write path from the call to the consuming obligation.
+Until then, trace replay proves the call's pre-state source origin, not its state liveness across
+subsequent statements.
 
-**Budget:** at most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be live at once. Past that cap, summaries are dropped at the next call as before. This keeps `dispatch_wide` at a live-fact peak of 61 against its 66-fact snapshot budget; the peak was 53 before this change.
+At most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be live at once.
+Past that cap, summaries are dropped at the next call as before. A witnessed arithmetic chain may
+receive one additional call term when needed to read its nested arithmetic operands.
 
-**Replay gap:** replay trusts the type-bound trace as a boundary fact, exactly as it does for pure-call witnesses. Replay does not re-derive the callee's classification. Closing that gap for both witness kinds is a follow-up.
+Before the source-site binding update, the combined strict O2 product (`build/elisa-proof` SHA-256
+`532cb70fcc3b2694616db3d9cc3278d0f1cc7099a5d04dcb4b232c379ad543ac`, proof HEAD `9a1a4531`) used
+pinned Stage1 compiler revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`.
+`scripts/test_deterministic_call_chain.py` and `scripts/test_portable_replay.py` passed. The direct
+mutation harness `examples/deterministic_call_trace_replay_runtime.elisa` compiled, linked and ran
+with exit 0 against that commit. Earlier protocol-v2 coverage passed on strict O2 product
+`e989e4336e7be1fe8c843af105a0daa52615d9bf181a74ba10b3a7d359adff53` via
+`scripts/test_agent_protocol_schema.py`.
 
-Tests: `examples/deterministic_call_chain.elisa`, `examples/rejected_deterministic_call_chain.elisa` (effects, global read, mutable borrow, indirect effect), and `scripts/test_deterministic_call_chain.py`, including a 40-call budget case.
+At the B-02 close checkpoint, focused evidence on the strict O2 product (`build/elisa-proof` SHA-256
+`e989e4336e7be1fe8c843af105a0daa52615d9bf181a74ba10b3a7d359adff53`) with pinned Stage1 compiler
+revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`: `scripts/test_deterministic_call_chain.py`,
+`scripts/test_portable_replay.py`, and `scripts/test_agent_protocol_schema.py` passed, including
+positive call chains and effect, mutable-global, mutable-borrow, indirect-effect, package schema,
+and replay controls. A complete suite was not run at that checkpoint.
 
-## Bound tuple label witnesses (BACKLOG B-03)
+R-005 focused evidence after source-site binding: strict O2 `build/elisa-proof` SHA-256
+`121bcc14ba1422b0dffa8077ef316fbae61be901d92293c0d35e7ee89623b512`, built with pinned Stage1
+revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`; `scripts/test_deterministic_call_chain.py`
+passed, including both positive nested-call chains and negative effect/global/borrow/indirect-call
+controls. The in-memory `examples/deterministic_call_trace_replay_runtime.elisa` harness passed
+after rejecting a parenthesized reference actual and a forged scalar actual, restoring the original
+trace, then revalidating every trace in the nested-chain source. The full dogfood script and full
+suite were not run. Straight-line source binding is covered; control-flow sites fail closed, and
+post-call state liveness remains open as described above.
 
-A local bound to a named-tuple call result (`found: (count: i64, value: H[r]) = pick(value)`) is
-one stored value whatever the callee reads, so each primitive scalar label `found.<label>` gets the
-callee's declared element type witness, and a narrow unsigned label also gets its `0 <= x <= MAX`
-range, exactly as a parameter does. These are type-bound facts: replay trusts their traces, the
-same gap recorded for parameter type bounds. No bound beyond the type is added; every other fact
-about a label comes from the callee's instantiated summaries. `package_reader` itself stays
-unproven: its `Json::` compiler builtins and `ElisaProofJson` calls have no summaries. The front
-end reports no diagnostic for a label the callee does not declare; such a label gets no witness.
+## Tuple-field call summaries (BACKLOG B-03)
+
+For a named-tuple call local such as
+`found: (count: i64, value: JsonValueHandle[r]) = pick(value)`, producer substitution keeps the
+local as the original call only when its complete field-label sequence matches the callee's
+declared return labels in the same positions. This is required because tuple assignment is
+positional: a reordered local's `found.count` can contain the callee's `total`. A mismatch or
+reordering stays opaque and receives no call summary or tuple-field type witness. With matching
+labels, the callee's original `call.count` summary remains in the proof state, and independent
+replay re-instantiates the exact ensure against that call projection. Declared scalar field types
+are added to the same call projections; those type-bound traces retain the existing trusted
+compiler-type boundary. No field bound beyond the callee's ensures is added.
+
+Evidence: `scripts/test_tuple_field_region.py` uses a package-reader-shaped handle result. Its
+ordered count/value case proves and replays; stronger-than-summary, wrong-label and reordered
+position controls stay unproven. The rejected report has zero replay gaps. The actual package
+reader remains outside this example because its `Json::` compiler builtins and `ElisaProofJson`
+calls do not have proof summaries.
 
 ## The "c4 scalar witness" item (BACKLOG B-04)
 
@@ -11284,3 +11384,78 @@ complete replay; wrong-value and shadowing controls still fail. The first diagno
 finished with 42 failed steps, including stale expectations, build/provenance failures and
 the since-fixed CLI routing. It ran across investigation snapshots and is not a final
 validation of these commits. A clean full matrix and dogfood are still required.
+## Nested early-return guards keep their fall-through facts
+
+K-03's focused probe uses the postfix guard form inside both an `if` arm and a `for` body:
+`return 0 if index >= values.count`. The following index access verifies in each case, and the
+certificates replay with zero gaps. Removing the guard from the loop body leaves
+`index-upper-unproven`, so the control confirms that the access depends on the branch fact.
+The producer and branch replay already carried these surviving facts through recursive
+`proof_check_returns` calls; no proof rule or trace kind was needed. A separate foreach-element
+index probe also refused its generated binder's lower-bound goal. That is unrelated to guard
+propagation and remains outside K-03.
+
+Evidence: `scripts/test_nested_early_return_guards.py`.
+
+## Source-defined math helper summaries
+
+The min/max/abs summary probe passes on the strict O2 product built with pinned compiler
+revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`: all 19 positive proof obligations
+replay, while five wrong-side or off-by-one claims remain unproven. The covered helpers are
+ordinary source declarations, not compiler name-level builtins. `min_i64` and `max_i64`
+summaries compose through `clamp`; `abs_i32` uses widening, and `abs_small` states an explicit
+range precondition. No unbounded `abs_i64` summary is claimed across signed-minimum overflow.
+
+Evidence: `scripts/test_min_max_abs_summaries.py`, `examples/min_max_abs_summaries.elisa`,
+and `examples/rejected_min_max_abs_summaries.elisa`.
+
+## Loop invariants compile and constrain proofs (E-03)
+
+The pinned Stage1 compiler (`7b27fa312c5af923f044f6ee0e5e1de4f811f595`) compiles the four
+invariant-bearing loops in `examples/loop_invariants_compile.elisa`; the emitted object links and
+the executable passes its runtime checks. The matching strict O2 proof product
+(`9d4c4e21e50136996a84f5401adc305f5d8c18d89048ceb22588c2a12f259e63`, built from proof source
+HEAD `0ea0c3e12e7b21c6249cd54268cf9c6de365e3ce`) proves the fixture with no findings and zero
+replay gaps. The gate also negates or tightens each invariant and requires all eight mutations to
+stay unproved, confirming the annotations constrain the proof result.
+
+Evidence: `scripts/test_loop_invariants_compile.py`.
+
+## Entry-state postconditions for collection pushes (D-02)
+
+On strict O2 binary `9d4c4e21e50136996a84f5401adc305f5d8c18d89048ceb22588c2a12f259e63`,
+`v.push(x)` postconditions prove one, two, and twelve increments over `old(v.count)`; the same
+probe checks an unchanged count, returning the entry count, and reading the pushed value at the old
+count. The rejected matrix covers missing or conditional pushes, undone effects, receiver reads,
+wrong/overwritten elements, and stale count assumptions. All emitted certificates replay without
+gaps. The mutable-aggregate `old(field)` control also remains refused after the field changes.
+
+Evidence: `scripts/test_collection_push_count.py` and
+`scripts/test_old_mutable_reference.py`.
+
+## Bounded difference-bound closure (C-01)
+
+The goal-query path constructs a Floyd–Warshall matrix with at most 32 named values plus its
+zero node. The same kernel constant guards producer and independent replay. Existing interval
+propagation remains a fixed-point scan bounded to 33 rounds in both paths; the historical
+four-round limit is no longer present. On strict O2 product
+`ddca51a94f3fe0c0834e7a862046058b4cd9555017e9dc9e7c20f0b1fc222974` (pinned Stage1
+`7b27fa312c5af923f044f6ee0e5e1de4f811f595`), the 32-name chain proves and all 10 certificates
+replay; a relevant 33-name chain remains unproven with zero replay gaps. The focused gate also
+asserts the runtime stays below its 60-second budget.
+
+Evidence: `scripts/test_long_difference_chain.py`,
+`examples/long_difference_chain.elisa`, and
+`examples/rejected_long_difference_chain.elisa`.
+
+## Versioned agent report protocol (H-05)
+
+JSON reports now include `protocol_version: 2`. The v1 schema accepts a representative
+unversioned pre-marker report, while the v2 schema requires marker value 2 and rejects marker 1.
+The integrated `scripts/test_agent_protocol_schema.py` additionally validates a report emitted
+by strict O2 product `ddca51a94f3fe0c0834e7a862046058b4cd9555017e9dc9e7c20f0b1fc222974`, built
+with pinned Stage1 `7b27fa312c5af923f044f6ee0e5e1de4f811f595`. Both schema files parse as JSON. The
+compatibility test uses one representative old report, not a corpus of archived reports.
+
+Evidence: `schema/elisa-proof-v1.json`, `schema/elisa-proof-v2.json`, and
+`scripts/test_agent_protocol_schema.py`.

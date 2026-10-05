@@ -289,26 +289,28 @@ extend ElisaProofKernelReplay:
             return ">" if operator == ">="
             ""
 
-        def proof_kernel_replay_expr_pair_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, left: usize, right: usize, depth: usize) -> bool:
-            return false if pending.count >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
+        def proof_kernel_replay_expr_pair_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left: usize, right: usize, depth: usize) -> bool:
+            return false if scheduled >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
             pending.push(ProofKernelReplayExprPair{left: left, right: right, depth: depth, call_argument: false})
+            scheduled <- scheduled + 1
             return true
 
-        def proof_kernel_replay_expr_call_argument_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, left: usize, right: usize, depth: usize) -> bool:
-            return false if pending.count >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
+        def proof_kernel_replay_expr_call_argument_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left: usize, right: usize, depth: usize) -> bool:
+            return false if scheduled >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
             pending.push(ProofKernelReplayExprPair{left: left, right: right, depth: depth, call_argument: true})
+            scheduled <- scheduled + 1
             return true
 
-        def proof_kernel_replay_expr_child_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, left: usize, right: usize, depth: usize, call_argument: bool) -> bool:
-            return proof_kernel_replay_expr_call_argument_enqueue(pending, left, right, depth) if call_argument
-            return proof_kernel_replay_expr_pair_enqueue(pending, left, right, depth)
+        def proof_kernel_replay_expr_child_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left: usize, right: usize, depth: usize, call_argument: bool) -> bool:
+            return proof_kernel_replay_expr_call_argument_enqueue(pending, scheduled, left, right, depth) if call_argument
+            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left, right, depth)
 
-        def proof_kernel_replay_expr_child_span_enqueue(children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, left_start: usize, right_start: usize, count: usize, depth: usize, call_arguments: bool) -> bool:
+        def proof_kernel_replay_expr_child_span_enqueue(children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left_start: usize, right_start: usize, count: usize, depth: usize, call_arguments: bool) -> bool:
             return false if count > children.count or left_start > children.count - count or right_start > children.count - count
-            for index in 0..<count |index, children, pending, left_start, right_start, depth, call_arguments|:
+            for index in 0..<count |index, children, pending, scheduled, left_start, right_start, depth, call_arguments|:
                 left_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, left_start + index)
                 right_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, right_start + index)
-                return false if not left_child.known or not right_child.known or not proof_kernel_replay_expr_child_enqueue(pending, left_child.value, right_child.value, depth, call_arguments)
+                return false if not left_child.known or not right_child.known or not proof_kernel_replay_expr_child_enqueue(pending, scheduled, left_child.value, right_child.value, depth, call_arguments)
             return true
 
         def proof_kernel_replay_expr_leaf_equal(kind: sview, left_value: i64, right_value: i64, left_name: sview, right_name: sview) -> (handled: bool, equal: bool):
@@ -346,50 +348,86 @@ extend ElisaProofKernelReplay:
             # recursion on caller-owned arenas prevents resource-summary convergence in our
             # verifier. Each pending pair retains the original per-path depth bound.
             pending: mutable darray[ProofKernelReplayExprPair] = [ProofKernelReplayExprPair{left: left_root, right: right_root, depth: depth, call_argument: false}]
-            cursor: mutable usize = 0
-            while cursor < pending.count |cursor, pending, nodes, children|:
+            scheduled: mutable usize = 1
+            while pending.count > 0 |pending, scheduled, nodes, children|:
                 invariant true
-                pair: ProofKernelReplayExprPair = pending[cursor]
-                pair_left: usize = pair.left
-                pair_right: usize = pair.right
-                pair_depth: usize = pair.depth
-                call_argument: bool = pair.call_argument
-                return false if not proof_kernel_replay_valid(nodes, pair_left) or not proof_kernel_replay_valid(nodes, pair_right)
-                assert pair_left < nodes.count and pair_right < nodes.count
-                left: ElisaProofKernelCore::ProofKernelNode = nodes[pair_left]
-                right: ElisaProofKernelCore::ProofKernelNode = nodes[pair_right]
-                return false if not proof_kernel_replay_expr_pair_nodes_valid(left, right, pair_left == pair_right, call_argument, pair_depth)
-                leaf: (handled: bool, equal: bool) = proof_kernel_replay_expr_leaf_equal(left.kind, left.value, right.value, left.name, right.name)
-                return false if leaf.handled and not leaf.equal
-                if not leaf.handled:
-                    child_depth: usize = pair_depth + 1
-                    if left.kind == "field" or left.kind == "scope" or left.kind == "call_arg" or left.kind == "field-init":
-                        return false if left.name != right.name
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
-                    elif left.kind == "unary" or left.kind == "move":
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
-                    elif left.kind == "binary" or left.kind == "index" or left.kind == "dict_entry":
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.right, right.right, child_depth)
-                    elif left.kind == "slice" or left.kind == "if":
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.right, right.right, child_depth)
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.auxiliary, right.auxiliary, child_depth)
-                    elif left.kind == "index-n" or left.kind == "call" or left.kind == "array" or left.kind == "tuple" or left.kind == "set" or left.kind == "dict" or left.kind == "construct" or left.kind == "record-update":
-                        return false if left.children_count != right.children_count
-                        return false if left.kind == "index-n" and left.children_count == 0
-                        return false if left.kind == "call" and left.auxiliary != right.auxiliary
-                        if left.kind == "call" or left.kind == "index-n" or left.kind == "construct" or left.kind == "record-update":
-                            return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
-                        return false if not proof_kernel_replay_expr_child_span_enqueue(children, &pending, left.children_start, right.children_start, left.children_count, child_depth, left.kind == "call")
-                    elif left.kind == "quantifier":
-                        return false if left.name != right.name or left.secondary_name != right.secondary_name
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.left, right.left, child_depth)
-                        return false if not proof_kernel_replay_expr_pair_enqueue(&pending, left.right, right.right, child_depth)
-                    else:
-                        return false
-                cursor <- cursor + 1
+                pair: ProofKernelReplayExprPair = pending.pop()
+                return false if not proof_kernel_replay_expr_pair_expand(nodes, children, &pending, &scheduled, pair)
             return true
+
+        def proof_kernel_replay_expr_pair_enqueue_two(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left_first: usize, right_first: usize, left_second: usize, right_second: usize, depth: usize) -> bool:
+            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_first, right_first, depth)
+            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_second, right_second, depth)
+
+        def proof_kernel_replay_expr_pair_enqueue_three(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left_first: usize, right_first: usize, left_second: usize, right_second: usize, left_third: usize, right_third: usize, depth: usize) -> bool:
+            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_first, right_first, depth)
+            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_second, right_second, depth)
+            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_third, right_third, depth)
+
+        def proof_kernel_replay_expr_pair_enqueue_aggregate_children(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize, call_arguments: bool) -> bool:
+            return false if left.children_count != right.children_count
+            return proof_kernel_replay_expr_child_span_enqueue(children, pending, scheduled, left.children_start, right.children_start, left.children_count, depth, call_arguments)
+
+        def proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize, call_arguments: bool) -> bool:
+            return false if left.children_count != right.children_count
+            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left.left, right.left, depth)
+            return proof_kernel_replay_expr_child_span_enqueue(children, pending, scheduled, left.children_start, right.children_start, left.children_count, depth, call_arguments)
+
+        def proof_kernel_replay_expr_pair_enqueue_aggregate_index(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+            return false if left.children_count == 0
+            return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, depth, false)
+
+        def proof_kernel_replay_expr_pair_enqueue_aggregate_call(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+            return false if left.auxiliary != right.auxiliary
+            return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, depth, true)
+
+        def proof_kernel_replay_expr_pair_enqueue_aggregate(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+            match left.kind:
+                "index-n":
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate_index(left, right, children, pending, scheduled, depth)
+                "call":
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate_call(left, right, children, pending, scheduled, depth)
+                "construct" | "record-update":
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, depth, false)
+                "array" | "tuple" | "set" | "dict":
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate_children(left, right, children, pending, scheduled, depth, false)
+                _:
+                    return false
+
+        def proof_kernel_replay_expr_pair_enqueue_single(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+            if left.kind == "field" or left.kind == "scope" or left.kind == "call_arg" or left.kind == "field-init":
+                return false if left.name != right.name
+            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left.left, right.left, depth)
+
+        def proof_kernel_replay_expr_pair_enqueue_quantifier(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+            return false if left.name != right.name or left.secondary_name != right.secondary_name
+            return proof_kernel_replay_expr_pair_enqueue_two(pending, scheduled, left.left, right.left, left.right, right.right, depth)
+
+        def proof_kernel_replay_expr_pair_enqueue_children(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+            match left.kind:
+                "field" | "scope" | "call_arg" | "field-init" | "unary" | "move":
+                    return proof_kernel_replay_expr_pair_enqueue_single(left, right, pending, scheduled, depth)
+                "binary" | "index" | "dict_entry":
+                    return proof_kernel_replay_expr_pair_enqueue_two(pending, scheduled, left.left, right.left, left.right, right.right, depth)
+                "slice" | "if":
+                    return proof_kernel_replay_expr_pair_enqueue_three(pending, scheduled, left.left, right.left, left.right, right.right, left.auxiliary, right.auxiliary, depth)
+                "index-n" | "call" | "array" | "tuple" | "set" | "dict" | "construct" | "record-update":
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate(left, right, children, pending, scheduled, depth)
+                "quantifier":
+                    return proof_kernel_replay_expr_pair_enqueue_quantifier(left, right, pending, scheduled, depth)
+            return false
+
+        def proof_kernel_replay_expr_pair_expand(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, pair: ProofKernelReplayExprPair) -> bool:
+            pair_left: usize = pair.left
+            pair_right: usize = pair.right
+            return false if not proof_kernel_replay_valid(nodes, pair_left) or not proof_kernel_replay_valid(nodes, pair_right)
+            assert pair_left < nodes.count and pair_right < nodes.count
+            left: ElisaProofKernelCore::ProofKernelNode = nodes[pair_left]
+            right: ElisaProofKernelCore::ProofKernelNode = nodes[pair_right]
+            return false if not proof_kernel_replay_expr_pair_nodes_valid(left, right, pair_left == pair_right, pair.call_argument, pair.depth)
+            leaf: (handled: bool, equal: bool) = proof_kernel_replay_expr_leaf_equal(left.kind, left.value, right.value, left.name, right.name)
+            return leaf.equal if leaf.handled
+            return proof_kernel_replay_expr_pair_enqueue_children(left, right, children, pending, scheduled, pair.depth + 1)
 
         def proof_kernel_replay_definitionally_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
             # This normalization follows only a finite chain of explicit identity rewrites. The

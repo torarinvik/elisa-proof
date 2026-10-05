@@ -136,6 +136,23 @@ goal attempt, bound every fact to a trace and re-matched the AST against the are
 | `effect-containment` | `proof_kernel_replay_effect_report_with_workspace` | trace certificate |
 <!-- /inventory:certificate-rules -->
 
+## Certificate construction entry points
+
+These functions append `ProofGoalCertificate` values to the report. The inventory checker finds
+the construction sites under `proof/` and requires this exact producer set. This makes new report
+certificate admission paths visible for review; it does not establish that the source facts,
+kernel root, or replay dispatch are sound.
+
+<!-- inventory:certificate-producers -->
+| Function | Source module | Certificate family |
+|---|---|---|
+| `proof_add_goal_attempt` | `proof/model/report_recording.elisa` | ordinary goal and quantifier obligations |
+| `proof_reuse_goal_attempt` | `proof/check/certificate_reuse.elisa` | exact-state reuse of index bounds |
+| `proof_add_resource_goal_attempt` | `proof/certificate_admission.elisa` | resource-safety trace |
+| `proof_add_effect_goal_attempt` | `proof/certificate_admission.elisa` | effect-containment trace |
+| `proof_add_structural_goal_attempt` | `proof/certificate_admission.elisa` | structural-safety trace |
+<!-- /inventory:certificate-producers -->
+
 ## Fact trace kinds
 
 Each fact a certificate uses must be bound to a `ProofFactTrace` whose kernel expression is
@@ -151,7 +168,9 @@ summary trace cannot be relabelled as one.
 |---|---|---|
 | `global-constant` | `check/global_constants.elisa` | a module constant's value (re-validated by `replay/global_constant_validation.elisa`) |
 | `global-constant-qualified` | `check/global_constants.elisa` | a module constant reached through a qualified name (re-validated by `replay/global_constant_validation.elisa`) |
+| `deterministic-call` | `check/function_contracts_and_frames.elisa` | scalar witness marker for a source-site pure call (reconstructed from declarations at replay) |
 | `variant-exclusion` | `check/variant_exclusion.elisa` | `not (x is E.V) or not (x is E.W)` for distinct variants of a uniquely declared enum (re-validated by `replay/variant_exclusion_validation.elisa`) |
+| `match-exhaustiveness` | `check/returns/matches.elisa` | complete finite match over a uniquely declared enum's variants (re-validated against source declarations and proposition typing) |
 | `precondition` | `check/declaration_checks.elisa` | a function `requires` clause |
 | `type-bound` | `check/bounds_and_facts.elisa` | the range of a parameter's machine-integer type |
 | `runtime-assert` | `check/returns/contracts.elisa` | a statement after an aborting `assert` |

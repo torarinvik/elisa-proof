@@ -21,7 +21,7 @@ def run(*arguments):
 OPEN = ROOT / "examples/rejected_front_end_diagnostic_engine_open.elisa"
 SNAPSHOT = """goal 2 in keep line 6 (goal)
   goal: x > x
-  verdict: open, refused at gate no-rule
+  verdict: open, refused at gate budget
   facts: 4
     [0] __elisa_signed_type_bound(x, 8)  <- type-bound line 3
     [1] x <= 127  <- type-bound line 3

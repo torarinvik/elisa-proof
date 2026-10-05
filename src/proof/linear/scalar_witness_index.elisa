@@ -16,9 +16,13 @@ extend ElisaProof:
             # Known `__elisa_primitive_scalar_element` terms and depths, in fact order.
             element_terms: mutable darray[Ast::Expr]
             element_depths: mutable darray[i64]
+            # Collision-safe open-addressed lookup for `names`; slots store an index into the
+            # ordered source list so exact equality remains authoritative.
+            name_hashes: mutable darray[u32]
+            name_slots: mutable darray[usize]
 
         def proof_scalar_witness_markers(facts: darray[Ast::Expr]&) -> ProofScalarWitnesses:
-            witnesses: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], element_terms: [], element_depths: []}
+            witnesses: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], element_terms: [], element_depths: [], name_hashes: [], name_slots: []}
             for fact in facts |witnesses|:
                 callee: sview = proof_marker_callee_name(fact)
                 if callee == "__elisa_untrusted_operator_type":
@@ -38,8 +42,45 @@ extend ElisaProof:
                 elif callee == "__elisa_unsigned_type_bound":
                     unsigned_name: sview = proof_unsigned_marker_name(fact)
                     witnesses.names.push(unsigned_name) if unsigned_name != ""
+            # Keep `names` in source order for diagnostics and differential checks. The hash
+            # table is only an accelerator and stores exact source-list indexes.
+            capacity: mutable usize = 1 if witnesses.names.count > 0 else 0
+            target: usize = witnesses.names.count * 2
+            while capacity > 0 and capacity < target |capacity, target|:
+                capacity <- capacity * 2
+            if capacity > 0:
+                witnesses.name_slots.resize(capacity)
+                witnesses.name_hashes.resize(witnesses.names.count)
+                for name_index in 0..<witnesses.names.count |name_index, witnesses|:
+                    witnesses.name_hashes[name_index] <- proof_name_hash(witnesses.names[name_index])
+                for slot in 0..<capacity |slot, witnesses, capacity|:
+                    witnesses.name_slots[slot] <- witnesses.names.count
+                for name_index in 0..<witnesses.names.count |name_index, witnesses, capacity|:
+                    hash: u32 = witnesses.name_hashes[name_index]
+                    slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                    probes: mutable usize = 0
+                    while probes < capacity |probes, slot, hash, name_index, witnesses, capacity|:
+                        existing: usize = witnesses.name_slots[slot]
+                        if existing >= witnesses.names.count:
+                            witnesses.name_slots[slot] <- name_index
+                            break
+                        if witnesses.name_hashes[existing] == hash and witnesses.names[existing] == witnesses.names[name_index]:
+                            break
+                        slot <- (slot + 1) % capacity
+                        probes <- probes + 1
             return witnesses
 
         def proof_scalar_witnesses_name(witnesses: ProofScalarWitnesses&, name: sview) -> bool:
             return false if name == ""
-            return any known in witnesses.names where known == name
+            capacity: usize = witnesses.name_slots.count
+            return false if capacity == 0
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, name, witnesses, capacity|:
+                current: usize = witnesses.name_slots[slot]
+                return false if current >= witnesses.names.count
+                return true if witnesses.name_hashes[current] == wanted_hash and witnesses.names[current] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return false

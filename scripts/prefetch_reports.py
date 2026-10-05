@@ -20,14 +20,10 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from report_cache import effective_cpus, heavy_slot, heavy_slots  # noqa: E402
-
-
-def cache_key(path: str) -> str:
-    # The real path, so scripts/report_cache.py (resolved ROOT) and test.sh agree on the key.
-    return hashlib.sha1(os.path.realpath(path).encode("utf-8")).hexdigest()
+from report_cache import cache_key, effective_cpus, heavy_slot, heavy_slots  # noqa: E402
 
 
 def matrix_text(test_script: str) -> str:
@@ -69,18 +65,35 @@ def run_py(root: str, cache: str, name: str) -> None:
 
 
 def run_one(binary: str, cache: str, path: str) -> None:
-    key = cache_key(path)
+    key = cache_key(path, binary)
     # Marks a fixture in progress so a reader waits for it instead of running it twice.
     pending = os.path.join(cache, "pending", key)
-    open(pending, "w").close()
     out_path = os.path.join(cache, key + ".json")
-    with open(out_path + ".tmp", "wb") as out, heavy_slot(path, cache):
-        status = subprocess.run([binary, "--json", path], stdout=out, stderr=subprocess.DEVNULL).returncode
-    os.replace(out_path + ".tmp", out_path)
-    # The .rc file is written last: its presence marks a complete entry.
-    with open(os.path.join(cache, key + ".rc.tmp"), "w", encoding="utf-8") as rc:
-        rc.write(f"{status}\n")
-    os.replace(os.path.join(cache, key + ".rc.tmp"), os.path.join(cache, key + ".rc"))
+    digest_path = os.path.join(cache, key + ".sha256")
+    status_path = os.path.join(cache, key + ".rc")
+    open(pending, "w").close()
+    try:
+        with open(out_path + ".tmp", "wb") as out, heavy_slot(path, cache):
+            status = subprocess.run([binary, "--json", path], stdout=out, stderr=subprocess.DEVNULL).returncode
+        payload_digest = hashlib.sha256(Path(out_path + ".tmp").read_bytes()).hexdigest()
+        with open(digest_path + ".tmp", "w", encoding="ascii") as digest:
+            digest.write(f"{payload_digest}\n")
+        with open(status_path + ".tmp", "w", encoding="ascii") as rc:
+            rc.write(f"{status}\n")
+        # Publish the status last; a reader accepts the entry only when all three files agree.
+        os.replace(out_path + ".tmp", out_path)
+        os.replace(digest_path + ".tmp", digest_path)
+        os.replace(status_path + ".tmp", status_path)
+    finally:
+        for temporary in (out_path + ".tmp", digest_path + ".tmp", status_path + ".tmp"):
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+        try:
+            os.unlink(pending)
+        except FileNotFoundError:
+            pass
 
 
 def main() -> int:

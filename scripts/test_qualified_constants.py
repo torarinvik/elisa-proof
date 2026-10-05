@@ -32,6 +32,13 @@ code, data = run("qualified_constants_body.elisa")
 assert code == 0 and data["status"] == "proved" and data["findings"] == [], data["findings"]
 assert data["summary"]["proven"] == 4 and data["replay"]["gaps"] == 0
 
+# Keep the exact minimal shape that crashed the retained historical proof binary.
+code, data = run("qualified_constant_return_crash_repro.elisa")
+assert code == 0 and data["status"] == "proved" and data["findings"] == [], data
+assert data["summary"]["obligations"] == data["summary"]["proven"] == 1
+assert data["replay"]["certificates"] == data["replay"]["replayed"] == 1
+assert data["replay"]["gaps"] == 0
+
 for name, function in (("rejected_qualified_constants_body.elisa", "too_small"),
                        ("rejected_qualified_body_shadow.elisa", "shadowed")):
     code, data = run(name)

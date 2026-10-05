@@ -6,7 +6,7 @@
 # * Integers must be exact: a JSON number is binary64, so an index must be a nonnegative integer
 #   below 2^53, and a node value, a full i64, travels as a canonical decimal string.
 # * Strings are copied into one byte pool before any kernel node is built, so every kernel name
-#   views bytes that stay put for the whole check.
+#   views bytes that stay put for the whole check; the complete copied pool is bounded.
 # * Every count is bounded before the work it controls: nodes and children by the kernel's own
 #   budgets, theorems, hypotheses, and string bytes by `ProofPackageLimit`.
 
@@ -84,12 +84,25 @@ def proof_package_index_field[@r](object: JsonValueHandle[r], key: sview) -> (kn
     return (false, 0) if not found.known
     return proof_package_index(found.value)
 
+def proof_package_string_is_valid_utf8(text: sview) -> bool:
+    length: usize = sview_len(text)
+    index: mutable usize = 0
+    while index < length |index, text|:
+        byte: u8 = sview_at(text, index)
+        if byte >= 0x80:
+            width: usize = proof_json_utf8_width(text, index)
+            return false if width == 0
+            index <- index + width
+        else:
+            index <- index + 1
+    return true
+
 def proof_package_string_field[@r](object: JsonValueHandle[r], key: sview) -> (known: bool, value: sview):
     empty: sview = ""
     found: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(object, key)
     return (false, empty) if not found.known or ElisaProofJson::kind(found.value) != JsonKind.STRING
     text: sview @r = try ElisaProofJson::as_string(found.value) else empty
-    return (false, empty) if sview_len(text) > ProofPackageLimit::STRING_BYTES
+    return (false, empty) if sview_len(text) > ProofPackageLimit::STRING_BYTES or not proof_package_string_is_valid_utf8(text)
     return (true, text)
 
 def proof_package_bool_field[@r](object: JsonValueHandle[r], key: sview) -> (known: bool, value: bool):
@@ -136,28 +149,41 @@ def proof_package_pool_append(pool: mutable darray[u8]&, text: sview) -> usize c
         pool.push(sview_at(text, index))
     return start
 
-def proof_package_read_node[@r](node: JsonValueHandle[r], keys: darray[sview]&, pool: mutable darray[u8]&) -> (known: bool, node: ProofPackageRawNode) can[Memory.Allocate, Abort.Panic]:
+def proof_package_read_node[@r](node: JsonValueHandle[r], keys: darray[sview]&, pool: mutable darray[u8]&) -> (known: bool, over_budget: bool, node: ProofPackageRawNode) can[Memory.Allocate, Abort.Panic]:
     raw: ProofPackageRawNode = proof_package_raw_node_empty()
-    return (false, raw) if not proof_package_has_exactly(node, keys)
+    return (false, false, raw) if not proof_package_has_exactly(node, keys)
     kind: (known: bool, value: sview) = proof_package_string_field(node, "kind")
     operator: (known: bool, value: sview) = proof_package_string_field(node, "operator")
     name: (known: bool, value: sview) = proof_package_string_field(node, "name")
     secondary: (known: bool, value: sview) = proof_package_string_field(node, "secondary_name")
     value_text: (known: bool, value: sview) = proof_package_string_field(node, "value")
-    return (false, raw) if not kind.known or not operator.known or not name.known or not secondary.known or not value_text.known
+    return (false, false, raw) if not kind.known or not operator.known or not name.known or not secondary.known or not value_text.known
     value: (known: bool, value: i64) = proof_package_decimal_i64(value_text.value)
     left: (known: bool, value: usize) = proof_package_index_field(node, "left")
     right: (known: bool, value: usize) = proof_package_index_field(node, "right")
     auxiliary: (known: bool, value: usize) = proof_package_index_field(node, "auxiliary")
     children_start: (known: bool, value: usize) = proof_package_index_field(node, "children_start")
     children_count: (known: bool, value: usize) = proof_package_index_field(node, "children_count")
-    return (false, raw) if not value.known or not left.known or not right.known or not auxiliary.known or not children_start.known or not children_count.known
+    return (false, false, raw) if not value.known or not left.known or not right.known or not auxiliary.known or not children_start.known or not children_count.known
+    return (false, true, raw) if pool.count > ProofPackageLimit::STRING_BYTES
+    remaining: mutable usize = ProofPackageLimit::STRING_BYTES - pool.count
+    kind_count: usize = sview_len(kind.value)
+    return (false, true, raw) if kind_count > remaining
+    remaining <- remaining - kind_count
+    operator_count: usize = sview_len(operator.value)
+    return (false, true, raw) if operator_count > remaining
+    remaining <- remaining - operator_count
+    name_count: usize = sview_len(name.value)
+    return (false, true, raw) if name_count > remaining
+    remaining <- remaining - name_count
+    secondary_count: usize = sview_len(secondary.value)
+    return (false, true, raw) if secondary_count > remaining
     kind_start: usize = proof_package_pool_append(pool, kind.value)
     operator_start: usize = proof_package_pool_append(pool, operator.value)
     name_start: usize = proof_package_pool_append(pool, name.value)
     secondary_start: usize = proof_package_pool_append(pool, secondary.value)
-    read: ProofPackageRawNode = ProofPackageRawNode{kind_start: kind_start, kind_count: sview_len(kind.value), operator_start: operator_start, operator_count: sview_len(operator.value), left: left.value, right: right.value, auxiliary: auxiliary.value, children_start: children_start.value, children_count: children_count.value, value: value.value, name_start: name_start, name_count: sview_len(name.value), secondary_start: secondary_start, secondary_count: sview_len(secondary.value)}
-    return (true, read)
+    read: ProofPackageRawNode = ProofPackageRawNode{kind_start: kind_start, kind_count: kind_count, operator_start: operator_start, operator_count: operator_count, left: left.value, right: right.value, auxiliary: auxiliary.value, children_start: children_start.value, children_count: children_count.value, value: value.value, name_start: name_start, name_count: name_count, secondary_start: secondary_start, secondary_count: secondary_count}
+    return (true, false, read)
 
 # Reads `kernel` into raw nodes, the byte pool, and the children array. Nothing here decides
 # whether the arena is well formed; the kernel's own admission does that after the nodes exist.
@@ -173,7 +199,8 @@ def proof_package_read_kernel[@r](kernel: JsonValueHandle[r], raw: mutable darra
     missing: JsonValueHandle[r] = ElisaProofJson::null_value(kernel)
     for index in 0..<nodes.count |index, nodes, node_keys, missing, raw, pool|:
         node: JsonValueHandle[r] = try ElisaProofJson::at(nodes.value, index.i64()) else missing
-        read: (known: bool, node: ProofPackageRawNode) = proof_package_read_node(node, &node_keys, pool)
+        read: (known: bool, over_budget: bool, node: ProofPackageRawNode) = proof_package_read_node(node, &node_keys, pool)
+        return proof_package_over_budget("string-budget") if read.over_budget
         return proof_package_malformed("node-schema") if not read.known
         raw.push(read.node)
     for index in 0..<child_list.count |index, child_list, missing, children|:
