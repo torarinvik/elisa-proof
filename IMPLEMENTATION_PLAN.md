@@ -681,6 +681,8 @@ Start after immediate false acceptance/corruption containment. The goal is predi
 
 **Gate:** Disabled instrumentation has measured negligible cost; nested phases do not double-count exclusive time. Counter totals agree with workload inventory. Clock failures cannot alter proof outcomes.
 
+**Progress (2026-10-05):** A source-level report inventory maps existing counters and their limited origins across import, lex/parse, semantic checks, scheduling, VC generation, search, certificate construction, replay, and serialization. The CLI exposes artifact/workload counts, selected return-analysis and goal-cache counters, kernel arena counts, output bytes, and replay outcomes; it has no internal monotonic clock or complete phase-work totals. P-01 external process wall/CPU/RSS and Python JSON-decode time remain harness measurements. No internal durations were inferred and no ambiguous counter was added. Instrumentation overhead and phase-work consistency gates remain unverified; see [`docs/evidence/2026-10-05-r010-measurement-coverage.md`](docs/evidence/2026-10-05-r010-measurement-coverage.md). R-010 remains open.
+
 #### R-011 — Establish versioned performance and coverage sentinels
 
 **Change:** Extend existing P-01 and paired benchmark harnesses with tiny interactive goals, successful/refused symbolic quantifiers, kernel core, field equality, composed calls, resource-heavy modules and adversarial fact growth. Keep inputs and semantic expected outcomes independently versioned.
