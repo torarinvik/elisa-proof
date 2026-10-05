@@ -91,8 +91,17 @@ def assert_refused(directory, label, payload):
 def mutate_field(package, path, replacement):
     changed = copy.deepcopy(package)
     previous = get_at_path(changed, path)
-    assert previous != replacement, (path, previous, replacement)
+    assert previous != replacement or type(previous) is not type(replacement), (path, previous, replacement)
     put_at_path(changed, path, replacement)
+    return changed
+
+
+def delete_field(package, path):
+    changed = copy.deepcopy(package)
+    parent = changed
+    for part in path[:-1]:
+        parent = parent[part]
+    del parent[path[-1]]
     return changed
 
 
@@ -128,7 +137,16 @@ def main():
         ("theorem-reference-bool", ("theorems", 0, "conclusion"), True),
         ("theorem-reference-out-of-range", ("theorems", 0, "conclusion"), len(nodes) + 5),
         ("theorem-line-float", ("theorems", 0, "line"), 1.25),
+        ("theorem-id-bool", ("theorems", 0, "goal_id"), True),
+        ("theorem-name-type", ("theorems", 0, "name"), []),
+        ("theorem-statement-type", ("theorems", 0, "statement"), {}),
+        ("theorem-hypotheses-type", ("theorems", 0, "hypotheses"), "0"),
+        ("theorem-hypothesis-id-bool", ("theorems", 0, "hypotheses"), [True]),
         ("wrong-source-bytes-type", ("source", "bytes"), "371"),
+        ("source-path-null", ("source", "path"), None),
+        ("source-bytes-bool", ("source", "bytes"), True),
+        ("source-fingerprint-tag", ("source", "fingerprint", "algorithm"), "sha256"),
+        ("source-fingerprint-out-of-range", ("source", "fingerprint", "value"), 2**32),
         ("unauthenticated-source-upgrade", ("source", "authenticated"), True),
         ("source-admission-revocation", ("source", "admissible"), False),
         ("trust-hypothesis-upgrade", ("trust", "hypotheses"), "kernel"),
@@ -141,6 +159,13 @@ def main():
          child_node["children_count"] + len(base["kernel"]["children"]) + 1),
         ("length-truncate-child-arena", ("kernel", "children"), base["kernel"]["children"][:-1]),
         ("length-truncate-node-arena", ("kernel", "nodes"), nodes[:theorem["conclusion"]]),
+        ("node-operator-type", ("kernel", "nodes", compound_index, "operator"), 0),
+        ("node-left-id-bool", ("kernel", "nodes", compound_index, "left"), True),
+        ("node-auxiliary-type", ("kernel", "nodes", compound_index, "auxiliary"), "0"),
+        ("node-child-start-float", ("kernel", "nodes", child_index, "children_start"), 0.5),
+        ("node-child-count-bool", ("kernel", "nodes", child_index, "children_count"), False),
+        ("node-name-type", ("kernel", "nodes", compound_index, "name"), []),
+        ("node-secondary-name-type", ("kernel", "nodes", compound_index, "secondary_name"), {}),
         # A backward edge is legal in neither the package DAG nor the identity traversal.
         ("dag-self-cycle", ("kernel", "nodes", compound_index, "left"), compound_index),
         ("dag-invalid-reference", ("kernel", "nodes", compound_index, "right"), len(nodes) + 1),
@@ -172,6 +197,22 @@ def main():
         for label, path, value in cases:
             assert_refused(directory, label, mutate_field(base, path, value))
 
+        schema_cases = [
+            ("missing-source-authenticated", ("source", "authenticated")),
+            ("missing-fingerprint-value", ("source", "fingerprint", "value")),
+            ("missing-node-kind", ("kernel", "nodes", theorem["conclusion"], "kind")),
+            ("missing-theorem-statement", ("theorems", 0, "statement")),
+        ]
+        for label, path in schema_cases:
+            assert_refused(directory, label, delete_field(base, path))
+
+        extra_node_field = copy.deepcopy(base)
+        extra_node_field["kernel"]["nodes"][theorem["conclusion"]]["unexpected"] = 0
+        assert_refused(directory, "extra-reachable-node-field", extra_node_field)
+        invalid_child_id = copy.deepcopy(base)
+        invalid_child_id["kernel"]["children"].append(True)
+        assert_refused(directory, "child-id-bool", invalid_child_id)
+
         # A one-byte discriminator corruption remains parseable; truncation separately exercises
         # incomplete-token handling.
         encoded = json.dumps(base, separators=(",", ":"))
@@ -195,7 +236,8 @@ def main():
         assert code == 0 and result["status"] == "replayed", result
         assert result["summary"]["replayed"] == len(changed_fingerprint["theorems"]), result
 
-    print(f"package mutation campaign: {len(cases) + 2} adversarial inputs refused; 2 hint-only edits freshly replayed; seed={SEED}")
+    refused_count = len(cases) + len(schema_cases) + 4
+    print(f"package mutation campaign: {refused_count} adversarial inputs refused; 2 hint-only edits freshly replayed; seed={SEED}")
 
 
 if __name__ == "__main__":
