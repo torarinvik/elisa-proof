@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Check the report's measurement section and the shape of the shared kernel arena."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parent.parent
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 KEYS = (
     "declarations", "obligations", "goal_attempts", "certificates", "certificate_facts",
     "largest_certificate_facts", "repeated_certificate_fact_roots", "fact_traces",
@@ -24,7 +26,7 @@ REFERENCE_FIELDS = {
 
 def run(path, expected_exit):
     process = subprocess.run(
-        [str(ROOT / "build/elisa-proof"), "--json", str(path)],
+        [str(BINARY), "--json", str(path)],
         capture_output=True, text=True, timeout=120,
     )
     assert process.returncode == expected_exit, (str(path), process.returncode, process.stderr)
@@ -118,7 +120,7 @@ def main():
         malformed = Path(directory) / "malformed.elisa"
         malformed.write_text("def broken(:\n    return\n")
         process = subprocess.run(
-            [str(ROOT / "build/elisa-proof"), "--json", str(malformed)],
+            [str(BINARY), "--json", str(malformed)],
             capture_output=True, text=True, timeout=60,
         )
         assert process.returncode != 0
