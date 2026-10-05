@@ -8,14 +8,15 @@ over more than six names is not searched.
 """
 import copy
 import json
-import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from portable_replay_support import BINARY, REPLAY
+
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
 WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-linear-"))
 MARKER = "__elisa_linear_certificate"
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",
