@@ -746,6 +746,8 @@ sentinel classes plus proof-byte/obligation/replay-count reporting remain to be 
 
 **Gate:** Publish scaling curves and expected asymptotic work counters; beyond configured bounds the system terminates predictably. Do not eliminate stress coverage by simplifying away all duplicated facts before their relevant cost boundary is exercised.
 
+**Progress (2026-10-05):** Added a separate paired fact-growth fixture and focused regression probe with repeated facts plus relevant bounds and a parameter relation; the probe encodes exact proof/refusal, no-partial-certificate/model, and replay expectations. Python syntax validation passed, but the probe could not run because this checkout has no `build/elisa-proof`; semantic outcomes and replay remain unverified. No scaling measurements are claimed. See [`docs/evidence/2026-10-05-r013-fact-growth.md`](docs/evidence/2026-10-05-r013-fact-growth.md). R-013 remains open.
+
 #### R-014 — Make allocation lifecycle observable
 
 **Change:** Integrate optimized allocation-site/lifetime captures from the Elisa profiler and compiler tools; distinguish reserved arena capacity, committed memory, live nodes, dead retained nodes and process RSS. Attribute by stable source identity and store generation. Correlate captures with search phases.
