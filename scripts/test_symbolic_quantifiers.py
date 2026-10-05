@@ -38,6 +38,20 @@ def report(path):
         data = json.loads(result.stdout)
     except json.JSONDecodeError:
         return None
+    if not isinstance(data, dict):
+        failures.append(f"{path.name} report is not an object")
+        return None
+    summary = data.get("summary")
+    summary_valid = isinstance(summary, dict) and all(
+        type(summary.get(key)) is int and summary[key] >= 0
+        for key in ("obligations", "proven", "unproven", "semantic_errors"))
+    check(summary_valid, f"{path.name} has malformed obligation accounting")
+    if summary_valid:
+        check(summary["obligations"] == summary["proven"] + summary["unproven"],
+              f"{path.name} has incomplete obligation accounting")
+    expected_exit = {"proved": 0, "failed": 1}.get(data.get("status"))
+    check(expected_exit is not None and result.returncode == expected_exit,
+          f"{path.name} process exit {result.returncode} disagrees with report verdict")
     replay = data.get("replay")
     check(isinstance(replay, dict), f"{path.name} has no replay accounting")
     if isinstance(replay, dict):
@@ -48,6 +62,9 @@ def report(path):
               f"{path.name} has replay gaps: {replay}")
         check(replay.get("certificates") == replay.get("replayed"),
               f"{path.name} has unreplayed certificates: {replay}")
+        if summary_valid:
+            check(replay.get("certificates") == summary["proven"],
+                  f"{path.name} proven obligations lack complete certificates")
     check(result.returncode >= 0,
           f"{path.name} proof process died from signal {-result.returncode}")
     return data
