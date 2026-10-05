@@ -2,15 +2,18 @@
 
 import copy
 import json
-import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PROOF = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
+# This test lives below scripts/, so add its parent explicitly before importing the
+# shared resolver. It pins both binaries to one published generation (or honors a
+# complete paired override) at import time.
+sys.path.insert(0, str(ROOT / "scripts"))
+from portable_replay_support import BINARY as PROOF, REPLAY
 
 
 def run(command):
