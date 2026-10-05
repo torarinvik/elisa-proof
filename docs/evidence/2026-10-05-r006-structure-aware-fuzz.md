@@ -40,6 +40,17 @@ decoder binding.
   observed CPU was 0.050 seconds, and peak wall time was 0.070 seconds. Limits were 512 MiB RSS,
   4 seconds CPU, and 5 seconds wall per fresh process.
 
+## Integrated-current-main confirmation
+
+After the test commit was cherry-picked into the advancing `main`, the proof/replay pair was rebuilt
+from an isolated clean worktree at `8f1cbf6617ddf65ab184881444ee3ba95ce8e756`. Both manifests bind
+that same proof HEAD, source tree `72d57a84b7c759943ea348ec1af50ccf8e678e5530c44751fa75d0778749a17f`,
+and frontend revision above. Product SHA-256 values were `2185d617e1a2bcc023a370abd5041148f85fd0ef6a481c251013de28f093c1db`
+for `elisa-proof` and `ddc63640598ab8b73e9d408f4570bdccb351c1ece9cff39b9a61f361221b4a2e` for
+`elisa-proof-replay`. The exact integrated test (including the added prohibition on theorem-level
+partial replay) passed: 16 positive packages plus all 28 adversarial cases; peak sampled RSS was
+26,509,312 bytes, CPU 0.027 seconds, and wall 0.031 seconds.
+
 ## Remaining gaps
 
 This is a deterministic mutation matrix, not coverage-guided fuzzing. It does not yet mutate raw
