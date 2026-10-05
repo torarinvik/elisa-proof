@@ -790,6 +790,16 @@ proof/replay pair. Exact identities and remaining scope are in
 `docs/evidence/2026-10-05-r006-theorem-count-boundary.md` (`a6fb5a42`). This covers one parser cap;
 the rest of the valid maxima and parser memory/CPU envelope remain open.
 
+**`source.admissible` wrong-type runtime follow-up (2026-10-05):** The existing portable replay
+suite passed using explicitly selected proof/replay binaries from generation
+`79948cae3ccc4190aeebd778041c4b0b`, whose matched manifests identify source commit `414e5693`.
+Changing `source.admissible` to JSON integer `0` returned structured `malformed/source-schema`
+with no theorem rows and a zero replay summary. The suite also replayed 16 positive packages and
+passed its bounded structure-aware and raw-byte mutation matrices. This is runtime evidence for
+that historical pair only, not validation of current HEAD `3ebb3605`; the exact command, binary
+hashes, result and per-process limits are recorded in
+[`docs/evidence/2026-10-05-r006-source-admissible-runtime.md`](docs/evidence/2026-10-05-r006-source-admissible-runtime.md).
+
 #### R-007 — Freeze typed contexts and control assumption discharge
 
 **Change:** Establish immutable/versioned checked environments, distinct binder IDs, capture-avoiding substitution and exact context membership. Audit branches and tactics for leaked assumptions, reused scratch handles and mutation after checking. Share term storage only under explicit lifetime and context rules.
