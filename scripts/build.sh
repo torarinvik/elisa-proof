@@ -144,6 +144,8 @@ BUILD_TOKEN="$$"
 # Per-product temporaries carry the product's index, so two products never share one.
 stage_object_of() { printf '%s\n' "$ROOT_DIR/build/elisa-proof-stage.$BUILD_TOKEN.$1.o"; }
 proof_binary_of() { printf '%s\n' "$ROOT_DIR/build/elisa-proof.$BUILD_TOKEN.$1"; }
+manifest_temp_of() { printf '%s\n' "$(proof_binary_of "$1").manifest.json"; }
+manifest_checksum_temp_of() { printf '%s\n' "$(manifest_temp_of "$1").sha256"; }
 DEFAULT_PROFILE_HOOKS_OBJ="$ROOT_DIR/build/profile_hooks.o"
 PROFILE_HOOKS_OBJ="${ELISA_PROFILE_HOOKS_OBJ:-$DEFAULT_PROFILE_HOOKS_OBJ}"
 PROFILE_HOOKS_TEMP="$ROOT_DIR/build/profile_hooks.$BUILD_TOKEN.o"
@@ -155,7 +157,9 @@ cleanup_build() {
         kill "$pid" 2>/dev/null || true
     done
     for index in "${!PRODUCT_MAINS[@]}"; do
-        rm -f "$(stage_object_of "$index")" "$(stage_object_of "$index").log" "$(proof_binary_of "$index")" "$(proof_binary_of "$index").manifest.json"
+        rm -f "$(stage_object_of "$index")" "$(stage_object_of "$index").log" \
+            "$(proof_binary_of "$index")" "$(manifest_temp_of "$index")" \
+            "$(manifest_checksum_temp_of "$index")"
     done
     rm -f "$PROFILE_HOOKS_TEMP" "$BUILD_LOCK/pid"
     rmdir "$BUILD_LOCK" 2>/dev/null || true
@@ -371,12 +375,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
     if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
         codesign -s - --force "$PROOF_BINARY" 2>/dev/null
     fi
-    if [[ "$PROOF_MAIN" == "src/main.elisa" ]]; then
-        mv -f "$STAGE_OBJECT" "$ROOT_DIR/build/elisa-proof-stage.o"
-    else
-        rm -f "$STAGE_OBJECT"
-    fi
-    MANIFEST_TEMP="$PROOF_BINARY.manifest.json"
+    MANIFEST_TEMP="$(manifest_temp_of "$index")"
     python3 "$ROOT_DIR/scripts/build_manifest.py" \
         --recorded-build-identity "${BUILD_IDENTITIES[$index]}" \
         --binary "$PROOF_BINARY" \
@@ -397,8 +396,21 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --contract-flag "$CONTRACT_FLAG" \
         --installed-as "$PROOF_OUTPUT" \
         --output "$MANIFEST_TEMP"
+    shasum -a 256 "$MANIFEST_TEMP" | cut -d' ' -f1 > "$(manifest_checksum_temp_of "$index")"
+done
+# Prepare every requested binary and manifest before replacing any installed product. This keeps
+# a compiler, linker, signer, or manifest-generation failure from publishing only part of a pair.
+for index in "${!PRODUCT_MAINS[@]}"; do
+    [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] && continue
+    PROOF_MAIN="${PRODUCT_MAINS[$index]}"
+    PROOF_OUTPUT="${PRODUCT_OUTPUTS[$index]}"
+    PROOF_BINARY="$(proof_binary_of "$index")"
     mv -f "$PROOF_BINARY" "$PROOF_OUTPUT"
-    mv -f "$MANIFEST_TEMP" "$PROOF_OUTPUT.manifest.json"
-    shasum -a 256 "$PROOF_OUTPUT.manifest.json" | cut -d' ' -f1 > "$PROOF_OUTPUT.manifest.json.sha256.$BUILD_TOKEN"
-    mv -f "$PROOF_OUTPUT.manifest.json.sha256.$BUILD_TOKEN" "$PROOF_OUTPUT.manifest.json.sha256"
+    mv -f "$(manifest_temp_of "$index")" "$PROOF_OUTPUT.manifest.json"
+    mv -f "$(manifest_checksum_temp_of "$index")" "$PROOF_OUTPUT.manifest.json.sha256"
+    if [[ "$PROOF_MAIN" == "src/main.elisa" ]]; then
+        mv -f "$(stage_object_of "$index")" "$ROOT_DIR/build/elisa-proof-stage.o"
+    else
+        rm -f "$(stage_object_of "$index")"
+    fi
 done
