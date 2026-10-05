@@ -45,7 +45,40 @@ these roots on the current certificate. The earlier bounded experiment recorded 
 ordinary branch replay; a fresh build still refused both roots. That is useful negative evidence,
 not a reason to broaden acceptance.
 
-No sound, isolated replay or producer correction was established in this pass. R-003 remains open
-for roots 48 and 51. The regression must continue to accept only complete replay or explicit
-refusal, and the wrong-guard and overflow-sensitive refusal controls must remain in force for any
-future rule.
+That initial pass made no replay or producer correction and left both roots open.
+
+## Follow-up candidate — commit `1a78587c`
+
+`proof_kernel_replay_conditional_fallback_or_guard` now accepts the fallback equality disjoined
+with an exact primitive comparison that appears as a positive conjunct of the conditional's
+stable `and` guard. The bounded search descends only through parentheses and `and`; it does not
+infer through `or`, negation, arithmetic equivalence, or arbitrary guard implications. When the
+guard comparison holds, the disjunction holds; when it does not, the conditional takes its
+fallback arm and the equality is reflexive. Existing primitive-comparison, stability, scalar
+witness and source typing checks remain required.
+
+The updated focused regression observes `Slide.inner` root 48 replayed and root 51 still refused:
+five of six certificates replay, with one explicit gap. The isolated positive conjunction fixture
+replays 2/2. The wrong-guard, missing-conjunct (guard `at >= 0`, conclusion `at >= 1`) and
+overflow-sensitive `at + 1` / `count - 1` controls all fail with zero replay gaps. The portable
+replay regression re-seals and rejects a forged conditional theorem replacing the required
+`at >= 1` conjunct with `at >= 2`. `scripts/test_portable_replay.py` also passes its existing
+forged-arena, schema, trust and budget controls. `scripts/test_unsigned_subtraction_upper.py` and
+`scripts/test_negated_increment_peer.py` pass their guarded-positive and overflow/mixed-width
+refusal checks.
+
+Final products were force-built from clean commit `1a78587c87d8c1a98496fdb08234be108a093e00`
+using strict O2, pinned Stage1 compiler SHA-256
+`f77278c716dea7f3dba8f4fcbcf76ecc473426ab3f163c95fea4e358f6337653`, runtime SHA-256
+`b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`, and target
+`arm64-apple-darwin27.0.0`. The proof binary SHA-256 is
+`a99ff4ffcf32daddb6ad6a4f6509e8496dd6bff64a01a8e104d23bdb2b5be6a3`; its manifest SHA-256 is
+`904550f771fd01000d84ffcd700353f325268d5b919df6e0955e909c0cc96a2c`. The portable replay binary
+SHA-256 is `9fc9e246bd7b1097e9e6a6697f8fd5bd110079129800b7c983f27351004af028`; its manifest
+SHA-256 is `bb3efd8f17ab0bedca794dce5c2edd422cf09bae9e8d5775fca23fe22d17be41`. Both manifests bind
+source tree digest `3da166125e928fc4d652f9ea2d3a1c9ed164cc8ab2bbe9724ea92f030b1c978e` and record
+clean source.
+
+This closes the reproduced root-48 disagreement only. Root 51 still needs an independently
+checked signed-arithmetic derivation with operation-range evidence, and remains an explicit
+capability gap. No full suite ran; this is not closure of broader R-003 or R-005 work.
