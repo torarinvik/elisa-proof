@@ -722,6 +722,8 @@ Start after immediate false acceptance/corruption containment. The goal is predi
 
 **Gate:** Budget exhaustion returns a precise stage/dimension/observed/limit with no partial theorem. Boundary and one-over tests include the current 32-name difference closure. Accepted proofs replay within independent checker bounds.
 
+**Progress (2026-10-05):** On starting commit `3ea2364d`, producer difference search was using the kernel replay node-limit constant directly. Commit `a867c7c4` gives the search its own named `PROOF_LINEAR_DIFFERENCE_NODE_LIMIT`, currently 33 matrix nodes (the zero node plus 32 names); replay keeps its independent kernel limit. The existing `scripts/test_long_difference_chain.py` already exercises the exact 32-name acceptance and 33-name refusal, and confirms all accepted certificates replay with zero gaps; it passed after a strict build with the current Stage1 compiler (`e4a16fd2`). This closes only the producer/replay cap naming separation. Actual work counters, checked arithmetic for accumulated work, and a precise stage/dimension/observed/limit exhaustion finding are still open, so R-012 remains open.
+
 #### R-013 — Remove fact-count-dependent denial-of-service shapes
 
 **Change:** Benchmark repeated tautologies, irrelevant disjunctions, wide equality graphs and nested pure summaries across increasing sizes. Identify superlinear scans before changing algorithms. Retain `bounded_model_work_budget.elisa` as intentional stress data and add logically rich variants that exercise the same dimensions.
