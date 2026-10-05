@@ -851,10 +851,14 @@ unchanged, `ELISA_PROOF_PRODUCTS=all` now refreshes its whole-snapshot proof pro
 checksum while reusing the binary. A controlled fixture edits a source outside both closures and
 confirms both manifests converge on the current source-tree digest without compiler or linker
 work; a following no-op preserves all product and manifest bytes/timestamps. A strict Stage1 O2
-pair from commit `937ae0bb` has matching proof source digest `72d57a84…`; exact product identities
-and reuse evidence are in [R-015 manifest-pair coherence evidence](docs/evidence/2026-10-05-r015-manifest-pair-coherence.md).
-This does not establish pair-wide atomic publication, immutable concurrent snapshots, source
-mutation detection during snapshot preparation, or the full P-03 concurrency gate.
+pair has matching proof source digest `72d57a84…`. Follow-up commits `619c3dc8`, `3df1134c`, and
+`37c9d862` add a barrier-controlled same-output concurrency test and stage all requested binaries
+and manifests before publishing any of them. The second concurrent build is rejected by the
+output-tree lock without changing outputs. An injected replay-link failure leaves both prior
+products and manifests unchanged. Final file renames are still sequential, so interruption during
+publication can leave a partial pair; immutable concurrent snapshots and source-mutation detection
+during preparation also remain open. Exact identities and outcomes are in [R-015 manifest-pair
+coherence evidence](docs/evidence/2026-10-05-r015-manifest-pair-coherence.md).
 
 #### R-016 — Bound reporting and diagnostic materialization
 
