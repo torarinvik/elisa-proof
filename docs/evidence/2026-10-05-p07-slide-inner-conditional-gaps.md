@@ -1,0 +1,5 @@
+# P-07 `Slide.inner` conditional replay gaps
+
+The focused verifier run for `test/repro/minimal_slide_inner_replay_gap.elisa` reports six certificates, four replays, and two gaps. The refused roots are 48 and 51. Root 48 is `(if c then 1 else 0) == 0 or at >= 1`, where `c` is `(at >= 1) and (at + 1 < count)`. Root 51 has the same conditional equality and the goal `at < count - 1` as its fallback disjunct. The existing wrong-guard control remains failed with zero replay gaps.
+
+A local kernel experiment tried two narrow paths: recognizing a guard as a conjunct of the conditional condition, and falling back to ordinary independent replay of both substituted branches when the direct disjunction check fails. A fresh build still reported roots 48 and 51 refused (four of six certificates replayed). The experiment was reverted. This does not establish why the current conditional rules fail to close root 48; root 51 additionally needs a source-justified arithmetic derivation from `at + 1 < count` to `at < count - 1`. No producer-trusted rule or broad arithmetic shortcut was added.
