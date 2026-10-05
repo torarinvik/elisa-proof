@@ -166,6 +166,14 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                except PermissionError:
+                    # Some hosts deny signaling a process group even though the
+                    # caller owns the child. Kill that child directly so bounded
+                    # runs still stop and the wait below can collect its status.
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
                 if wait4_supported:
                     _, wait_status, usage = os.wait4(proc.pid, 0)
                     proc.returncode = os.waitstatus_to_exitcode(wait_status)

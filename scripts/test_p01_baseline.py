@@ -137,8 +137,10 @@ def main() -> None:
         old_output_limit = MODULE.MAX_OUTPUT_BYTES
         try:
             MODULE.MAX_OUTPUT_BYTES = 1024
-            limited = MODULE.invoke(binary, fixture, timeout=5, rss_limit_kib=500000)
+            with mock.patch.object(MODULE.os, "killpg", side_effect=PermissionError("denied")):
+                limited = MODULE.invoke(binary, fixture, timeout=5, rss_limit_kib=500000)
             assert limited["stop_reason"] == "output_limit", limited
+            assert limited["returncode"] is not None
             assert limited["stdout_bytes"] > limited["stdout_sha256_bytes"]
             assert limited["stdout_sha256_complete"] is False
         finally:
