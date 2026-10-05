@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: rebaselined on 2026-10-05 against committed proof HEAD `2638f329`. This is the reviewed committed baseline for this plan update, not a claim that the dirty working tree or shared build products match it. The worktree still contains uncommitted call-witness validation/test changes, the CLI responsibility split, and `.gitignore` updates; none are represented as committed or qualified here. The adjacent compiler checkout is clean at `bc8def2eadf41dd088adce22b4d3d9e74aadfee9` and its Stage1 product passes provenance verification, while the installed `~/.elisac/elisac-stage1` wrapper points to the older `7b27fa31` snapshot. Select the explicit verified product and matching runtime for builds. Section 23.17 is the active ranked execution order; §23.16 and R-001–R-090 retain detailed designs, definitions and acceptance gates. A Stage1 build made while source inputs changed is not qualification evidence. This update does not claim that the whole latest proof HEAD has a matched build or that the full suite passed. Historical measurements apply only to their recorded source/product identities.
+Status: rebaselined on 2026-10-05 against committed proof HEAD `f338a42d`. This is the reviewed committed baseline for this plan update, not a claim that the dirty working tree or shared build products match it. The worktree still contains uncommitted call-witness validation/test changes, the CLI responsibility split, and `.gitignore` updates; none are represented as committed or qualified here. The adjacent compiler checkout is clean at `bc8def2eadf41dd088adce22b4d3d9e74aadfee9` and its Stage1 product passes provenance verification, while the installed `~/.elisac/elisac-stage1` wrapper points to the older `7b27fa31` snapshot. Select the explicit verified product and matching runtime for builds. Section 23.17 is the active ranked execution order; §23.16 and R-001–R-090 retain detailed designs, definitions and acceptance gates. A Stage1 build made while source inputs changed is not qualification evidence. This update does not claim that the whole latest proof HEAD has a matched build or that the full suite passed. Historical measurements apply only to their recorded source/product identities.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -2105,7 +2105,7 @@ A useful feature closes a real gap with checked evidence. An optimization saves 
 ## 23.17 Re-ranked high-ROI program after the latest committed tranche
 
 This section supersedes the execution order in §23.16; the earlier section remains the detailed
-design and adversarial-gate catalog. Its rebaseline is proof HEAD `2638f329` plus the committed
+design and adversarial-gate catalog. Its rebaseline is proof HEAD `f338a42d` plus the committed
 evidence named below. The worktree may contain later in-flight edits, and a commit hash does not
 mean a single coherent proof/replay product was built from it. Do not benchmark or make current
 support claims until product provenance is freshly checked.
@@ -2181,6 +2181,11 @@ the queue and put its minimized reproducer first.
    documentation command that opens proof and replay binaries. Each paired operation must resolve
    once and use both returned paths from that generation; a stable legacy filename or two separate
    resolves can still mix generations. Keep compatibility aliases only for single-product use.
+   The portable replay Python suite now resolves once and uses both paths from that generation;
+   its paired-override failure control and real-product run are recorded in
+   [`docs/evidence/2026-10-05-r015-portable-replay-consumer.md`](docs/evidence/2026-10-05-r015-portable-replay-consumer.md)
+   (`f338a42d`). This is one consumer, not full migration. Other paired consumers and the build/
+   recovery gaps below remain open.
    Next add real Stage1 build and process-kill/restart tests, independent-root writer coordination,
    immutable source snapshot binding, and safe old-generation retention/cleanup. Recovery must
    expose a complete old or new pair, never a mixed one.
