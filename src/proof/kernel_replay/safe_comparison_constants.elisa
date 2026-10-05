@@ -110,16 +110,138 @@ extend ElisaProofKernelReplay:
             return empty if not magnitude.known or magnitude.value == ElisaProofKernelCore::PROOF_KERNEL_I64_MIN
             return ProofKernelReplayInt{known: true, value: 0 - magnitude.value}
 
+        def proof_kernel_replay_string_comparison(left: ElisaProofKernelCore::ProofKernelNode, operator: sview, right: ElisaProofKernelCore::ProofKernelNode) -> (handled: bool, value: bool):
+            return (false, false) if left.kind != "string" or right.kind != "string"
+            match operator:
+                "==":
+                    return (true, left.name == right.name)
+                "!=":
+                    return (true, left.name != right.name)
+                _:
+                    return (true, false)
+
+        def proof_kernel_replay_direct_typed_literal_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
+            return false if left_root >= nodes.count or right_root >= nodes.count
+            return false if nodes[left_root].kind != "typed-int" or nodes[right_root].kind != "typed-int"
+            return false if nodes[left_root].name != nodes[right_root].name
+            left: (known: bool, bits: u64, unsigned: bool, width: i64) = ElisaProofKernelCore::typed_literal_value(nodes[left_root])
+            right: (known: bool, bits: u64, unsigned: bool, width: i64) = ElisaProofKernelCore::typed_literal_value(nodes[right_root])
+            return false if not left.known or not right.known or left.unsigned != right.unsigned or left.width != right.width
+            return left.bits == right.bits if operator == "=="
+            return left.bits != right.bits if operator == "!="
+            return left.bits < right.bits if operator == "<"
+            return left.bits <= right.bits if operator == "<="
+            return left.bits > right.bits if operator == ">"
+            return left.bits >= right.bits if operator == ">="
+            return false
+
+        def proof_kernel_replay_unsigned_integer_maximum(width: i64) -> (known: bool, value: u64):
+            return (true, ElisaProofKernelCore::PROOF_KERNEL_U8_MAX.u64()) if width == ElisaProofKernelCore::PROOF_KERNEL_U8_WIDTH
+            return (true, ElisaProofKernelCore::PROOF_KERNEL_U16_MAX.u64()) if width == ElisaProofKernelCore::PROOF_KERNEL_U16_WIDTH
+            return (true, ElisaProofKernelCore::PROOF_KERNEL_U32_MAX.u64()) if width == ElisaProofKernelCore::PROOF_KERNEL_U32_WIDTH
+            return (true, ElisaProofKernelCore::PROOF_KERNEL_U64_MAX) if width == ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS
+            return (false, 0)
+
+        # Replay the deliberately small modular fragment needed for unsigned + and -. Every
+        # operand must be a canonical literal/expression of the same explicit unsigned sort.
+        # Returning unknown for other typed arithmetic keeps this independent replay fragment
+        # narrower than the elaborator's evaluator.
+        def proof_kernel_replay_unsigned_typed_constant_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize) -> (known: bool, bits: u64, width: i64):
+            requires remaining > 0
+            decreases remaining
+            return (false, 0, 0) if root >= nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "typed-int":
+                literal: (known: bool, bits: u64, unsigned: bool, width: i64) = ElisaProofKernelCore::typed_literal_value(node)
+                return (false, 0, 0) if not literal.known or not literal.unsigned
+                return (true, literal.bits, literal.width)
+            return (false, 0, 0) if remaining <= 1 or node.kind != "binary"
+            return (false, 0, 0) if node.operator != "+" and node.operator != "-"
+            return (false, 0, 0) if node.auxiliary != 0 or node.children_start != 0 or node.children_count != 0 or node.value != 0 or node.name != "" or node.secondary_name != ""
+            left: (known: bool, bits: u64, width: i64) = proof_kernel_replay_unsigned_typed_constant_remaining(nodes, node.left, remaining - 1)
+            right: (known: bool, bits: u64, width: i64) = proof_kernel_replay_unsigned_typed_constant_remaining(nodes, node.right, remaining - 1)
+            return (false, 0, 0) if not left.known or not right.known or left.width != right.width
+            maximum: (known: bool, value: u64) = proof_kernel_replay_unsigned_integer_maximum(left.width)
+            return (false, 0, 0) if not maximum.known or left.bits > maximum.value or right.bits > maximum.value
+            if node.operator == "+":
+                room: u64 = maximum.value - right.bits
+                wrapped: u64 = left.bits - room - 1 if left.bits > room else left.bits + right.bits
+                return (true, wrapped, left.width)
+            return (true, left.bits - right.bits, left.width) if left.bits >= right.bits
+            difference: u64 = right.bits - left.bits
+            return (true, maximum.value - difference + 1, left.width)
+
+        def proof_kernel_replay_unsigned_typed_constant(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, bits: u64, width: i64):
+            return proof_kernel_replay_unsigned_typed_constant_remaining(nodes, root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1)
+
+        def proof_kernel_replay_u64_comparison(left: u64, operator: sview, right: u64) -> (known: bool, value: bool):
+            return (true, left == right) if operator == "=="
+            return (true, left != right) if operator == "!="
+            return (true, left < right) if operator == "<"
+            return (true, left <= right) if operator == "<="
+            return (true, left > right) if operator == ">"
+            return (true, left >= right) if operator == ">="
+            return (false, false)
+
+        def proof_kernel_replay_unsigned_typed_expression_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> (known: bool, value: bool):
+            left: (known: bool, bits: u64, width: i64) = proof_kernel_replay_unsigned_typed_constant(nodes, left_root)
+            right: (known: bool, bits: u64, width: i64) = proof_kernel_replay_unsigned_typed_constant(nodes, right_root)
+            return (false, false) if not left.known or not right.known or left.width != right.width
+            return proof_kernel_replay_u64_comparison(left.bits, operator, right.bits)
+
+        def proof_kernel_replay_direct_signed_literal(node: ElisaProofKernelCore::ProofKernelNode) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if node.kind != "int" or node.value < 0
+            return ProofKernelReplayInt{known: true, value: node.value}
+
+        def proof_kernel_replay_unary_signed_literal(node: ElisaProofKernelCore::ProofKernelNode, operand: ElisaProofKernelCore::ProofKernelNode) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if node.kind != "unary" or (node.operator != "+" and node.operator != "-")
+            return empty if operand.kind != "int" or operand.value < 0
+            return ProofKernelReplayInt{known: true, value: operand.value} if node.operator == "+"
+            return ProofKernelReplayInt{known: true, value: 0 - operand.value}
+
+        def proof_kernel_replay_shallow_signed_literal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return empty if not located.known
+            return proof_kernel_replay_direct_signed_literal(located.node) if located.node.kind == "int"
+            return empty if located.node.kind != "unary" or (located.node.operator != "+" and located.node.operator != "-")
+            operand: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, located.node.left)
+            return empty if not operand.known
+            return proof_kernel_replay_unary_signed_literal(located.node, operand.node)
+
+        def proof_kernel_replay_i64_comparison(left: i64, operator: sview, right: i64) -> bool:
+            return left == right if operator == "=="
+            return left != right if operator == "!="
+            return left < right if operator == "<"
+            return left <= right if operator == "<="
+            return left > right if operator == ">"
+            return left >= right if operator == ">="
+            return false
+
+        def proof_kernel_replay_literal_constant_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
+            return false if left_root >= nodes.count or right_root >= nodes.count
+            if nodes[left_root].kind == "typed-int" or nodes[right_root].kind == "typed-int":
+                if nodes[left_root].kind == "typed-int" and nodes[right_root].kind == "typed-int":
+                    return proof_kernel_replay_direct_typed_literal_comparison(nodes, left_root, operator, right_root)
+                typed: (known: bool, value: bool) = proof_kernel_replay_unsigned_typed_expression_comparison(nodes, left_root, operator, right_root)
+                return typed.value if typed.known
+                return false
+            # Direct nonnegative literals retain their exact values. Compound arithmetic is
+            # admitted only when every intermediate is in the nonnegative i8 range, making its
+            # value identical under every wider signed/unsigned machine-integer interpretation.
+            left: mutable ProofKernelReplayInt = proof_kernel_replay_safe_comparison_constant(nodes, left_root)
+            right: mutable ProofKernelReplayInt = proof_kernel_replay_safe_comparison_constant(nodes, right_root)
+            left <- proof_kernel_replay_shallow_signed_literal(nodes, left_root) if not left.known
+            right <- proof_kernel_replay_shallow_signed_literal(nodes, right_root) if not right.known
+            return false if not left.known or not right.known
+            return proof_kernel_replay_i64_comparison(left.value, operator, right.value)
+
         def proof_kernel_replay_constant_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
             return false if left_root >= nodes.count or right_root >= nodes.count
-            if nodes[left_root].kind == "string" and nodes[right_root].kind == "string":
-                return nodes[left_root].name == nodes[right_root].name if operator == "=="
-                return nodes[left_root].name != nodes[right_root].name if operator == "!="
-                return false
-            typed: (known: bool, value: bool) = ElisaProofKernelCore::typed_constant_expression_comparison(nodes, left_root, operator, right_root)
-            return typed.value if typed.known
-            contextual: (known: bool, value: bool) = ElisaProofKernelCore::contextual_unsigned_constant_comparison(nodes, left_root, operator, right_root)
-            return contextual.value if contextual.known
+            strings: (handled: bool, value: bool) = proof_kernel_replay_string_comparison(nodes[left_root], operator, nodes[right_root])
+            return strings.value if strings.handled
             left_tagged: (known: bool, tag: sview, value: i64) = proof_kernel_replay_tagged_comparison_constant(nodes, left_root)
             right_tagged: (known: bool, tag: sview, value: i64) = proof_kernel_replay_tagged_comparison_constant(nodes, right_root)
             if left_tagged.known and right_tagged.known and (left_tagged.tag != "" or right_tagged.tag != ""):
@@ -134,24 +256,7 @@ extend ElisaProofKernelReplay:
                 return order > 0 if operator == ">"
                 return order >= 0 if operator == ">="
                 return false
-            if nodes[left_root].kind == "typed-int" or nodes[right_root].kind == "typed-int":
-                comparison: (known: bool, value: bool) = ElisaProofKernelCore::typed_literal_comparison(nodes[left_root], operator, nodes[right_root])
-                return comparison.known and comparison.value
-            # Direct nonnegative literals retain their exact values. Compound arithmetic is
-            # admitted only when every intermediate is in the nonnegative i8 range, making its
-            # value identical under every wider signed/unsigned machine-integer interpretation.
-            left: mutable ProofKernelReplayInt = proof_kernel_replay_signed_literal_comparison_constant(nodes, left_root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
-            right: mutable ProofKernelReplayInt = proof_kernel_replay_signed_literal_comparison_constant(nodes, right_root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT)
-            left <- proof_kernel_replay_safe_comparison_constant(nodes, left_root) if not left.known
-            right <- proof_kernel_replay_safe_comparison_constant(nodes, right_root) if not right.known
-            return false if not left.known or not right.known
-            return left.value == right.value if operator == "=="
-            return left.value != right.value if operator == "!="
-            return left.value < right.value if operator == "<"
-            return left.value > right.value if operator == ">"
-            return left.value <= right.value if operator == "<="
-            return left.value >= right.value if operator == ">="
-            return false
+            return proof_kernel_replay_literal_constant_comparison(nodes, left_root, operator, right_root)
 
         def proof_kernel_replay_negated_constant_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left_root: usize, operator: sview, right_root: usize) -> bool:
             return proof_kernel_replay_constant_comparison(nodes, left_root, "!=", right_root) if operator == "=="
