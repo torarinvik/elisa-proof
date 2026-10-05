@@ -2268,6 +2268,12 @@ the queue and put its minimized reproducer first.
    resolves the old complete pair and verifies a later build publishes a new complete pair
    (`27e7b849`, `e98696b4`). Mocked independent-root concurrency and post-copy source-mutation
    controls now pass; they do not exercise real Stage1 writers or mutation during an active copy.
+   The remote cross-build now stages proof and replay together, publishes one generation with both
+   manifests, resolves that pair once, and smoke-tests the proof binary from that resolved
+   generation ([`docs/evidence/2026-10-05-r015-remote-build-pair.md`](docs/evidence/2026-10-05-r015-remote-build-pair.md)).
+   Its publisher/resolver regression and shell syntax check pass; no remote Linux build was run, and
+   proof-source provenance is still taken from the synced remote checkout rather than the local
+   cross-compile snapshot.
    Next add real Stage1 crash/restart coverage, active-copy source-mutation handling, and safe
    old-generation retention/cleanup. Recovery must expose a complete old or new pair, never a
    mixed one.
