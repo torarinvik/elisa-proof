@@ -225,6 +225,12 @@ for child_value in (9007199254740992, 9007199254740993, 18446744073709551615, -1
     malformed["kernel"]["children"] = [child_value]
     malformed_case(malformed, "child-index-%s" % child_value)
 
+# Unknown node kind strings exercise the textual tag dispatch boundary on a theorem-reachable
+# node; a well-formed outer package must still refuse without reporting any theorem replayed.
+unknown_kind = with_theorem(base, assumption)
+unknown_kind["kernel"]["nodes"][assumption["conclusion"]]["kind"] = "unknown-kind"
+malformed_case(unknown_kind, "unknown-reachable-node-kind")
+
 # Bounded-but-invalid ranges and out-of-arena references exercise checked arithmetic and
 # child/index relationships before arena admission.
 for start, count in ((len(base["kernel"]["children"]), 1),
