@@ -21,8 +21,17 @@ def check_function(source_name, function_name, expected_exit, status,
     replay = report["replay"]
     assert run.returncode == expected_exit, (function_name, run.returncode, run.stderr)
     assert report["status"] == status, (function_name, report["status"])
+    summary_counts = ("obligations", "proven", "unproven", "semantic_errors",
+                      "semantic_diagnostics")
+    replay_counts = ("certificates", "replayed", "gaps")
+    for label, values, fields in (("summary", summary, summary_counts),
+                                  ("replay", replay, replay_counts)):
+        for field in fields:
+            value = values[field]
+            assert type(value) is int and value >= 0, (function_name, label, field, value)
     assert summary["semantic_errors"] == semantic_errors, (function_name, summary)
     assert (summary["obligations"], summary["proven"], summary["unproven"]) == counts
+    assert summary["obligations"] == summary["proven"] + summary["unproven"]
     assert [finding["kind"] for finding in report["findings"]] == finding_kinds
     assert replay["certificates"] == replay["replayed"] == summary["proven"]
     assert replay["gaps"] == 0
