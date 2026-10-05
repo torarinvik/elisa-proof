@@ -9,7 +9,8 @@ BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
 CASES = (
     (ROOT / "test/repro/minimal_conditional_ensure_replay_gap.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
     (ROOT / "test/repro/minimal_conditional_positive_conjunct_replay.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
-    (ROOT / "test/repro/minimal_slide_inner_replay_gap.elisa", {"certificates": 6, "replayed": 5, "gaps": 1}),
+    (ROOT / "test/repro/minimal_conditional_signed_unit_shift_replay.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
+    (ROOT / "test/repro/minimal_slide_inner_replay_gap.elisa", {"certificates": 6, "replayed": 6, "gaps": 0}),
 )
 
 reports = {}
@@ -39,7 +40,7 @@ for source, current_replay in CASES:
 
 slide_roots = {item.get("kernel_goal"): item.get("replayed")
                for item in reports["minimal_slide_inner_replay_gap.elisa"]["certificates"]}
-assert slide_roots[48] is True and slide_roots[51] is False, slide_roots
+assert slide_roots[48] is True and slide_roots[51] is True, slide_roots
 
 bad_source = ROOT / "test/repro/minimal_conditional_ensure_bad_guard.elisa"
 bad_run = subprocess.run([BINARY, "--json", str(bad_source)], capture_output=True, text=True, timeout=20)
@@ -58,7 +59,8 @@ assert any(
 ), (bad_source, bad_report["findings"])
 
 for name in ("minimal_conditional_missing_conjunct_refusal.elisa",
-             "minimal_conditional_overflow_refusal.elisa"):
+             "minimal_conditional_overflow_refusal.elisa",
+             "minimal_conditional_signed_unit_shift_wrong_bound_refusal.elisa"):
     source = ROOT / "test/repro" / name
     run = subprocess.run([BINARY, "--json", str(source)], capture_output=True, text=True, timeout=20)
     report = json.loads(run.stdout)
@@ -73,4 +75,4 @@ for name in ("minimal_conditional_missing_conjunct_refusal.elisa",
     assert any(item.get("kind") == "ensure-unproven" and item.get("name") == "inner"
                for item in report["findings"]), (source, report["findings"])
 
-print("positive conditional conjunct replays; Slide.inner root 48 closes; root 51, missing-conjunct, overflow and wrong-guard controls remain refused")
+print("positive conditional conjunct and range-checked signed unit shift replay; Slide.inner roots 48 and 51 close; missing-conjunct, overflow, wrong-bound and wrong-guard controls remain refused")
