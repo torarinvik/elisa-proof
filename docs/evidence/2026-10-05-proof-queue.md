@@ -55,6 +55,13 @@ of the historical crash. The regression is in
 explicit refusal, and rejects a `proved` label with gaps. The focused test passed against the
 refreshed O2 binary. It does not yet identify which replay rule should be fixed.
 
+Commit `95daaea` factors the bounded unsigned literal/add/sub replay path while preserving its
+same-width checks, modulo-width arithmetic and refusal of malformed or unsupported nodes. The
+kernel comparison runtime passed a direct O0 compile/link/run against the updated source. The
+typed-unsigned report controls also passed, but that report binary predates the helper's lifetime
+annotation; exact-source O2 report controls are pending the current P-06 rebuild. This refactor is
+not evidence that the historical crash has been fixed.
+
 ## P-01 baseline
 
 The seven-round baseline with one warm-up is complete for three pinned fixtures. Every report had
