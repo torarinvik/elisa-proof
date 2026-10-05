@@ -151,6 +151,7 @@ run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'im
 run_py_test test_overlap_diagnostics.py
 run_py_test test_certificate_reuse.py
 run_py_test test_measurements.py
+run_py_test tests/test_disjunction_work_accounting.py
 run_py_test test_source_admission_matrix.py
 run_py_test test_negated_conjunction_fallthrough.py
 run_py_test test_or_chain_loop_update.py
