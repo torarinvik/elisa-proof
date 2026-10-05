@@ -159,6 +159,12 @@ after caching a report. The binary digest changes, the old report is not returne
 prefetched result matches an uncached run byte-for-byte. This exercises stale-product invalidation
 in the identity/cache harness; it is not a real verifier-binary replacement test.
 
+The real equivalence test also creates a temporary root fixture that includes a separate `Limit`
+module. Changing its constant from 0 to 1 leaves the root file bytes/path unchanged, changes the
+report and cache key, and yields a new complete 2/2 replayed report. After prefetching the changed
+dependency, the cache hit matched the uncached verifier bytes exactly. This is one real included-
+source mutation control; other dependency classes and a real executable replacement remain open.
+
 P-03 passed a controlled strict O2 initial build followed by an identical no-op. The no-op kept
 main/replay binaries, runtime object, hook products and manifests unchanged, with identical hashes,
 inodes, sizes and modification times. It performed no compiles, hook compiles, links, signing or
