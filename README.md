@@ -54,6 +54,12 @@ The `trust` object contains an itemized `boundary_facts` ledger (kind, source ow
 source-neutral kernel root) whose length must equal `trusted_boundary_facts`, plus an explicit
 `trusted_assumptions` ledger. The latter is empty in the current system, and future foreign axioms
 or unchecked escape hatches must appear there explicitly.
+Each `ensure-unproven` finding and unresolved goal includes `refusal_gate`. It reports recognized
+guards such as literal-width, wrap-safety, and budget refusals; replay failures use
+`kernel-replay-gap`. This is a post-hoc classification rather than a trace of the search order, so
+the report says `unknown` when it cannot identify a refusing guard. Per-finding budget dimensions
+and limits remain available in the existing `budget` object when recorded; the report does not
+currently expose a search-tier trace.
 Logical `and`/`or`/`not` results compared with Boolean literals now normalize to
 the proposition or its exact negation, including mirrored equality and inequality.
 Producer and replay kernel check their expression forms independently. Numeric
