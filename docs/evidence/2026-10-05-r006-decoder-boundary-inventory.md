@@ -23,8 +23,9 @@ named by R-006; the plan item remains open.
 `scripts/test_portable_replay.py` contains mutations for duplicate object keys, extra fields,
 wrong package versions, malformed decimal spellings and indexes, unknown node kinds, invalid
 child spans, cycles, forward references, exponential DAG identity growth, node/child/hypothesis/
-theorem count limits, truncation, and empty input. It also requires positive package replay and
-consistent forged statements before checking kernel refusals.
+theorem count limits, truncation, empty input, six invalid raw UTF-8 encodings, and six invalid
+JSON types for the `source.authenticated` Boolean field. It also requires positive package replay
+and consistent forged statements before checking kernel refusals.
 
 `scripts/tests/test_portable_package_string_budget.py` covers an under-budget node string and a
 pair of individually valid strings whose aggregate exceeds the copied-string budget.
@@ -32,9 +33,14 @@ pair of individually valid strings whose aggregate exceeds the copied-string bud
 This source audit did not execute those tests or rebuild a product. The tests' source locations
 show intended coverage but do not establish behavior for the current binary.
 
-A separate isolated Luna review on `codex/plan-r006-reader-audit` also found no substantiated
-narrow malformed-input fix and did not change or test code; its concise cross-check is
-`docs/evidence/2026-10-05-r006-package-decoder-audit.md` (commit `5d72139c`).
+A separate isolated Luna review initially found no narrow fix. Its follow-up raw-byte probe
+showed that malformed UTF-8 in a theorem presentation label could be replayed. Commit `de4bc101`
+now validates the complete bounded input as UTF-8 before JSON parsing and validates decoded
+strings read from the package; invalid input returns structured `malformed/utf8`. The six raw-byte
+and six Boolean-type regressions passed in the agent's strict pinned O2 build and
+`scripts/test_portable_replay.py`. That replay binary's SHA-256 was
+`6b897fd8a11ef7f828fb7236d0662e6d6541eeca6ad0ba7f9f873caa5de77624`; see the concise cross-check
+`docs/evidence/2026-10-05-r006-package-decoder-audit.md` and commits `df652ae0`, `58d07b65`.
 
 ## R-006 work still required
 
@@ -42,8 +48,9 @@ narrow malformed-input fix and did not change or test code; its concise cross-ch
   admission. This note follows only the portable package path; it does not inventory declaration
   artifacts, caches, source admission payloads, every textual marker, or all integer IDs.
 - No parser-plus-checker fuzz harness or retained minimized fuzz failure was located in the
-  focused portable tests. Malformed escape sequences, invalid UTF-8/surrogate policy, parser
-  nesting/resource limits, and malformed Boolean node payloads need explicit end-to-end cases.
+  focused portable tests. Escaped unpaired-surrogate policy, parser nesting/resource limits, and
+  malformed Boolean node payloads still need explicit end-to-end cases; the added UTF-8 tests
+  cover raw input bytes and the header Boolean type only.
 - Existing visible budget mutations cover selected over-limit values. A systematic below/at/above
   boundary matrix for every count, index range, typed-literal tag and theorem label is not
   established here.

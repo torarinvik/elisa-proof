@@ -626,12 +626,14 @@ for package file size, exact object schemas (including duplicate keys), numeric 
 node strings, node/child/theorem/hypothesis counts, identity bytes, node shapes, child spans,
 cycles, forward references, theorem roots and rule dispatch. Existing focused tests include those
 malformed shapes and selected count limits. The inventory note
-`docs/evidence/2026-10-05-r006-decoder-boundary-inventory.md` records these controls and limits
-its claims to source review: it did not run the tests or validate a current binary. A separate
-Luna audit, recorded in `docs/evidence/2026-10-05-r006-package-decoder-audit.md`, found no
-additional narrow fix. Fuzzing, invalid-UTF8/parser-resource policy, complete decoder/ID
-inventory, systematic boundary cases and measured worst-case memory remain open, so R-006 is not
-complete.
+`docs/evidence/2026-10-05-r006-decoder-boundary-inventory.md` records the source inventory. A
+follow-up raw-byte probe reproduced acceptance of malformed UTF-8 in a theorem label; the reader
+now validates bounded input bytes before JSON parsing and decoded package strings before use. Six
+invalid UTF-8 sequences and six malformed header-Boolean types return structured refusals; the
+strict pinned O2 build and portable replay regression passed on the agent branch (binary identity
+is in the cross-check note). The broad decoder/ID inventory, parser/checker fuzzing, escaped
+surrogate and malformed kernel-Boolean cases, systematic boundary matrix, parser-resource tests
+and worst-case memory evidence remain open, so R-006 is not complete.
 
 #### R-007 — Freeze typed contexts and control assumption discharge
 
