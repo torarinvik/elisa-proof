@@ -29,6 +29,57 @@ assert MODULE.EXPECTED_OUTCOMES["quantifier_success"] == {
 assert MODULE.EXPECTED_OUTCOMES["region_lending_success"] == {
     "status": "proved", "returncode": 0,
 }
+assert {name for name, _ in MODULE.FIXTURES} >= {"branch_join", "rejected_branch_join"}
+sentinels = MODULE.load_sentinel_manifest()
+pair = json.loads(MODULE.SENTINEL_MANIFEST.read_text(encoding="utf-8"))["workloads"]["branch_join_pair"]
+assert pair["members"] == ["branch_join", "rejected_branch_join"]
+for name, count, status in (("branch_join", 12, "proved"),
+                            ("rejected_branch_join", 6, "failed")):
+    fixture = sentinels[name]
+    expected = fixture["semantic_expectations"]
+    assert fixture["expected_outcome"]["status"] == status
+    assert fixture["expected_outcome"]["returncode"] == (0 if status == "proved" else 1)
+    assert MODULE.identity(MODULE.ROOT / fixture["path"]) == {
+        "sha256": fixture["sha256"], "size_bytes": fixture["size_bytes"],
+    }
+    assert expected["obligation_count"] == count
+    assert expected["obligation_ids"] == list(range(count))
+    assert len(expected["obligation_details"]) == count
+    assert sum(item["result"] == "proved" for item in expected["obligation_details"]) == expected["proven"]
+    assert sum(item["result"] == "unproven" for item in expected["obligation_details"]) == expected["unproven"]
+    assert expected["failed"] == expected["unproven"]
+    assert expected["trusted_assumptions"] == 0
+    assert expected["replay_gaps"] == 0
+    assert expected["replay_certificates"] == expected["replayed"]
+    assert fixture["budget_classification"] == pair["budget_classification"]
+    assert pair["budget_classification"] == {
+        "classification": "standard-bounded", "timeout_seconds": 20,
+        "rss_limit_kib": 1500000, "output_limit_bytes": MODULE.MAX_OUTPUT_BYTES,
+    }
+
+positive = sentinels["branch_join"]["semantic_expectations"]
+profile_measurement = {"stop_reason": None, "report_complete": True, "cpu_seconds": 0.01,
+                       "replay_gaps": positive["replay_gaps"],
+                       "replay_certificates": positive["replay_certificates"],
+                       "replayed": positive["replayed"], "goal_cache_hits": 0,
+                       "goal_cache_misses": 0, "control_flow_steps": 0,
+                       "live_facts_peak": 0, "status": "proved", "returncode": 0,
+                       "obligations": positive["obligation_count"],
+                       "obligation_ids": positive["obligation_ids"],
+                       "obligation_details": positive["obligation_details"],
+                       "proven": positive["proven"], "unproven": positive["unproven"],
+                       "failed": positive["failed"],
+                       "trusted_assumptions": positive["trusted_assumptions"],
+                       "trusted_boundary_facts": positive["trusted_boundary_facts"],
+                       "proof_certificates": positive["proof_certificates"]}
+MODULE.check_report(profile_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+profile_measurement["trusted_assumptions"] = 1
+try:
+    MODULE.check_report(profile_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+except RuntimeError as error:
+    assert "trusted_assumptions" in str(error)
+else:
+    raise AssertionError("semantic workload profile drift was accepted")
 
 
 def main() -> None:

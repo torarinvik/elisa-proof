@@ -31,13 +31,15 @@ FIXTURES = (
     ("unsigned_boundary_refusal", ROOT / "examples/counterexample_unsigned_boundaries.elisa"),
     ("quantifier_success", ROOT / "examples/quantifier.elisa"),
     ("region_lending_success", ROOT / "examples/region_lend_calls.elisa"),
+    ("branch_join", ROOT / "examples/branch_join.elisa"),
+    ("rejected_branch_join", ROOT / "examples/rejected_branch_join.elisa"),
 )
 def load_sentinel_manifest() -> dict:
     try:
         payload = json.loads(SENTINEL_MANIFEST.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"cannot read P-01 sentinel manifest: {error}") from error
-    if payload.get("schema") != "elisa-proof-p01-sentinels-v1" or not isinstance(payload.get("fixtures"), dict):
+    if payload.get("schema") != "elisa-proof-p01-sentinels-v2" or not isinstance(payload.get("fixtures"), dict):
         raise RuntimeError("P-01 sentinel manifest has an unsupported schema")
     return payload["fixtures"]
 
@@ -247,6 +249,15 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
             1 for item in declarations if item.get("verified") is True),
         "goals": len(goals), "replay_certificates": replay.get("certificates"),
         "replayed": replay.get("replayed"), "replay_gaps": replay.get("gaps"),
+        "obligation_ids": [goal.get("goal_id") for goal in goals],
+        "obligation_details": [{"id": goal.get("goal_id"), "function": goal.get("name"),
+                                "line": goal.get("line"), "rule": goal.get("rule"),
+                                "result": "proved" if goal.get("proven") is True else "unproven"}
+                               for goal in goals],
+        "failed": summary.get("failed"),
+        "proof_certificates": measurements.get("certificates"),
+        "trusted_assumptions": len(report.get("trust", {}).get("trusted_assumptions", [])),
+        "trusted_boundary_facts": report.get("trust", {}).get("trusted_boundary_facts"),
         # Preserve the complete CLI measurement object. This keeps newly emitted serialized
         # counters available to baseline consumers without implying internal timing coverage.
         "proof_report_measurements": measurements,
@@ -258,7 +269,8 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
     return result
 
 
-def check_report(measurement: dict, expected: dict | None = None) -> None:
+def check_report(measurement: dict, expected: dict | None = None,
+                 semantic_expectations: dict | None = None) -> None:
     if measurement["stop_reason"]:
         raise RuntimeError(f"bounded failure: {measurement['stop_reason']}")
     if not measurement["report_complete"]:
@@ -280,6 +292,17 @@ def check_report(measurement: dict, expected: dict | None = None) -> None:
             raise RuntimeError(f"unexpected proof status: {measurement['status']}")
         if measurement["returncode"] != expected["returncode"]:
             raise RuntimeError(f"unexpected CLI exit code: {measurement['returncode']}")
+    if semantic_expectations:
+        for key in ("obligation_count", "proven", "unproven", "failed", "trusted_assumptions",
+                    "trusted_boundary_facts", "proof_certificates", "replay_certificates",
+                    "replayed", "replay_gaps"):
+            observed_key = "obligations" if key == "obligation_count" else key
+            if measurement.get(observed_key) != semantic_expectations[key]:
+                raise RuntimeError(f"unexpected {observed_key}: {measurement.get(observed_key)}")
+        if measurement.get("obligation_ids") != semantic_expectations["obligation_ids"]:
+            raise RuntimeError("obligation IDs differ from the pinned semantic workload")
+        if measurement.get("obligation_details") != semantic_expectations["obligation_details"]:
+            raise RuntimeError("obligation details differ from the pinned semantic workload")
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -315,6 +338,18 @@ def run(args: argparse.Namespace) -> dict:
         if (sentinel.get("sha256") != fixture_ids[name]["sha256"]
                 or sentinel.get("size_bytes") != fixture_ids[name]["size_bytes"]):
             raise RuntimeError(f"P-01 workload identity changed for {name}; review and version the sentinel")
+    manifest = json.loads(SENTINEL_MANIFEST.read_text(encoding="utf-8"))
+    for workload_name, workload in manifest.get("workloads", {}).items():
+        members = workload.get("members", [])
+        if not any(member in sentinels for member in members):
+            continue
+        if len(members) != 2 or any(member not in sentinels for member in members):
+            raise RuntimeError(f"P-01 workload {workload_name} must name exactly two pinned fixtures")
+        for member in members:
+            if sentinels[member].get("workload") != workload_name:
+                raise RuntimeError(f"P-01 fixture {member} is not wired to workload {workload_name}")
+            if sentinels[member].get("budget_classification") != workload.get("budget_classification"):
+                raise RuntimeError(f"P-01 fixture {member} has a different workload budget")
     cases = []
     failures = []
     with tempfile.TemporaryDirectory(prefix="elisa-p01-") as temp:
@@ -327,7 +362,8 @@ def run(args: argparse.Namespace) -> dict:
                 row = invoke(binary, input_path, args.timeout, args.rss_limit_kib)
                 row["round"] = round_index
                 try:
-                    check_report(row, sentinels[name]["expected_outcome"])
+                    check_report(row, sentinels[name]["expected_outcome"],
+                                 sentinels[name].get("semantic_expectations"))
                 except RuntimeError as error:
                     row["validation_error"] = str(error)
                     failures.append(f"{name}/{label}/round-{round_index}: {error}")
@@ -337,7 +373,8 @@ def run(args: argparse.Namespace) -> dict:
                 source.write_bytes(fixture.read_bytes())
                 warmup = invoke(binary, source, args.timeout, args.rss_limit_kib)
                 try:
-                    check_report(warmup, sentinels[name]["expected_outcome"])
+                    check_report(warmup, sentinels[name]["expected_outcome"],
+                                 sentinels[name].get("semantic_expectations"))
                 except RuntimeError as error:
                     failures.append(f"{name}/warmup-{warmup_index + 1}: {error}")
             edit_source = None
@@ -383,7 +420,12 @@ def run(args: argparse.Namespace) -> dict:
             "phase_timing_availability": PHASE_TIMING_AVAILABILITY,
             "fixtures": [{"name": name, "path": str(path), "sha256": fixture_ids[name]["sha256"],
                           "size_bytes": fixture_ids[name]["size_bytes"],
-                          "expected_outcome": sentinels[name]["expected_outcome"]} for name, path in FIXTURES],
+                          "expected_outcome": sentinels[name]["expected_outcome"],
+                          **({"workload": sentinels[name]["workload"],
+                              "semantic_expectations": sentinels[name]["semantic_expectations"],
+                              "budget_classification": sentinels[name]["budget_classification"]}
+                             if "semantic_expectations" in sentinels[name] else {})}
+                         for name, path in FIXTURES],
             "cases": cases}
 
 
