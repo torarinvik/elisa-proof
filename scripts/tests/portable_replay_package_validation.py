@@ -14,6 +14,11 @@ text = json.dumps(with_theorem(base, assumption))
 valid_header = with_theorem(base, assumption)
 code, result = replay(valid_header, "required-header-positive")
 assert code == 0 and result["status"] == "replayed", result
+wrong_source_type = copy.deepcopy(valid_header)
+wrong_source_type["source"] = 7
+result = refused(wrong_source_type, "source-object-replaced-by-integer", "malformed", "source-schema")
+assert result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, result
+assert result["theorems"] == [], result
 missing_header = copy.deepcopy(valid_header)
 del missing_header["trust"]
 result = refused(missing_header, "required-header-missing-trust", "malformed", "package-schema")
