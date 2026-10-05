@@ -5,6 +5,7 @@ import importlib.util
 import hashlib
 import json
 import tempfile
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,8 +56,14 @@ def main() -> None:
         old = MODULE.FIXTURES
         MODULE.FIXTURES = (("test", fixture),)
         try:
-            result = MODULE.run(SimpleNamespace(binary=binary, timeout=5, rss_limit_kib=500000,
-                                                rounds=2, warmup_runs=1))
+            with mock.patch.object(MODULE, "ROOT", root), \
+                    mock.patch.object(MODULE, "load_sentinel_manifest", return_value={
+                "test": {"path": "fixture.elisa", "sha256": MODULE.identity(fixture)["sha256"],
+                         "size_bytes": fixture.stat().st_size,
+                         "expected_outcome": {"status": "proved", "returncode": 0}},
+            }):
+                result = MODULE.run(SimpleNamespace(binary=binary, timeout=5, rss_limit_kib=500000,
+                                                    rounds=2, warmup_runs=1))
         finally:
             MODULE.FIXTURES = old
         assert result["schema"] == "elisa-proof-p01-baseline-v3"

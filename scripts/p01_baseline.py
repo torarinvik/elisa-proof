@@ -18,6 +18,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "elisa-proof-p01-baseline-v3"
+SENTINEL_MANIFEST = ROOT / "scripts" / "p01_sentinels.json"
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 FIXTURES = (
     ("real_small", ROOT / "examples/perf_luna_accept.elisa"),
@@ -28,16 +29,18 @@ FIXTURES = (
     ("qualified_constants", ROOT / "examples/qualified_constants_statements.elisa"),
     ("qualified_constant_refusal", ROOT / "examples/rejected_qualified_constants_statements.elisa"),
 )
-EXPECTED_OUTCOMES = {
-    "real_small": {"status": "proved", "returncode": 0},
-    "real_refusal": {"status": "failed", "returncode": 1},
-    "proof_kernel_core": {"status": "proved", "returncode": 0},
-    "qualified_constants": {"status": "proved", "returncode": 0},
-    "qualified_constant_refusal": {"status": "failed", "returncode": 1},
-    # The bounded symbolic-quantifier case may time out; if it emits a complete report,
-    # it must remain a non-proof with the CLI's ordinary refusal exit code.
-    "adversarial": {"not_proved": True, "returncode": 1},
-}
+def load_sentinel_manifest() -> dict:
+    try:
+        payload = json.loads(SENTINEL_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"cannot read P-01 sentinel manifest: {error}") from error
+    if payload.get("schema") != "elisa-proof-p01-sentinels-v1" or not isinstance(payload.get("fixtures"), dict):
+        raise RuntimeError("P-01 sentinel manifest has an unsupported schema")
+    return payload["fixtures"]
+
+
+EXPECTED_OUTCOMES = {name: row["expected_outcome"]
+                     for name, row in load_sentinel_manifest().items()}
 PHASE_TIMING_AVAILABILITY = {
     "proof_cli_invocation_wall": "measured-external-monotonic-wall",
     "proof_cli_child_cpu": "measured-wait4-child-user-plus-system",
@@ -280,6 +283,16 @@ def run(args: argparse.Namespace) -> dict:
     if rounds <= 0 or warmup_runs < 0:
         raise RuntimeError("rounds must be positive and warm-up runs cannot be negative")
     fixture_ids = {name: identity(path) for name, path in FIXTURES}
+    sentinels = load_sentinel_manifest()
+    if set(sentinels) != {name for name, _ in FIXTURES}:
+        raise RuntimeError("P-01 fixtures do not match the versioned sentinel manifest")
+    for name, path in FIXTURES:
+        sentinel = sentinels[name]
+        if sentinel.get("path") != str(path.relative_to(ROOT)):
+            raise RuntimeError(f"P-01 sentinel path changed for {name}")
+        if (sentinel.get("sha256") != fixture_ids[name]["sha256"]
+                or sentinel.get("size_bytes") != fixture_ids[name]["size_bytes"]):
+            raise RuntimeError(f"P-01 workload identity changed for {name}; review and version the sentinel")
     cases = []
     failures = []
     with tempfile.TemporaryDirectory(prefix="elisa-p01-") as temp:
@@ -292,7 +305,7 @@ def run(args: argparse.Namespace) -> dict:
                 row = invoke(binary, input_path, args.timeout, args.rss_limit_kib)
                 row["round"] = round_index
                 try:
-                    check_report(row, EXPECTED_OUTCOMES.get(name))
+                    check_report(row, sentinels[name]["expected_outcome"])
                 except RuntimeError as error:
                     row["validation_error"] = str(error)
                     failures.append(f"{name}/{label}/round-{round_index}: {error}")
@@ -302,7 +315,7 @@ def run(args: argparse.Namespace) -> dict:
                 source.write_bytes(fixture.read_bytes())
                 warmup = invoke(binary, source, args.timeout, args.rss_limit_kib)
                 try:
-                    check_report(warmup, EXPECTED_OUTCOMES.get(name))
+                    check_report(warmup, sentinels[name]["expected_outcome"])
                 except RuntimeError as error:
                     failures.append(f"{name}/warmup-{warmup_index + 1}: {error}")
             edit_source = None
@@ -348,7 +361,7 @@ def run(args: argparse.Namespace) -> dict:
             "phase_timing_availability": PHASE_TIMING_AVAILABILITY,
             "fixtures": [{"name": name, "path": str(path), "sha256": fixture_ids[name]["sha256"],
                           "size_bytes": fixture_ids[name]["size_bytes"],
-                          "expected_outcome": EXPECTED_OUTCOMES.get(name)} for name, path in FIXTURES],
+                          "expected_outcome": sentinels[name]["expected_outcome"]} for name, path in FIXTURES],
             "cases": cases}
 
 
