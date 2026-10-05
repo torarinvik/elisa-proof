@@ -46,6 +46,17 @@ for index, malformed_surrogates in enumerate(("\ud800", "\udc00", "\ud800A", "\u
     malformed_bytes = json.dumps(claim, separators=(",", ":")).encode("ascii")
     refused(malformed_bytes, "escaped-surrogate-invalid-%d" % index,
             "malformed", "json")
+# The pinned Json recursive-descent parser allows 256 open arrays/objects. The package root is
+# the first level; put nested arrays in the required source slot so the limit itself is exercised
+# before the strict header schema refuses the otherwise parsed value.
+for depth, expected_reason in ((254, "source-schema"), (255, "source-schema"), (256, "json")):
+    claim = copy.deepcopy(base)
+    nested = "not-a-source-record"
+    for _ in range(depth):
+        nested = [nested]
+    claim["source"] = nested
+    nested_bytes = json.dumps(claim, separators=(",", ":")).encode("ascii")
+    refused(nested_bytes, "json-depth-%d" % (depth + 1,), "malformed", expected_reason)
 extra = with_theorem(base, assumption)
 extra["kernel"]["nodes"][0]["proof"] = True
 refused(extra, "extra-node-key", "malformed", "node-schema")
