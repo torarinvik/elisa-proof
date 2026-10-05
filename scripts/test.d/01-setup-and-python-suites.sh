@@ -68,6 +68,7 @@ run_py_test test_report_cache_nested_dependency_edit.py
 run_py_test test_report_cache_symlink_dependency.py
 run_py_test test_p01_baseline.py
 run_py_test test_bounded_model_work_budget.py
+run_py_test test_r013_logical_work_stress.py
 run_py_test test_disjunction_search_bounds.py
 run_py_test test_p05_package_restart.py
 run_py_test test_conditional_ensure_replay_gap.py
