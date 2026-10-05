@@ -4,6 +4,31 @@ Passing the current suites is regression evidence, not completion of the full au
 The objective covers all existing implementation code, scripts, proof fixtures, and their
 assumptions about the compiler. No module below is yet certified as fully audited.
 
+## Weakness program — 2026-10-05 census
+
+The bounded six-input support census is recorded in
+[`docs/evidence/2026-10-05-proof-queue.md`](docs/evidence/2026-10-05-proof-queue.md) and is tied to
+the strict O2 product identities listed there. It is a local arm64 macOS sample, not a full-corpus
+coverage rate. Current completed reports include `kernel_core.elisa` at 37/37 obligations,
+mocap `balance.elisa` at 240/240, compiler `lexer.elisa` at 110/326 with 110/110 certificates
+replayed, and `kernel_comparison_runtime.elisa` at 2,544/3,800 with 2,544/2,544 certificates
+replayed in a separate 3 GiB bounded run. Mocap `track.elisa` has 926/943 obligations proved and
+two replay gaps among 928 certificates. `field_equality_runtime.elisa` exceeded its 60-second
+bound. These incomplete results are retained as open work, not removed from the denominator.
+
+| Plan weakness | Current evidence and next gate |
+| --- | --- |
+| W1 — no SMT backend | No solver-backed feature is counted in this census. Keep all answers independently kernel-checked; add an opt-in oracle only with replayable certificates and on/off census comparison. |
+| W2 — symbolic quantifiers | Symbolic quantifier support and its trigger-free refusal cases remain a separate feature gate; no broad coverage claim follows from this census. |
+| W3 — array/collection theory | Some bounded update and extent rules exist. Real-code support remains incomplete; repair source-justified collection cases with false-claim and malformed-certificate controls. |
+| W4 — weak automation | No near-miss or invariant-suggestion coverage metric is established here. Measure supported goals and preserve the unproven result when search exhausts its budget. |
+| W5 — thin real-code coverage | The listed real-code counts are the current baseline. The track replay gaps and unsupported lexer/kernel-comparison obligations require repair with source correspondence and negative controls. |
+| W6 — scale | The 3,800-obligation report completes under a 3 GiB cap, while the field-equality fixture times out at 60 seconds. Profile current code and bound each incomplete path before claiming scale. |
+
+The P-01 baseline is seven paired rounds on three fixtures, but phase timings, a retained session,
+Linux qualification, and the broader compiler/Core corpus remain open. See the active queue in
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md); no weakness is marked closed by this sample.
+
 ## 2026-10-04 checkpoint: Boolean summary disjunctions over signed call results
 
 The clamp-then-check regression reproduced on the existing main binary: 23 of 24
