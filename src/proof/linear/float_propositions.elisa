@@ -1,0 +1,111 @@
+# A narrow propositional fragment for float-bearing functions. Float comparisons remain opaque
+# Boolean atoms; this admits control-flow tautologies without assigning them IEEE arithmetic laws.
+extend ElisaProof:
+    private:
+        const PROOF_FLOAT_BOOLEAN_ATOM_LIMIT: usize = 8
+
+        def proof_float_boolean_atom(expression: Ast::Expr, operator_mask: usize) -> bool:
+            return false if not proof_kernel_expression_supported(expression)
+            return false if proof_expr_has_call(expression) or proof_expr_has_move(expression)
+            return false if proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
+            match proof_strip_parens(expression):
+                Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq
+                    left_name: sview = proof_ident_name(proof_strip_parens(left))
+                    right_name: sview = proof_ident_name(proof_strip_parens(right))
+                    return left_name != "" and right_name != ""
+                _:
+                    return false
+
+        def proof_float_boolean_formula(expression: Ast::Expr, operator_mask: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_float_boolean_formula(inner, operator_mask, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    protocol: sview = proof_builtin_unary_operator_protocol(TokenKind.Not)
+                    return false if protocol != "" and proof_source_primitive_operator_mask_has(operator_mask, protocol)
+                    return proof_float_boolean_formula(inner, operator_mask, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        protocol: sview = proof_builtin_operator_protocol(operator)
+                        return false if protocol != "" and proof_source_primitive_operator_mask_has(operator_mask, protocol)
+                        return proof_float_boolean_formula(left, operator_mask, depth + 1) and proof_float_boolean_formula(right, operator_mask, depth + 1)
+                    return proof_float_boolean_atom(expression, operator_mask)
+                _:
+                    return proof_float_boolean_atom(expression, operator_mask)
+
+        def proof_float_boolean_collect(expression: Ast::Expr, atoms: mutable darray[Ast::Expr]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_float_boolean_collect(inner, atoms, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_float_boolean_collect(inner, atoms, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        return proof_float_boolean_collect(left, atoms, depth + 1) and proof_float_boolean_collect(right, atoms, depth + 1)
+                _:
+                    pass
+            return true if any atom in atoms where proof_expr_equal(atom, expression)
+            return false if atoms.count >= PROOF_FLOAT_BOOLEAN_ATOM_LIMIT
+            atoms.push(expression)
+            return true
+
+        def proof_float_boolean_evaluate(expression: Ast::Expr, atoms: darray[Ast::Expr]&, values: darray[bool]&, depth: usize) -> (known: bool, value: bool):
+            return (false, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.BoolLit(value, _):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_float_boolean_evaluate(inner, atoms, values, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    nested: (known: bool, value: bool) = proof_float_boolean_evaluate(inner, atoms, values, depth + 1)
+                    return (nested.known, not nested.value)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    first: (known: bool, value: bool) = proof_float_boolean_evaluate(left, atoms, values, depth + 1)
+                    return (false, false) if not first.known
+                    return (true, false) if not first.value
+                    return proof_float_boolean_evaluate(right, atoms, values, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    first: (known: bool, value: bool) = proof_float_boolean_evaluate(left, atoms, values, depth + 1)
+                    return (false, false) if not first.known
+                    return (true, true) if first.value
+                    return proof_float_boolean_evaluate(right, atoms, values, depth + 1)
+                _:
+                    pass
+            for index in 0..<atoms.count |index, atoms, values, expression|:
+                return (true, values[index]) if index < values.count and proof_expr_equal(atoms[index], expression)
+            return (false, false)
+
+        def proof_float_boolean_all_assignments(facts: darray[Ast::Expr]&, goal: Ast::Expr, atoms: darray[Ast::Expr]&, values: mutable darray[bool]&, atom_index: usize) -> bool:
+            if atom_index >= atoms.count:
+                for fact in facts |fact, goal, atoms, values|:
+                    premise: (known: bool, value: bool) = proof_float_boolean_evaluate(fact, atoms, values, 0)
+                    return false if not premise.known
+                    continue if premise.value
+                    return true
+                conclusion: (known: bool, value: bool) = proof_float_boolean_evaluate(goal, atoms, values, 0)
+                return conclusion.known and conclusion.value
+            values.push(false)
+            if not proof_float_boolean_all_assignments(facts, goal, atoms, values, atom_index + 1):
+                values.truncate(values.count - 1)
+                return false
+            values[values.count - 1] <- true
+            valid: bool = proof_float_boolean_all_assignments(facts, goal, atoms, values, atom_index + 1)
+            values.truncate(values.count - 1)
+            return valid
+
+        def proof_float_propositional_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize) -> bool:
+            return false if not proof_float_boolean_formula(goal, operator_mask, 0)
+            relevant_facts: mutable darray[Ast::Expr] = []
+            atoms: mutable darray[Ast::Expr] = []
+            for fact in facts |fact, goal, operator_mask, relevant_facts, atoms|:
+                continue if not proof_float_boolean_formula(fact, operator_mask, 0)
+                relevant_facts.push(fact)
+                return false if not proof_float_boolean_collect(fact, &atoms, 0)
+            return false if not proof_float_boolean_collect(goal, &atoms, 0)
+            assignments: mutable darray[bool] = []
+            proof_float_boolean_all_assignments(relevant_facts, goal, atoms, &assignments, 0)
