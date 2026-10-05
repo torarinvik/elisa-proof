@@ -1066,6 +1066,15 @@ identities and focused commands are recorded in [R-042 quotient slice evidence](
 This closes the narrow quotient-bound slice; no width matrix, other arithmetic operation, or full
 integrated-suite claim is implied.
 
+**Signed overflow boundary follow-up (2026-10-05):** Focused source and kernel audit found matching
+fail-closed handling for divide-by-zero and `MIN_I64 / -1` / `MIN_I64 % -1`. The interval rule also
+refuses `% -1` when it cannot establish that the dividend excludes the overflow input. Added
+positive bounded cases with negative divisors, refusal cases for both minimum overflow operators,
+and exact zero-divisor diagnostic checks. The strict proof/replay pair from the quotient-slice
+validation independently replayed every accepted certificate with zero gaps. No producer/replay
+mismatch or sound narrow behavior fix was found; the broader width-specific minimum and overflow
+matrix remains open. See [signed division boundary evidence](docs/evidence/2026-10-05-r042-signed-division-boundaries.md).
+
 #### R-043 — Make float/string/character boundaries explicit
 
 **Change:** Preserve existing conservative float rules while defining which IEEE operations, NaNs, signed zeros, infinities and rounding modes are supported. Separately model string bytes/characters, indexing and cstr termination according to Elisa semantics.
