@@ -10429,16 +10429,24 @@ This lets summaries survive a later call, as in `first = f(x); second = f(first)
 
 Tests: `examples/deterministic_call_chain.elisa`, `examples/rejected_deterministic_call_chain.elisa` (effects, global read, mutable borrow, indirect effect), and `scripts/test_deterministic_call_chain.py`, including a 40-call budget case.
 
-## Bound tuple label witnesses (BACKLOG B-03)
+## Tuple-field call summaries (BACKLOG B-03)
 
-A local bound to a named-tuple call result (`found: (count: i64, value: H[r]) = pick(value)`) is
-one stored value whatever the callee reads, so each primitive scalar label `found.<label>` gets the
-callee's declared element type witness, and a narrow unsigned label also gets its `0 <= x <= MAX`
-range, exactly as a parameter does. These are type-bound facts: replay trusts their traces, the
-same gap recorded for parameter type bounds. No bound beyond the type is added; every other fact
-about a label comes from the callee's instantiated summaries. `package_reader` itself stays
-unproven: its `Json::` compiler builtins and `ElisaProofJson` calls have no summaries. The front
-end reports no diagnostic for a label the callee does not declare; such a label gets no witness.
+For a named-tuple call local such as
+`found: (count: i64, value: JsonValueHandle[r]) = pick(value)`, producer substitution keeps the
+local as the original call only when its complete field-label sequence matches the callee's
+declared return labels in the same positions. This is required because tuple assignment is
+positional: a reordered local's `found.count` can contain the callee's `total`. A mismatch or
+reordering stays opaque and receives no call summary or tuple-field type witness. With matching
+labels, the callee's original `call.count` summary remains in the proof state, and independent
+replay re-instantiates the exact ensure against that call projection. Declared scalar field types
+are added to the same call projections; those type-bound traces retain the existing trusted
+compiler-type boundary. No field bound beyond the callee's ensures is added.
+
+Evidence: `scripts/test_tuple_field_region.py` uses a package-reader-shaped handle result. Its
+ordered count/value case proves and replays; stronger-than-summary, wrong-label and reordered
+position controls stay unproven. The rejected report has zero replay gaps. The actual package
+reader remains outside this example because its `Json::` compiler builtins and `ElisaProofJson`
+calls do not have proof summaries.
 
 ## The "c4 scalar witness" item (BACKLOG B-04)
 
