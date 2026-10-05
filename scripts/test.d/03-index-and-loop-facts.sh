@@ -280,10 +280,10 @@ if [[ "$rejected_counting_loop_measure_status" -ne 1 ]] || ! python3 -c 'import 
     printf 'proof test matrix failed: rejected_counting_loop_measure=%s\n' "$rejected_counting_loop_measure_status" >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] for goal in report["goals"]); assert any(not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_cycle_arena" for finding in report["findings"])'
+run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); summary = report["summary"]; replay = report["replay"]; assert report["status"] == "failed"; assert summary["semantic_errors"] == 0; assert summary["obligations"] == summary["proven"] + summary["unproven"]; assert replay["certificates"] == replay["replayed"] + replay["gaps"]; assert all(not goal["proven"] or goal["replay_status"] == "replayed" for goal in report["goals"]); target = [item for item in report["declaration_details"] if item["name"] == "rejected_cycle_arena"]; assert len(target) == 1 and not target[0]["verified"]; target_findings = [finding["kind"] for finding in report["findings"] if finding["name"] == "rejected_cycle_arena"]; assert "function-summary-unverified" in target_findings'
 arena_cycle_probe_status=${PIPESTATUS[1]}
 if [[ "$arena_cycle_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: cyclic source-neutral arena was not rejected fail-closed\n' >&2
+    printf 'proof test matrix failed: cyclic-arena report accounting or target refusal was inconsistent\n' >&2
     exit 1
 fi
 for malformed_proposition_fixture in rejected_nonbool_hypothesis_reuse rejected_nonbool_opaque_propositions; do

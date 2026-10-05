@@ -81,6 +81,7 @@ run_py_test test_build_dependency_closure.py
 run_py_test test_build_manifest_sidecar_integrity.py
 run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
+run_py_test test_cycle_arena_runtime_rejection.py
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
 # The downstream assertions still check the report's expected shape; this adapter checks that the
