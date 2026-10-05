@@ -51,6 +51,15 @@ for `elisa-proof` and `ddc63640598ab8b73e9d408f4570bdccb351c1ece9cff39b9a61f3612
 partial replay) passed: 16 positive packages plus all 28 adversarial cases; peak sampled RSS was
 26,509,312 bytes, CPU 0.027 seconds, and wall 0.031 seconds.
 
+The subsequently advanced committed `main` was independently rebuilt and exercised from a clean
+isolated worktree at `27f2a3ea50cd5f3807320d3de525da6a846a4e47` (including intervening conditional
+replay changes). Its paired manifests agree on proof source tree
+`8892b7c71e803f8815b947614119e74256442ae7cfe0e82671c2034547003b82` and the Stage1 frontend
+revision. The complete portable replay suite and all 28 adversarial inputs passed again; sampled
+peak RSS was 26,509,312 bytes, CPU 0.024 seconds, and wall 0.031 seconds. The proof binary SHA-256
+is `4eca0a5fb7ef74a563bedddab550855a9690d5c846a8f29f1401eef0d7edc4fa`; the replay binary SHA-256
+is `4181b33041d1165b4d2bf74c98205416e82a70faba9561628b37d823d0ccc75b`.
+
 ## Remaining gaps
 
 This is a deterministic mutation matrix, not coverage-guided fuzzing. It does not yet mutate raw
