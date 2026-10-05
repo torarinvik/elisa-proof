@@ -61,6 +61,7 @@ run_py_test() {
     python3 "$ROOT_DIR/scripts/$name"
 }
 run_py_test test_report_cache_identity.py
+run_py_test test_report_cache_real_equivalence.py
 run_py_test test_p01_baseline.py
 run_py_test test_p05_package_restart.py
 run_py_test test_conditional_ensure_replay_gap.py
