@@ -2368,6 +2368,11 @@ These are measurement gates, not optimization claims. Complete them before broad
     compositional call, region/ownership, arithmetic widths, quantifier, loop, fact growth,
     certificate-only replay, summary/full serialization, no-op build, local edit and transitive edit.
     Pin bytes/hash, expected obligations/status/trust, proof/replay counts, budgets and compiler ID.
+    The P-01 corpus now includes a branch-join proof and an adjacent false-claim/stale-fact refusal,
+    with pinned obligation details and standard-bounded limits. Their focused manifest regression
+    passes; direct fixture outcomes were checked on an older dirty published pair, and a one-round
+    corpus smoke remains incomplete because `qualified_constants` has replay gaps. See
+    [`docs/evidence/2026-10-05-r011-branch-join-workload.md`](docs/evidence/2026-10-05-r011-branch-join-workload.md).
 14. **P1.2 — Complete per-run phase/work accounting (R-010/R-012).** Define counter owner, unit,
     scope, reset, overflow and inclusive/exclusive semantics. Count nodes, declarations, obligations,
     fact scans, comparisons, index probes/collisions, candidate attempts, substitutions, rewrites,
