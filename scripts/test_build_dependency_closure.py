@@ -21,14 +21,28 @@ def digest(snapshot: Path, main: str) -> str:
 
 
 def identity(snapshot: Path, main: str, compiler: Path, clang: str, link_input: Path,
-             output: Path, environment=None) -> str:
-    result = subprocess.run(
-        ["python3", str(MANIFEST), "--identity-only", "--identity-root", str(snapshot),
+             output: Path, environment=None, recipe: Path = None) -> str:
+    command = ["python3", str(MANIFEST), "--identity-only", "--identity-root", str(snapshot),
          "--identity-main", main, "--identity-object-key", "object-key",
          "--identity-compiler", str(compiler), "--identity-compiler-product", str(compiler),
          "--identity-clang", clang, "--identity-link-input", str(link_input),
-         "--identity-link-flags=-dead_strip", "--identity-output", str(output)],
-        check=True, capture_output=True, text=True, env=environment,
+         "--identity-link-flags=-dead_strip", "--identity-output", str(output)]
+    if recipe is not None:
+        command.extend(["--identity-recipe", str(recipe)])
+    result = subprocess.run(command, check=True, capture_output=True, text=True, env=environment)
+    return result.stdout.strip()
+
+
+def env_digest(environment=None) -> str:
+    result = subprocess.run(["python3", str(MANIFEST), "--effective-env-digest"],
+                            check=True, capture_output=True, text=True, env=environment)
+    return result.stdout.strip()
+
+
+def recipes_digest(recipe: Path) -> str:
+    result = subprocess.run(
+        ["python3", str(MANIFEST), "--recipes-digest", "--recipe-path", str(recipe)],
+        check=True, capture_output=True, text=True,
     )
     return result.stdout.strip()
 
@@ -60,18 +74,41 @@ with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
         fake_compiler.write_bytes(b"compiler")
         linked = base / "linked.o"
         linked.write_bytes(b"hooks")
+        recipe = base / "build.sh"
+        recipe.write_text("build recipe v1\n")
+        first_recipe_digest = recipes_digest(recipe)
         output = base / "proof-bin"
         output.write_bytes(b"binary")
         proof_identity = identity(proof, "src/replay_main.elisa", fake_compiler,
-                                  clang, linked, output)
+                                  clang, linked, output, recipe=recipe)
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output) == proof_identity
+                        clang, linked, output, recipe=recipe) == proof_identity
         build_jobs_env = dict(os.environ, ELISA_PROOF_BUILD_JOBS="9")
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output, build_jobs_env) == proof_identity
+                        clang, linked, output, build_jobs_env, recipe) == proof_identity
+        unrelated_env = dict(os.environ, CODEX_THREAD_ID="different-session", TERM="vt100")
+        assert identity(proof, "src/replay_main.elisa", fake_compiler,
+                        clang, linked, output, unrelated_env, recipe) == proof_identity
+        relevant_env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="12.0")
+        assert identity(proof, "src/replay_main.elisa", fake_compiler,
+                        clang, linked, output, relevant_env, recipe) != proof_identity
+        target_env = dict(os.environ, ELISA_TARGET_TRIPLE="aarch64-unknown-test")
+        assert identity(proof, "src/replay_main.elisa", fake_compiler,
+                        clang, linked, output, target_env, recipe) != proof_identity
+        path_env = dict(os.environ, PATH="/p03-other-tools:" + os.environ.get("PATH", ""))
+        sdk_env = dict(os.environ, SDKROOT="")
+        assert env_digest(build_jobs_env) == env_digest(unrelated_env)
+        assert env_digest(unrelated_env) != env_digest(relevant_env)
+        assert env_digest(unrelated_env) != env_digest(target_env)
+        assert env_digest(unrelated_env) != env_digest(path_env)
+        assert env_digest(unrelated_env) != env_digest(sdk_env)
         linked.write_bytes(b"changed hooks")
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output) != proof_identity
+                        clang, linked, output, recipe=recipe) != proof_identity
+        recipe.write_text("build recipe v2\n")
+        assert recipes_digest(recipe) != first_recipe_digest
+        assert identity(proof, "src/replay_main.elisa", fake_compiler,
+                        clang, linked, output, recipe=recipe) != proof_identity
 
         manifest = base / "proof-bin.manifest.json"
         manifest.write_text(json.dumps({"build_identity": proof_identity,
