@@ -150,8 +150,8 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
     # the manifest can record that checkout's revision instead of none.
     if [[ -n "${ELISA_STAGE1_ROOT:-}" ]]; then
         stage1_root="$ELISA_STAGE1_ROOT"
-    elif [[ -n "${driver:-}" ]]; then
-        stage1_root="${driver%/scripts/elisac_stage1.sh}"
+    elif [[ -n "${ELISA_RESOLVED_STAGE1_ROOT:-}" ]]; then
+        stage1_root="$ELISA_RESOLVED_STAGE1_ROOT"
     elif [[ -f "${HOME}/.elisac/stage1/SNAPSHOT" ]]; then
         stage1_root="${HOME}/.elisac/stage1"
     fi

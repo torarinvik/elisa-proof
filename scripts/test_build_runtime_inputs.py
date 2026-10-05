@@ -65,6 +65,24 @@ with tempfile.TemporaryDirectory(prefix="elisa runtime input ") as directory:
                   ELISA_COMPILER_SRC=source_alias)
     assert run.returncode == 0 and run.stdout == f"runtime={root_runtime}\n", (run.stdout, run.stderr)
 
+    # Runtime and provenance must resolve the same root, even with a runtime override.
+    def resolved_root(compiler, is_stage0, **variables):
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ("ELISA_RUNTIME_OBJ", "ELISA_COMPILER_SRC", "ELISA_COMPILER_ROOT")}
+        environment.update({key: str(value) for key, value in variables.items()})
+        command = ('source "$1"; elisa_resolve_runtime_obj "$2" "$3" || exit $?; '
+                   'printf "%s" "$ELISA_RESOLVED_STAGE1_ROOT"')
+        process = subprocess.run(["bash", "-c", command, "root-test",
+                                  str(ROOT / "scripts/runtime_inputs.sh"), str(compiler), str(is_stage0)],
+                                 env=environment, capture_output=True, text=True, timeout=5)
+        assert process.returncode == 0, process.stderr
+        return process.stdout
+
+    assert resolved_root(bare_stage1, 0, ELISA_COMPILER_SRC=source_root) == str(source_root)
+    assert resolved_root(bare_stage1, 0, ELISA_COMPILER_ROOT=root_precedence,
+                         ELISA_COMPILER_SRC=source_alias, ELISA_RUNTIME_OBJ=source_runtime) == str(root_precedence)
+    assert resolved_root(bare_stage1, 1, ELISA_COMPILER_SRC=source_root) == ""
+
     # A binary that embeds the freshness-guarded wrapper path keeps that wrapper's root.
     wrapper = source_root / "scripts/elisac_stage1.sh"
     embedded_stage1 = temp / "embedded/elisac-stage1"
@@ -80,6 +98,8 @@ with tempfile.TemporaryDirectory(prefix="elisa runtime input ") as directory:
     touch(wrapper)
     run = resolve(wrapper, home)
     assert run.returncode == 0 and run.stdout == f"runtime={source_runtime}\n", (run.stdout, run.stderr)
+    assert resolved_root(wrapper, 0, ELISA_COMPILER_SRC=other_root) == str(source_root)
+    assert resolved_root(embedded_stage1, 0, ELISA_COMPILER_SRC=other_root) == str(source_root)
 
     # A known but incomplete wrapper must not silently borrow the unrelated HOME runtime.
     broken_wrapper_root = temp / "broken wrapper root"

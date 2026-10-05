@@ -11,6 +11,7 @@ elisa_resolve_runtime_obj() {
 
     RUNTIME_OBJ=""
     COMPILER_IS_STAGE1=0
+    ELISA_RESOLVED_STAGE1_ROOT=""
     if [[ "$compiler_is_stage0" -ne 1 ]]; then
         driver="$(grep -o '/[^\"]*/scripts/elisac_stage1\.sh' "$compiler" 2>/dev/null | head -1 || true)"
         if [[ -z "$driver" && "$(basename "$compiler")" == "elisac_stage1.sh" ]]; then
@@ -18,6 +19,11 @@ elisa_resolve_runtime_obj() {
         fi
         if [[ -n "$driver" || "$(basename "$compiler")" == "elisac-stage1" ]]; then
             COMPILER_IS_STAGE1=1
+        fi
+        if [[ -n "$driver" ]]; then
+            ELISA_RESOLVED_STAGE1_ROOT="${driver%/scripts/elisac_stage1.sh}"
+        elif [[ "$COMPILER_IS_STAGE1" -eq 1 && -n "$compiler_root" ]]; then
+            ELISA_RESOLVED_STAGE1_ROOT="$compiler_root"
         fi
     fi
 
