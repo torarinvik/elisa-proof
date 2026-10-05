@@ -10,16 +10,25 @@ that source slice with canonical resolved/typed declaration bytes under a new sc
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import sys
+import tempfile
 
 
 SCHEMA = "elisa-proof-declaration-artifact-v1"
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+STORE_SCHEMA = "elisa-proof-declaration-artifact-store-v1"
+MAX_RECORD_BYTES = 1024 * 1024
+MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+MAX_STORE_FILE_BYTES = MAX_RECORD_BYTES + 4 * ((MAX_PAYLOAD_BYTES + 2) // 3) + 4096
 
 
 def is_sha256(value: object) -> bool:
@@ -237,6 +246,123 @@ def validate_artifact_record(record: dict, current_manifest: dict,
     return validate_record_for_source(record, current_manifest, source_slice) \
         and record.get("payload_sha256") == sha256_bytes(payload) \
         and record.get("dependencies") == current_dependencies
+
+
+def _store_path(store_dir: Path, artifact_sha256: str) -> Path:
+    if not is_sha256(artifact_sha256):
+        raise ValueError("artifact identity must be a lowercase SHA-256 digest")
+    return store_dir / f"{artifact_sha256}.json"
+
+
+def _encode_store_entry(record: dict, payload: bytes) -> bytes:
+    record_bytes = canonical_bytes(record)
+    if len(record_bytes) > MAX_RECORD_BYTES:
+        raise ValueError("declaration artifact record exceeds the store size limit")
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        raise ValueError("declaration artifact payload exceeds the store size limit")
+    envelope = {
+        "schema": STORE_SCHEMA,
+        "record": record,
+        "payload_base64": base64.b64encode(payload).decode("ascii"),
+    }
+    encoded = canonical_bytes(envelope)
+    if len(encoded) > MAX_STORE_FILE_BYTES:
+        raise ValueError("declaration artifact entry exceeds the store size limit")
+    return encoded
+
+
+def publish_artifact(store_dir: Path, record: dict, current_manifest: dict,
+                     source_slice: bytes, payload: bytes,
+                     current_dependencies: list[dict]) -> Path:
+    """Atomically publish a verified immutable artifact, returning its content-addressed path.
+
+    A single bounded JSON file holds both the integrity envelope and payload. The temporary
+    file is fsynced and hard-linked into place, so readers see either no entry or a complete
+    entry and an existing artifact can never be overwritten.
+    """
+    if not isinstance(payload, bytes) or not isinstance(source_slice, bytes):
+        raise ValueError("source slice and payload must be bytes")
+    if not validate_artifact_record(record, current_manifest, source_slice, payload,
+                                    current_dependencies):
+        raise ValueError("declaration artifact identity validation failed")
+    entry = _encode_store_entry(record, payload)
+    destination = _store_path(Path(store_dir), record["artifact_sha256"])
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact-", suffix=".tmp",
+                                                   dir=destination.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(entry)
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            # Idempotent publication is allowed only when the existing complete entry verifies.
+            old_record, old_payload = read_artifact(
+                destination.parent, record["artifact_sha256"], current_manifest,
+                source_slice, current_dependencies
+            )
+            if old_record != record or old_payload != payload:
+                raise ValueError("immutable declaration artifact path contains different data")
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return destination
+
+
+def read_artifact(store_dir: Path, artifact_sha256: str, current_manifest: dict,
+                  source_slice: bytes, current_dependencies: list[dict]) -> tuple[dict, bytes]:
+    """Read a bounded store entry and reject every incomplete or stale identity."""
+    if not isinstance(source_slice, bytes) or not isinstance(current_dependencies, list):
+        raise ValueError("current source slice and dependencies have invalid types")
+    path = _store_path(Path(store_dir), artifact_sha256)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError("declaration artifact entry is missing or unavailable") from error
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_size < 1 \
+                or file_stat.st_size > MAX_STORE_FILE_BYTES:
+            raise ValueError("declaration artifact entry has an invalid size or file type")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            raw = source.read(MAX_STORE_FILE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) != file_stat.st_size or len(raw) > MAX_STORE_FILE_BYTES:
+        raise ValueError("declaration artifact entry is truncated or oversized")
+    try:
+        envelope = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError("declaration artifact entry is not valid JSON") from error
+    if not isinstance(envelope, dict) or envelope.get("schema") != STORE_SCHEMA:
+        raise ValueError("unsupported declaration artifact store schema")
+    record = envelope.get("record")
+    encoded_payload = envelope.get("payload_base64")
+    if not isinstance(record, dict) or not isinstance(encoded_payload, str):
+        raise ValueError("declaration artifact entry is incomplete")
+    if len(canonical_bytes(record)) > MAX_RECORD_BYTES:
+        raise ValueError("declaration artifact record exceeds the store size limit")
+    try:
+        payload = base64.b64decode(encoded_payload, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError("declaration artifact payload encoding is invalid") from error
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        raise ValueError("declaration artifact payload exceeds the store size limit")
+    if record.get("artifact_sha256") != artifact_sha256 or not validate_artifact_record(
+            record, current_manifest, source_slice, payload, current_dependencies):
+        raise ValueError("declaration artifact identities do not match current inputs")
+    return record, payload
 
 
 def main() -> int:

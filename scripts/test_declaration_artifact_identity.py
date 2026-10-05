@@ -68,6 +68,77 @@ with tempfile.TemporaryDirectory(prefix="elisa-declaration-identity-") as tempor
     assert not identity.validate_artifact_record(record, manifest, declaration_source, payload,
                                                  changed_dependencies)
 
+    # Store entries publish atomically as immutable, bounded envelopes and verify every identity
+    # again when read. A failed link leaves no visible partial artifact.
+    store = root / "artifact-store"
+    stored_path = identity.publish_artifact(store, record, manifest, declaration_source,
+                                            payload, dependencies)
+    assert stored_path == store / f"{record['artifact_sha256']}.json"
+    assert identity.read_artifact(store, record["artifact_sha256"], manifest,
+                                  declaration_source, dependencies) == (record, payload)
+    assert identity.publish_artifact(store, record, manifest, declaration_source,
+                                     payload, dependencies) == stored_path
+    try:
+        identity.read_artifact(store, "0" * 64, manifest, declaration_source, dependencies)
+    except ValueError as error:
+        assert "missing" in str(error)
+    else:
+        raise AssertionError("missing declaration artifact was accepted")
+    try:
+        identity.read_artifact(store, record["artifact_sha256"], manifest,
+                               declaration_source, changed_dependencies)
+    except ValueError as error:
+        assert "identities" in str(error)
+    else:
+        raise AssertionError("artifact with stale dependency identities was accepted")
+    try:
+        identity.read_artifact(store, record["artifact_sha256"], manifest,
+                               declaration_source + b"# changed", dependencies)
+    except ValueError as error:
+        assert "identities" in str(error)
+    else:
+        raise AssertionError("artifact for a stale source slice was accepted")
+
+    oversized_store = root / "oversized-store"
+    oversized_store.mkdir()
+    oversized_path = oversized_store / f"{record['artifact_sha256']}.json"
+    with oversized_path.open("wb") as output:
+        output.truncate(identity.MAX_STORE_FILE_BYTES + 1)
+    try:
+        identity.read_artifact(oversized_store, record["artifact_sha256"], manifest,
+                               declaration_source, dependencies)
+    except ValueError as error:
+        assert "size" in str(error)
+    else:
+        raise AssertionError("oversized declaration artifact was read")
+
+    interrupted_store = root / "interrupted-store"
+    original_link = identity.os.link
+    def fail_link(source: str, destination: str) -> None:
+        raise OSError("simulated interruption before publication")
+    identity.os.link = fail_link
+    try:
+        try:
+            identity.publish_artifact(interrupted_store, record, manifest, declaration_source,
+                                      payload, dependencies)
+        except OSError as error:
+            assert "simulated interruption" in str(error)
+        else:
+            raise AssertionError("simulated publication interruption was ignored")
+    finally:
+        identity.os.link = original_link
+    assert not (interrupted_store / f"{record['artifact_sha256']}.json").exists()
+    assert not list(interrupted_store.glob("*.tmp"))
+
+    stored_path.write_bytes(b'{"schema":"elisa-proof-declaration-artifact-store-v1"')
+    try:
+        identity.read_artifact(store, record["artifact_sha256"], manifest,
+                               declaration_source, dependencies)
+    except ValueError as error:
+        assert "JSON" in str(error)
+    else:
+        raise AssertionError("truncated declaration artifact was accepted")
+
     # The compiler C-04 frontend identity is bound through the canonical build manifest.
     changed_frontend = json.loads(json.dumps(manifest))
     changed_frontend["frontend"]["tree"] = digest(b"new frontend tree")
