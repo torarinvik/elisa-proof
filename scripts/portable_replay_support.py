@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 __all__ = (
@@ -17,8 +18,29 @@ if not __debug__:
     raise SystemExit("portable replay checks must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
+
+
+def resolve_products():
+    """Select one published product generation, or honor an explicit paired override."""
+    proof_override = os.environ.get("ELISA_PROOF_BIN")
+    replay_override = os.environ.get("ELISA_PROOF_REPLAY_BIN")
+    if proof_override or replay_override:
+        if not proof_override or not replay_override:
+            raise RuntimeError("portable replay requires both ELISA_PROOF_BIN and ELISA_PROOF_REPLAY_BIN")
+        return Path(proof_override), Path(replay_override)
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/verify_product_pair.py"), "resolve",
+         "--generation-root", os.environ.get("ELISA_PROOF_GENERATION_ROOT",
+                                               str(ROOT / "build/elisa-proof-generations"))],
+        capture_output=True, text=True, check=True,
+    )
+    products = json.loads(result.stdout)["products"]
+    return (Path(products["elisa-proof"]["binary"]),
+            Path(products["elisa-proof-replay"]["binary"]))
+
+
+BINARY, REPLAY = resolve_products()
 WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-portable-"))
 
 TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapter",

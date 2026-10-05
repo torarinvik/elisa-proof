@@ -227,6 +227,7 @@ run_py_test test_monotone_orders.py
 run_py_test test_replay_construct_arguments.py
 run_py_test test_negated_guard_orders.py
 run_py_test test_nested_early_return_guards.py
+python3 "$ROOT_DIR/scripts/tests/test_portable_replay_generation_resolution.py"
 run_py_test test_portable_replay.py
 python3 "$ROOT_DIR/scripts/tests/test_portable_package_byte_boundaries.py"
 python3 "$ROOT_DIR/scripts/tests/test_portable_package_string_budget.py"
