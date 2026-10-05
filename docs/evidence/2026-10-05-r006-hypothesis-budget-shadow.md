@@ -58,3 +58,15 @@ at least 65,588 (+52 bytes), which would allow the canonical 4,097 string to rea
 hypothesis gate. This also raises the general per-string/copy-pool allowance by 52 bytes; it does
 not materially change the package-wide 64 MiB identity budget. R-006 remains open pending a
 reviewed policy choice or a revised test contract.
+
+## Post-integration rerun
+
+After integrating the new cap-shadow controls with the existing node text-schema mutations, the
+full `scripts/test_portable_replay.py` suite was rerun from proof checkout HEAD `b85f4ac9`, using
+the same explicit product pair and its unchanged `414e5693` source identity. The merged harness
+SHA-256 was `7f98162a0a31b335c1cb3d1807bdc144953d1747c146c970c63744182e08c1dd`. It exited 0: all 16
+positive packages replayed, all 512 raw-byte cases completed (three remained valid), and the
+structure-aware cap, schema, and malformed-package controls passed with no crashes or partial
+theorem replay. The structure-aware run peaked at 0.033 seconds wall, 0.030 seconds CPU, and
+26,525,696 bytes RSS. This rerun validates the integrated test harness against that older pair; it
+does not establish behavior of proof products built from current HEAD.
