@@ -58,13 +58,26 @@ code, false_over_limit = run(late_premise(13, dishonest=True))
 assert code == 1 and false_over_limit["status"] == "failed", false_over_limit["summary"]
 assert all(finding["status"] != "proved" for finding in false_over_limit["findings"])
 
-# Exercise eight and nine earlier disjunction candidates. The final premise is
-# relevant and replay must independently validate the proof even when producer
-# entailment stops after its candidate budget.
+# Put a relevant fact after eight and nine irrelevant disjunctions. The call
+# goal also exercises the independent replay path; a bounded scan may decline
+# to use the late fact, while another complete rule can still certify it.
 for candidate_count in (8, 9):
-    lines = ["def candidates(accepted: bool, denied: bool) -> bool:", "    requires not denied"]
+    lines = [
+        "def identity(value: bool) -> bool:",
+        "    ensure result == value",
+        "    return value",
+        "",
+        "def candidates(accepted: bool) -> bool:",
+    ]
     lines.extend("    requires true or false" for _ in range(candidate_count))
-    lines.extend(["    requires accepted or denied", "    ensure result", "    return accepted", ""])
+    lines.extend(
+        [
+            "    requires identity(accepted) or false",
+            "    ensure identity(accepted)",
+            "    return accepted",
+            "",
+        ]
+    )
     code, report = run("\n".join(lines))
     assert code == 0 and report["status"] == "proved", report["findings"]
 
