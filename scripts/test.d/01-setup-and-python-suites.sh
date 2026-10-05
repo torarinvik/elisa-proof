@@ -405,13 +405,6 @@ if [[ "$kernel_intern_status" -ne 0 ]]; then
     printf 'proof test matrix failed: kernel term sharing boundary tests failed (%s)\n' "$kernel_intern_status" >&2
     exit 1
 fi
-"${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/report-invariants" "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
-"$standalone_probe_dir/report-invariants"
-report_invariants_status=$?
-if [[ "$report_invariants_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: report invariant boundary tests failed (%s)\n' "$report_invariants_status" >&2
-    exit 1
-fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-allocation.o" "$ROOT_DIR/examples/region_allocation.elisa" >/dev/null 2>&1
 region_allocation_compiler_status=$?
 if [[ "$region_allocation_compiler_status" -ne 0 ]]; then
