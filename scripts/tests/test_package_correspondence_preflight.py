@@ -89,6 +89,31 @@ with tempfile.TemporaryDirectory(prefix="elisa-package-correspondence-preflight-
     assert positive["package"]["theorems"] == positive["package"]["replayed"] > 0, positive
     assert positive["summary"]["coverage"] == "complete", positive
 
+    # The correspondence CLI is a separate package ingress. Duplicate keys that can change
+    # format, source-admission, or trust interpretation must fail before it reports any theorem.
+    package_text = package_run.stdout.decode("utf-8")
+    duplicate_key_payloads = (
+        package_text.replace(
+            '"format":"elisa-proof-package-v1"',
+            '"format":"elisa-proof-package-v1","\\u0066ormat":"elisa-proof-package-v1"',
+            1,
+        ),
+        package_text.replace(
+            '"authenticated":false', '"authenticated":false,"authenticated":false', 1,
+        ),
+        package_text.replace(
+            '"hypotheses":"adapter"', '"hypotheses":"adapter","hypotheses":"adapter"', 1,
+        ),
+    )
+    for index, duplicate_payload in enumerate(duplicate_key_payloads):
+        assert duplicate_payload != package_text, index
+        duplicate_path = work / ("duplicate-key-%d.json" % index)
+        duplicate_path.write_text(duplicate_payload, encoding="utf-8")
+        assert_package_wide_error(
+            run("--correspondence", duplicate_path, SOURCE), "malformed",
+            ("package-schema", "source-schema", "trust-schema")[index],
+        )
+
     malformed_path = work / "malformed.json"
     malformed_path.write_bytes(b'{"format":')
     assert_package_wide_error(
