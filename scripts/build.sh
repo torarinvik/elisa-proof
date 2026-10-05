@@ -236,7 +236,7 @@ object_key_of() {
     local main="$1" dependencies
     [[ -n "$compiler_digest" ]] || return 0
     dependencies="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --dependency-root "$SNAPSHOT_ROOT" --dependency-main "$main")" || return $?
-    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1" "$(uname -smr)"
+    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1"
         printf '%s\n' "$dependencies"; } | shasum -a 256 | cut -d' ' -f1
 }
 build_identity_of() {

@@ -110,14 +110,23 @@ else:
             log.write('link\\n')
         output.write_bytes(b'fixture-binary')
 """)
-    for executable in (mock_compiler, mock_clang):
+    mock_uname = tools / "uname"
+    mock_uname.write_text("""#!/bin/sh
+if [ "$1" = "-smr" ]; then
+    printf 'fixture-system fixture-machine %s\\n' "$MOCK_UNAME_RELEASE"
+else
+    exec /usr/bin/uname "$@"
+fi
+""")
+    for executable in (mock_compiler, mock_clang, mock_uname):
         executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
     environment = dict(os.environ, ELISA_COMPILER_BIN=str(mock_compiler),
                        ELISA_COMPILER_SRC=str(compiler), ELISA_COMPILER_REV=revision,
                        ELISA_CLANG=str(mock_clang), ELISA_PROOF_PRODUCTS="all",
                        ELISA_PROOF_OBJECT_CACHE="0", MOCK_COMPILER_LOG=str(compiler_log),
-                       MOCK_CLANG_LOG=str(clang_log))
+                       MOCK_CLANG_LOG=str(clang_log), MOCK_UNAME_RELEASE="release-one",
+                       PATH=str(tools) + os.pathsep + os.environ["PATH"])
     build = proof / "scripts/build.sh"
     initial = subprocess.run([str(build)], cwd=proof, env=environment,
                              capture_output=True, text=True)
@@ -143,6 +152,15 @@ else:
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
     after = product_state()
     assert after == before, (initial.stderr, after_edit.stderr)
+
+    changed_kernel = dict(environment, MOCK_UNAME_RELEASE="release-two")
+    after_kernel_change = subprocess.run([str(build)], cwd=proof, env=changed_kernel,
+                                         check=True, capture_output=True, text=True)
+    assert "product src/main.elisa is unchanged" in after_kernel_change.stderr
+    assert "product src/replay_main.elisa is unchanged" in after_kernel_change.stderr
+    assert compiler_log.read_text().splitlines() == ["main.elisa", "replay_main.elisa"]
+    assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
+    assert product_state() == before, (initial.stderr, after_kernel_change.stderr)
 
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
