@@ -90,6 +90,21 @@ and exhaustive decoder-boundary gates.
   `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`, target
   `arm64-apple-darwin27.0.0`). The package reader's decoded-string UTF-8 check remains an
   additional boundary; this policy evidence does not establish parser/checker fuzz coverage.
+- The pinned JSON parser has `JSON_MAX_DEPTH = 256` in `elisacore_std/elisacore_json.elisa` at
+  compiler source revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595` (file blob
+  `fd6661ac5ec12c5a03dc934e2259fc4ee9283cfe`); it increments depth for each array/object and
+  returns `JsonErrorCode.DEPTH_EXCEEDED` above the limit. The package boundary regression places
+  nested arrays in `source` and checks total
+  container depth 255, 256 and 257: below-limit and at-limit inputs parse and return structured
+  `malformed/source-schema`; one-over returns structured `malformed/json`. This confirms there
+  is no missing package-layer nesting cap to add. The test ran against strict pinned O2 proof
+  revision `15560c60aab2540b8fd18137c8d2fd1ed2282e1e`; replay product SHA-256
+  `6664442a5e7de99cd99763b0c1fa2c630c13c69d5215bc0908c485f1aa7e6a84`, proof product SHA-256
+  `54824e53bab5aa7f6c031f3db527dedf1515b44d594f0624cf44e78c65f6bbcb`, pinned Stage1 SHA-256
+  `f77278c716dea7f3dba8f4fcbcf76ecc473426ab3f163c95fea4e358f6337653`, runtime SHA-256
+  `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`, target
+  `arm64-apple-darwin27.0.0`. The parser cap bounds recursive stack depth; this is not a peak
+  memory measurement for the DOM at or near the 64 MiB input-file cap.
 - `goal_id` and `line` are parsed as bounded indexes and echoed as presentation labels, but the
   checker does not establish uniqueness. Their consumer-facing identity semantics need to be
   documented or tested before treating duplicate labels as harmless.
