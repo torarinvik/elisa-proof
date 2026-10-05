@@ -801,6 +801,15 @@ focused test sources. It is source inspection only: construction call sites are 
 no complete transitive root-to-source/compiler/runtime dependency graph or rule soundness map is
 established. R-008 remains open.
 
+**Certificate producer inventory follow-up (2026-10-05):** Commit `fff61c73` makes
+`scripts/test_kernel_inventory.py` discover every function that appends a `ProofGoalCertificate`
+and compare that exact set against `KERNEL_INVENTORY.md`. The first run also exposed two current
+boundary fact kinds missing from the inventory; `deterministic-call` and `match-exhaustiveness`
+are now documented with their source producers and replay checks. The focused inventory check
+passes with 10 source-matched tables and 169 entries. This catches undocumented producer/kind
+additions but does not prove producer soundness, constructor privacy across all APIs, or transitive
+trust closure; R-008 remains open.
+
 #### R-009 — Automate soundness-incident and artifact invalidation policy
 
 **Change:** Version rule semantics and source-admission identities; introduce a documented affected-version registry and cache/package refusal or mandatory-replay policy. Preserve reproducer, exact product, trust boundary and downstream theorem impact for every confirmed incident. Reuse existing identity controls.
