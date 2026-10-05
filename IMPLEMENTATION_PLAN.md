@@ -645,6 +645,13 @@ complete.
 
 **Gate:** Every admitted root exposes its transitive trust dependencies; no solver or tactic success enters as an unlabeled axiom. Review specialized checkers as TCB even when outside `kernel_core.elisa`.
 
+**Progress (2026-10-05):** The starting register in
+`docs/evidence/2026-10-05-r008-trust-register.md` maps the visible logical, resource, effect,
+structural, tactic and portable-package admission paths and records their current trust labels and
+focused test sources. It is source inspection only: construction call sites are not exhaustive and
+no complete transitive root-to-source/compiler/runtime dependency graph or rule soundness map is
+established. R-008 remains open.
+
 #### R-009 — Automate soundness-incident and artifact invalidation policy
 
 **Change:** Version rule semantics and source-admission identities; introduce a documented affected-version registry and cache/package refusal or mandatory-replay policy. Preserve reproducer, exact product, trust boundary and downstream theorem impact for every confirmed incident. Reuse existing identity controls.
