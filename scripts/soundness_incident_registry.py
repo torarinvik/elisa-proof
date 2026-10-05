@@ -59,7 +59,7 @@ def validate(registry):
                 if not _object(product, {"kind", "identity", "sha256"}):
                     errors.append(f"{product_prefix} has missing or unknown fields")
                     continue
-                if product["kind"] not in PRODUCT_KINDS:
+                if not isinstance(product["kind"], str) or product["kind"] not in PRODUCT_KINDS:
                     errors.append(f"{product_prefix}.kind is unsupported")
                 if not isinstance(product["identity"], str) or not product["identity"].strip():
                     errors.append(f"{product_prefix}.identity is required")

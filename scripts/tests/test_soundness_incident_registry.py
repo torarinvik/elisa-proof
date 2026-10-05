@@ -41,6 +41,7 @@ for mutate in (
     lambda item: item["affected_products"].clear(),
     lambda item: item["affected_products"][0].update(sha256="not-a-digest"),
     lambda item: item["affected_products"][0].update(kind="unknown"),
+    lambda item: item["affected_products"][0].update(kind=[]),
     lambda item: item["evidence"].update(sha256="not-a-digest"),
     lambda item: item.update(unsupported_claim=True),
 ):
