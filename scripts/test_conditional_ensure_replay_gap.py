@@ -34,4 +34,20 @@ for source, current_replay in CASES:
         assert replay["certificates"] == replay["replayed"], (source, replay)
         assert declaration["verified"] is True, (source, declaration)
 
-print("minimal and Slide.inner conditional ensure gaps are refused, or fully replayed after a fix")
+bad_source = ROOT / "test/repro/minimal_conditional_ensure_bad_guard.elisa"
+bad_run = subprocess.run([BINARY, "--json", str(bad_source)], capture_output=True, text=True, timeout=20)
+bad_report = json.loads(bad_run.stdout)
+bad_declaration = next(
+    item for item in bad_report["declaration_details"]
+    if item.get("kind") == "function" and item.get("name") == "inner"
+)
+assert bad_run.returncode == 1, (bad_source, bad_run.returncode, bad_report["status"])
+assert bad_report["status"] == "failed", (bad_source, bad_report["status"])
+assert bad_report["replay"]["gaps"] == 0, (bad_source, bad_report["replay"])
+assert bad_declaration["verified"] is False, (bad_source, bad_declaration)
+assert any(
+    item.get("kind") == "ensure-unproven" and item.get("name") == "inner"
+    for item in bad_report["findings"]
+), (bad_source, bad_report["findings"])
+
+print("conditional ensure gaps are refused or fully replayed; the wrong-guard control stays unproved")
