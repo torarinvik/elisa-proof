@@ -11365,3 +11365,18 @@ gaps. The mutable-aggregate `old(field)` control also remains refused after the 
 
 Evidence: `scripts/test_collection_push_count.py` and
 `scripts/test_old_mutable_reference.py`.
+
+## Bounded difference-bound closure (C-01)
+
+The goal-query path constructs a Floyd–Warshall matrix with at most 32 named values plus its
+zero node. The same kernel constant guards producer and independent replay. Existing interval
+propagation remains a fixed-point scan bounded to 33 rounds in both paths; the historical
+four-round limit is no longer present. On strict O2 product
+`ddca51a94f3fe0c0834e7a862046058b4cd9555017e9dc9e7c20f0b1fc222974` (pinned Stage1
+`7b27fa312c5af923f044f6ee0e5e1de4f811f595`), the 32-name chain proves and all 10 certificates
+replay; a relevant 33-name chain remains unproven with zero replay gaps. The focused gate also
+asserts the runtime stays below its 60-second budget.
+
+Evidence: `scripts/test_long_difference_chain.py`,
+`examples/long_difference_chain.elisa`, and
+`examples/rejected_long_difference_chain.elisa`.
