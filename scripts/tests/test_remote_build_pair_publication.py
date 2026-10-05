@@ -26,7 +26,10 @@ def main() -> None:
     assert '--proof-manifest "$stage/elisa-proof.manifest.json"' in script
     assert '--replay-binary "$stage/elisa-proof-replay"' in script
     assert '--replay-manifest "$stage/elisa-proof-replay.manifest.json"' in script
-    assert 'resolve --generation-root build/elisa-proof-generations' in script
+    assert 'pair_json=$(python3 scripts/verify_product_pair.py resolve --generation-root build/elisa-proof-generations)' in script
+    assert 'json.load(sys.stdin)["products"]["elisa-proof"]["binary"]' in script
+    assert '"$proof_binary" examples/verified.elisa' in script
+    assert 'build/elisa-proof examples/verified.elisa' not in script
 
     generation = "a" * 32
     source_identity = {

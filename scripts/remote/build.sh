@@ -86,8 +86,9 @@ status=0
       cp "build/elisa-proof-generations/$generation/$product.manifest.json.sha256" "build/$product.manifest.json.sha256.$generation.tmp"
       mv -f "build/$product.manifest.json.sha256.$generation.tmp" "build/$product.manifest.json.sha256"
     done
-    python3 scripts/verify_product_pair.py resolve --generation-root build/elisa-proof-generations >/dev/null
-    build/elisa-proof examples/verified.elisa >/dev/null'
+    pair_json=$(python3 scripts/verify_product_pair.py resolve --generation-root build/elisa-proof-generations)
+    proof_binary=$(printf "%s\n" "$pair_json" | python3 -c '\''import json,sys; print(json.load(sys.stdin)["products"]["elisa-proof"]["binary"])'\'')
+    "$proof_binary" examples/verified.elisa >/dev/null'
 } || status=$?
 echo "build=$status"
 exit $status
