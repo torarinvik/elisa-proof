@@ -7,6 +7,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "scripts/build_manifest.py"
@@ -87,6 +88,12 @@ output = pathlib.Path(args[args.index('-o') + 1])
 source = pathlib.Path(args[-1])
 with open(__import__('os').environ['MOCK_COMPILER_LOG'], 'a') as log:
     log.write(source.name + '\\n')
+gate = __import__('os').environ.get('MOCK_COMPILER_GATE_DIR')
+if gate:
+    gate = pathlib.Path(gate)
+    (gate / 'entered').touch()
+    while not (gate / 'release').exists():
+        __import__('time').sleep(0.01)
 output.write_bytes(('object:' + source.name).encode())
 """)
     mock_clang = tools / "clang"
@@ -108,6 +115,8 @@ else:
     else:
         with open(os.environ['MOCK_CLANG_LOG'], 'a') as log:
             log.write('link\\n')
+        if os.environ.get('MOCK_FAIL_REPLAY_LINK') == '1' and output.name.endswith('.1'):
+            raise SystemExit(42)
         output.write_bytes(b'fixture-binary')
 """)
     mock_uname = tools / "uname"
@@ -196,6 +205,59 @@ fi
     assert clang_log.read_text().splitlines() == ["hook", "link", "link", "link"]
     refreshed = main_checksum.read_text(encoding="ascii").strip()
     assert refreshed == hashlib.sha256(products[0].with_name(products[0].name + ".manifest.json").read_bytes()).hexdigest()
+
+    # Hold a first build in its compile phase. A second build against the same
+    # output tree must fail at the lock before either can publish products.
+    (proof / "src/main.elisa").write_text('include "./shared.elisa"\nmain changed\n')
+    (proof / "src/replay_main.elisa").write_text("replay changed\n")
+    before_concurrent = product_state()
+    gate = project / "compile-gate"
+    gate.mkdir()
+    gated_environment = dict(environment, MOCK_COMPILER_GATE_DIR=str(gate))
+    first_build = subprocess.Popen([str(build)], cwd=proof, env=gated_environment,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.monotonic() + 20
+    while not (gate / "entered").exists() and time.monotonic() < deadline:
+        if first_build.poll() is not None:
+            stdout, stderr = first_build.communicate()
+            raise AssertionError(f"first build exited before compile gate: {stdout} {stderr}")
+        time.sleep(0.01)
+    assert (gate / "entered").exists(), "first build did not reach compile gate"
+    lock = proof / "build/.elisa-proof-build.lock"
+    assert lock.is_dir()
+    concurrent = subprocess.run([str(build)], cwd=proof, env=environment,
+                                capture_output=True, text=True)
+    assert concurrent.returncode == 2, (concurrent.returncode, concurrent.stdout, concurrent.stderr)
+    assert "another proof build owns" in concurrent.stderr, concurrent.stderr
+    assert product_state() == before_concurrent
+    (gate / "release").touch()
+    first_stdout, first_stderr = first_build.communicate(timeout=30)
+    assert first_build.returncode == 0, (first_stdout, first_stderr)
+    assert not lock.exists()
+    concurrent_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
+                       for path in products]
+    assert concurrent_pair[0]["proof"] == concurrent_pair[1]["proof"]
+    for path in products:
+        manifest = path.with_name(path.name + ".manifest.json")
+        sidecar = path.with_name(path.name + ".manifest.json.sha256")
+        assert sidecar.read_text().strip() == hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    # Failure on replay linking happens after the proof product is installed.
+    # Record the resulting state explicitly: the lock serializes writers, but
+    # publication is not a transaction spanning both products.
+    old_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
+                for path in products]
+    (proof / "src/main.elisa").write_text('include "./shared.elisa"\nmain failed-generation\n')
+    (proof / "src/replay_main.elisa").write_text("replay failed-generation\n")
+    failed_environment = dict(environment, MOCK_FAIL_REPLAY_LINK="1")
+    failed = subprocess.run([str(build)], cwd=proof, env=failed_environment,
+                            capture_output=True, text=True)
+    assert failed.returncode == 42, (failed.returncode, failed.stdout, failed.stderr)
+    assert not lock.exists()
+    failed_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
+                   for path in products]
+    assert failed_pair[0]["proof"]["source_tree_sha256"] != old_pair[0]["proof"]["source_tree_sha256"]
+    assert failed_pair[1] == old_pair[1]
 
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
