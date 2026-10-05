@@ -20,6 +20,13 @@ def report(example, expected_exit, expected_status):
     assert result.returncode == expected_exit, (example, result.returncode, result.stderr)
     parsed = json.loads(result.stdout)
     assert parsed["status"] == expected_status, (example, parsed.get("status"), parsed.get("summary"))
+    for section, fields in (
+        ("replay", ("certificates", "replayed", "gaps")),
+        ("summary", ("semantic_errors", "obligations", "proven", "unproven")),
+    ):
+        for field in fields:
+            counter = parsed[section][field]
+            assert type(counter) is int and counter >= 0, (example, section, field, counter)
     assert parsed["replay"]["certificates"] == parsed["replay"]["replayed"], (example, parsed["replay"])
     assert parsed["replay"]["gaps"] == 0, (example, parsed["replay"])
     return parsed
