@@ -702,6 +702,13 @@ matching attempt. This closes a report-consistency subcase only; expected obliga
 be derived from the original admitted source/declaration schedule and reconciled against every
 terminal status, including unsupported and skipped paths.
 
+Follow-up: source admission now also requires recorded goal attempts to be no more numerous than
+counted obligations. A runtime mutation deletes an open obligation ledger row and its aggregate
+count while retaining the attempted goal; the formerly self-consistent report is refused. This
+binds each remaining attempt to some counted event, but does not detect omission of a source check
+that leaves no attempt, nor coordinated rewrites of source and report. Focused evidence is in
+[`docs/evidence/2026-10-05-r004-open-attempt-bound.md`](docs/evidence/2026-10-05-r004-open-attempt-bound.md).
+
 #### R-005 — Audit source-derived boundary facts and call witnesses
 
 **Change:** Extend the recent source-derived witness work in `check/function_contracts_and_frames.elisa` and `replay/boundary_trace_shapes.elisa`. Inventory initial facts about parameter types, ranges, calls, aliases, effects and resources; replay exact owner, argument position, state version and declaration identity instead of trusting producer bookkeeping.
