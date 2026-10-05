@@ -13,6 +13,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from portable_replay_support import BINARY, REPLAY
 
 INPUT_LIMIT = 64 * 1024 * 1024
+EXACT_INTEGER_BOUND = 1 << 53
+I64_MAX = (1 << 63) - 1
 
 
 def run_bytes(data, path):
@@ -27,6 +29,15 @@ def assert_package_refusal(process, result, status, reason):
     assert result["status"] == status and result["reason"] == reason, result
     assert result["theorems"] == [], result
     assert result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, result
+
+
+def replace_first_integer(data, field, value):
+    pattern = rb'("' + field.encode("ascii") + rb'":)[0-9]+'
+    changed, count = re.subn(pattern,
+                             lambda match: match.group(1) + str(value).encode("ascii"),
+                             data, count=1)
+    assert count == 1, (field, count)
+    return changed
 
 
 def main():
@@ -48,6 +59,27 @@ def main():
             "replayed": len(package["theorems"]),
             "not_replayed": 0,
         }, positive_result
+
+        # The largest integer admitted by the package's strict binary64 bound remains exact in
+        # both source metadata and the theorem's echoed numeric label.
+        largest_exact = replace_first_integer(exported.stdout, "bytes", EXACT_INTEGER_BOUND - 1)
+        largest_exact = replace_first_integer(largest_exact, "goal_id", EXACT_INTEGER_BOUND - 1)
+        exact_process, exact_result = run_bytes(largest_exact, work / "largest-exact-index.json")
+        assert exact_process.returncode == 0 and exact_result["status"] == "replayed", exact_result
+        assert exact_result["theorems"][0]["goal_id"] == EXACT_INTEGER_BOUND - 1, exact_result
+        assert exact_result["summary"]["replayed"] == len(package["theorems"]), exact_result
+
+        # Integers at/above 2^53 may be rounded by the DOM, so every package index-like path must
+        # refuse them before publication. `bytes` is source metadata; `left` and `children_count`
+        # exercise a node index and span count. The refusal is malformed schema, not over-budget
+        # or a replay rejection.
+        for field, reason in (("bytes", "source-schema"),
+                              ("left", "node-schema"),
+                              ("children_count", "node-schema")):
+            for value in (EXACT_INTEGER_BOUND, EXACT_INTEGER_BOUND + 1, I64_MAX):
+                mutation = replace_first_integer(exported.stdout, field, value)
+                process, result = run_bytes(mutation, work / f"{field}-{value}.json")
+                assert_package_refusal(process, result, "malformed", reason)
 
         # A fractional conclusion index rounds to its original integer in the JSON DOM's f64
         # representation. It must be malformed before any theorem can be published.
@@ -98,8 +130,9 @@ def main():
         assert oversized_process.returncode == 2 and oversized_result["status"] == "unreadable", oversized_result
         assert len(oversized_process.stdout) < 4096, len(oversized_process.stdout)
 
-    print("portable package numeric encoding: exact positive replay; rounded fractional index malformed; "
-          "budget/rejection classes distinct; package-wide failures publish no theorem; input cap enforced")
+    print("portable package numeric encoding: 2^53-1 preserved; rounded fractions and oversized "
+          "integer metadata/index/count fields malformed; budget/rejection classes distinct; "
+          "package-wide failures publish no theorem; input cap enforced")
 
 
 if __name__ == "__main__":
