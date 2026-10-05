@@ -126,14 +126,33 @@ source digest `1f273bf1ec466404c40a5d3f86f0654a6c42df0679541f0f1b1fd06366411ee9`
 Stage1 revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`, and runtime object SHA-256
 `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897` for target
 `arm64-apple-darwin27.0.0`. The typed-unsigned report control passed on this exact binary with
-complete replay. Its balance and lexer profiles are in progress. Earlier `ad1888…` profiles remain
-historical and must not be attributed to the current source. No optimization or paired
-uninstrumented speedup is established yet.
+complete replay.
+
+On this exact product, `balance.elisa` completed three instrumented runs at 10.37, 13.34 and
+16.80 seconds. All three reports were complete and proved/replayed 240/240 obligations with zero
+gaps; stdout was 9,882,857 bytes. The matching pinned compiler lexer source
+(`src/lexer/lexer.elisa`, SHA-256
+`790f7e89330800c19c85b4a9e6e23259877cf5bc561a9f7700dedb451a6456e9`) completed one expected
+refusal run in 50.63 seconds: 326 obligations, 110 proven, 216 unproven, 110/110 certificates
+replayed, zero gaps, and complete 1,915,250-byte output. Its profiler sidecar is marked partial
+because the valid refusal exits 1; capture itself completed with zero dropped frames.
+
+Function/event/call-edge/location/timing data is complete for both. Stack detail is partial under
+the 16 MiB cap: 288,437,385 balance stack records and 181,588,070 lexer stack records were dropped.
+The function profiles repeatedly show `proof_kernel_replay_valid`, `root_valid`, witness-marker
+candidate extraction, replay goal/depth/report work, and arena helpers as hotspots. These are
+instrumented discovery signals, not speed claims. The raw JSON, sidecars, exact identity records,
+and commands are in `/private/tmp/elisa-p06-profile-20261005-recovered/` (`balance-final-functions.json`,
+`lexer-final-functions.json`, and `identity-final-after-profile.json`). The earlier `ad1888…`
+profiles remain historical and are not attributed to the current source. No optimization or paired
+uninstrumented speedup is established yet; the known `track` 300-second timeout remains a separate
+bounded failure and was not repeated.
 
 ## Acceptance status
 
-These slices provide bounded, identity-bound build, baseline, cache and census evidence. They do
-not complete P-00, P-01's full corpus/phase counters, P-02 equivalence controls, P-04, P-05, P-06
-or P-07. Required remaining work includes a minimized crash/replay regression, session-backed
-incremental reuse, canonical identities and invalidation, current profiling, source-justified
-support repairs, Linux qualification and immutable-snapshot full gates.
+These slices provide bounded, identity-bound build, baseline, cache, profiling and census evidence.
+They do not complete P-00, P-01's full corpus/phase counters, P-02 equivalence controls, P-04, P-05,
+P-06 or P-07. Required remaining work includes the historical crash's root cause and platform
+matrix, session-backed incremental reuse, canonical identities and invalidation, a measured
+hot-path change with paired uninstrumented results, current source-justified support repairs, Linux
+qualification and immutable-snapshot full gates.
