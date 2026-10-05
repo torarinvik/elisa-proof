@@ -58,6 +58,26 @@ for bad in ("01", "-0", "+1", "", " 1", "9223372036854775808", "-922337203685477
 claim = with_theorem(base, assumption)
 claim["kernel"]["nodes"][0]["value"] = 0
 refused(claim, "value-number", "malformed", "node-schema")
+# A bool node's payload has two decoder boundaries: its JSON field must be the package's
+# canonical decimal string, and the admitted kernel value must be exactly 0 or 1. Keep the
+# malformed node reachable from a well-formed theorem so this exercises complete package replay.
+for bad in (True, 1, None, [], {}):
+    claim = copy.deepcopy(base)
+    boolean_root = append_node(claim, "bool", value=bad)
+    theorem = copy.deepcopy(assumption)
+    theorem["hypotheses"] = [boolean_root]
+    theorem["conclusion"] = boolean_root
+    claim["theorems"] = [reseal(claim, theorem)]
+    refused(claim, "bool-payload-type-%s" % (type(bad).__name__,),
+            "malformed", "node-schema")
+for bad in ("-1", "2", "9223372036854775807"):
+    claim = copy.deepcopy(base)
+    boolean_root = append_node(claim, "bool", value=bad)
+    theorem = copy.deepcopy(assumption)
+    theorem["hypotheses"] = [boolean_root]
+    theorem["conclusion"] = boolean_root
+    claim["theorems"] = [reseal(claim, theorem)]
+    refused(claim, "bool-payload-range-" + bad, "malformed", "arena-inadmissible")
 for bad in (1.5, -1, 2**53, "3", True):
     claim = with_theorem(base, assumption)
     claim["theorems"][0]["conclusion"] = bad
