@@ -242,9 +242,8 @@ fi
         sidecar = path.with_name(path.name + ".manifest.json.sha256")
         assert sidecar.read_text().strip() == hashlib.sha256(manifest.read_bytes()).hexdigest()
 
-    # Failure on replay linking happens after the proof product is installed.
-    # Record the resulting state explicitly: the lock serializes writers, but
-    # publication is not a transaction spanning both products.
+    # Failure on replay linking happens before either staged product is installed.
+    # The previous coherent pair must remain byte-for-byte and timestamp-identical.
     old_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
                 for path in products]
     before_failed_build = product_state()
