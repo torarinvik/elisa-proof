@@ -41,6 +41,11 @@ return_witnesses = [
 assert len(return_witnesses) == 1, return_witnesses
 assert return_witnesses[0]["name"] == "r", return_witnesses[0]
 assert return_witnesses[0]["secondary_name"] == "second", return_witnesses[0]
+return_site = return_witnesses[0]["left"]
+assert return_site < len(positive["kernel"]["nodes"]), return_witnesses[0]
+site_node = positive["kernel"]["nodes"][return_site]
+assert site_node["kind"] == "resource-call", site_node
+assert site_node["name"] == "choose_sview_first", site_node
 
 # Replay the actual persisted certificate in a separate, source-independent process. Then alter
 # the exact owner and lifetime claims while keeping the theorem/proof package otherwise intact.
