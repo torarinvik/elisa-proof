@@ -260,11 +260,16 @@ adapter's mapping from compiler-checked declarations to this environment remains
     `T[N]`) to their element, and from loop binders — a counting-range binder is an integer, and
     a binder over a container whose element witness has depth one inherits the scalar witness;
     both are keyed by the binder's proof atom. Each witness is retained and invalidated with its
-    root symbol. A call is witnessed only when the callee is a verified
-    total-pure function with a scalar declared return type and every argument is witnessed: that
-    classification is what makes two occurrences of the call text one value. An opaque call, a
-    subscript on a struct (an `__index__` protocol call), a plain enum, a reference to a scalar,
-    and every aggregate stay unwitnessed.
+    root symbol. A call is witnessed only when the callee is a verified total-pure function, or a
+    source-checked deterministic function with no effects, mutable-global reads, or mutable
+    parameters; the return type is scalar and every argument is witnessed (or is a fixed value
+    binding). Replay re-derives the deterministic callee's acyclic call graph, effect rows,
+    parameter and return types, and mutable-global reads from source declarations. This marker is
+    added only after an executable call whose preconditions have already been established; it
+    grants stable value identity while the arguments stay stable, not trust in an unverified
+    contract. Recursive calls and body forms outside the checked subset are refused. An opaque
+    call, a subscript on a struct (an `__index__` protocol call), a plain enum, a reference to a
+    scalar, and every aggregate stay unwitnessed.
 13b. Ground congruence closure is a separate, kernel-owned equality rule over the primitive
     scalar fragment. Its universe is the set of subterms of the premises and the goal, its
     relation is seeded only by positive equalities (`and` is transparent and `not (a != b)` is
@@ -284,8 +289,10 @@ adapter's mapping from compiler-checked declarations to this environment remains
     trace to identify it as a type bound of the owning declaration. An unsigned width marker is
     accepted as the same witness. A field selector, a construction field name, and a literal
     payload belong to a former's identity, not to its operands.
-    Excluded formers are not merged at all: `call` carries no determinism witness and no known
-    result type, `move` transfers ownership rather than denoting a value, unary `&` is an address
+    Excluded formers are not merged at all: `call` is never a congruence former. A particular
+    scalar call term may carry a source-checked determinism witness for stable value identity, but
+    that witness does not merge calls by matching arguments or unfold a call. `move` transfers
+    ownership rather than denoting a value, unary `&` is an address
     and two equal values may live at different addresses, `is`/`as` are type operations, `::` is a
     namespace path, `get … else` marks a guarded access, and a quantifier binds names, so its body
     is never entered and a bound occurrence can never join a free term's class. The conclusion is

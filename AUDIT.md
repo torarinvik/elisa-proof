@@ -10409,25 +10409,33 @@ signed widths below 64. The same limitation remains for a *goal* written `>= -12
 
 ## Deterministic call witnesses (BACKLOG B-02)
 
-`proof_mark_deterministic_functions` classifies a function as deterministic when it is pure, or when it meets both of the following:
-- It is non-recursive and passes `proof_function_is_directly_pure` with its `requires` allowed. That means no effects, no `changes` or `preserves`, no mutable or mutable-typed parameter, and no read of a mutable global.
-- Every call it makes is to another deterministic function.
+At an executable call site of a verified deterministic callee with a scalar result,
+`proof_add_deterministic_call_witness` records a `deterministic-call` trace. Producer eligibility
+requires an acyclic call chain of effect-free functions, no `changes` or `preserves`, no mutable or
+mutable-typed callee parameter, and no read of a mutable global. The call has already executed, so
+its `requires` was discharged at that call site. Its result depends only on fixed by-value inputs;
+the marker gives that exact call term stable scalar identity while its arguments remain stable. It
+does not authorize unfolding or merging different calls by their arguments. The marker is never
+added in contract position, where a partial callee could be named outside its precondition.
 
-At an executable call site of a verified deterministic callee with a scalar result, `proof_add_deterministic_call_witness` records `__elisa_primitive_scalar_type(call)` and the declared signed width. It does this only when every argument is witnessed or is a value binding.
+Replay does not trust the producer's classification. `proof_replay_deterministic_call_valid`
+reconstructs the callee and helper call graph from source declarations, rejects recursive or
+unsupported body shapes, checks effect rows and parameter/result scalar types, and rejects mutable
+global reads. The scalar result marker must match the exact call term. This closes the source
+classification gap recorded in the earlier B-02 checkpoint. The conservative subset may refuse
+safe functions with recursive calls, unsupported statements, or non-scalar parameters/results;
+no direct serialized-report mutation test for this trace has yet been added.
 
-The soundness argument:
-- The call ran, so its precondition was proved there.
-- The callee's result depends only on its by-value arguments, so the call text denotes one value for as long as those arguments do.
-- `proof_expr_call_stable` already requires stable arguments before it retains the term.
-- The witness is never added in contract position. There a partial callee could be named outside its precondition.
+At most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be live at once.
+Past that cap, summaries are dropped at the next call as before. A witnessed arithmetic chain may
+receive one additional call term when needed to read its nested arithmetic operands.
 
-This lets summaries survive a later call, as in `first = f(x); second = f(first)`.
-
-**Budget:** at most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be live at once. Past that cap, summaries are dropped at the next call as before. This keeps `dispatch_wide` at a live-fact peak of 61 against its 66-fact snapshot budget; the peak was 53 before this change.
-
-**Replay gap:** replay trusts the type-bound trace as a boundary fact, exactly as it does for pure-call witnesses. Replay does not re-derive the callee's classification. Closing that gap for both witness kinds is a follow-up.
-
-Tests: `examples/deterministic_call_chain.elisa`, `examples/rejected_deterministic_call_chain.elisa` (effects, global read, mutable borrow, indirect effect), and `scripts/test_deterministic_call_chain.py`, including a 40-call budget case.
+Focused evidence on the strict O2 product (`build/elisa-proof` SHA-256
+`e989e4336e7be1fe8c843af105a0daa52615d9bf181a74ba10b3a7d359adff53`) with pinned Stage1 compiler
+revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`: `scripts/test_deterministic_call_chain.py`,
+`scripts/test_portable_replay.py`, and `scripts/test_agent_protocol_schema.py` passed, including
+positive call chains and effect, mutable-global, mutable-borrow, indirect-effect, package schema,
+and replay controls. A complete suite and a direct deterministic-call trace tamper case remain open.
 
 ## Tuple-field call summaries (BACKLOG B-03)
 
