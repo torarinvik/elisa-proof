@@ -162,19 +162,30 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
             elif output_bytes > MAX_OUTPUT_BYTES:
                 stop = "output_limit"
             if stop:
+                proc_kill_fallback = False
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
                 except PermissionError:
                     # Some hosts deny signaling a process group even though the
-                    # caller owns the child. Kill that child directly so bounded
-                    # runs still stop and the wait below can collect its status.
+                    # caller owns the child. Prefer os.kill here: Popen.kill()
+                    # polls (and may reap) the child with waitpid, racing the
+                    # wait4 below and losing child resource usage.
                     try:
-                        proc.kill()
+                        os.kill(proc.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                if wait4_supported:
+                    except PermissionError:
+                        # Only use Popen's fallback if direct signaling is denied.
+                        # In that rare path, Popen may reap the child internally,
+                        # so do not call wait4 afterward.
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                        proc_kill_fallback = True
+                if wait4_supported and not proc_kill_fallback:
                     _, wait_status, usage = os.wait4(proc.pid, 0)
                     proc.returncode = os.waitstatus_to_exitcode(wait_status)
                     cpu_seconds = usage.ru_utime + usage.ru_stime
