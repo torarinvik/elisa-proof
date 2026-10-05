@@ -49,11 +49,11 @@ postconditions. No crash disappearance is being counted as a correctness fix. Th
 conditional-return case separately reproduces one gap: `inner(at:i64)` has
 `ensure result == 0 or at >= 1` and returns `1 if at >= 1 else 0`. Both contain no qualified
 constant or body rewrite, so these replay defects are independent of the historical crash. The
-regressions are `test/repro/minimal_conditional_ensure_replay_gap.elisa` and
+pre-fix regressions are `test/repro/minimal_conditional_ensure_replay_gap.elisa` and
 `test/repro/minimal_slide_inner_replay_gap.elisa`, checked by
 `scripts/test_conditional_ensure_replay_gap.py`. The focused test passed against the coherent O2
-binary and accepts only full replay or explicit refusal. The responsible replay rule remains to be
-identified.
+binary and accepts only full replay or explicit refusal. At that revision, the three-line case had
+one replay gap and `Slide.inner` had two; the simple case was subsequently repaired by `8cfcc4f`.
 
 A fresh strict O2 build with object caching disabled was produced at
 `/private/tmp/elisa-p07-fresh-20261005/elisa-proof`. Its manifest binds proof source digest
@@ -65,6 +65,19 @@ passed on this fresh binary: the three-line conditional case remained one explic
 `Slide.inner` slice remained two gaps, and the wrong-guard control stayed unproved with zero replay
 gaps. This confirms the outcome from a no-cache build of the recorded source tree; it does not
 identify the kernel branch-check failure.
+
+Commit `8cfcc4f` adds an exact fallback-branch disjunction replay rule for the simple case. The
+fresh strict O2 candidate at `/private/tmp/elisa-p07-agent-final/elisa-proof` (binary SHA-256
+`8c63c66917b43086703e3f82e9475fd3e4d627ac0fc367e2e6f070809b650099`, Stage1 revision
+`7b27fa…`, arm64 macOS) passed `scripts/test_conditional_ensure_replay_gap.py`: the simple case
+replays 2/2, `Slide.inner` still replays 4/6 with two gaps, and the wrong-guard case remains failed
+with zero gaps. The candidate manifest records a dirty proof source tree, so its source-tree SHA is
+preserved there rather than described as a clean checkout build. Additional min/max/abs, nested
+conditional, and unsigned-literal controls passed on the same candidate. Read-only source tracing
+of `Slide.inner` roots 48 and 51 found that root 51's then arm needs the arithmetic implication
+`at + 1 < count => at < count - 1`; root 48 appears to be a direct conjunct case but its recorded
+gap is not explained by the inspected helper path. No broader rule was added without identifying
+that runtime rejection.
 
 The retained audit warm binary at `build/audit-20261005/elisa-proof-warm` has SHA-256
 `74f49810b8988d2e53f38d6298a0e29536299c579363209d464ad2a7b789658a`; its adjacent manifest binds
