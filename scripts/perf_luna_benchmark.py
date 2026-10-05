@@ -33,7 +33,7 @@ from perf_build_provenance import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = "elisa-proof-perf-luna-v2"
+SCHEMA = "elisa-proof-perf-luna-v3"
 FIXTURES = (
     ("accept", ROOT / "examples" / "perf_luna_accept.elisa", 0, "proved"),
     ("refusal", ROOT / "examples" / "perf_luna_refusal.elisa", 1, "failed"),
@@ -137,6 +137,20 @@ def invoke(binary: Path, arguments: list[str], timeout: int) -> dict:
     except (ValueError, KeyError, json.JSONDecodeError) as error:
         raise RuntimeError(f"invalid measurement wrapper response: {run.stdout[:300]!r}") from error
     return result
+
+
+def invoke_for_side(binary: Path, arguments: list[str], timeout: int,
+                    side: str, fixture: str, phase: str) -> dict:
+    """Make watchdog censoring explicit and attributable; censored runs have no result."""
+    try:
+        return invoke(binary, arguments, timeout)
+    except RuntimeError as error:
+        if "timed out" in str(error):
+            raise RuntimeError(
+                f"{side}/{fixture}/{phase}: classification=timeout; censored=true; "
+                "speedup=not-reported"
+            ) from error
+        raise
 
 
 def run_wrapper(wrapper: list[str], timeout: float) -> subprocess.CompletedProcess:
@@ -307,6 +321,63 @@ def proof_report(result: dict, expected_status: str, label: str,
     return report
 
 
+def semantic_workload_metrics(result: dict, report: dict, label: str) -> dict:
+    """Return semantic workload size only for a complete, replay-closed proof report."""
+    try:
+        summary = report["summary"]
+        replay = report["replay"]
+        declarations = report["declaration_details"]
+        goals = report["goals"]
+        certificates = report["certificates"]
+        if not all(isinstance(value, dict) for value in (summary, replay)):
+            raise ValueError("summary/replay is not an object")
+        if not all(isinstance(value, list) for value in (declarations, goals, certificates)):
+            raise ValueError("declarations/goals/certificates is not an array")
+        declaration_count = summary["declarations"]
+        obligation_count = summary["obligations"]
+        certificate_count = replay["certificates"]
+        replayed_count = replay["replayed"]
+        replay_gaps = replay["gaps"]
+        proven_count = summary["proven"]
+        unproven_count = summary["unproven"]
+        if any(type(value) is not int or value < 0 for value in (
+                declaration_count, obligation_count, certificate_count,
+                replayed_count, replay_gaps, proven_count, unproven_count)):
+            raise ValueError("count field is missing or invalid")
+        if declaration_count != len(declarations) or obligation_count != len(goals):
+            raise ValueError("declaration/obligation arrays are incomplete")
+        if certificate_count != len(certificates) or replayed_count != certificate_count or replay_gaps != 0:
+            raise ValueError("certificate replay is incomplete")
+        if proven_count + unproven_count != obligation_count:
+            raise ValueError("obligation totals are incomplete")
+        status = report.get("status")
+        if status == "proved" and unproven_count == 0 and proven_count == obligation_count:
+            classification = "proved"
+        elif status == "failed" and unproven_count > 0:
+            classification = "refusal"
+        else:
+            raise ValueError("report outcome is neither a complete proof nor a refusal")
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError(f"{label}: incomplete semantic workload report: {error}") from error
+
+    certificate_bytes = len(json.dumps(
+        certificates, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8"))
+    return {
+        "classification": classification,
+        "declarations": declaration_count,
+        "verified_declarations": sum(1 for item in declarations
+                                      if isinstance(item, dict) and item.get("verified") is True),
+        "obligations": obligation_count,
+        "proof_bytes": len(result["stdout"]),
+        "certificate_count": certificate_count,
+        "certificate_bytes_compact_json": certificate_bytes,
+        "replayed_count": replayed_count,
+        "replay_gaps": replay_gaps,
+        "complete": True,
+    }
+
+
 def replay_result(result: dict, expected_status: str, expected_reason: str | None,
                   label: str) -> dict:
     try:
@@ -408,6 +479,7 @@ def run(args: argparse.Namespace) -> dict:
         for fixture, source, proof_exit, proof_status in FIXTURES:
             run_outputs = {variant: {"proof": [], "export": [], "replay": []}
                            for variant in binaries}
+            semantic_metrics = {}
             total_rounds = args.warmup_rounds + args.rounds
             for round_index in range(total_rounds):
                 is_warmup = round_index < args.warmup_rounds
@@ -418,13 +490,17 @@ def run(args: argparse.Namespace) -> dict:
                     proof_binary, replay_binary = binaries[variant]
                     outputs = run_outputs[variant]
                     package_path = scratch / f"{variant}-{fixture}.json"
-                    proof = invoke(proof_binary, ["--json", str(source)], args.timeout)
+                    proof = invoke_for_side(proof_binary, ["--json", str(source)], args.timeout,
+                                            variant, fixture, "proof")
                     check_exit(proof, proof_exit, f"{variant}/{fixture}/proof")
                     proof_report(proof, proof_status, f"{variant}/{fixture}/proof",
                                  MUST_REMAIN_UNPROVEN.get(fixture, ()),
                                  MUST_PROVE.get(fixture, ()),
                                  MUST_HAVE_FINDINGS.get(fixture, ()))
                     report = json.loads(proof["stdout"])
+                    semantic_metrics[variant] = semantic_workload_metrics(
+                        proof, report, f"{variant}/{fixture}/proof"
+                    )
                     declined = set(MUST_DECLINE_QUANTIFIER_CERTIFICATE.get(fixture, ()))
                     if any(certificate.get("name") in declined
                            and certificate.get("rule", "").startswith("quantifier")
@@ -433,7 +509,8 @@ def run(args: argparse.Namespace) -> dict:
                     if not is_warmup:
                         outputs["proof"].append(proof)
 
-                    export = invoke(proof_binary, ["--package", str(source)], args.timeout)
+                    export = invoke_for_side(proof_binary, ["--package", str(source)], args.timeout,
+                                             variant, fixture, "export")
                     # Export exit status reports source admissibility. Refused sources may
                     # still produce a valid package envelope, but never carry theorems.
                     try:
@@ -467,7 +544,8 @@ def run(args: argparse.Namespace) -> dict:
                     if not is_warmup:
                         outputs["export"].append(export)
 
-                    replay = invoke(replay_binary, [str(package_path)], args.timeout)
+                    replay = invoke_for_side(replay_binary, [str(package_path)], args.timeout,
+                                             variant, fixture, "replay")
                     check_exit(replay, replay_exit, f"{variant}/{fixture}/replay")
                     replay_result(replay, expected_replay, expected_reason,
                                   f"{variant}/{fixture}/replay")
@@ -492,6 +570,7 @@ def run(args: argparse.Namespace) -> dict:
                                    for variant, data in run_outputs.items()},
                 "standalone_replay": {variant: record_measurements(data["replay"])
                                       for variant, data in run_outputs.items()},
+                "semantic_workload": semantic_metrics,
                 "outputs_identical": True,
             })
 

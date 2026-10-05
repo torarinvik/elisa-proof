@@ -232,6 +232,64 @@ class SamplingTests(unittest.TestCase):
         summary = benchmark.record_measurements([self.sample(3.25)])
         self.assertEqual(summary["p95_wall_seconds"], 3.25)
 
+    @staticmethod
+    def semantic_report(status: str = "proved", *, obligations: int = 1,
+                        proven: int = 1, unproven: int = 0) -> tuple[dict, dict]:
+        goals = [{"name": "claim", "proven": proven == 1}] if obligations else []
+        certificates = [{"name": "claim", "rule": "reflexivity"}] if proven else []
+        report = {
+            "status": status,
+            "summary": {"declarations": 1, "obligations": obligations,
+                        "proven": proven, "unproven": unproven},
+            "declaration_details": [{"name": "claim", "verified": proven == 1}],
+            "goals": goals,
+            "certificates": certificates,
+            "replay": {"certificates": len(certificates), "replayed": len(certificates), "gaps": 0},
+        }
+        return {"stdout": json.dumps(report, separators=(",", ":")).encode()}, report
+
+    def test_semantic_workload_metrics_for_proved_report(self) -> None:
+        result, report = self.semantic_report()
+        metrics = benchmark.semantic_workload_metrics(result, report, "positive")
+        self.assertEqual(metrics["classification"], "proved")
+        self.assertEqual(metrics["declarations"], 1)
+        self.assertEqual(metrics["verified_declarations"], 1)
+        self.assertEqual(metrics["obligations"], 1)
+        self.assertEqual(metrics["proof_bytes"], len(result["stdout"]))
+        self.assertEqual(metrics["certificate_count"], 1)
+        self.assertGreater(metrics["certificate_bytes_compact_json"], 0)
+        self.assertEqual(metrics["replayed_count"], 1)
+        self.assertEqual(metrics["replay_gaps"], 0)
+        self.assertTrue(metrics["complete"])
+
+    def test_semantic_workload_metrics_classify_expected_refusal(self) -> None:
+        result, report = self.semantic_report("failed", proven=0, unproven=1)
+        report["goals"][0]["proven"] = False
+        metrics = benchmark.semantic_workload_metrics(result, report, "refusal")
+        self.assertEqual(metrics["classification"], "refusal")
+        self.assertEqual(metrics["obligations"], 1)
+        self.assertEqual(metrics["certificate_count"], 0)
+        self.assertEqual(metrics["replayed_count"], 0)
+
+    def test_incomplete_report_is_censored_not_measurable(self) -> None:
+        result, report = self.semantic_report()
+        report["summary"]["obligations"] = 2
+        with self.assertRaisesRegex(RuntimeError, "incomplete semantic workload report"):
+            benchmark.semantic_workload_metrics(result, report, "incomplete")
+
+        report["summary"]["obligations"] = 1
+        report["replay"]["gaps"] = 1
+        with self.assertRaisesRegex(RuntimeError, "incomplete semantic workload report"):
+            benchmark.semantic_workload_metrics(result, report, "replay-gap")
+
+    def test_timeout_names_censored_side_and_suppresses_speedup(self) -> None:
+        with mock.patch.object(benchmark, "invoke", side_effect=RuntimeError("measurement wrapper timed out")):
+            with self.assertRaisesRegex(
+                    RuntimeError,
+                    r"candidate/fixture/proof: classification=timeout; censored=true; speedup=not-reported"):
+                benchmark.invoke_for_side(Path("candidate-proof"), ["--json", "fixture"],
+                                           1, "candidate", "fixture", "proof")
+
     def test_warmups_are_excluded_and_variant_order_alternates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -250,6 +308,8 @@ class SamplingTests(unittest.TestCase):
             context = manifest()
             proof_bytes = json.dumps({
                 "status": "proved", "goals": [], "findings": [], "functions": [],
+                "summary": {"declarations": 0, "obligations": 0, "proven": 0, "unproven": 0},
+                "declaration_details": [], "certificates": [],
                 "replay": {"gaps": 0, "certificates": 0, "replayed": 0},
             }).encode()
             package_bytes = json.dumps({
@@ -302,6 +362,10 @@ class SamplingTests(unittest.TestCase):
                 ("candidate", "proof"), ("candidate", "export"), ("candidate", "replay"),
             ])
             fixture = result["fixtures"][0]
+            self.assertEqual(fixture["semantic_workload"]["baseline"]["classification"], "proved")
+            self.assertEqual(fixture["semantic_workload"]["candidate"]["classification"], "proved")
+            self.assertEqual(fixture["semantic_workload"]["baseline"],
+                             fixture["semantic_workload"]["candidate"])
             for phase_key in ("proof", "package_export", "standalone_replay"):
                 for variant in ("baseline", "candidate"):
                     self.assertEqual(fixture[phase_key][variant]["rounds"], 2)
