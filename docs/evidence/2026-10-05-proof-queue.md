@@ -66,6 +66,18 @@ passed on this fresh binary: the three-line conditional case remained one explic
 gaps. This confirms the outcome from a no-cache build of the recorded source tree; it does not
 identify the kernel branch-check failure.
 
+The retained audit warm binary at `build/audit-20261005/elisa-proof-warm` has SHA-256
+`74f49810b8988d2e53f38d6298a0e29536299c579363209d464ad2a7b789658a`; its adjacent manifest binds
+the dirty proof source tree digest `d3e5d883b6b6fd75a9ac4adcf815022f27de0181d2476660eea74efd2e5109b2`,
+frontend/Stage1 revision `4c479ad1981403c9f77f04a9ee5918f74713533e`, strict O2, and the current
+arm64 macOS target. Bounded child runs on both `examples/kernel_comparison_runtime.elisa` and
+`mocap-cleaner/src/tools/track.elisa` exited `-11` with zero stdout/stderr bytes. The proof fixture
+is byte-identical to its blob at audit HEAD `13d686b2`; the track file is clean in its repository
+and last changed at `133622721` on 2026-10-03, though its capture-time digest was not saved. The
+audit assessment instead records binary SHA-256 `d734fd75…`, leaving the identity of that original
+captured executable unresolved. This reproduction localizes the old failure to the retained
+manifest-bound binary; it does not establish the cause.
+
 Commit `95daaea` factors the bounded unsigned literal/add/sub replay path while preserving its
 same-width checks, modulo-width arithmetic and refusal of malformed or unsupported nodes. The
 kernel comparison runtime passed a direct O0 compile/link/run after the initial refactor; that run
