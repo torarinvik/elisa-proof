@@ -60,6 +60,179 @@ def write_manifest(binary: Path, payload: object, *, checksum: bool = True) -> N
                        encoding="ascii")
 
 
+# Test-owned semantic corpus lock. Keeping the source digest and the expected
+# workload contract here makes fixture drift explicit and reviewable; these are
+# identity/coverage checks, not measured performance results.
+CORPUS_REPORT_FIELDS = (
+    "status", "summary.declarations", "summary.obligations",
+    "summary.proven", "summary.unproven", "declaration_details", "goals",
+    "certificates", "replay.certificates", "replay.replayed", "replay.gaps",
+)
+SEMANTIC_CORPUS_MANIFEST = (
+    {
+        "name": "accept", "path": "examples/perf_luna_accept.elisa",
+        "sha256": "b98bc4c879e7ca4279515ade0c248d125f9323a1f3e01f9bed389fc9a818354b",
+        "expected_exit": 0, "expected_status": "proved",
+        "must_prove": (), "must_unproven": (), "must_find": (), "inadmissible": False,
+        "must_decline_certificates": (),
+    },
+    {
+        "name": "refusal", "path": "examples/perf_luna_refusal.elisa",
+        "sha256": "5bb1c84d7baf95c9853e448062184a3427b298d80b205ed7cd9ac8032a7cd454",
+        "expected_exit": 1, "expected_status": "failed",
+        "must_prove": (), "must_unproven": ("perf_luna_must_remain_open",),
+        "must_find": (), "inadmissible": False,
+        "must_decline_certificates": (),
+    },
+    {
+        "name": "symbolic_quantifier", "path": "examples/symbolic_quantifier.elisa",
+        "sha256": "eb8ea811bdf07e0796eeecc929a0b007bb44813724214e8bbc952a65325e0e9e",
+        "expected_exit": 0, "expected_status": "proved",
+        "must_prove": (), "must_unproven": (), "must_find": (), "inadmissible": False,
+        "must_decline_certificates": (),
+    },
+    {
+        "name": "rejected_symbolic_quantifier",
+        "path": "examples/rejected_symbolic_quantifier.elisa",
+        "sha256": "5c1990bafd783178ad4bc66916fa35c16b8670a7dc30d8443f077b161cd3b352",
+        "expected_exit": 1, "expected_status": "failed",
+        "must_prove": (),
+        "must_unproven": (
+            "bubble_pass_strict", "congruence_other_index", "congruence_other_container",
+            "negated_not_strict", "negated_wrong_direction", "guard_not_refuted",
+            "guard_mentions_binder", "guard_not_negated", "instance_outside",
+            "lower_missing_point", "lower_two_short", "narrow_keeps_write",
+            "binding_other_value", "subscript_unequal", "subscript_other_container",
+            "alias_outside", "alias_other_container", "alias_carried_outside",
+        ),
+        "must_find": (), "inadmissible": True,
+        "must_decline_certificates": (
+            "off_by_one", "wrong_lower", "other_body", "shadow", "weaken_wrong_way",
+            "weaken_wider", "weaken_grown_missing_point", "element_not_strict",
+        ),
+    },
+    {
+        "name": "congruence", "path": "examples/congruence.elisa",
+        "sha256": "99b0a7a7712de6c427ed84eedfb4853e5639c83fb35c224a6d14c9c08bdaebca",
+        "expected_exit": 0, "expected_status": "proved",
+        "must_prove": (), "must_unproven": (), "must_find": (), "inadmissible": False,
+        "must_decline_certificates": (),
+    },
+    {
+        "name": "rejected_congruence", "path": "examples/rejected_congruence.elisa",
+        "sha256": "8cd9f33f34c9fa124aa9bad5740a3619000a71dcab706274f9d1c7f9f1e6e534",
+        "expected_exit": 1, "expected_status": "failed",
+        "must_prove": ("indexed_element", "call_congruence"),
+        "must_unproven": (),
+        "must_find": (
+            "disequality_premise", "order_premise", "disjunctive_premise",
+            "unrelated_operand", "distinct_former", "struct_equality_premise",
+            "local_struct_equality_premise", "constructed_aggregate", "cross_width",
+            "wrapping_operand",
+        ),
+        "inadmissible": False,
+        "must_decline_certificates": (),
+    },
+)
+CORPUS_REPLAY_REQUIREMENTS = {
+    "proof_report_fields": CORPUS_REPORT_FIELDS,
+    "zero_replay_gaps": True,
+    "certificate_count_equals_replayed": True,
+    "claimed_goal_requires_replay_status": "replayed",
+}
+EXPECTED_CORPUS_REPLAY_REQUIREMENTS = {
+    "proof_report_fields": (
+        "status", "summary.declarations", "summary.obligations",
+        "summary.proven", "summary.unproven", "declaration_details", "goals",
+        "certificates", "replay.certificates", "replay.replayed", "replay.gaps",
+    ),
+    "zero_replay_gaps": True,
+    "certificate_count_equals_replayed": True,
+    "claimed_goal_requires_replay_status": "replayed",
+}
+
+
+def validate_semantic_corpus_manifest(entries, *, root: Path = ROOT) -> None:
+    """Fail closed on changed workload identity or semantic/replay contract."""
+    if tuple(entries) != SEMANTIC_CORPUS_MANIFEST:
+        raise AssertionError("semantic benchmark corpus manifest differs from its reviewed contract")
+    fixture_projection = tuple(
+        (item["name"], ROOT / item["path"], item["expected_exit"], item["expected_status"])
+        for item in entries
+    )
+    if fixture_projection != benchmark.FIXTURES:
+        raise AssertionError("semantic corpus manifest no longer matches benchmark fixtures")
+    for item in entries:
+        source = root / item["path"]
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        if digest != item["sha256"]:
+            raise AssertionError(f"semantic workload bytes/hash changed: {item['name']}")
+    for name, expected in (
+        ("must_prove", benchmark.MUST_PROVE),
+        ("must_unproven", benchmark.MUST_REMAIN_UNPROVEN),
+        ("must_find", benchmark.MUST_HAVE_FINDINGS),
+    ):
+        actual = {item["name"]: item[name] for item in entries if item[name]}
+        if actual != expected:
+            raise AssertionError(f"semantic corpus {name} metadata differs from benchmark harness")
+    expected_inadmissible = {item["name"] for item in entries if item["inadmissible"]}
+    if expected_inadmissible != benchmark.MUST_BE_INADMISSIBLE:
+        raise AssertionError("semantic corpus admissibility metadata differs from benchmark harness")
+    expected_declines = {
+        item["name"]: item["must_decline_certificates"]
+        for item in entries if item["must_decline_certificates"]
+    }
+    if expected_declines != benchmark.MUST_DECLINE_QUANTIFIER_CERTIFICATE:
+        raise AssertionError("semantic corpus declined-certificate metadata differs from benchmark harness")
+    if CORPUS_REPORT_FIELDS != EXPECTED_CORPUS_REPLAY_REQUIREMENTS["proof_report_fields"]:
+        raise AssertionError("semantic corpus required report fields changed")
+    if CORPUS_REPLAY_REQUIREMENTS != EXPECTED_CORPUS_REPLAY_REQUIREMENTS:
+        raise AssertionError("semantic corpus replay requirements changed")
+
+
+class SemanticCorpusManifestTests(unittest.TestCase):
+    def test_corpus_manifest_binds_fixture_bytes_and_harness_metadata(self) -> None:
+        validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
+
+    def test_workload_identity_and_expectation_mutations_are_detected(self) -> None:
+        for field, replacement in (
+                ("name", "renamed-workload"),
+                ("path", "examples/other-workload.elisa"),
+                ("sha256", "0" * 64),
+                ("expected_exit", 7),
+                ("expected_status", "unknown"),
+                ("must_prove", ("unexpected_claim",)),
+                ("must_unproven", ("unexpected_open_goal",)),
+                ("must_find", ("unexpected_finding",)),
+                ("inadmissible", True),
+                ("must_decline_certificates", ("unexpected_certificate",))):
+            with self.subTest(field=field):
+                changed = [dict(item) for item in SEMANTIC_CORPUS_MANIFEST]
+                changed[0][field] = replacement
+                with self.assertRaisesRegex(AssertionError, "manifest"):
+                    validate_semantic_corpus_manifest(changed)
+
+    def test_source_byte_change_is_rejected_even_with_original_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for item in SEMANTIC_CORPUS_MANIFEST:
+                destination = root / item["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((ROOT / item["path"]).read_bytes())
+            target = root / SEMANTIC_CORPUS_MANIFEST[0]["path"]
+            target.write_bytes(target.read_bytes() + b"\n")
+            with self.assertRaisesRegex(AssertionError, "bytes/hash changed"):
+                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST, root=root)
+
+    def test_replay_contract_mutation_is_detected(self) -> None:
+        with mock.patch.dict(CORPUS_REPLAY_REQUIREMENTS, {"zero_replay_gaps": False}):
+            with self.assertRaisesRegex(AssertionError, "replay requirements"):
+                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
+        with mock.patch(__name__ + ".CORPUS_REPORT_FIELDS", ("status",)):
+            with self.assertRaisesRegex(AssertionError, "report fields"):
+                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
+
+
 class ManifestReadTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
