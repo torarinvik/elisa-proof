@@ -17,7 +17,7 @@ for float_probe in rejected_float_boolean_stale_fact rejected_float_boolean_over
         printf 'proof test matrix failed: unsupported float proposition accepted: %s\n' "$float_probe" >&2
         exit 1
     fi
-    python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["summary"]["semantic_errors"] == 0; assert not any(g["name"].startswith("rejected_float_boolean_") and g["proven"] and g["rule"] == "goal" for g in r["goals"])' "$report"
+    python3 -c 'import json,sys; name=sys.argv[2]; r=json.load(open(sys.argv[1])); expected="call-requires-unproven" if name.endswith("stale_fact") else "expression-unsupported"; assert r["summary"]["semantic_errors"] == 0; assert any(f["name"] == name and f["kind"] == expected for f in r["findings"]); assert not any(g["name"] == name and g["proven"] and g["rule"] == "goal" for g in r["goals"])' "$report" "$float_probe"
 done
 for float_probe in rejected_float_arithmetic_atom rejected_float_order_totality; do
     report="$standalone_probe_dir/$float_probe.json"
