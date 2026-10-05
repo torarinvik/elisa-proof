@@ -10442,10 +10442,17 @@ added in contract position, where a partial callee could be named outside its pr
 Replay does not trust the producer's classification. `proof_replay_deterministic_call_valid`
 reconstructs the callee and helper call graph from source declarations, rejects recursive or
 unsupported body shapes, checks effect rows and parameter/result scalar types, and rejects mutable
-global reads. The scalar result marker must match the exact call term. This closes the source
-classification gap recorded in the earlier B-02 checkpoint. The conservative subset may refuse
-safe functions with recursive calls, unsupported statements, or non-scalar parameters/results;
-no direct serialized-report mutation test for this trace has yet been added.
+global reads. A direct in-memory mutation regression now also wraps a forged reference actual in
+parentheses; replay rejects it while the original trace still replays. The argument-shape check is
+recursive, so reference operators cannot be hidden below parentheses or refinements. The
+conservative subset may refuse safe functions with recursive calls, unsupported statements, or
+non-scalar parameters/results.
+
+R-005 remains broader than this B-02 hardening: deterministic-call replay currently establishes
+that the marker names a unique deterministic scalar-returning declaration and that its explicit
+actuals contain no references. It does not yet prove that the exact marker call and argument
+state-version occur at the recorded source owner/line. A direct trace mutation harness now exists,
+so exact source-site binding can be audited without relying on JSON shape checks alone.
 
 At most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be live at once.
 Past that cap, summaries are dropped at the next call as before. A witnessed arithmetic chain may
