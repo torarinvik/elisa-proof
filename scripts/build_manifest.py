@@ -16,15 +16,20 @@ import re
 import shutil
 import subprocess
 import sys
+from compiler_environment import select_compiler_environment
 
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
 INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"', re.MULTILINE)
-NON_PRODUCT_ENV = {
-    "_", "PWD", "OLDPWD", "SHLVL", "PS1", "ELISA_PROOF_OUTPUT",
-    "ELISA_PROOF_PRODUCTS", "ELISA_PROOF_MAIN", "ELISA_PROOF_BUILD_JOBS",
-    "ELISA_PROOF_OBJECT_CACHE", "ELISA_PROFILE_HOOKS_OBJ",
-    "ELISA_PROFILE_HOOKS_SOURCE", "ELISA_EXTRA_LINK_INPUTS", "ELISA_RUNTIME_OBJ",
-}
+
+
+def effective_environment() -> dict:
+    """Return only environment controls that can affect compiler/link outputs."""
+    return select_compiler_environment(os.environ)
+
+
+def effective_environment_digest() -> str:
+    encoded = json.dumps(effective_environment(), sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def file_digest(path: str) -> dict:
@@ -114,6 +119,9 @@ def main() -> int:
     parser.add_argument("--identity-compiler-product", default="")
     parser.add_argument("--identity-clang", default="")
     parser.add_argument("--identity-link-input", action="append", default=[])
+    parser.add_argument("--identity-recipe", action="append", default=[])
+    parser.add_argument("--recipes-digest", action="store_true")
+    parser.add_argument("--recipe-path", action="append", default=[])
     parser.add_argument("--identity-link-flags", default="")
     parser.add_argument("--identity-output", default="")
     parser.add_argument("--check-existing", action="store_true")
@@ -122,6 +130,7 @@ def main() -> int:
     parser.add_argument("--existing-manifest-sha256", default="")
     parser.add_argument("--recorded-build-identity", default="")
     parser.add_argument("--target-clang", default="clang")
+    parser.add_argument("--effective-env-digest", action="store_true")
     for option in (
         "binary", "compiler", "stage", "stage1-revision", "runtime", "profile-hooks",
         "frontend-repo", "frontend-revision", "proof-root", "snapshot-root",
@@ -130,6 +139,20 @@ def main() -> int:
     ):
         parser.add_argument(f"--{option}", default="")
     arguments = parser.parse_args()
+
+    if arguments.effective_env_digest:
+        print(effective_environment_digest())
+        return 0
+
+    if arguments.recipes_digest:
+        try:
+            recipes = [file_digest(path) for path in arguments.recipe_path]
+        except OSError as error:
+            print(f"build manifest: cannot hash build recipes: {error}", file=sys.stderr)
+            return 2
+        encoded = json.dumps(recipes, sort_keys=True, separators=(",", ":")).encode()
+        print(hashlib.sha256(encoded).hexdigest())
+        return 0
 
     if arguments.identity_only:
         required = (arguments.identity_root, arguments.identity_main, arguments.identity_object_key,
@@ -172,10 +195,10 @@ def main() -> int:
                 "linker_version": linker_version,
                 "sdk": sdk,
                 "link_inputs": [file_digest(path) for path in arguments.identity_link_input],
+                "build_recipes": [file_digest(path) for path in arguments.identity_recipe],
                 "link_flags": arguments.identity_link_flags,
                 "output": os.path.realpath(arguments.identity_output),
-                "environment": {key: value for key, value in sorted(os.environ.items())
-                                if key not in NON_PRODUCT_ENV},
+                "effective_environment_sha256": effective_environment_digest(),
                 "platform": {"system": platform.system(), "machine": platform.machine()},
             }
             encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

@@ -216,6 +216,13 @@ fi
 # ELISA_PROOF_OBJECT_CACHE=0 disables it.
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
 compiler_digest=""
+BUILD_RECIPES=("$ROOT_DIR/scripts/build.sh" "$ROOT_DIR/scripts/compiler_snapshot.sh" \
+    "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/compiler_environment.py")
+recipe_digest_args=()
+for recipe in "${BUILD_RECIPES[@]}"; do
+    recipe_digest_args+=(--recipe-path "$recipe")
+done
+build_recipe_digest="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --recipes-digest "${recipe_digest_args[@]}")"
 compiler_files=()
 for compiler_file in "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER"; do
     [[ -n "$compiler_file" && -f "$compiler_file" ]] && compiler_files+=("$compiler_file")
@@ -223,13 +230,13 @@ done
 if [[ ${#compiler_files[@]} -gt 0 ]]; then
     compiler_digest="$(shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n')"
 fi
-compiler_environment_digest="$(env | LC_ALL=C sort | sed -E '/^(PWD|OLDPWD|SHLVL|_|PS1|ELISA_PROOF_OUTPUT|ELISA_PROOF_PRODUCTS|ELISA_PROOF_MAIN|ELISA_PROOF_BUILD_JOBS|ELISA_PROOF_OBJECT_CACHE|ELISA_PROFILE_HOOKS_OBJ|ELISA_PROFILE_HOOKS_SOURCE|ELISA_EXTRA_LINK_INPUTS|ELISA_RUNTIME_OBJ)=/d' | shasum -a 256 | cut -d' ' -f1)"
+compiler_environment_digest="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --effective-env-digest)"
 compiler_target_triple="$("$CLANG_TOOL" -dumpmachine)"
 object_key_of() {
     local main="$1" dependencies
     [[ -n "$compiler_digest" ]] || return 0
     dependencies="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --dependency-root "$SNAPSHOT_ROOT" --dependency-main "$main")" || return $?
-    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1" "$(uname -smr)"
+    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1" "$(uname -smr)"
         printf '%s\n' "$dependencies"; } | shasum -a 256 | cut -d' ' -f1
 }
 build_identity_of() {
@@ -243,6 +250,10 @@ build_identity_of() {
             identity_args+=(--identity-link-input "$input")
         done
     fi
+    local recipe
+    for recipe in "${BUILD_RECIPES[@]}"; do
+        identity_args+=(--identity-recipe "$recipe")
+    done
     flags="$(printf '%q ' "${ELISA_DEAD_STRIP_LINK[@]}")"
     if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
         input="$(command -v codesign)"
