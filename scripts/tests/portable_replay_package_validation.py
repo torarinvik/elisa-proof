@@ -11,6 +11,14 @@ from portable_replay_support import *
 
 # Header, trust and schema: nothing is inferred, over-claimed or accepted twice.
 text = json.dumps(with_theorem(base, assumption))
+valid_header = with_theorem(base, assumption)
+code, result = replay(valid_header, "required-header-positive")
+assert code == 0 and result["status"] == "replayed", result
+missing_header = copy.deepcopy(valid_header)
+del missing_header["trust"]
+result = refused(missing_header, "required-header-missing-trust", "malformed", "package-schema")
+assert result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, result
+assert result["theorems"] == [], result
 refused(text.replace('{"format": ', '{"format": "elisa-proof-package-v1", "format": ', 1),
         "duplicate-key", "malformed", "package-schema")
 # Boolean fields accept only JSON booleans. Similar-looking values must fail as a structured
