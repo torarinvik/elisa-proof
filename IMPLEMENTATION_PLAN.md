@@ -607,6 +607,12 @@ These have the highest ROI because every other feature depends on trustworthy ou
 
 **Gate:** Swapped arguments, similarly named modules, changed contracts, stale pre-call facts, forged origins and substituted alias targets refuse. Document each remaining adapter-trusted fact. Zero replay gaps must not conceal an unjustified source premise.
 
+**Progress (2026-10-05):** Replay now rejects a deterministic-call trace whose scalar call contains a
+reference actual hidden under parentheses; `examples/deterministic_call_trace_replay_runtime.elisa`
+mutates the in-memory trace and confirms refusal, then restores and replays the original. Exact
+call-site binding to the source owner/line and argument state version remains open, as do the wider
+parameter/range/alias/resource boundary inventory and the rest of this gate.
+
 #### R-006 — Exhaustively harden all certificate/package decoders
 
 **Change:** Inventory raw integer IDs, node arities, child spans, enums, textual markers and version dispatch in `src/portable/`, `src/proof/kernel_replay/` and admission. Check sizes before allocation, arithmetic before index use, duplicate IDs and DAG cycles. Make decode failure distinct from a valid empty proof.

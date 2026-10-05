@@ -10458,12 +10458,15 @@ At most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be
 Past that cap, summaries are dropped at the next call as before. A witnessed arithmetic chain may
 receive one additional call term when needed to read its nested arithmetic operands.
 
-Focused evidence on the strict O2 product (`build/elisa-proof` SHA-256
-`e989e4336e7be1fe8c843af105a0daa52615d9bf181a74ba10b3a7d359adff53`) with pinned Stage1 compiler
-revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`: `scripts/test_deterministic_call_chain.py`,
-`scripts/test_portable_replay.py`, and `scripts/test_agent_protocol_schema.py` passed, including
-positive call chains and effect, mutable-global, mutable-borrow, indirect-effect, package schema,
-and replay controls. A complete suite and a direct deterministic-call trace tamper case remain open.
+The latest combined strict O2 product (`build/elisa-proof` SHA-256
+`532cb70fcc3b2694616db3d9cc3278d0f1cc7099a5d04dcb4b232c379ad543ac`, proof HEAD `9a1a4531`) used
+pinned Stage1 compiler revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`.
+`scripts/test_deterministic_call_chain.py` and `scripts/test_portable_replay.py` passed. The direct
+mutation harness `examples/deterministic_call_trace_replay_runtime.elisa` compiled, linked and ran
+with exit 0 against that commit. Earlier protocol-v2 coverage passed on strict O2 product
+`e989e4336e7be1fe8c843af105a0daa52615d9bf181a74ba10b3a7d359adff53` via
+`scripts/test_agent_protocol_schema.py`. A complete suite and exact source-site binding of
+deterministic-call traces remain open.
 
 ## Tuple-field call summaries (BACKLOG B-03)
 
