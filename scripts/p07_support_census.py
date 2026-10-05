@@ -148,6 +148,24 @@ def process_rss_kib(pid: int) -> int | None:
         return None
 
 
+def terminate_process_group(proc: subprocess.Popen) -> None:
+    """Stop the child tree without treating an exit race as a census failure."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # On macOS a child can exit after poll() but before killpg(); its zombie
+        # process-group entry can make killpg report EPERM instead of ESRCH.
+        # poll() reaps that already-exited child. If it is still alive, fall
+        # back to killing the direct child rather than crashing the census.
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+
 def partial_report_metadata(report: object) -> dict:
     if not isinstance(report, dict):
         return {}
@@ -162,7 +180,10 @@ def rank_unsupported_kinds(results: list[dict]) -> list[dict]:
     affected_inputs = defaultdict(set)
     sites_by_kind = defaultdict(set)
     for result in results:
-        if "unsupported_sites" not in result:
+        # Failed, timed-out or malformed reports are not a trustworthy sample of the
+        # unsupported-language surface. Preserve them in the failure report, but exclude their
+        # partial source scan from the success-only kind ranking.
+        if result.get("error") is not None or "unsupported_sites" not in result:
             continue
         for site in result.get("unsupported_sites", []):
             kind = site.rsplit(" ", 1)[-1]
@@ -204,10 +225,7 @@ def run(path: Path, timeout: int, rss_limit_kib: int,
             elif output_bytes > MAX_OUTPUT_BYTES:
                 stop_reason = "output-limit"
             if stop_reason:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                terminate_process_group(proc)
                 break
             time.sleep(0.025)
         proc.wait()
