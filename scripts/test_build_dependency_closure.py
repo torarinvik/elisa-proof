@@ -60,7 +60,7 @@ def run_outside_closure_build_control(base: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
     for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh", "link_flags.sh",
-                 "build_manifest.py", "compiler_environment.py"):
+                 "build_manifest.py", "compiler_environment.py", "verify_product_pair.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
     (compiler / "src/front.elisa").write_text("frontend\n")
     (compiler / "elisacore_std/placeholder").write_text("fixture\n")
@@ -133,6 +133,8 @@ fi
     environment = dict(os.environ, ELISA_COMPILER_BIN=str(mock_compiler),
                        ELISA_COMPILER_SRC=str(compiler), ELISA_COMPILER_REV=revision,
                        ELISA_CLANG=str(mock_clang), ELISA_PROOF_PRODUCTS="all",
+                       ELISA_PROOF_OUTPUT=str(project / "compat-proof" / "elisa-proof"),
+                       ELISA_PROOF_REPLAY_OUTPUT=str(project / "other-root" / "elisa-proof-replay"),
                        ELISA_PROOF_OBJECT_CACHE="0", MOCK_COMPILER_LOG=str(compiler_log),
                        MOCK_CLANG_LOG=str(clang_log), MOCK_UNAME_RELEASE="release-one",
                        PATH=str(tools) + os.pathsep + os.environ["PATH"])
@@ -142,7 +144,35 @@ fi
     assert initial.returncode == 0, initial.stderr
     assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"], (compiler_log.read_text(), initial.stderr)
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"], (clang_log.read_text(), initial.stderr)
-    products = [proof / "build/elisa-proof", proof / "build/elisa-proof-replay"]
+    products = [Path(environment["ELISA_PROOF_OUTPUT"]),
+                Path(environment["ELISA_PROOF_REPLAY_OUTPUT"])]
+    generation_root = proof / "build/elisa-proof-generations"
+
+    def resolve_generation(env=environment) -> dict:
+        result = subprocess.run(
+            ["python3", str(proof / "scripts/verify_product_pair.py"), "resolve",
+             "--generation-root", str(generation_root)], env=env,
+            check=True, capture_output=True, text=True,
+        )
+        resolved = json.loads(result.stdout)
+        assert all(Path(row["binary"]).is_file() for row in resolved["products"].values())
+        assert Path(resolved["products"]["elisa-proof"]["binary"]).parent == Path(
+            resolved["products"]["elisa-proof-replay"]["binary"]).parent
+        return resolved
+
+    initial_generation = resolve_generation()
+    assert initial_generation["pair_generation"]
+    assert all(json.loads(Path(row["manifest"]).read_text())["pair_generation"] ==
+               initial_generation["pair_generation"] for row in initial_generation["products"].values())
+    current_pointer = generation_root / "CURRENT"
+    pointer_value = current_pointer.read_text(encoding="ascii")
+    current_pointer.write_text("../not-a-generation\n", encoding="ascii")
+    refused_pointer = subprocess.run(
+        ["python3", str(proof / "scripts/verify_product_pair.py"), "resolve",
+         "--generation-root", str(generation_root)], capture_output=True, text=True,
+    )
+    current_pointer.write_text(pointer_value, encoding="ascii")
+    assert refused_pointer.returncode == 2 and "valid generation identity" in refused_pointer.stderr
 
     def product_state() -> list:
         artifacts = [artifact for path in products for artifact in
@@ -156,7 +186,8 @@ fi
 
     (proof / "src/unrelated.elisa").write_text("outside closure edited\n")
     after_edit = subprocess.run([str(build)], cwd=proof, env=environment,
-                                check=True, capture_output=True, text=True)
+                                capture_output=True, text=True)
+    assert after_edit.returncode == 0, (after_edit.returncode, after_edit.stdout, after_edit.stderr)
     assert "product src/main.elisa is unchanged" in after_edit.stderr
     assert "product src/replay_main.elisa is unchanged" in after_edit.stderr
     assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"]
@@ -199,7 +230,10 @@ fi
     main_checksum = products[0].with_name(products[0].name + ".manifest.json.sha256")
     main_checksum.write_text("0" * 64 + "\n", encoding="ascii")
     after_checksum_corruption = subprocess.run([str(build)], cwd=proof, env=environment,
-                                                check=True, capture_output=True, text=True)
+                                                capture_output=True, text=True)
+    assert after_checksum_corruption.returncode == 0, (after_checksum_corruption.returncode,
+                                                        after_checksum_corruption.stdout,
+                                                        after_checksum_corruption.stderr)
     assert "product src/main.elisa is unchanged" not in after_checksum_corruption.stderr
     assert "product src/replay_main.elisa is unchanged" in after_checksum_corruption.stderr
     assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "main.elisa", "replay_main.elisa"]
@@ -260,9 +294,9 @@ fi
     assert failed_pair == old_pair
     assert product_state() == before_failed_build
 
-    # Interrupt after the proof binary, manifest, and checksum have been replaced,
-    # but before the replay binary's first final rename. This is the remaining
-    # observable pair-publication window.
+    # The immutable generation has already been published when compatibility files
+    # are copied. Interrupt after the proof compatibility binary changes but before
+    # replay changes: the legacy paths mismatch, while a pinned generation is sound.
     published_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
                       for path in products]
     before_publish_interrupt = product_state()
@@ -294,6 +328,12 @@ os.execv('/bin/mv', ['mv', *args])
     assert interrupted_pair[0]["proof"]["source_tree_sha256"] != published_pair[0]["proof"]["source_tree_sha256"]
     assert interrupted_pair[1] == published_pair[1]
     assert interrupted_pair[0]["proof"]["source_tree_sha256"] != interrupted_pair[1]["proof"]["source_tree_sha256"]
+    pinned_after_compat_interrupt = resolve_generation()
+    assert pinned_after_compat_interrupt["pair_generation"] != initial_generation["pair_generation"]
+    pinned_pair = [json.loads(Path(row["manifest"]).read_text())
+                   for row in pinned_after_compat_interrupt["products"].values()]
+    assert pinned_pair[0]["pair_generation"] == pinned_pair[1]["pair_generation"]
+    assert pinned_pair[0]["proof"] == pinned_pair[1]["proof"]
     for path in products:
         manifest = path.with_name(path.name + ".manifest.json")
         sidecar = path.with_name(path.name + ".manifest.json.sha256")
@@ -303,13 +343,60 @@ os.execv('/bin/mv', ['mv', *args])
     assert partial_state[3:] == before_publish_interrupt[3:]
 
     # A later ordinary build repairs the pair from the current source snapshot.
-    subprocess.run([str(build)], cwd=proof, env=environment,
-                   check=True, capture_output=True, text=True)
+    repaired = subprocess.run([str(build)], cwd=proof, env=environment,
+                              capture_output=True, text=True)
+    assert repaired.returncode == 0, (repaired.returncode, repaired.stdout, repaired.stderr)
     repaired_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
                      for path in products]
     assert repaired_pair[0]["proof"] == repaired_pair[1]["proof"]
-    print("build publication: competing writer=2; second-link failure=42 preserved pair; "
-          "interrupted replay rename=88 exposed mismatched source digest; later build repaired pair")
+    resolve_generation()
+
+    # Fail at every directory/pointer publication edge. Before CURRENT replacement
+    # the previous generation remains selected; after replacement the new complete
+    # generation is selected. Unreferenced completed generation directories are safe.
+    failure_boundaries = {
+        "before-generation-rename": False,
+        "after-generation-rename": False,
+        "before-pointer-replace": False,
+        "after-pointer-replace": True,
+    }
+    for number, (boundary, selects_new) in enumerate(failure_boundaries.items()):
+        before = resolve_generation()
+        (proof / "src/main.elisa").write_text(f'include "./shared.elisa"\nmain boundary {number}\n')
+        (proof / "src/replay_main.elisa").write_text(f"replay boundary {number}\n")
+        failed_boundary_env = dict(environment, ELISA_PROOF_PUBLISH_FAIL_AT=boundary)
+        stopped = subprocess.run([str(build)], cwd=proof, env=failed_boundary_env,
+                                  capture_output=True, text=True)
+        assert stopped.returncode == 2 and boundary in stopped.stderr, (boundary, stopped.returncode, stopped.stderr)
+        after = resolve_generation()
+        assert (after["pair_generation"] != before["pair_generation"]) == selects_new, (boundary, before, after)
+        pair_manifests = [json.loads(Path(row["manifest"]).read_text())
+                          for row in after["products"].values()]
+        assert pair_manifests[0]["pair_generation"] == pair_manifests[1]["pair_generation"]
+        assert pair_manifests[0]["proof"] == pair_manifests[1]["proof"]
+    legacy_boundaries = (
+        "legacy-proof-binary", "legacy-proof-manifest", "legacy-proof-checksum",
+        "legacy-replay-binary", "legacy-replay-manifest", "legacy-replay-checksum",
+    )
+    for number, boundary in enumerate(legacy_boundaries):
+        before = resolve_generation()
+        (proof / "src/main.elisa").write_text(f'include "./shared.elisa"\nlegacy boundary {number}\n')
+        (proof / "src/replay_main.elisa").write_text(f"legacy replay boundary {number}\n")
+        stopped = subprocess.run(
+            [str(build)], cwd=proof,
+            env=dict(environment, ELISA_PROOF_PUBLISH_FAIL_AT=boundary),
+            capture_output=True, text=True,
+        )
+        assert stopped.returncode == 88 and boundary in stopped.stderr, (boundary, stopped.returncode, stopped.stderr)
+        after = resolve_generation()
+        assert after["pair_generation"] != before["pair_generation"], (boundary, before, after)
+        manifests = [json.loads(Path(row["manifest"]).read_text())
+                     for row in after["products"].values()]
+        assert manifests[0]["pair_generation"] == manifests[1]["pair_generation"]
+        assert manifests[0]["proof"] == manifests[1]["proof"]
+    print("build publication: link failure preserved pair; legacy interruption left pinned generation "
+          "coherent; all four authoritative and six compatibility boundaries resolved complete; "
+          "separate compatibility roots passed")
     print("build publication source trees: installed-proof="
           f"{interrupted_pair[0]['proof']['source_tree_sha256']}; installed-replay="
           f"{interrupted_pair[1]['proof']['source_tree_sha256']}")

@@ -36,7 +36,8 @@ case "${ELISA_PROOF_PRODUCTS:-one}" in
         ;;
     all)
         PRODUCT_MAINS=(src/main.elisa src/replay_main.elisa)
-        PRODUCT_OUTPUTS=("$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/build/elisa-proof-replay")
+        PRODUCT_OUTPUTS=("${ELISA_PROOF_OUTPUT:-$ROOT_DIR/build/elisa-proof}"
+                         "${ELISA_PROOF_REPLAY_OUTPUT:-$ROOT_DIR/build/elisa-proof-replay}")
         ;;
     *) printf 'ELISA_PROOF_PRODUCTS must be one or all (got %s)\n' "$ELISA_PROOF_PRODUCTS" >&2; exit 2 ;;
 esac
@@ -141,6 +142,14 @@ fi
 printf '%s\n' "$$" >"$BUILD_LOCK/pid"
 
 BUILD_TOKEN="$$"
+PAIR_GENERATION=""
+PAIR_NEEDS_PUBLISH=0
+PAIR_MANIFEST_ARGS=()
+PAIR_GENERATION_ROOT="$ROOT_DIR/build/elisa-proof-generations"
+if [[ "${ELISA_PROOF_PRODUCTS:-one}" == all ]]; then
+    PAIR_GENERATION="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --new-pair-generation)"
+    PAIR_MANIFEST_ARGS=(--pair-generation "$PAIR_GENERATION")
+fi
 # Per-product temporaries carry the product's index, so two products never share one.
 stage_object_of() { printf '%s\n' "$ROOT_DIR/build/elisa-proof-stage.$BUILD_TOKEN.$1.o"; }
 proof_binary_of() { printf '%s\n' "$ROOT_DIR/build/elisa-proof.$BUILD_TOKEN.$1"; }
@@ -221,7 +230,8 @@ fi
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
 compiler_digest=""
 BUILD_RECIPES=("$ROOT_DIR/scripts/build.sh" "$ROOT_DIR/scripts/compiler_snapshot.sh" \
-    "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/compiler_environment.py")
+    "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/compiler_environment.py" \
+    "$ROOT_DIR/scripts/verify_product_pair.py")
 recipe_digest_args=()
 for recipe in "${BUILD_RECIPES[@]}"; do
     recipe_digest_args+=(--recipe-path "$recipe")
@@ -288,6 +298,7 @@ compile_object() {
 OBJECT_KEYS=()
 BUILD_IDENTITIES=()
 SKIP_PRODUCTS=()
+BINARY_REUSED=()
 COMPILE_INDICES=()
 compile_count=0
 for index in "${!PRODUCT_MAINS[@]}"; do
@@ -300,6 +311,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --existing-manifest "${PRODUCT_OUTPUTS[$index]}.manifest.json" \
         --existing-manifest-sha256 "${PRODUCT_OUTPUTS[$index]}.manifest.json.sha256"; then
         SKIP_PRODUCTS+=(1)
+        BINARY_REUSED+=(0)
         # Reuse the executable, but keep whole-snapshot provenance current. The
         # product identity above is closure-specific, so edits outside this
         # product do not require another compile or link.
@@ -310,6 +322,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         continue
     fi
     SKIP_PRODUCTS+=(0)
+    BINARY_REUSED+=(0)
     cached_object="$OBJECT_CACHE/$object_key.o"
     if [[ "$OBJECT_CACHE" != "0" && -n "$object_key" && -f "$cached_object" && -f "$cached_object.sha256" && \
           "$(shasum -a 256 "$cached_object" | cut -d' ' -f1)" == "$(<"$cached_object.sha256")" ]]; then
@@ -320,6 +333,24 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         compile_count=$((compile_count + 1))
     fi
 done
+# If exactly one all-products output misses its cache, publish a newly manifested pair. Reuse
+# the unchanged executable bytes, but regenerate its manifest with the same generation ID.
+if [[ "${ELISA_PROOF_PRODUCTS:-one}" == all ]]; then
+    any_rebuild=0
+    for index in "${!SKIP_PRODUCTS[@]}"; do
+        [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] || any_rebuild=1
+    done
+    if [[ "$any_rebuild" == 1 ]]; then
+        PAIR_NEEDS_PUBLISH=1
+        for index in "${!SKIP_PRODUCTS[@]}"; do
+            if [[ "${SKIP_PRODUCTS[$index]}" == 1 ]]; then
+                cp "${PRODUCT_OUTPUTS[$index]}" "$(proof_binary_of "$index")"
+                BINARY_REUSED[$index]=1
+            fi
+            SKIP_PRODUCTS[$index]=0
+        done
+    fi
+fi
 compile_status=0
 # Bash 3.2 treats an empty array as unset under nounset. Skip all expansions
 # of COMPILE_INDICES when every product was restored from the object cache.
@@ -365,15 +396,17 @@ for index in "${!PRODUCT_MAINS[@]}"; do
     PROOF_OUTPUT="${PRODUCT_OUTPUTS[$index]}"
     STAGE_OBJECT="$(stage_object_of "$index")"
     PROOF_BINARY="$(proof_binary_of "$index")"
-    LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
-    [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
-    # ELISA_EXTRA_LINK_INPUTS (space-separated objects) lets a host supply symbols the platform's
-    # dead stripping would otherwise remove, such as unreachable native-callback entry points.
-    [[ -n "${ELISA_EXTRA_LINK_INPUTS:-}" ]] && read -r -a extra_link_inputs <<< "$ELISA_EXTRA_LINK_INPUTS" && LINK_INPUTS+=("${extra_link_inputs[@]}")
-    "$CLANG_TOOL" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
-    # Sign before hashing so the manifest digest names the exact executable that runs.
-    if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
-        codesign -s - --force "$PROOF_BINARY" 2>/dev/null
+    if [[ "${BINARY_REUSED[$index]}" != 1 ]]; then
+        LINK_INPUTS=("$STAGE_OBJECT" "$PROFILE_HOOKS_OBJ")
+        [[ -n "$RUNTIME_OBJ" ]] && LINK_INPUTS+=("$RUNTIME_OBJ")
+        # ELISA_EXTRA_LINK_INPUTS (space-separated objects) lets a host supply symbols the platform's
+        # dead stripping would otherwise remove, such as unreachable native-callback entry points.
+        [[ -n "${ELISA_EXTRA_LINK_INPUTS:-}" ]] && read -r -a extra_link_inputs <<< "$ELISA_EXTRA_LINK_INPUTS" && LINK_INPUTS+=("${extra_link_inputs[@]}")
+        "$CLANG_TOOL" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$PROOF_BINARY" "${LINK_INPUTS[@]}"
+        # Sign before hashing so the manifest digest names the exact executable that runs.
+        if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+            codesign -s - --force "$PROOF_BINARY" 2>/dev/null
+        fi
     fi
     MANIFEST_TEMP="$(manifest_temp_of "$index")"
     python3 "$ROOT_DIR/scripts/build_manifest.py" \
@@ -395,21 +428,45 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --compile-mode "$COMPILE_MODE" \
         --contract-flag "$CONTRACT_FLAG" \
         --installed-as "$PROOF_OUTPUT" \
+        "${PAIR_MANIFEST_ARGS[@]}" \
         --output "$MANIFEST_TEMP"
     shasum -a 256 "$MANIFEST_TEMP" | cut -d' ' -f1 > "$(manifest_checksum_temp_of "$index")"
 done
+# The immutable generation is authoritative for paired consumers. Its directory rename and
+# CURRENT pointer replacement occur inside one filesystem; compatibility paths below are still
+# replaced separately and therefore are explicitly not a transactional pair.
+if [[ -n "$PAIR_GENERATION" && "$PAIR_NEEDS_PUBLISH" == 1 ]]; then
+    python3 "$ROOT_DIR/scripts/verify_product_pair.py" publish \
+        --generation-root "$PAIR_GENERATION_ROOT" --generation "$PAIR_GENERATION" \
+        --proof-binary "$(proof_binary_of 0)" --proof-manifest "$(manifest_temp_of 0)" \
+        --replay-binary "$(proof_binary_of 1)" --replay-manifest "$(manifest_temp_of 1)"
+fi
 # Prepare every requested binary and manifest before replacing any installed product. This keeps
-# a compiler, linker, signer, or manifest-generation failure from publishing only part of a pair.
+# failures before the authoritative generation publication from changing legacy outputs. The
+# legacy executable/manifest renames remain sequential and consumers must use the resolver above.
+publish_compatibility_file() {
+    local boundary="$1" source="$2" destination="$3"
+    if [[ "${ELISA_PROOF_PUBLISH_FAIL_AT:-}" == "$boundary" ]]; then
+        printf 'build: injected compatibility publication failure at %s\n' "$boundary" >&2
+        return 88
+    fi
+    mv -f "$source" "$destination"
+}
 for index in "${!PRODUCT_MAINS[@]}"; do
     [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] && continue
     PROOF_MAIN="${PRODUCT_MAINS[$index]}"
     PROOF_OUTPUT="${PRODUCT_OUTPUTS[$index]}"
     PROOF_BINARY="$(proof_binary_of "$index")"
-    mv -f "$PROOF_BINARY" "$PROOF_OUTPUT"
-    mv -f "$(manifest_temp_of "$index")" "$PROOF_OUTPUT.manifest.json"
-    mv -f "$(manifest_checksum_temp_of "$index")" "$PROOF_OUTPUT.manifest.json.sha256"
+    product_label="proof"
+    [[ "$index" != 1 ]] || product_label="replay"
+    if [[ -f "$PROOF_BINARY" ]]; then
+        publish_compatibility_file "legacy-$product_label-binary" "$PROOF_BINARY" "$PROOF_OUTPUT"
+    fi
+    publish_compatibility_file "legacy-$product_label-manifest" "$(manifest_temp_of "$index")" "$PROOF_OUTPUT.manifest.json"
+    publish_compatibility_file "legacy-$product_label-checksum" "$(manifest_checksum_temp_of "$index")" "$PROOF_OUTPUT.manifest.json.sha256"
     if [[ "$PROOF_MAIN" == "src/main.elisa" ]]; then
-        mv -f "$(stage_object_of "$index")" "$ROOT_DIR/build/elisa-proof-stage.o"
+        [[ ! -f "$(stage_object_of "$index")" ]] || \
+            mv -f "$(stage_object_of "$index")" "$ROOT_DIR/build/elisa-proof-stage.o"
     else
         rm -f "$(stage_object_of "$index")"
     fi

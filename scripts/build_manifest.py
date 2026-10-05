@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from compiler_environment import select_compiler_environment
 
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
@@ -124,6 +125,8 @@ def main() -> int:
     parser.add_argument("--recipe-path", action="append", default=[])
     parser.add_argument("--identity-link-flags", default="")
     parser.add_argument("--identity-output", default="")
+    parser.add_argument("--pair-generation", default="")
+    parser.add_argument("--new-pair-generation", action="store_true")
     parser.add_argument("--check-existing", action="store_true")
     parser.add_argument("--refresh-proof-provenance", action="store_true")
     parser.add_argument("--refresh-manifest", default="")
@@ -146,6 +149,10 @@ def main() -> int:
 
     if arguments.effective_env_digest:
         print(effective_environment_digest())
+        return 0
+
+    if arguments.new_pair_generation:
+        print(uuid.uuid4().hex)
         return 0
 
     if arguments.recipes_digest:
@@ -291,6 +298,7 @@ def main() -> int:
     frontend_tree = git(arguments.frontend_repo, "rev-parse", f"{arguments.frontend_revision}^{{tree}}")
     manifest = {
         "schema": MANIFEST_SCHEMA,
+        "pair_generation": arguments.pair_generation or None,
         "build_identity": arguments.recorded_build_identity or None,
         "proof": {
             "head": proof_head or None,
