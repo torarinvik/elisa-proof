@@ -141,7 +141,9 @@ fi
                       path.with_name(path.name + ".manifest.json.sha256"))]
         return [(artifact.read_bytes(), artifact.stat().st_mtime_ns) for artifact in artifacts]
 
-    before = product_state()
+    binaries_before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in products]
+    manifest_proofs_before = [json.loads(path.with_name(path.name + ".manifest.json").read_text())["proof"]
+                              for path in products]
 
     (proof / "src/unrelated.elisa").write_text("outside closure edited\n")
     after_edit = subprocess.run([str(build)], cwd=proof, env=environment,
@@ -151,7 +153,27 @@ fi
     assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"]
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
     after = product_state()
-    assert after == before, (initial.stderr, after_edit.stderr)
+    binaries_after = [(path.read_bytes(), path.stat().st_mtime_ns) for path in products]
+    assert binaries_after == binaries_before, (initial.stderr, after_edit.stderr)
+    current_tree = hashlib.sha256()
+    for directory, subdirectories, files in os.walk(proof / "src"):
+        subdirectories.sort()
+        for name in sorted(files):
+            path = Path(directory) / name
+            current_tree.update(path.relative_to(proof / "src").as_posix().encode() + b"\0")
+            current_tree.update(hashlib.sha256(path.read_bytes()).digest())
+    manifest_proofs_after = [json.loads(path.with_name(path.name + ".manifest.json").read_text())["proof"]
+                             for path in products]
+    assert all(proof_info["source_tree_sha256"] == current_tree.hexdigest()
+               for proof_info in manifest_proofs_after), manifest_proofs_after
+    assert manifest_proofs_after[0] == manifest_proofs_after[1]
+    assert manifest_proofs_after != manifest_proofs_before
+    for path in products:
+        manifest = path.with_name(path.name + ".manifest.json")
+        sidecar = path.with_name(path.name + ".manifest.json.sha256")
+        assert sidecar.read_text().strip() == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"]
+    assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
 
     changed_kernel = dict(environment, MOCK_UNAME_RELEASE="release-two")
     after_kernel_change = subprocess.run([str(build)], cwd=proof, env=changed_kernel,
@@ -160,7 +182,7 @@ fi
     assert "product src/replay_main.elisa is unchanged" in after_kernel_change.stderr
     assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"]
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
-    assert product_state() == before, (initial.stderr, after_kernel_change.stderr)
+    assert product_state() == after, (initial.stderr, after_kernel_change.stderr)
 
     # A damaged sidecar must invalidate only its product and drive the full build
     # path through compile, link, manifest write, and checksum refresh.

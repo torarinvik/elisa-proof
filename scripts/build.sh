@@ -296,6 +296,12 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --existing-manifest "${PRODUCT_OUTPUTS[$index]}.manifest.json" \
         --existing-manifest-sha256 "${PRODUCT_OUTPUTS[$index]}.manifest.json.sha256"; then
         SKIP_PRODUCTS+=(1)
+        # Reuse the executable, but keep whole-snapshot provenance current. The
+        # product identity above is closure-specific, so edits outside this
+        # product do not require another compile or link.
+        python3 "$ROOT_DIR/scripts/build_manifest.py" --refresh-proof-provenance \
+            --refresh-manifest "${PRODUCT_OUTPUTS[$index]}.manifest.json" \
+            --refresh-snapshot-root "$SNAPSHOT_ROOT" --refresh-proof-root "$ROOT_DIR"
         printf 'build: product %s is unchanged\n' "${PRODUCT_MAINS[$index]}" >&2
         continue
     fi
