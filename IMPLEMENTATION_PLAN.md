@@ -2347,6 +2347,11 @@ the queue and put its minimized reproducer first.
     adapter assumptions, compiler/type-system guarantees, runtime/ABI assumptions, solver and
     package versions, and dependencies. Connect incident records to actual cache/package invalidation;
     demonstrate that a pre-fix artifact is replayed under the new semantic version or refused.
+    An incremental static guard now pins the portable package route's input trust labels and checks
+    that `replayed` status follows complete-arena admission plus per-theorem schema, identity and
+    kernel checks ([`scripts/test_portable_trust_inventory.py`](scripts/test_portable_trust_inventory.py)).
+    This is source-pattern evidence for one route; it does not prove the reader, kernel or source
+    correspondence correct, nor enumerate every constructor/admission route.
 
 ### Priority 1 — make performance visible, reproducible, and bounded
 
