@@ -181,6 +181,7 @@ fi
         manifest = path.with_name(path.name + ".manifest.json")
         sidecar = path.with_name(path.name + ".manifest.json.sha256")
         assert sidecar.read_text().strip() == hashlib.sha256(manifest.read_bytes()).hexdigest()
+
     assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"]
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
 
@@ -258,6 +259,57 @@ fi
                    for path in products]
     assert failed_pair == old_pair
     assert product_state() == before_failed_build
+
+    # Interrupt after the proof binary, manifest, and checksum have been replaced,
+    # but before the replay binary's first final rename. This is the remaining
+    # observable pair-publication window.
+    published_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
+                      for path in products]
+    before_publish_interrupt = product_state()
+    (proof / "src/main.elisa").write_text('include "./shared.elisa"\nmain interrupted-generation\n')
+    (proof / "src/replay_main.elisa").write_text("replay interrupted-generation\n")
+    mock_mv = tools / "mv"
+    mock_mv.write_text("""#!/usr/bin/env python3
+import os, pathlib, sys
+args = sys.argv[1:]
+source, destination = pathlib.Path(args[-2]), pathlib.Path(args[-1])
+if (os.environ.get('MOCK_INTERRUPT_BEFORE_REPLAY_PUBLISH') == '1'
+        and destination.name == 'elisa-proof-replay'
+        and source.name.startswith('elisa-proof.') and source.name.endswith('.1')):
+    pathlib.Path(os.environ['MOCK_PUBLISH_FAILURE_MARKER']).touch()
+    raise SystemExit(88)
+os.execv('/bin/mv', ['mv', *args])
+""")
+    mock_mv.chmod(mock_mv.stat().st_mode | stat.S_IXUSR)
+    publish_marker = project / "publish-interrupted"
+    interrupted_environment = dict(environment, MOCK_INTERRUPT_BEFORE_REPLAY_PUBLISH="1",
+                                   MOCK_PUBLISH_FAILURE_MARKER=str(publish_marker))
+    interrupted = subprocess.run([str(build)], cwd=proof, env=interrupted_environment,
+                                 capture_output=True, text=True)
+    assert interrupted.returncode == 88, (interrupted.returncode, interrupted.stdout, interrupted.stderr)
+    assert publish_marker.exists(), "injected interruption did not reach the second product rename"
+    assert not lock.exists()
+    interrupted_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
+                        for path in products]
+    assert interrupted_pair[0]["proof"]["source_tree_sha256"] != published_pair[0]["proof"]["source_tree_sha256"]
+    assert interrupted_pair[1] == published_pair[1]
+    assert interrupted_pair[0]["proof"]["source_tree_sha256"] != interrupted_pair[1]["proof"]["source_tree_sha256"]
+    for path in products:
+        manifest = path.with_name(path.name + ".manifest.json")
+        sidecar = path.with_name(path.name + ".manifest.json.sha256")
+        assert sidecar.read_text().strip() == hashlib.sha256(manifest.read_bytes()).hexdigest()
+    partial_state = product_state()
+    assert partial_state[:3] != before_publish_interrupt[:3]
+    assert partial_state[3:] == before_publish_interrupt[3:]
+
+    # A later ordinary build repairs the pair from the current source snapshot.
+    subprocess.run([str(build)], cwd=proof, env=environment,
+                   check=True, capture_output=True, text=True)
+    repaired_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
+                     for path in products]
+    assert repaired_pair[0]["proof"] == repaired_pair[1]["proof"]
+    print("build publication: competing writer=2; second-link failure=42 preserved pair; "
+          "interrupted replay rename=88 exposed mismatched source digest; later build repaired pair")
 
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
