@@ -67,11 +67,18 @@ def self_test_process_group_cleanup(entrypoint: Path) -> None:
         raise RuntimeError("ordinary measurement returned invalid output") from error
     if measured.get("returncode") != 0 or ordinary_stdout != b"ordinary\n":
         raise RuntimeError("ordinary measurement did not preserve its successful command output")
+    if (not isinstance(measured.get("wall_seconds"), (int, float))
+            or not isinstance(measured.get("user_cpu_seconds"), (int, float))
+            or not isinstance(measured.get("system_cpu_seconds"), (int, float))
+            or measured.get("peak_rss_kib") is not None
+            and not isinstance(measured.get("peak_rss_kib"), int)):
+        raise RuntimeError("measurement wrapper returned invalid per-process resource metrics")
 
     coherent_manifest = {
-        "proof": {"source_tree_sha256": "source"},
+        "proof": {"source_tree_sha256": "source", "source_dirty": False},
         "frontend": {"revision": "frontend", "tree": "frontend-tree"},
-        "compiler": {"stage": "stage1", "product": {"sha256": "compiler"},
+        "compiler": {"stage": "stage1", "stage1_revision": "stage1", "source_revision": "compiler-rev",
+                     "source_dirty": False, "product": {"sha256": "compiler"},
                      "executable": {"sha256": "driver"}},
         "runtime": {"sha256": "runtime"},
         "profile_hooks": {"sha256": "hooks"},
