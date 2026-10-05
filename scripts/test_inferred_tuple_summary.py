@@ -14,6 +14,12 @@ def report(example, code):
                              capture_output=True, text=True, timeout=120)
     assert process.returncode == code, (example, process.returncode, process.stderr)
     data = json.loads(process.stdout)
+    for section, fields in (("summary", ("semantic_errors", "obligations", "proven", "unproven")),
+                            ("replay", ("certificates", "replayed", "gaps"))):
+        for field in fields:
+            counter = data[section][field]
+            assert type(counter) is int and counter >= 0, (example, section, field, counter)
+    assert data["summary"]["obligations"] == data["summary"]["proven"] + data["summary"]["unproven"]
     assert data["summary"]["semantic_errors"] == 0
     assert data["replay"]["gaps"] == 0
     assert data["replay"]["certificates"] == data["replay"]["replayed"] == data["summary"]["proven"]
@@ -25,7 +31,8 @@ assert positive["status"] == "proved" and positive["findings"] == []
 assert positive["summary"]["obligations"] == positive["summary"]["proven"] > 0
 assert {row["name"] for row in positive["declaration_details"]
         if row["kind"] == "function" and row["verified"]} == {
-            "tuple_summary_source", "explicit_tuple_summary", "inferred_tuple_summary"}
+            "tuple_summary_source", "explicit_tuple_summary", "inferred_tuple_summary",
+            "guarded_inferred_tuple_summary", "shadowed_inferred_tuple_guard"}
 negative = report("rejected_inferred_tuple_summary.elisa", 1)
 assert negative["status"] == "failed"
 refused = {row["name"] for row in negative["findings"] if row["kind"] == "ensure-unproven"}
