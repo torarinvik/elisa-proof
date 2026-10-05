@@ -57,7 +57,7 @@ integer search can emit a goal certificate. The existing kernel rule remains sig
 instances continue through the range-checked source and replay paths.
 
 A fresh matched strict O2 pair was built from a clean worktree at proof HEAD
-`f915072c2b3aab191ef2bad7ffe183e8a563b6d5`, source tree
+`6753e0df2dc2128e380b010b0b9b5953776418b1`, source tree
 `51d6d770b5212386b9b9f73fe70d0b13025793071139da4aa52a133a320c2cef`, and frontend revision
 `7b27fa312c5af923f044f6ee0e5e1de4f811f595` / tree
 `ab8926f6080a13d21b06606af251e6f0027c2db5`. Both products were built strict O2 with the clean
@@ -73,8 +73,8 @@ Validation against these products:
 
 - `ELISA_PROOF_BIN="$PWD/build/elisa-proof" ELISA_PROOF_REPLAY_BIN="$PWD/build/elisa-proof-replay" python3 scripts/test_conditional_ensure_replay_gap.py` passed. The positive source fixture proved with 2/2 internal replays; `Slide.inner` roots 48 and 51 both replay; every negative control, including u64, failed with zero gaps and complete replay.
 - Exporting the positive fixture with `build/elisa-proof --package` and replaying it with `build/elisa-proof-replay` returned `replayed`, 2/2 theorems, zero not-replayed.
-- The u64 control now reports `failed`, one certificate replayed, zero gaps, and declaration reason `body-unverified`; its unsupported goal has no emitted goal certificate. Signed near-min/max and wrong-width controls remain ordinary unproved obligations with complete replay.
-- `git diff --check` passed before the evidence update; the final evidence-only change is also whitespace-checked before commit.
+- The u64 control now reports `failed`, one certificate replayed, zero gaps, and declaration reason `body-unverified`; its unsupported goal reports `not_certified` with no certificate id. Signed near-min/max and wrong-width controls remain ordinary unproved obligations with complete replay.
+- `git diff --check` passed before the evidence update; the evidence-only update is whitespace-checked before commit.
 
 This closes the producer/replay disagreement for this exact unsigned fallback shape only. The
 broader R-003 inventory, generalized conditional replay, and full R-042 integer matrix remain open.
