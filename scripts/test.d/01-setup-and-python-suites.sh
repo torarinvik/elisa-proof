@@ -170,6 +170,7 @@ run_py_test test_variant_exclusion.py
 run_py_test test_signed_upper_bound.py
 run_py_test test_refusal_gate.py
 run_py_test test_report_count_semantics.py
+run_py_test test_agent_protocol_schema.py
 run_py_test test_deterministic_call_chain.py
 run_py_test test_deterministic_operator_global.py
 run_py_test test_tuple_field_region.py

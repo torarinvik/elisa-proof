@@ -2,11 +2,14 @@
 """Check the report's v1 compatibility shape and the v2 version marker."""
 
 import json
+import os
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_DIR = ROOT / "schema"
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 
 
 def check(instance, schema, name):
@@ -62,10 +65,17 @@ def main():
         pass
     else:
         raise AssertionError("v2 schema accepted protocol_version 1")
-    emitter = (ROOT / "src/app/report_output_integrated_helpers.elisa").read_text()
-    escaped_quote = chr(92) + '"'
-    assert escaped_quote + 'protocol_version' in emitter and ':2,' + escaped_quote + 'status' in emitter
-    print("v1 compatibility and v2 version marker validated")
+    emitted = subprocess.run(
+        [str(BINARY), "--json", str(ROOT / "examples/loop_invariants_compile.elisa")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert emitted.returncode == 0, emitted.stderr
+    current_report = json.loads(emitted.stdout)
+    check(current_report, v2, "emitted v2 report")
+    assert current_report["protocol_version"] == 2
+    print("v1 compatibility and an emitted v2 report validated")
 
 
 if __name__ == "__main__":
