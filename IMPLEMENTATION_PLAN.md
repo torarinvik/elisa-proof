@@ -1167,7 +1167,16 @@ replays; negative counts emit the expected diagnostic; a shift by the u8 width a
 high-bit-right-shift claim remain unproved. Source and kernel guards agree on these cases, so no
 semantic change was indicated. The exact product identities are in
 `docs/evidence/2026-10-05-r042-u8-shift-boundaries.md`. This does not establish oversized runtime
-shift behavior, the true high-bit result, other widths/signs, or bitwise/cast parity.
+shift behavior, other widths/signs, or bitwise/cast parity.
+
+**True high-bit u8 shift follow-up (2026-10-05):** Commit `23025f3d` adds same-sort unsigned
+`>>` evaluation to the closed-constant producer and an independent kernel replay rule, both
+bounded by the operand width. `128u8 >> 1u8 == 64u8` proves and replays; the width-sized
+`128u8 >> 8u8 == 0u8` control remains unproved. The focused regression and matched product
+identities are recorded in
+[`R-042 high-bit shift evidence`](docs/evidence/2026-10-05-r042-u8-highbit-shift.md)
+(`8110f017`). This closes one true high-bit u8 right-shift case; the broader R-042 matrix remains
+open.
 
 **Signed overflow boundary follow-up (2026-10-05):** Focused source and kernel audit found matching
 fail-closed handling for divide-by-zero and `MIN_I64 / -1` / `MIN_I64 % -1`. The interval rule also
@@ -1589,7 +1598,8 @@ appearing on `main`.
 | `f6e18613`, `605710a9`, `6776977c`, `9793a98f`, `b5793019` — signed division/remainder boundaries | Safe negative-divisor cases prove; zero divisors and `MIN_I64 / -1` or `% -1` stay unproved, with exact diagnostic-site and independent replay checks. | This is only the `i64` division/remainder edge slice; widths, casts, shifts, bitwise operations, overflow modes, and cross-route semantic parity remain open. See [`docs/evidence/2026-10-05-r042-signed-division-boundaries.md`](docs/evidence/2026-10-05-r042-signed-division-boundaries.md). |
 | `4da00dd9`, `93a3e2f0` — portable JSON depth boundary | Depths 255 and 256 reach structured source-schema refusal; depth 257 reaches structured malformed-JSON refusal at the pinned cap. | Does not cover parser allocation/peak memory, CPU near the cap, or other decoder fields. Continue R-006. |
 | `8037346a`, `038cf854` — finite universal escape control | Independent replay accepts the quantified positive control and refuses one attempt to use its bound name as a free outer-scope fact. | Binder identity, general shadowing/alpha-renaming, existential rules, mutation and other context routes remain open. Continue R-007. |
-| `e8d17819`, `1ec99e4b`, `8e4d6e25`, `5bf08af1` — unsigned u8 shift boundaries | A safe small shift proves and replays; negative and width-sized shifts and a false high-bit result stay unproved; producer and kernel guards agree. | Other widths, oversized execution behavior, true high-bit result, casts, bitwise operations and cross-route parity remain open. Continue R-042. |
+| `e8d17819`, `1ec99e4b`, `8e4d6e25`, `5bf08af1` — unsigned u8 shift boundaries | A safe small shift proves and replays; negative and width-sized shifts and a false high-bit result stay unproved; producer and kernel guards agree. | Other widths, oversized execution behavior, casts, bitwise operations and cross-route parity remain open. Continue R-042. |
+| `23025f3d`, `8110f017` — true high-bit u8 right shift | `128u8 >> 1u8 == 64u8` proves and independently replays; the width-sized refusal remains closed. Producer and kernel use matching unsigned same-sort rules. | One `u8` right-shift value is covered; other counts, widths, left shift, casts, bitwise operations and cross-route parity remain open. See [`docs/evidence/2026-10-05-r042-u8-highbit-shift.md`](docs/evidence/2026-10-05-r042-u8-highbit-shift.md). |
 | `71ede8b4` — signed unit-shift implication in conditional replay | The kernel accepts only the exact `(x + 1) < y ⇒ x < (y - 1)` shape, checks matching signed widths and primitive comparisons, requires both expressions to be safe, then derives the consequent with the linear arithmetic checker. The source fixture closes the prior `Slide.inner` root-51 replay gap; wrong-bound, missing-conjunct, overflow and wrong-guard controls remain refused. | This is a narrow implication rule, not general conditional arithmetic. Audit fixed-width safety premises and source-to-certificate correspondence; add adversarial near-min/max and width/sort mutations, then rerun a matched pair using the current compiler before claiming current integration. Continue R-003/R-042. |
 | `90a38a3e`, `1fda811c` — conditional conjunct replay | Exact primitive positive conjuncts of a stable `and` guard now replay through the fallback rule; root 48 proves and forged/missing/overflow-sensitive cases refuse. | The original evidence predates the signed-shift extension and used an older Stage1 product. Root 51 is now closed by the narrow `71ede8b4` slice, but broader conditional-call/replay inventory and current-compiler integration remain open. |
 | `576a090f` — benchmark harness responsibility split | The overlong Luna benchmark driver is split into coherent process, validation, and orchestration modules under the source-size limit. | This is maintainability/iteration groundwork, not a verifier speedup; broaden real workload coverage and measure end-to-end test-loop savings under R-011/R-018. |
