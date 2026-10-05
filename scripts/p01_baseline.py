@@ -40,9 +40,99 @@ def load_sentinel_manifest() -> dict:
         payload = json.loads(SENTINEL_MANIFEST.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"cannot read P-01 sentinel manifest: {error}") from error
-    if payload.get("schema") != "elisa-proof-p01-sentinels-v2" or not isinstance(payload.get("fixtures"), dict):
+    if payload.get("schema") != "elisa-proof-p01-sentinels-v3" or not isinstance(payload.get("fixtures"), dict):
         raise RuntimeError("P-01 sentinel manifest has an unsupported schema")
-    return payload["fixtures"]
+    fixtures = payload["fixtures"]
+    probe = payload.get("semantic_probe")
+    probe_keys = ("proof_head", "proof_source_tree_sha256", "compiler_source_revision",
+                  "compiler_product_sha256", "frontend_tree", "runtime_sha256",
+                  "proof_binary_sha256", "replay_binary_sha256", "target", "optimization",
+                  "compile_mode", "generation")
+    if not isinstance(probe, dict) or any(not isinstance(probe.get(key), str) or not probe[key]
+                                          for key in probe_keys):
+        raise RuntimeError("P-01 semantic probe provenance is missing or incomplete")
+    probe_hashes = ("proof_source_tree_sha256", "compiler_product_sha256",
+                    "runtime_sha256", "proof_binary_sha256", "replay_binary_sha256")
+    if any(len(probe[key]) != 64 or any(char not in "0123456789abcdef" for char in probe[key])
+           for key in probe_hashes):
+        raise RuntimeError("P-01 semantic probe provenance contains a malformed digest")
+    for key in ("proof_head", "compiler_source_revision", "frontend_tree"):
+        if len(probe[key]) != 40 or any(char not in "0123456789abcdef" for char in probe[key]):
+            raise RuntimeError("P-01 semantic probe provenance contains a malformed revision")
+    expected_names = {name for name, _ in FIXTURES}
+    if set(fixtures) != expected_names:
+        raise RuntimeError("P-01 fixtures do not match the versioned sentinel manifest")
+    semantic_counts = ("obligation_count", "proven", "unproven", "failed",
+                       "obligation_detail_proven", "obligation_detail_unproven",
+                       "trusted_assumptions", "trusted_boundary_facts", "proof_certificates",
+                       "replay_certificates", "replayed", "replay_gaps")
+    for name, row in fixtures.items():
+        if not isinstance(row, dict):
+            raise RuntimeError(f"P-01 workload identity is malformed for {name}")
+        digest = row.get("sha256")
+        size = row.get("size_bytes")
+        line_count = row.get("source_lines")
+        if (not isinstance(row.get("path"), str) or not row["path"]
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)
+                or isinstance(size, bool) or not isinstance(size, int) or size < 0
+                or isinstance(line_count, bool) or not isinstance(line_count, int) or line_count < 0):
+            raise RuntimeError(f"P-01 workload identity is incomplete for {name}")
+        outcome = row.get("expected_outcome")
+        if (not isinstance(outcome, dict)
+                or outcome.get("status") not in {"proved", "failed", "proved_with_replay_gaps"}
+                or isinstance(outcome.get("returncode"), bool)
+                or not isinstance(outcome.get("returncode"), int)
+                or outcome.get("returncode") != (0 if outcome["status"] == "proved" else 1)):
+            raise RuntimeError(f"P-01 expected status is incomplete or inconsistent for {name}")
+        semantic = row.get("semantic_expectations")
+        if not isinstance(semantic, dict):
+            raise RuntimeError(f"P-01 semantic expectations are missing for {name}")
+        if any(isinstance(semantic.get(key), bool) or not isinstance(semantic.get(key), int)
+               or semantic[key] < 0 for key in semantic_counts):
+            raise RuntimeError(f"P-01 semantic counts are incomplete for {name}")
+        ids = semantic.get("obligation_ids")
+        details = semantic.get("obligation_details")
+        assumption_details = semantic.get("trusted_assumption_details")
+        inventory_complete = semantic.get("obligation_inventory_complete")
+        if (not isinstance(ids, list) or any(isinstance(item, bool) or not isinstance(item, int)
+                                             for item in ids)
+                or len(set(ids)) != len(ids)
+                or not isinstance(details, list)
+                or not isinstance(assumption_details, list)
+                or not isinstance(inventory_complete, bool)):
+            raise RuntimeError(f"P-01 obligation/assumption inventory is incomplete for {name}")
+        if (len(details) != len(ids)
+                or (inventory_complete and len(ids) != semantic["obligation_count"])
+                or [item.get("id") if isinstance(item, dict) else None for item in details] != ids
+                or any(isinstance(item, bool) or not isinstance(item, int)
+                       for item in (detail.get("id") for detail in details if isinstance(detail, dict)))
+                or semantic["trusted_assumptions"] != len(assumption_details)):
+            raise RuntimeError(f"P-01 obligation/assumption identity disagrees for {name}")
+        if any(not isinstance(item, dict)
+               or isinstance(item.get("id"), bool) or not isinstance(item.get("id"), int)
+               or not isinstance(item.get("function"), str)
+               or isinstance(item.get("line"), bool) or not isinstance(item.get("line"), int)
+               or not isinstance(item.get("rule"), str)
+               or item.get("result") not in ("proved", "unproven")
+               for item in details):
+            raise RuntimeError(f"P-01 obligation row is malformed for {name}")
+        if (semantic["proven"] + semantic["unproven"] != semantic["obligation_count"]
+                or semantic["failed"] > semantic["unproven"]
+                or semantic["obligation_detail_proven"] + semantic["obligation_detail_unproven"] != len(details)
+                or (inventory_complete and (semantic["obligation_detail_proven"] != semantic["proven"]
+                                            or semantic["obligation_detail_unproven"] != semantic["unproven"]))
+                or semantic["proof_certificates"] != semantic["replay_certificates"]
+                or semantic["replay_certificates"] != semantic["replayed"] + semantic["replay_gaps"]):
+            raise RuntimeError(f"P-01 semantic/replay totals are inconsistent for {name}")
+        if (sum(item.get("result") == "proved" for item in details if isinstance(item, dict))
+                != semantic["obligation_detail_proven"]
+                or sum(item.get("result") == "unproven" for item in details if isinstance(item, dict))
+                != semantic["obligation_detail_unproven"]
+                or any(not isinstance(item, dict) or item.get("result") not in {"proved", "unproven"}
+                       for item in details)):
+            raise RuntimeError(f"P-01 obligation results disagree with totals for {name}")
+    return fixtures
 
 
 EXPECTED_OUTCOMES = {name: row["expected_outcome"]
@@ -77,6 +167,27 @@ def identity(path: Path) -> dict:
             digest.update(block)
             size += len(block)
     return {"sha256": digest.hexdigest(), "size_bytes": size}
+
+
+def source_line_count(path: Path) -> int:
+    data = path.read_bytes()
+    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+
+
+def validate_workload_identities(sentinels: dict) -> dict:
+    """Bind every manifest row to the fixed name/path table and current fixture bytes."""
+    if set(sentinels) != {name for name, _ in FIXTURES}:
+        raise RuntimeError("P-01 fixtures do not match the versioned sentinel manifest")
+    fixture_ids = {name: identity(path) for name, path in FIXTURES}
+    for name, path in FIXTURES:
+        sentinel = sentinels[name]
+        if sentinel.get("path") != str(path.relative_to(ROOT)):
+            raise RuntimeError(f"P-01 sentinel path changed for {name}")
+        if (sentinel.get("sha256") != fixture_ids[name]["sha256"]
+                or sentinel.get("size_bytes") != fixture_ids[name]["size_bytes"]
+                or sentinel.get("source_lines") != source_line_count(path)):
+            raise RuntimeError(f"P-01 workload identity changed for {name}; review and version the sentinel")
+    return fixture_ids
 
 
 def build_identity(binary: Path) -> dict:
@@ -263,6 +374,7 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
         "failed": summary.get("failed"),
         "proof_certificates": measurements.get("certificates"),
         "trusted_assumptions": len(report.get("trust", {}).get("trusted_assumptions", [])),
+        "trusted_assumption_details": report.get("trust", {}).get("trusted_assumptions", []),
         "trusted_boundary_facts": report.get("trust", {}).get("trusted_boundary_facts"),
         # Preserve the complete CLI measurement object. This keeps newly emitted serialized
         # counters available to baseline consumers without implying internal timing coverage.
@@ -311,6 +423,11 @@ def check_report(measurement: dict, expected: dict | None = None,
         if measurement["returncode"] != expected["returncode"]:
             raise RuntimeError(f"unexpected CLI exit code: {measurement['returncode']}")
     if semantic_expectations:
+        if semantic_expectations.get("obligation_inventory_complete") is not True:
+            raise RuntimeError("source obligation inventory is incomplete")
+        if (measurement.get("obligations") != len(measurement.get("obligation_ids", []))
+                or measurement.get("obligations") != len(measurement.get("obligation_details", []))):
+            raise RuntimeError("reported obligation count differs from emitted obligation inventory")
         for key in ("obligation_count", "proven", "unproven", "failed", "trusted_assumptions",
                     "trusted_boundary_facts", "proof_certificates", "replay_certificates",
                     "replayed", "replay_gaps"):
@@ -321,6 +438,8 @@ def check_report(measurement: dict, expected: dict | None = None,
             raise RuntimeError("obligation IDs differ from the pinned semantic workload")
         if measurement.get("obligation_details") != semantic_expectations["obligation_details"]:
             raise RuntimeError("obligation details differ from the pinned semantic workload")
+        if measurement.get("trusted_assumption_details") != semantic_expectations["trusted_assumption_details"]:
+            raise RuntimeError("trusted assumptions differ from the pinned semantic workload")
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -345,17 +464,8 @@ def run(args: argparse.Namespace) -> dict:
     warmup_runs = getattr(args, "warmup_runs", 0)
     if rounds <= 0 or warmup_runs < 0:
         raise RuntimeError("rounds must be positive and warm-up runs cannot be negative")
-    fixture_ids = {name: identity(path) for name, path in FIXTURES}
     sentinels = load_sentinel_manifest()
-    if set(sentinels) != {name for name, _ in FIXTURES}:
-        raise RuntimeError("P-01 fixtures do not match the versioned sentinel manifest")
-    for name, path in FIXTURES:
-        sentinel = sentinels[name]
-        if sentinel.get("path") != str(path.relative_to(ROOT)):
-            raise RuntimeError(f"P-01 sentinel path changed for {name}")
-        if (sentinel.get("sha256") != fixture_ids[name]["sha256"]
-                or sentinel.get("size_bytes") != fixture_ids[name]["size_bytes"]):
-            raise RuntimeError(f"P-01 workload identity changed for {name}; review and version the sentinel")
+    fixture_ids = validate_workload_identities(sentinels)
     manifest = json.loads(SENTINEL_MANIFEST.read_text(encoding="utf-8"))
     for workload_name, workload in manifest.get("workloads", {}).items():
         members = workload.get("members", [])
@@ -416,6 +526,18 @@ def run(args: argparse.Namespace) -> dict:
         raise RuntimeError("a fixed workload changed during measurement")
     if build_identity(binary) != build:
         raise RuntimeError("P-01 proof build identity changed during measurement")
+    fixture_rows = []
+    for name, path in FIXTURES:
+        sentinel = sentinels[name]
+        fixture_row = {"name": name, "path": str(path), "sha256": fixture_ids[name]["sha256"],
+                       "size_bytes": fixture_ids[name]["size_bytes"],
+                       "expected_outcome": sentinel["expected_outcome"]}
+        if "semantic_expectations" in sentinel:
+            fixture_row["semantic_expectations"] = sentinel["semantic_expectations"]
+        for optional_key in ("workload", "budget_classification"):
+            if optional_key in sentinel:
+                fixture_row[optional_key] = sentinel[optional_key]
+        fixture_rows.append(fixture_row)
     return {"schema": SCHEMA, "complete": not failures, "failures": failures,
             "machine": {"platform": platform.platform(),
             "python": platform.python_version(), "target": platform.machine(),
@@ -438,14 +560,7 @@ def run(args: argparse.Namespace) -> dict:
                 "goal_attempt_and_cache_counts": "serialized-per-proof-report",
                 "kernel_node_child_and_replay_counts": "serialized-per-proof-report"},
             "phase_timing_availability": PHASE_TIMING_AVAILABILITY,
-            "fixtures": [{"name": name, "path": str(path), "sha256": fixture_ids[name]["sha256"],
-                          "size_bytes": fixture_ids[name]["size_bytes"],
-                          "expected_outcome": sentinels[name]["expected_outcome"],
-                          **({"workload": sentinels[name]["workload"],
-                              "semantic_expectations": sentinels[name]["semantic_expectations"],
-                              "budget_classification": sentinels[name]["budget_classification"]}
-                             if "semantic_expectations" in sentinels[name] else {})}
-                         for name, path in FIXTURES],
+            "fixtures": fixture_rows,
             "cases": cases}
 
 
