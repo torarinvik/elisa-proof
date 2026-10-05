@@ -467,6 +467,22 @@ class SamplingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "incomplete semantic workload report"):
             benchmark.semantic_workload_metrics(result, report, "replay-gap")
 
+    def test_goal_results_must_match_summary_and_be_boolean(self) -> None:
+        result, report = self.semantic_report()
+        report["goals"][0]["proven"] = False
+        with self.assertRaisesRegex(RuntimeError, "goal results disagree"):
+            benchmark.semantic_workload_metrics(result, report, "contradictory-proof")
+
+        result, report = self.semantic_report("failed", proven=0, unproven=1)
+        report["goals"][0]["proven"] = True
+        with self.assertRaisesRegex(RuntimeError, "goal results disagree"):
+            benchmark.semantic_workload_metrics(result, report, "contradictory-refusal")
+
+        result, report = self.semantic_report()
+        report["goals"][0]["proven"] = 1
+        with self.assertRaisesRegex(RuntimeError, "goal results are missing or invalid"):
+            benchmark.semantic_workload_metrics(result, report, "non-boolean-goal-result")
+
     def test_timeout_names_censored_side_and_suppresses_speedup(self) -> None:
         with mock.patch.object(benchmark, "invoke", side_effect=RuntimeError("measurement wrapper timed out")):
             with self.assertRaisesRegex(

@@ -85,6 +85,13 @@ def semantic_workload_metrics(result: dict, report: dict, label: str) -> dict:
             raise ValueError("count field is missing or invalid")
         if declaration_count != len(declarations) or obligation_count != len(goals):
             raise ValueError("declaration/obligation arrays are incomplete")
+        if any(not isinstance(goal, dict) or type(goal.get("proven")) is not bool
+               for goal in goals):
+            raise ValueError("goal results are missing or invalid")
+        goal_proven = sum(goal["proven"] is True for goal in goals)
+        goal_unproven = sum(goal["proven"] is False for goal in goals)
+        if goal_proven != proven_count or goal_unproven != unproven_count:
+            raise ValueError("goal results disagree with proven/unproven summary totals")
         if certificate_count != len(certificates) or replayed_count != certificate_count or replay_gaps != 0:
             raise ValueError("certificate replay is incomplete")
         if proven_count + unproven_count != obligation_count:
