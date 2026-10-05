@@ -362,6 +362,26 @@ if [[ "${ELISA_PROOF_PRODUCTS:-one}" == all ]]; then
     for index in "${!SKIP_PRODUCTS[@]}"; do
         [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] || any_rebuild=1
     done
+    if [[ "$any_rebuild" == 0 ]]; then
+        pair_status=0
+        python3 "$ROOT_DIR/scripts/verify_product_pair.py" check-current \
+            --generation-root "$PAIR_GENERATION_ROOT" \
+            --proof-binary "${PRODUCT_OUTPUTS[0]}" \
+            --proof-manifest "${PRODUCT_OUTPUTS[0]}.manifest.json" \
+            --proof-manifest-sha256 "${PRODUCT_OUTPUTS[0]}.manifest.json.sha256" \
+            --replay-binary "${PRODUCT_OUTPUTS[1]}" \
+            --replay-manifest "${PRODUCT_OUTPUTS[1]}.manifest.json" \
+            --replay-manifest-sha256 "${PRODUCT_OUTPUTS[1]}.manifest.json.sha256" || pair_status=$?
+        if [[ "$pair_status" -eq 1 ]]; then
+            # Both product binaries still match their closure-specific identities, but the
+            # immutable pair can name an older whole-source snapshot or build tuple. Publish
+            # fresh manifests and reuse the exact checked binaries; do not compile or link.
+            printf 'build: refreshing immutable pair provenance without recompiling products\n' >&2
+            any_rebuild=1
+        elif [[ "$pair_status" -ne 0 ]]; then
+            exit "$pair_status"
+        fi
+    fi
     if [[ "$any_rebuild" == 1 ]]; then
         PAIR_NEEDS_PUBLISH=1
         for index in "${!SKIP_PRODUCTS[@]}"; do
@@ -493,7 +513,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
     PROOF_BINARY="$(proof_binary_of "$index")"
     product_label="proof"
     [[ "$index" != 1 ]] || product_label="replay"
-    if [[ -f "$PROOF_BINARY" ]]; then
+    if [[ -f "$PROOF_BINARY" && "${BINARY_REUSED[$index]}" != 1 ]]; then
         publish_compatibility_file "legacy-$product_label-binary" "$PROOF_BINARY" "$PROOF_OUTPUT"
     fi
     publish_compatibility_file "legacy-$product_label-manifest" "$(manifest_temp_of "$index")" "$PROOF_OUTPUT.manifest.json"

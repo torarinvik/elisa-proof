@@ -175,10 +175,24 @@ fi
             resolved["products"]["elisa-proof-replay"]["binary"]).parent
         return resolved
 
+    def check_current_generation(env=environment) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["python3", str(proof / "scripts/verify_product_pair.py"), "check-current",
+             "--generation-root", str(generation_root),
+             "--proof-binary", str(products[0]),
+             "--proof-manifest", str(products[0].with_name(products[0].name + ".manifest.json")),
+             "--proof-manifest-sha256", str(products[0].with_name(products[0].name + ".manifest.json.sha256")),
+             "--replay-binary", str(products[1]),
+             "--replay-manifest", str(products[1].with_name(products[1].name + ".manifest.json")),
+             "--replay-manifest-sha256", str(products[1].with_name(products[1].name + ".manifest.json.sha256"))],
+            env=env, capture_output=True, text=True,
+        )
+
     initial_generation = resolve_generation()
     assert initial_generation["pair_generation"]
     assert all(json.loads(Path(row["manifest"]).read_text())["pair_generation"] ==
                initial_generation["pair_generation"] for row in initial_generation["products"].values())
+    assert check_current_generation().returncode == 0
 
     current_pointer = generation_root / "CURRENT"
     pointer_value = current_pointer.read_text(encoding="ascii")
@@ -228,6 +242,27 @@ fi
         manifest = path.with_name(path.name + ".manifest.json")
         sidecar = path.with_name(path.name + ".manifest.json.sha256")
         assert sidecar.read_text().strip() == hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    refreshed_generation = resolve_generation()
+    assert refreshed_generation["pair_generation"] != initial_generation["pair_generation"]
+    refreshed_pair = [json.loads(Path(row["manifest"]).read_text())
+                      for row in refreshed_generation["products"].values()]
+    assert refreshed_pair[0]["proof"] == manifest_proofs_after[0]
+    assert refreshed_pair[1]["proof"] == manifest_proofs_after[1]
+    assert all(pair_manifest["binary"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+               for pair_manifest, path in zip(refreshed_pair, products))
+    assert check_current_generation().returncode == 0
+
+    # A second no-op with the same whole-source snapshot must preserve the new generation as
+    # well as both executable and manifest bytes; provenance-only republishing is one-time.
+    after_unrelated_edit = product_state()
+    no_op_generation = refreshed_generation["pair_generation"]
+    repeated_no_op = subprocess.run([str(build)], cwd=proof, env=environment,
+                                    capture_output=True, text=True)
+    assert repeated_no_op.returncode == 0, (repeated_no_op.stdout, repeated_no_op.stderr)
+    assert product_state() == after_unrelated_edit
+    assert resolve_generation()["pair_generation"] == no_op_generation
+    assert check_current_generation().returncode == 0
 
     assert sorted(compiler_log.read_text().splitlines()) == ["main.elisa", "replay_main.elisa"]
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
