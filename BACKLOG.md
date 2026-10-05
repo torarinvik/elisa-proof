@@ -153,7 +153,7 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 | K-05 (T0, BLOCKED 2026-10-05) | `char` range facts (`'0' <= c <= '9'` implies `c - '0' <= 9`) | Every lexer | `scripts/test_k05_char_subtraction_semantics.py` records that the pinned compiler accepts `c - '0'` in both `i64` and `char` return contexts, while proof replay has only a generic primitive-scalar witness. A sound rule awaits explicit compiler/type evidence for character subtraction semantics; the current digit-range goal stays refused. |
 | K-06 (T0, DONE 2026-10-05) | `.count` of a literal array beyond empty (use the kernel-safe usize constant route) | Table-driven code | `scripts/test_literal_count.py`: non-empty and empty literal counts prove/replay; wrong count, nine-element unsupported length, and signed overflow stay refused |
 | K-07 (T0, DONE 2026-10-05) | Better message for the i8 `ensure` front-end diagnostic so users know the proof engine still ran | Confusing status seen during signed-bound work | `scripts/test_engine_state.py`: the i8 front-end diagnostic reports `engine: proved`, with the engine state and replay result checked separately |
-| K-08 (T0) | `--explain <goal_id>` CLI printing facts, origins and the refusing gate | Makes A-02 usable by hand | Snapshot test |
+| K-08 (T0, DONE 2026-10-05) | `--explain <goal_id>` CLI printing facts, origins and the refusing gate | Makes A-02 usable by hand | `scripts/test_explain.py` pins the rendered open-goal output and checks proved/refused goals, refusal gates, fact counts, and invalid IDs |
 
 ## Execution order
 
