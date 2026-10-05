@@ -57,11 +57,11 @@ refreshed O2 binary. It does not yet identify which replay rule should be fixed.
 
 Commit `95daaea` factors the bounded unsigned literal/add/sub replay path while preserving its
 same-width checks, modulo-width arithmetic and refusal of malformed or unsupported nodes. The
-kernel comparison runtime passed a direct O0 compile/link/run against the updated source. Exact
-proof-source O2 typed-unsigned report controls also passed (11 certificates replayed, zero gaps),
-but that build exposed Stage1 revision `60c906…` against frontend pin `7b27fa…`; a coherent
-provenance rebuild and repeat are pending. The earlier report binary also predates the helper's
-lifetime annotation. This refactor is not evidence that the historical crash has been fixed.
+kernel comparison runtime passed a direct O0 compile/link/run after the initial refactor; that run
+predates the lifetime-safe follow-up `45e7f01`. On the later coherent exact-current O2 product, the
+typed-unsigned report had 16 obligations, 11 proven, 11/11 certificates replayed and zero gaps;
+three positive u64 checks proved and five expected refusals remained refused. The original crash
+cause is still unknown, and this refactor is not evidence that it has been fixed.
 
 ## P-01 baseline
 
@@ -119,11 +119,16 @@ say `source.authenticated: false`; there is no retained local session, generatio
 cancellation or safe stale-publication boundary. See
 [`P-05_SESSION_READINESS.md`](../P05_SESSION_READINESS.md).
 
-The latest P-06 profile attempt stopped before compilation because the profiler rejected the
-pinned Stage1 compiler product for a `source_revision` provenance mismatch and then could not
-resolve source dependencies. It did not bypass freshness or edit proof sources. Records are in
-`/private/tmp/elisa-p06-profile-20261005-latest`. Current internal phase timings are therefore
-still unmeasured.
+The coherent current strict O2 product is
+`/private/tmp/elisa-p06-proof-coherent-20261005/build/elisa-proof`, SHA-256
+`ba640c47a1107c87e3105bf3ad005d3b2bbddc9d09bfb066427e27ee7610fd1e`. Its manifest binds proof
+source digest `1f273bf1ec466404c40a5d3f86f0654a6c42df0679541f0f1b1fd06366411ee9`, frontend and
+Stage1 revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`, and runtime object SHA-256
+`b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897` for target
+`arm64-apple-darwin27.0.0`. The typed-unsigned report control passed on this exact binary with
+complete replay. Its balance and lexer profiles are in progress. Earlier `ad1888…` profiles remain
+historical and must not be attributed to the current source. No optimization or paired
+uninstrumented speedup is established yet.
 
 ## Acceptance status
 
