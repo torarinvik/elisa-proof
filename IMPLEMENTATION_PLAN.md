@@ -1,12 +1,12 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-05 against committed proof-code baseline `6d94df44` (18 commits ahead of `origin/main`, before this documentation commit). Section 23.22 is now the authoritative, ordered execution plan. The shared checkout has parallel, uncommitted proof-source and test edits; they are explicitly in-flight, not completed work, and are excluded from this committed baseline. Sections 23.16–23.21 preserve useful historical design and evidence, but their snapshots and queue ordering are superseded by §23.22.
+Status: refreshed 2026-10-05 against committed proof-code baseline `3eccfc76` (23 commits ahead of `origin/main`, before this documentation commit). Section 23.22 is now the authoritative, ordered execution plan. The shared checkout has parallel, uncommitted proof-source and test edits; they are explicitly in-flight, not completed work, and are excluded from this committed baseline. Sections 23.16–23.21 preserve useful historical design and evidence, but their snapshots and queue ordering are superseded by §23.22.
 
-High-return gains committed since the previous plan refresh include: `1ee75edd` fixes immutable pair provenance refresh when proof sources change without rebuilding either executable, and tests that a repeated no-op preserves the published generation; `23feb047` adds cross-route regression coverage for a guarded `i8` local increment plus unguarded overflow, `i16` boundary, and suffix-only negatives; `c05da046` expands portable-package mutation assurance; `3c5d1003` validates profiler phase-timing evidence without claiming an optimization; `c44dff5e` keeps the build-closure suite within its source-file size limit; and `6d94df44` fixes lossy JSON-number interpretation in portable packages. Its reader rejects signed, fractional and exponent-form numeric tokens before binary64 DOM conversion, preventing a fractional index from rounding to an integer field; positive replay, malformed/budget outcomes and no-theorem-on-package-error regressions pass. The byte-boundary case remains unverified because the compiler manifest was dirty. Earlier committed groundwork includes postcondition source inventory, typed signed arithmetic, package budget/mutation cases, source/build-input revalidation, and benchmark identity validation. These are narrow invariants and tests, not completion of whole-program obligation enumeration, machine-integer semantics, package decoder assurance, a performance baseline, or the full build/replay gate.
+High-return gains committed since the previous plan refresh include: `1ee75edd` fixes immutable pair provenance refresh when proof sources change without rebuilding either executable, and tests that a repeated no-op preserves the published generation; `23feb047` adds cross-route regression coverage for a guarded `i8` local increment plus unguarded overflow, `i16` boundary, and suffix-only negatives; `c05da046` expands portable-package mutation assurance; `3c5d1003` validates profiler phase-timing evidence without claiming an optimization; `c44dff5e` keeps the build-closure suite within its source-file size limit; and `6d94df44` fixes lossy JSON-number interpretation in portable packages. Its reader rejects signed, fractional and exponent-form numeric tokens before binary64 DOM conversion, preventing a fractional index from rounding to an integer field; positive replay, malformed/budget outcomes and no-theorem-on-package-error regressions pass. The byte-boundary regression is committed in `927a5db9` and passed against immutable Stage1 generation `764f254a07404c24986b1b3e52bfcf24`; this verifies the supported numeric boundary cases, not the whole JSON codec. Since that refresh, `00b7fa0a` bound the narrow source-literal obligation inventory to both attempt and certificate claims, and `3eccfc76` extended it to plural `ensures` plus mismatched literal returns. Those remain a partial top-level inventory, not whole-program completeness. Commit `41c2bc7c` added source-call replay validation, but an independent review has now found a stale-call/branch-join false acceptance in that path; treat the call-summary provenance slice and any proofs depending on it as suspect until its repair and fresh replay tests land. A separate custom numeric `__cast__` hook also bypasses builtin-conversion assumptions and has a minimized false-proof reproducer; its consumer audit and fix are in progress. Earlier committed groundwork includes typed signed arithmetic, package budget/mutation cases, source/build-input revalidation, and benchmark identity validation. These are narrow invariants and tests, not completion of whole-program obligation enumeration, machine-integer semantics, package decoder assurance, a performance baseline, or the full build/replay gate.
 
 Build evidence must be refreshed before making current-product claims. The previous resolved pair was built from older proof sources; the provenance-refresh fix has passed the isolated build-closure, snapshot-race, and sidecar-integrity harnesses, but a clean exact-HEAD proof/replay generation and full current suite have not yet been established. Stage1 freshness passed at compiler revision `541788548651d43dd466d0b5210955eb966eb18e`. The installed Stage0 binary reported descendant revision `f84b9c10`, while the proof repository pins `370110bc`; this is a pin mismatch, not proof that the installed binary is stale. At the last check an exact pinned Stage0 binary was available and passed its freshness/provenance checks. Preserve the pin until a candidate is deliberately selected and qualified; run the parity suite against exact identified Stage0 and Stage1 products.
 
-The most recent committed typed-local integer test does not by itself establish complete typed-local propagation or bit-vector semantics. Likewise, the package numeric fix is not exhaustive fuzzing or a formal codec proof, and timing-contract validation is not a speed result. A proposed R-004 isolated change and current shared-worktree call, loop, boundary-trace and source-binding edits remain candidates until reviewed, tested against a fresh exact pair, and committed. Never merge their status into the baseline implicitly.
+The most recent committed typed-local integer test does not by itself establish complete typed-local propagation or bit-vector semantics. Likewise, the package numeric fix is not exhaustive fuzzing or a formal codec proof, and timing-contract validation is not a speed result. The R-004 plural/mismatched-return inventory slice is integrated; current shared-worktree custom-cast, loop, call-summary, and replay-provenance edits remain in flight until reviewed, tested against fresh exact pairs, and committed. Never merge their status into the baseline implicitly.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -675,6 +675,29 @@ current build workflow. Rebuild the exact current snapshot with the latest prove
 Stage1 before carrying this result into current-corpus or performance claims; see
 `docs/evidence/2026-10-05-r003-slide-inner-source-trace.md`.
 
+**Call-summary replay soundness incident (2026-10-05):** An independent source audit of
+`41c2bc7c` found that a previously matched local call can remain authorized after a later call
+reassigns that local, and that matching state can leak between conditional/match arms. The
+minimized shape is a local initialized by `f(1)`, reassigned by `f(2)`, then returned while replay
+still selects the earlier call site; a branch-local match can likewise authorize a different
+alternative. This is a false source-binding acceptance, not merely a replay gap. Do not rely on
+proof results whose local call-result facts traverse this path until per-path invalidation and
+join checks are fixed and replayed on a fresh pair. A separate `opaque(accepted)` call-summary
+case currently produces `proved_with_replay_gaps` (not `proved`) because producer facts fail the
+replay provenance gate; it is a capability/replay mismatch, not evidence for a search
+optimization. Both repairs and their positive/adversarial tests are in flight; keep them open
+under R-003/R-005 until independently validated.
+
+**Custom numeric cast soundness incident (2026-10-05):** The proof-side numeric conversion
+classifier recognizes a postfix scalar selector as a value-preserving builtin without checking
+whether Elisa resolves it to a user `__cast__` hook. A minimized `i8 -> i16` hook returns a
+different value, the Stage1 executable violates its postcondition, and the old proof/replay pair
+accepts the false claim. The selector-only assumption also feeds purity/effect, frame, widening,
+return, and index paths, so every consumer must be audited. Until a source-aware overload check (or
+fail-closed fallback) and adversarial route coverage pass, numeric postfix casts in affected proof
+outputs are not trusted as builtin conversions. The fix is in progress; do not count this incident
+as closed on the basis of one helper guard.
+
 #### R-004 — Make whole-program admission completeness structural
 
 **Change:** Audit `certificate_admission.elisa`, report aggregation and declaration scheduling for paths where missing bodies, skipped branches, unsupported nodes, semantic errors or truncated checks disappear from the verdict. Represent expected obligation inventory and completed checks explicitly; tie each exported theorem to a checked root.
@@ -714,6 +737,18 @@ count while retaining the attempted goal; the formerly self-consistent report is
 binds each remaining attempt to some counted event, but does not detect omission of a source check
 that leaves no attempt, nor coordinated rewrites of source and report. Focused evidence is in
 [`docs/evidence/2026-10-05-r004-open-attempt-bound.md`](docs/evidence/2026-10-05-r004-open-attempt-bound.md).
+
+**Plural/mismatched literal-postcondition slice (2026-10-05):** Integrated as `3eccfc76` from
+isolated commit `4c1cd6b8`. The source inventory now recognizes both `ensure` and `ensures`, stores
+the contract literal separately from the returned literal, and checks the exact substituted
+equality including operand orientation. A false `ensures result == 7` with `return 8` remains the
+explicit source proposition `8 == 7`, is not dropped from coverage, and the CLI rejects it; the
+plural true control proves with replay. Coordinated omission, duplicate, and false-claim mutations
+are exercised by `scripts/tests/test_report_inventory_completeness.py`. A matched Stage1 pair
+(`18d03dce4c71402a8b2563c5ff796706`, compiler revision
+`541788548651d43dd466d0b5210955eb966eb18e`) and focused suite passed before integration. This
+still covers only the existing narrow top-level, single-contract, integer-literal-return shape;
+module members, arbitrary bodies and complete expected-obligation enumeration remain open.
 
 #### R-005 — Audit source-derived boundary facts and call witnesses
 
