@@ -1,0 +1,116 @@
+# Focused source/owner identity mutations for direct if/match branch obligations.
+include "report_inventory_test_support.elisa"
+using ElisaProof
+
+const BRANCH_INVENTORY_DROPPED: i64 = 1
+const BRANCH_CONTROL_REJECTED: i64 = 2
+const BRANCH_OMISSION_ADMITTED: i64 = 3
+const BRANCH_DUPLICATE_ADMITTED: i64 = 4
+const BRANCH_FALSE_CLAIM_ADMITTED: i64 = 5
+const BRANCH_WRONG_BRANCH_ADMITTED: i64 = 6
+const BRANCH_SOURCE_MISMATCH_ADMITTED: i64 = 7
+const NESTED_BRANCH_NOT_UNSUPPORTED: i64 = 8
+const LAMBDA_NOT_UNSUPPORTED: i64 = 9
+const BRANCH_BAD_OFFSET_ADMITTED: i64 = 10
+
+def source_pos(line: u32, offset: u32) -> Ast::Pos:
+    return Ast::Pos{line: line, column: 1, offset: offset, end_line: line, end_column: 2, end_offset: offset + 1}
+
+def source_assert_by_block(line: u32, offset: u32) -> Ast::Stmt:
+    target_position: Ast::Pos = source_pos(line, offset)
+    step_position: Ast::Pos = source_pos(line + 1, offset + 10)
+    target: Ast::Expr = Ast::Expr.BoolLit(true, target_position)
+    step: Ast::Expr = Ast::Expr.BoolLit(true, step_position)
+    target_contract: Ast::Stmt = Ast::Stmt.Contract("assert", target, target_position)
+    step_contract: Ast::Stmt = Ast::Stmt.Contract("assert", step, step_position)
+    return Ast::Stmt.Block("assert_by", [], "", [target_contract, step_contract], target_position)
+
+def empty_branch_report() -> ProofReport:
+    return ProofReport{declarations: 0, obligations: 0, proven: 0, failed: 0, findings: [], source_declarations: [], declaration_details: [], goal_attempts: [], obligation_inventory: [], certificates: [], theorem_summaries: []}
+
+def append_branch_attempt(report: mutable ProofReport&, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool), value: bool, owner_name: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    position: Ast::Pos = source_pos(expected.goal_line, expected.goal_offset)
+    goal: Ast::Expr = Ast::Expr.BoolLit(value, position)
+    certificate_index: usize = report.certificates.count
+    report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: certificate_index, kernel_facts_start: 0, kernel_facts_count: 0, line: expected.attempt_line, name: owner_name, rule: "goal", proven: true, has_certificate: true, certificate_index: certificate_index})
+    report.certificates.push(ProofGoalCertificate{goal: goal, facts_start: 0, facts_count: 0, kernel_goal: certificate_index, kernel_facts_start: 0, kernel_facts_count: 0, line: expected.attempt_line, name: owner_name, rule: "goal", replayed: true})
+
+def append_inventory_report(report: mutable ProofReport&, inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, omit_index: usize, substitute_index: usize, use_wrong_branch: bool, false_claim_index: usize, wrong_owner_index: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    for index in 0..<inventory.count |index, report, inventory, omit_index, substitute_index, use_wrong_branch, false_claim_index, wrong_owner_index|:
+        if index != omit_index:
+            expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool) = inventory[index]
+            if use_wrong_branch and index == substitute_index:
+                expected = inventory[2]
+            value: mutable bool = expected.expected_value
+            value <- false if index == false_claim_index
+            owner_name: mutable sview = expected.name
+            owner_name <- "different_owner" if index == wrong_owner_index
+            append_branch_attempt(report, expected, value, owner_name)
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    then_assert: Ast::Stmt = source_assert_by_block(12, 120)
+    else_assert: Ast::Stmt = source_assert_by_block(22, 220)
+    if_statement: Ast::Stmt = Ast::Stmt.If(Ast::Expr.BoolLit(true, source_pos(10, 100)), [then_assert], [else_assert], source_pos(10, 90))
+
+    first_match_assert: Ast::Stmt = source_assert_by_block(32, 320)
+    second_match_assert: Ast::Stmt = source_assert_by_block(42, 420)
+    first_match_arm: Ast::MatchArm = Ast::MatchArm{pattern: Ast::Pattern.Literal("0"), body: [first_match_assert], guard: Ast::Expr.Absent, pos: source_pos(30, 300)}
+    second_match_arm: Ast::MatchArm = Ast::MatchArm{pattern: Ast::Pattern.Wildcard, body: [second_match_assert], guard: Ast::Expr.Absent, pos: source_pos(40, 400)}
+    match_statement: Ast::Stmt = Ast::Stmt.Match(Ast::Expr.IntLit(0, source_pos(29, 290)), [first_match_arm, second_match_arm], source_pos(28, 280))
+
+    source_body: darray[Ast::Stmt] = [if_statement, match_statement]
+    source_function: Ast::Decl = Ast::Decl.Func("branch_owner", [], Ast::Expr.Absent, source_body, [], [], source_pos(1, 1))
+    source_declarations: darray[Ast::Decl] = [source_function]
+    inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(source_declarations)
+    return BRANCH_INVENTORY_DROPPED if inventory.count != 8
+    for expected in inventory:
+        return BRANCH_INVENTORY_DROPPED if expected.name != "branch_owner" or not expected.supported or not expected.expected_value
+
+    valid_report: mutable ProofReport = empty_branch_report()
+    append_inventory_report(&valid_report, inventory, inventory.count, inventory.count, false, inventory.count, inventory.count)
+    return BRANCH_CONTROL_REJECTED if not proof_source_assert_by_coverage(inventory, valid_report)
+
+    omitted_report: mutable ProofReport = empty_branch_report()
+    append_inventory_report(&omitted_report, inventory, 0, inventory.count, false, inventory.count, inventory.count)
+    return BRANCH_OMISSION_ADMITTED if proof_source_assert_by_coverage(inventory, omitted_report)
+
+    duplicate_report: mutable ProofReport = empty_branch_report()
+    append_inventory_report(&duplicate_report, inventory, inventory.count, inventory.count, false, inventory.count, inventory.count)
+    append_branch_attempt(&duplicate_report, inventory[0], true, "branch_owner")
+    return BRANCH_DUPLICATE_ADMITTED if proof_source_assert_by_coverage(inventory, duplicate_report)
+
+    false_claim_report: mutable ProofReport = empty_branch_report()
+    append_inventory_report(&false_claim_report, inventory, inventory.count, 0, false, 0, inventory.count)
+    return BRANCH_FALSE_CLAIM_ADMITTED if proof_source_assert_by_coverage(inventory, false_claim_report)
+
+    wrong_branch_report: mutable ProofReport = empty_branch_report()
+    append_inventory_report(&wrong_branch_report, inventory, 2, 0, true, inventory.count, inventory.count)
+    return BRANCH_WRONG_BRANCH_ADMITTED if proof_source_assert_by_coverage(inventory, wrong_branch_report)
+
+    wrong_owner_report: mutable ProofReport = empty_branch_report()
+    append_inventory_report(&wrong_owner_report, inventory, inventory.count, inventory.count, false, inventory.count, 0)
+    return BRANCH_SOURCE_MISMATCH_ADMITTED if proof_source_assert_by_coverage(inventory, wrong_owner_report)
+
+    bad_offset_report: mutable ProofReport = empty_branch_report()
+    append_inventory_report(&bad_offset_report, inventory, 0, inventory.count, false, inventory.count, inventory.count)
+    bad_offset_position: Ast::Pos = source_pos(inventory[0].goal_line, inventory[0].goal_offset + 1)
+    bad_offset_goal: Ast::Expr = Ast::Expr.BoolLit(true, bad_offset_position)
+    bad_offset_report.goal_attempts.push(ProofGoalAttempt{goal: bad_offset_goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: bad_offset_report.certificates.count, kernel_facts_start: 0, kernel_facts_count: 0, line: inventory[0].attempt_line, name: inventory[0].name, rule: "goal", proven: true, has_certificate: true, certificate_index: bad_offset_report.certificates.count})
+    bad_offset_report.certificates.push(ProofGoalCertificate{goal: bad_offset_goal, facts_start: 0, facts_count: 0, kernel_goal: bad_offset_report.certificates.count, kernel_facts_start: 0, kernel_facts_count: 0, line: inventory[0].attempt_line, name: inventory[0].name, rule: "goal", replayed: true})
+    return BRANCH_BAD_OFFSET_ADMITTED if proof_source_assert_by_coverage(inventory, bad_offset_report)
+
+    nested_assert: Ast::Stmt = source_assert_by_block(52, 520)
+    nested_if: Ast::Stmt = Ast::Stmt.If(Ast::Expr.BoolLit(true, source_pos(51, 510)), [nested_assert], [], source_pos(51, 505))
+    nested_branch: Ast::Stmt = Ast::Stmt.If(Ast::Expr.BoolLit(true, source_pos(50, 500)), [nested_if], [], source_pos(50, 495))
+    nested_function: Ast::Decl = Ast::Decl.Func("nested_branch_owner", [], Ast::Expr.Absent, [nested_branch], [], [], source_pos(49, 490))
+    nested_declarations: darray[Ast::Decl] = [nested_function]
+    nested_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(nested_declarations)
+    return NESTED_BRANCH_NOT_UNSUPPORTED if nested_inventory.count != 2 or not proof_source_assert_by_inventory_has_unsupported(nested_inventory)
+
+    lambda_assert: Ast::Stmt = source_assert_by_block(62, 620)
+    lambda_expression: Ast::Expr = Ast::Expr.Lambda([], [lambda_assert], source_pos(61, 610))
+    lambda_function: Ast::Decl = Ast::Decl.Func("lambda_owner", [], Ast::Expr.Absent, [Ast::Stmt.Expr(lambda_expression, source_pos(61, 610))], [], [], source_pos(60, 600))
+    lambda_declarations: darray[Ast::Decl] = [lambda_function]
+    lambda_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(lambda_declarations)
+    return LAMBDA_NOT_UNSUPPORTED if lambda_inventory.count != 2 or not proof_source_assert_by_inventory_has_unsupported(lambda_inventory)
+    return 0

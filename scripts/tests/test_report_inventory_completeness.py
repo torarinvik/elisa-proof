@@ -9,6 +9,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 PROOF = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 INVARIANT_HARNESS = Path(os.environ.get("ELISA_REPORT_INVENTORY_HARNESS", ""))
+BRANCH_HARNESS = Path(os.environ.get("ELISA_ASSERT_BY_BRANCH_HARNESS", ""))
 
 
 def run_report(source: Path) -> tuple[int, dict]:
@@ -28,6 +29,8 @@ def check_emitted_inventory(report: dict, *, proved: bool) -> None:
     assert inventory["coverage"] == "partial"
     assert inventory["whole_program"] is False
     assert "Boolean-literal assert-by" in inventory["supported_subset"]
+    assert "direct if/match branches" in inventory["supported_subset"]
+    assert "nested branch and scoped bodies are unsupported" in inventory["supported_subset"]
     summary = report["summary"]
     declarations = report["declaration_details"]
     goals = report["goals"]
@@ -68,6 +71,10 @@ def main() -> None:
         "test runner must provide the executable compiled from "
         "examples/report_invariants_runtime.elisa"
     )
+    assert BRANCH_HARNESS.is_file(), (
+        "test runner must provide the executable compiled from "
+        "examples/source_assert_by_branch_inventory_runtime.elisa"
+    )
 
     # The Elisa harness imports the exact report_invariants module used by CLI admission,
     # retains source declarations outside the mutable report, and checks both an intact
@@ -77,6 +84,13 @@ def main() -> None:
         "R-004 source-derived admission regression failed: the harness did not accept "
         "the positive control and reject the deliberately omitted source obligation: "
         f"exit={mutation.returncode}, stderr={mutation.stderr[:500]!r}"
+    )
+    branch_mutations = subprocess.run([str(BRANCH_HARNESS)], capture_output=True, timeout=30)
+    assert branch_mutations.returncode == 0, (
+        "R-004 branch source-identity regression failed: the harness did not accept valid "
+        "if/match branches and reject omission, duplication, false claims, wrong owners, "
+        "wrong-branch substitution, bad offsets, and unsupported nested scopes: "
+        f"exit={branch_mutations.returncode}, stderr={branch_mutations.stderr[:500]!r}"
     )
 
     # Exercise the production CLI gate with a source function inside the explicitly supported
@@ -153,6 +167,31 @@ def main() -> None:
     assert false_goal["goal"]["kind"] == "bool" and false_goal["goal"]["value"] is False
     assert assert_by_false["summary"]["unproven"] > 0 or assert_by_false["summary"]["failed"] > 0
 
+    # Branch body targets use the enclosing top-level function identity plus their exact
+    # imported literal offset. Both if arms and both match arms must remain independently
+    # covered, even when the branch propositions have the same value.
+    code, branch_assert_by = run_report(ROOT / "examples/source_obligation_assert_by_branches.elisa")
+    assert code == 0
+    check_emitted_inventory(branch_assert_by, proved=True)
+    branch_goals = [
+        goal for goal in branch_assert_by["goals"]
+        if goal["name"] == "source_assert_by_branches" and goal["rule"] == "goal"
+    ]
+    assert len(branch_goals) == 8
+    assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in branch_goals)
+    assert all(goal["goal"]["kind"] == "bool" and goal["goal"]["value"] is True for goal in branch_goals)
+
+    code, branch_false = run_report(ROOT / "examples/source_obligation_assert_by_branch_false.elisa")
+    assert code == 1
+    check_emitted_inventory(branch_false, proved=False)
+    false_branch_targets = [
+        goal for goal in branch_false["goals"]
+        if goal["name"] == "source_assert_by_branch_false" and goal["line"] == 4 and goal["rule"] == "goal"
+    ]
+    assert false_branch_targets
+    assert all(not goal["proven"] for goal in false_branch_targets)
+    assert any(goal["goal"]["kind"] == "bool" and goal["goal"]["value"] is False for goal in false_branch_targets)
+
     # The ordinary checker replays these equality goals. They are outside the literal-only
     # source inventory slice, so the report stays explicitly partial rather than claiming
     # whole-program source completeness or rejecting already replayed proofs.
@@ -214,7 +253,7 @@ def main() -> None:
     assert unsupported["verification_state"] == "unsupported"
     assert any(finding["status"] == "unsupported" for finding in unsupported["findings"])
 
-    print("R-004 slices: literal-postcondition and BoolLit assert-by inventories validated; failed and unsupported rows retained; nonliteral formulas remain checker/replay-owned; omission, duplicate, source-mismatch, false-claim, and malformed-source mutations rejected")
+    print("R-004 slices: direct if/match branch BoolLit assert-by inventory validated; false goals remain open; omission, duplicate, false-claim, wrong-owner, wrong-branch, source-offset and malformed-source mutations rejected; nested branch/lambda/module scopes fail closed; nonliteral formulas remain checker/replay-owned")
 
 
 if __name__ == "__main__":

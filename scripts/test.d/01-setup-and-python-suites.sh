@@ -336,6 +336,12 @@ if [[ "$report_invariants_compile_status" -ne 0 ]]; then
     printf 'proof test matrix failed: report invariant boundary harness did not compile\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/assert-by-branch-invariants.o" "$ROOT_DIR/examples/source_assert_by_branch_inventory_runtime.elisa" >/dev/null 2>&1
+assert_by_branch_compile_status=$?
+if [[ "$assert_by_branch_compile_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: assert-by branch identity harness did not compile\n' >&2
+    exit 1
+fi
 ELISA_COMPILER_BIN="$SELF_HOST_COMPILER" python3 "$ROOT_DIR/scripts/test_loop_invariants_compile.py" || exit 1
 kernel_runtime_inputs=()
 kernel_runtime_obj="${ELISA_RUNTIME_OBJ:-}"
