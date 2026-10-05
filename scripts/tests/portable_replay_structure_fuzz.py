@@ -286,7 +286,8 @@ result, workload_seconds = run_fresh(large, "oversized-string", must_refuse=True
 assert workload_seconds < WALL_LIMIT_SECONDS, workload_seconds
 
 print("R-006 structured package fuzz: 5 nesting depths, 8 exact-index boundaries, 5 child-indexes, "
-      "4 child ranges, 2 node refs, 2 cycles, 1 forward ref, and 1 8-MiB parser workload passed; "
+      "1 unknown reachable node tag, 4 child ranges, 2 node refs, 2 cycles, 1 forward ref, "
+      "and 1 8-MiB parser workload passed; "
       "peak wall %.3fs, CPU %.3fs, RSS %d bytes (limits: %ds CPU, %d bytes RSS, %ds wall)" %
       (PEAK_WALL_SECONDS, PEAK_CPU_SECONDS, PEAK_RSS_BYTES, CPU_LIMIT_SECONDS,
        RSS_LIMIT_BYTES, WALL_LIMIT_SECONDS))
