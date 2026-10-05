@@ -766,6 +766,8 @@ sentinel classes plus proof-byte/obligation/replay-count reporting remain to be 
 
 **Gate:** Compact and full routes agree on conclusions, assumptions, unresolved goals and replay. Large refusal reports stay bounded without silently truncating proof-critical data. Optional presentation truncation has an explicit marker and retrieval path.
 
+**Progress (2026-10-05):** Added an explicit `--summary-json` presentation route. It keeps status, verification state, source byte count and FNV-1a source fingerprint, declaration and obligation totals, replay-confirmed proven/unproven totals, finding-status counts, semantic diagnostic counts, trusted boundary facts, replayed certificate count and the empty trusted-assumption ledger. It sets `details.omitted: true` and names `--json` as the authoritative full-evidence route. Positive and refusal comparisons are recorded in [R-016 compact report evidence](docs/evidence/2026-10-05-r016-compact-report.md). This bounds serialized presentation size for the exercised reports; retained report memory, streaming, and a large-refusal stress bound remain unmeasured and are not claimed complete.
+
 #### R-017 — Set ratcheted, workload-specific performance gates
 
 **Change:** Once R-011 provides a baseline, set reviewed ceilings for interactive p95, batch throughput, replay latency and peak memory. First aim for at least 30% lower peak live allocation on the largest measured workload and 20% lower dominant-phase CPU where a profile identifies removable repeated work; these are targets, not claimed gains.
