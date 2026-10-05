@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = os.environ.get("ELISA_COMPILER_BIN")
@@ -11,7 +12,9 @@ if not COMPILER:
     raise SystemExit("set ELISA_COMPILER_BIN to the pinned stage1 compiler")
 
 semantics = ROOT / "examples/k05_char_subtraction_semantics.elisa"
-subprocess.run([COMPILER, str(semantics), "-o", "/tmp/k05-char-subtraction.o"], check=True)
+with tempfile.TemporaryDirectory(prefix="elisa-k05-char-") as temporary:
+    object_path = Path(temporary) / "char-subtraction.o"
+    subprocess.run([COMPILER, str(semantics), "-o", str(object_path)], check=True)
 
 result = subprocess.run(
     [PROOF, "--json", str(ROOT / "examples/rejected_k05_char_digit_bound.elisa")],
