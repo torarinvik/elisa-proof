@@ -164,6 +164,7 @@ fi
     assert initial_generation["pair_generation"]
     assert all(json.loads(Path(row["manifest"]).read_text())["pair_generation"] ==
                initial_generation["pair_generation"] for row in initial_generation["products"].values())
+
     current_pointer = generation_root / "CURRENT"
     pointer_value = current_pointer.read_text(encoding="ascii")
     current_pointer.write_text("../not-a-generation\n", encoding="ascii")
@@ -400,6 +401,20 @@ os.execv('/bin/mv', ['mv', *args])
     print("build publication source trees: installed-proof="
           f"{interrupted_pair[0]['proof']['source_tree_sha256']}; installed-replay="
           f"{interrupted_pair[1]['proof']['source_tree_sha256']}")
+
+    # The single-product build has no pair-generation arguments. Keep this path under
+    # `set -u`: macOS's system Bash 3.2 errors when an empty array is expanded directly.
+    single_output = project / "single-root" / "elisa-proof"
+    single_environment = dict(environment, ELISA_PROOF_PRODUCTS="one",
+                              ELISA_PROOF_OUTPUT=str(single_output))
+    single_build = subprocess.run(["/bin/bash", str(build)], cwd=proof, env=single_environment,
+                                  capture_output=True, text=True)
+    assert single_build.returncode == 0, (single_build.stdout, single_build.stderr)
+    assert "PAIR_MANIFEST_ARGS" not in single_build.stderr, single_build.stderr
+    single_manifest_path = single_output.with_name(single_output.name + ".manifest.json")
+    assert single_manifest_path.is_file(), (single_build.stdout, single_build.stderr)
+    single_manifest = json.loads(single_manifest_path.read_text())
+    assert single_manifest["pair_generation"] is None, single_manifest
 
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
