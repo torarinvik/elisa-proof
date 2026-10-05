@@ -840,6 +840,16 @@ replay products because their proof-source digests differ. A coherent isolated p
 per-snapshot output workflow are still required; build robustness tests do not make mismatched
 products comparable.
 
+Commit `937ae0bb` fixes one source of that mismatch: when a product's dependency closure is
+unchanged, `ELISA_PROOF_PRODUCTS=all` now refreshes its whole-snapshot proof provenance and
+checksum while reusing the binary. A controlled fixture edits a source outside both closures and
+confirms both manifests converge on the current source-tree digest without compiler or linker
+work; a following no-op preserves all product and manifest bytes/timestamps. A strict Stage1 O2
+pair from commit `937ae0bb` has matching proof source digest `72d57a84…`; exact product identities
+and reuse evidence are in [R-015 manifest-pair coherence evidence](docs/evidence/2026-10-05-r015-manifest-pair-coherence.md).
+This does not establish pair-wide atomic publication, immutable concurrent snapshots, source
+mutation detection during snapshot preparation, or the full P-03 concurrency gate.
+
 #### R-016 — Bound reporting and diagnostic materialization
 
 **Change:** Separate compact verdict/trust/repair summaries from opt-in full facts and AST dumps. Stream diagnostics or serialize interned references with explicit ownership; preserve complete authoritative obligation inventory and certificate export. Record serialization bytes and retained report memory.
