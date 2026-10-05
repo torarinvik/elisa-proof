@@ -96,15 +96,20 @@ def certificate_rules() -> set[str]:
 def certificate_producer_functions() -> set[str]:
     producers: set[str] = set()
     for path in elisa_files(PROOF):
-        current_function = ""
-        for line in strip_comments(read(path)).splitlines():
+        lines = strip_comments(read(path)).splitlines()
+        for index, line in enumerate(lines):
             definition = re.match(r"\s*def (\w+)\b", line)
-            if definition:
-                current_function = definition.group(1)
-            if "report.certificates" in line and "ProofGoalCertificate{" in line:
-                if not current_function:
-                    raise AssertionError(f"certificate construction outside function in {path}")
-                producers.add(current_function)
+            if not definition:
+                continue
+            indent = len(line) - len(line.lstrip())
+            body = []
+            for following in lines[index + 1:]:
+                if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                    break
+                body.append(following)
+            text = "\n".join(body)
+            if "report.certificates" in text and "ProofGoalCertificate{" in text:
+                producers.add(definition.group(1))
     return producers
 
 
