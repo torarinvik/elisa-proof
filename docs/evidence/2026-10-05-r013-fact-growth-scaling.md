@@ -34,7 +34,7 @@ outcomes, replay counts/gaps, exposed counters, wall duration and RSS are in
 | Match-arm width | 1, 2, 4, 8, 12, 16 | All proved; 0 replay gaps | obligations 3→18; control-flow steps 10→55; kernel nodes 17→77; report bytes 11,290→174,459 | 7,984 KiB |
 
 All 25 invocations finished without timeout or RSS refusal. Per-case wall time was approximately
-0.039–0.045 seconds on this machine; it is descriptive only. These measurements do **not** imply
+0.039–0.048 seconds on this machine; it is descriptive only. These measurements do **not** imply
 an asymptotic complexity, a general scaling bound, or a speedup. In particular, the match sweep
 creates additional arm obligations as width grows; its proof and report counts must not be read
 as fixed-work comparisons. The duplicate-fact 13-point refusal is expected budget behavior, not
@@ -68,13 +68,15 @@ The installed Stage1 binary was freshness-checked against its immutable snapshot
 `stage1_provenance.py check`; it reports current at revision
 `7b27fa312c5af923f044f6ee0e5e1de4f811f595`, matching the project pin. Both products were built
 in the isolated R-013 worktree using that Stage1 binary and its matching runtime, strict mode,
-O2. Proof and portable replay manifests record the same compiler revision, frontend tree
+O2, from proof commit `ea62acca192d14a5a72caa86bedf4f714c519a5f`. Proof and portable replay
+manifests record the same compiler revision, frontend tree
 `ab8926f6080a13d21b06606af251e6f0027c2db5`, proof source-tree hash
-`72d57a84b7c759943ea348ec1af50ccf8e678e5530c44751fa75d0778749a17f`, and runtime SHA-256
+`8892b7c71e803f8815b947614119e74256442ae7cfe0e82671c2034547003b82`, and runtime SHA-256
 `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`.
 
-- Proof product SHA-256: `90ad8e3a41cabb8cd2c671cd2faba58f4be044d4b1a0d3f6edea1170c9bc5a51`.
-- Portable replay product SHA-256: `81a1d52872278b944eae3ba55327e8c33850d3fa32bbb0adf2fc6255d96d3bf8`.
+- Stage1 product SHA-256: `3e23836002e5b6035dba43185ea84a9ab5358707c1ee4148c4752cacb2f41a70`.
+- Proof product SHA-256: `7d0e5d17268ca090a70bebd88820045a9e57e242f8ce98f581dc24eddb250de6`.
+- Portable replay product SHA-256: `9a049a4170de5f7b4040dd9b6382074654cf9e136da8bced1ef6996b802c27f3`.
 - `test_fact_growth_work_budget.py`: passed (12 duplicate premises prove/replay; 13 refuse).
 - `test_bounded_model_work_budget.py`: passed.
 - `test_fact_growth_scaling.py`: 25 cases recorded; 24 proved, one expected unknown/refusal;
