@@ -62,6 +62,7 @@ run_py_test() {
 }
 run_py_test test_report_cache_identity.py
 run_py_test test_report_cache_real_equivalence.py
+run_py_test test_report_cache_executable_swap.py
 run_py_test test_report_cache_missing_nested_dependency.py
 run_py_test test_p01_baseline.py
 run_py_test test_p05_package_restart.py
