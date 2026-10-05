@@ -81,6 +81,72 @@ extend ElisaProof:
             # refused by proof_replay_deterministic_call_arguments_equal.
             return not proof_replay_deterministic_call_expression_equal(source_outer, forged_outer)
 
+        def test_trace_with_expression(original: ProofFactTrace, expression: Ast::Expr) -> ProofFactTrace:
+            return ProofFactTrace{expression: expression, kernel_expression: original.kernel_expression, kind: original.kind, line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
+
+        def test_call_result_binding_replay() -> i64:
+            text: sview = "def ordered_call(first: u8, second: u8) -> u8:\n    ensure result == first\n    return first\n\ndef call_result_owner(first: u8, second: u8) -> u8:\n    requires first <= 10\n    requires second <= 10\n    ensure result == first\n    answer: u8 = ordered_call(first, second)\n    return answer\n"
+            source: mutable darray[u8] = []
+            for index in 0..<sview_len(text) |index, text, source|:
+                source.push(sview_at(text, index))
+            source.push(0)
+            file: Ast::File = frontend_parse(&source[0])
+            report: mutable ProofReport = proof_empty_report()
+            proof_check(file, &report)
+            proof_replay_certificates(&report)
+            owner: (found: bool, line: u32) = test_owner_function_line(report.source_declarations, "call_result_owner", 0)
+            return 1 if not owner.found
+            trace_index: mutable usize = report.fact_traces.count
+            for index in 0..<report.fact_traces.count |index, report, trace_index|:
+                trace: ProofFactTrace = report.fact_traces[index]
+                continue if trace.kind != "local-binding" or trace.name != "call_result_owner"
+                match trace.expression:
+                    Ast::Expr.Binary(Ast::Expr.Ident("answer", _), TokenKind.EqEq, Ast::Expr.Call(_, _, _, _), _):
+                        trace_index <- index
+                        break
+                    _:
+                        pass
+            return 2 if trace_index >= report.fact_traces.count
+            original: ProofFactTrace = report.fact_traces[trace_index]
+            certificate_line: mutable u32 = 0
+            for certificate in report.certificates |certificate, original, certificate_line|:
+                certificate_line <- certificate.line if certificate.name == original.name and certificate.rule == "goal" and certificate.line > original.line
+            return 3 if certificate_line == 0
+            report.replay_owner_line <- owner.line
+            report.trace_owner_line <- certificate_line
+            return 4 if not proof_replay_call_result_binding_valid(report, original)
+            match original.expression:
+                Ast::Expr.Binary(left, TokenKind.EqEq, Ast::Expr.Call(callee, arguments, argument_names, call_position), binding_position):
+                    forged_position: Ast::Pos = call_position
+                    forged_position.offset <- forged_position.offset + 1
+                    forged_position.end_offset <- forged_position.end_offset + 1
+                    forged_call: Ast::Expr = Ast::Expr.Call(callee, arguments, argument_names, forged_position)
+                    forged_span: ProofFactTrace = test_trace_with_expression(original, Ast::Expr.Binary(left, TokenKind.EqEq, forged_call, binding_position))
+                    return 5 if proof_replay_call_result_binding_valid(report, forged_span)
+                    return 6 if arguments.count != 2
+                    reversed_arguments: darray[Ast::Expr] = [arguments[1], arguments[0]]
+                    reordered_call: Ast::Expr = Ast::Expr.Call(callee, reversed_arguments, argument_names, call_position)
+                    forged_order: ProofFactTrace = test_trace_with_expression(original, Ast::Expr.Binary(left, TokenKind.EqEq, reordered_call, binding_position))
+                    return 7 if proof_replay_call_result_binding_valid(report, forged_order)
+                _:
+                    return 8
+            saved_declarations: darray[Ast::Decl] = report.source_declarations
+            overload_text: sview = "extern ordered_call(first: i64, second: i64) -> u8\n"
+            overload_source: mutable darray[u8] = []
+            for index in 0..<sview_len(overload_text) |index, overload_text, overload_source|:
+                overload_source.push(sview_at(overload_text, index))
+            overload_source.push(0)
+            overload_file: Ast::File = frontend_parse(&overload_source[0])
+            report.source_declarations.extend(overload_file.top_decls)
+            overload_refused: bool = not proof_replay_call_result_binding_valid(report, original)
+            report.source_declarations <- saved_declarations
+            return 9 if not overload_refused
+            report.source_declarations.push(Ast::Decl.Import("unresolved_call_api.elisa", Ast::pos_at_line(original.line)))
+            import_refused: bool = not proof_replay_call_result_binding_valid(report, original)
+            report.source_declarations <- saved_declarations
+            return 10 if not import_refused
+            return 0
+
         def test_summary_source_call_known(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> bool:
             return proof_replay_summary_source_call(report, trace, summary).known
 
@@ -118,6 +184,52 @@ extend ElisaProof:
             report.replay_owner_line <- owner_line
             report.fact_traces.push(forged_trace)
             return not proof_replay_fact_trace_entry(report, report.fact_traces.count - 1)
+
+        def test_literal_call_binding_replay() -> i64:
+            source_text: sview = "def signed_identity(value: i64) -> i64:\n    requires value >= 0\n    ensure result == value\n    return value\n\ndef literal_argument_owner() -> i64:\n    return 1 if signed_identity(7) != 7\n    return 0\n"
+            source: mutable darray[u8] = []
+            for index in 0..<sview_len(source_text) |index, source_text, source|:
+                source.push(sview_at(source_text, index))
+            source.push(0)
+            file: Ast::File = frontend_parse(&source[0])
+            report: mutable ProofReport = proof_empty_report()
+            proof_check(file, &report)
+            proof_replay_certificates(&report)
+            return 11 if report.replay_gaps != 0
+            owner: (found: bool, line: u32) = test_owner_function_line(report.source_declarations, "literal_argument_owner", 0)
+            return 2 if not owner.found
+            saved_owner_line: u32 = report.replay_owner_line
+            saved_trace_line: u32 = report.trace_owner_line
+            found_binding: mutable bool = false
+            accepted_forgery: mutable bool = false
+            for index in 0..<report.fact_traces.count |index, report, owner, saved_owner_line, saved_trace_line, found_binding, accepted_forgery|:
+                trace: ProofFactTrace = report.fact_traces[index]
+                continue if trace.kind != "local-binding" or trace.name != "literal_argument_owner"
+                match trace.expression:
+                    Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, Ast::Expr.IntLit(value, literal_position), expression_position):
+                        continue if proof_replay_literal_binding_symbol_index(symbol) >= PROOF_INTERNAL_REBIND_SYMBOL_COUNT
+                        report.replay_owner_line <- owner.line
+                        report.trace_owner_line <- trace.line
+                        if not proof_replay_literal_call_argument_binding_valid(report, trace):
+                            report.replay_owner_line <- saved_owner_line
+                            report.trace_owner_line <- saved_trace_line
+                            return 3
+                        forged_expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, Ast::expr_pos(trace.expression)), TokenKind.EqEq, Ast::Expr.IntLit(value + 1, literal_position), expression_position)
+                        forged_trace: ProofFactTrace = ProofFactTrace{expression: forged_expression, kernel_expression: trace.kernel_expression, kind: trace.kind, line: trace.line, name: trace.name, dependency: trace.dependency, premises_start: trace.premises_start, premises_count: trace.premises_count, kernel_premises_start: trace.kernel_premises_start, kernel_premises_count: trace.kernel_premises_count, summary_bindings_start: trace.summary_bindings_start, summary_bindings_count: trace.summary_bindings_count, summary_requires_start: trace.summary_requires_start, summary_requires_count: trace.summary_requires_count, summary_ensure_index: trace.summary_ensure_index, owner_line: trace.owner_line}
+                        report.fact_traces[index] <- forged_trace
+                        accepted_forgery <- proof_replay_literal_call_argument_binding_valid(report, forged_trace)
+                        report.fact_traces[index] <- trace
+                        found_binding <- true
+                        report.replay_owner_line <- saved_owner_line
+                        report.trace_owner_line <- saved_trace_line
+                        break
+                    _:
+                        pass
+            report.replay_owner_line <- saved_owner_line
+            report.trace_owner_line <- saved_trace_line
+            return 4 if accepted_forgery
+            return 0 if found_binding
+            return 5
 
         def test_owner_function_line(declarations: darray[Ast::Decl]&, owner: sview, depth: usize) -> (found: bool, line: u32):
             return (false, 0) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT

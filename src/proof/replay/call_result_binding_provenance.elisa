@@ -1,0 +1,181 @@
+# Authenticate a local-result equality against one immutable scalar declaration and its exact call.
+extend ElisaProof:
+    private:
+        def proof_replay_call_result_binding_expr_borrows(expression: Ast::Expr, name: sview, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Unary(operator, inner, _):
+                    return true if operator == TokenKind.Ampersand and proof_expr_mentions_name(inner, name)
+                    return proof_replay_call_result_binding_expr_borrows(inner, name, depth + 1)
+                Ast::Expr.Move(inner, _):
+                    return true if proof_expr_mentions_name(inner, name)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match callee:
+                        Ast::Expr.Field(receiver, _, _) if proof_expr_mentions_name(receiver, name):
+                            return true
+                        _:
+                            pass
+                    return true if proof_replay_call_result_binding_expr_borrows(callee, name, depth + 1)
+                    for argument in arguments |name, depth|:
+                        return true if proof_replay_call_result_binding_expr_borrows(argument, name, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, _, arguments, _, _):
+                    for argument in arguments |name, depth|:
+                        return true if proof_replay_call_result_binding_expr_borrows(argument, name, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_replay_call_result_binding_expr_borrows(inner, name, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_call_result_binding_expr_borrows(left, name, depth + 1) or proof_replay_call_result_binding_expr_borrows(right, name, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    return proof_replay_call_result_binding_expr_borrows(object, name, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_replay_call_result_binding_expr_borrows(object, name, depth + 1) or proof_replay_call_result_binding_expr_borrows(index, name, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_replay_call_result_binding_expr_borrows(object, name, depth + 1) or proof_replay_call_result_binding_expr_borrows(low, name, depth + 1) or proof_replay_call_result_binding_expr_borrows(high, name, depth + 1)
+                Ast::Expr.IndexN(object, elements, _):
+                    return true if proof_replay_call_result_binding_expr_borrows(object, name, depth + 1)
+                    for element in elements |name, depth|:
+                        return true if proof_replay_call_result_binding_expr_borrows(element, name, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |name, depth|:
+                        return true if proof_replay_call_result_binding_expr_borrows(element, name, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |name, depth|:
+                        return true if proof_replay_call_result_binding_expr_borrows(entry.key, name, depth + 1) or proof_replay_call_result_binding_expr_borrows(entry.value, name, depth + 1)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_replay_call_result_binding_expr_borrows(base, name, depth + 1)
+                    for field in fields |name, depth|:
+                        return true if proof_replay_call_result_binding_expr_borrows(field.value, name, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return proof_replay_call_result_binding_expr_borrows(condition, name, depth + 1) or proof_replay_call_result_binding_expr_borrows(yes, name, depth + 1) or proof_replay_call_result_binding_expr_borrows(no, name, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_replay_call_result_binding_expr_borrows(base, name, depth + 1) or proof_replay_call_result_binding_expr_borrows(predicate, name, depth + 1)
+                Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    return true if proof_expr_mentions_name(expression, name)
+                _:
+                    pass
+            return false
+
+        def proof_replay_call_result_binding_scan_statements(body: darray[Ast::Stmt]&, name: sview, binding_position: Ast::Pos, binding_count: mutable usize&, source_type: mutable Ast::Expr&, source_initializer: mutable Ast::Expr&, invalid: mutable bool&, lexical_depth: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for statement in body |name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                        if local_name == name:
+                            binding_count <- binding_count + 1
+                            if lexical_depth == 0 and proof_replay_source_position_equal(position, binding_position):
+                                source_type <- type_expression
+                                source_initializer <- initializer
+                            else:
+                                invalid <- true
+                        invalid <- true if proof_replay_call_result_binding_expr_borrows(initializer, name, 0)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        invalid <- true if proof_expr_mentions_name(target, name)
+                        invalid <- true if proof_replay_call_result_binding_expr_borrows(target, name, 0) or proof_replay_call_result_binding_expr_borrows(value, name, 0)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        invalid <- true if proof_replay_call_result_binding_expr_borrows(expression, name, 0)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        invalid <- true if proof_replay_call_result_binding_expr_borrows(condition, name, 0)
+                        return false if not proof_replay_call_result_binding_scan_statements(yes, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                        return false if not proof_replay_call_result_binding_scan_statements(no, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        invalid <- true if proof_replay_call_result_binding_expr_borrows(condition, name, 0)
+                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                    Ast::Stmt.For(bind, variables, iterable, nested, _):
+                        invalid <- true if bind == name or any variable in variables where variable == name
+                        invalid <- true if proof_replay_call_result_binding_expr_borrows(iterable, name, 0)
+                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        invalid <- true if proof_replay_call_result_binding_expr_borrows(scrutinee, name, 0)
+                        for arm in arms |arm, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth, depth|:
+                            pattern_names: mutable darray[sview] = []
+                            return false if not proof_replay_call_pattern_bindings(arm.pattern, &pattern_names, depth + 1)
+                            invalid <- true if any pattern_name in pattern_names where pattern_name == name
+                            invalid <- true if proof_replay_call_result_binding_expr_borrows(arm.guard, name, 0)
+                            return false if not proof_replay_call_result_binding_scan_statements(arm.body, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_call_result_binding_owner(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, source_type: mutable Ast::Expr&, source_initializer: mutable Ast::Expr&, binding_count: mutable usize&, owner_count: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, local_name, binding_position, source_type, source_initializer, binding_count, owner_count, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, body, _, _, position):
+                        if candidate == owner and position.line == owner_line:
+                            owner_count <- owner_count + 1
+                            invalid: mutable bool = false
+                            return false if not proof_replay_call_result_binding_scan_statements(body, local_name, binding_position, binding_count, source_type, source_initializer, invalid, 0, 0)
+                            return false if invalid
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_call_result_binding_owner(nested, owner, owner_line, local_name, binding_position, source_type, source_initializer, binding_count, owner_count, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_call_result_binding_signature(declarations: darray[Ast::Decl]&, name: sview, owner_module: sview, current_module: sview, argument_count: usize, result_type: Ast::Expr, matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for declaration in declarations |name, owner_module, current_module, argument_count, result_type, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate, parameters, return_type, _, _, _, _):
+                        if candidate == name and current_module == owner_module:
+                            matches <- matches + 1
+                            return false if parameters.count != argument_count or not proof_replay_expr_equal(return_type, result_type)
+                            for parameter in parameters:
+                                return false if parameter.is_mutable or parameter.has_default or proof_replay_deterministic_parameter_type(parameter.type_expression, 0) or not proof_replay_deterministic_scalar_type(parameter.type_expression, declarations, 0)
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_replay_call_result_binding_signature(nested, name, owner_module, module_name, argument_count, result_type, matches, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_call_result_binding_signature(nested, name, owner_module, current_module, argument_count, result_type, matches, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_call_result_binding_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if report.trace_owner_line <= trace.line or report.replay_owner_line == 0 or report.replay_owner_line == 4294967295
+            return false if trace.line == 0 or proof_replay_summary_has_unresolved_import(report.source_annotations)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, 0)
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(local_name, local_position), TokenKind.EqEq, source_call, binding_position):
+                    return false if local_name == "" or not proof_replay_source_position_equal(local_position, binding_position)
+                    return false if binding_position.line != trace.line or not proof_replay_is_call(source_call)
+                    match source_call:
+                        Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), arguments, _, _):
+                            return false if callee_name == "" or proof_name_is_reserved_internal(callee_name)
+                            for argument in arguments:
+                                return false if proof_replay_expression_contains_call_node(argument, 0)
+                            owner_module: mutable sview = ""
+                            owner_module_count: mutable usize = 0
+                            proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &owner_module, &owner_module_count, 0)
+                            return false if owner_module_count != 1
+                            binding_count: mutable usize = 0
+                            owner_count: mutable usize = 0
+                            source_type: mutable Ast::Expr = Ast::Expr.Invalid
+                            source_initializer: mutable Ast::Expr = Ast::Expr.Invalid
+                            return false if not proof_replay_call_result_binding_owner(report.source_declarations, trace.name, report.replay_owner_line, local_name, binding_position, &source_type, &source_initializer, &binding_count, &owner_count, 0)
+                            return false if owner_count != 1 or binding_count != 1
+                            return false if not proof_replay_deterministic_scalar_type(source_type, report.source_declarations, 0) or proof_replay_deterministic_parameter_type(source_type, 0)
+                            match source_initializer:
+                                Ast::Expr.Call(Ast::Expr.Ident(source_callee, _), source_arguments, source_names, _):
+                                    return false if source_callee != callee_name or source_arguments.count != arguments.count
+                                    return false if source_names.count != 0 and source_names.count != source_arguments.count
+                                    for argument_name in source_names:
+                                        return false if argument_name != ""
+                                    return false if not proof_replay_deterministic_call_expression_equal(source_initializer, source_call)
+                                    return false if not proof_replay_deterministic_call_source_site(report, trace, source_initializer)
+                                    same_module_count: mutable usize = 0
+                                    return false if not proof_replay_summary_same_module_name_count(report.source_declarations, callee_name, owner_module, "", &same_module_count, 0) or same_module_count != 1
+                                    global_candidate_count: mutable usize = 0
+                                    return false if not proof_replay_summary_global_candidate_count(report.source_declarations, callee_name, &global_candidate_count, 0) or global_candidate_count != 1
+                                    signature_count: mutable usize = 0
+                                    return false if not proof_replay_call_result_binding_signature(report.source_declarations, callee_name, owner_module, "", source_arguments.count, source_type, &signature_count, 0) or signature_count != 1
+                                    return true
+                                _:
+                                    return false
+                        _:
+                            return false
+                _:
+                    return false

@@ -1,0 +1,227 @@
+# Authenticate only the narrow local-binding form introduced when a signed call argument is
+# rebound to preserve its primitive width. Other local-binding traces remain unsupported.
+extend ElisaProof:
+    private:
+        def proof_replay_literal_call_find_expression(expression: Ast::Expr, expected_position: Ast::Pos, matches: mutable usize&, found_call: mutable Ast::Expr&, safe: mutable bool&, nested: bool, conditional: bool, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, position):
+                    if proof_replay_source_position_equal(position, expected_position):
+                        matches <- matches + 1
+                        found_call <- expression
+                        safe <- false if nested or conditional
+                    return false if not proof_replay_literal_call_find_expression(callee, expected_position, matches, found_call, safe, true, conditional, depth + 1)
+                    for argument in arguments |expected_position, matches, found_call, safe, conditional, depth|:
+                        return false if not proof_replay_literal_call_find_expression(argument, expected_position, matches, found_call, safe, true, conditional, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    return false
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_replay_literal_call_find_expression(inner, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    short_circuit: bool = operator == TokenKind.And or operator == TokenKind.Or
+                    return false if not proof_replay_literal_call_find_expression(left, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                    return proof_replay_literal_call_find_expression(right, expected_position, matches, found_call, safe, nested, conditional or short_circuit, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    return proof_replay_literal_call_find_expression(object, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return false if not proof_replay_literal_call_find_expression(object, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                    return proof_replay_literal_call_find_expression(index, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_replay_literal_call_find_expression(object, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                    return false if not proof_replay_literal_call_find_expression(low, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                    return proof_replay_literal_call_find_expression(high, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_replay_literal_call_find_expression(object, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                    for argument in arguments |expected_position, matches, found_call, safe, nested, conditional, depth|:
+                        return false if not proof_replay_literal_call_find_expression(argument, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |expected_position, matches, found_call, safe, nested, conditional, depth|:
+                        return false if not proof_replay_literal_call_find_expression(element, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |expected_position, matches, found_call, safe, nested, conditional, depth|:
+                        return false if not proof_replay_literal_call_find_expression(entry.key, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                        return false if not proof_replay_literal_call_find_expression(entry.value, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_replay_literal_call_find_expression(base, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                    for field in fields |expected_position, matches, found_call, safe, nested, conditional, depth|:
+                        return false if not proof_replay_literal_call_find_expression(field.value, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return false if not proof_replay_literal_call_find_expression(condition, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                    return false if not proof_replay_literal_call_find_expression(yes, expected_position, matches, found_call, safe, nested, true, depth + 1)
+                    return proof_replay_literal_call_find_expression(no, expected_position, matches, found_call, safe, nested, true, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_replay_literal_call_find_expression(base, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                    return proof_replay_literal_call_find_expression(predicate, expected_position, matches, found_call, safe, nested, conditional, depth + 1)
+                Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    return false
+                _:
+                    pass
+            return true
+
+        def proof_replay_literal_call_find_statements(body: darray[Ast::Stmt]&, expected_position: Ast::Pos, matches: mutable usize&, found_call: mutable Ast::Expr&, safe: mutable bool&, conditional: bool, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for statement in body |expected_position, matches, found_call, safe, conditional, depth|:
+                match statement:
+                    Ast::Stmt.Expr(expression, _):
+                        return false if not proof_replay_literal_call_find_expression(expression, expected_position, matches, found_call, safe, false, conditional, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_replay_literal_call_find_statements(nested, expected_position, matches, found_call, safe, true, depth + 1)
+                    Ast::Stmt.VarDecl(_, _, value, _):
+                        return false if not proof_replay_literal_call_find_expression(value, expected_position, matches, found_call, safe, false, conditional, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return false if not proof_replay_literal_call_find_expression(target, expected_position, matches, found_call, safe, false, conditional, depth + 1)
+                        return false if not proof_replay_literal_call_find_expression(value, expected_position, matches, found_call, safe, false, conditional, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return false if not proof_replay_literal_call_find_expression(condition, expected_position, matches, found_call, safe, false, conditional, depth + 1)
+                        return false if not proof_replay_literal_call_find_statements(yes, expected_position, matches, found_call, safe, true, depth + 1)
+                        return false if not proof_replay_literal_call_find_statements(no, expected_position, matches, found_call, safe, true, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        return false if not proof_replay_literal_call_find_expression(condition, expected_position, matches, found_call, safe, false, true, depth + 1)
+                        return false if not proof_replay_literal_call_find_statements(nested, expected_position, matches, found_call, safe, true, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, nested, _):
+                        return false if not proof_replay_literal_call_find_expression(iterable, expected_position, matches, found_call, safe, false, true, depth + 1)
+                        return false if not proof_replay_literal_call_find_statements(nested, expected_position, matches, found_call, safe, true, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        return false if not proof_replay_literal_call_find_expression(value, expected_position, matches, found_call, safe, false, conditional, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return false if not proof_replay_literal_call_find_expression(scrutinee, expected_position, matches, found_call, safe, false, conditional, depth + 1)
+                        for arm in arms |expected_position, matches, found_call, safe, depth|:
+                            return false if not proof_replay_literal_call_find_expression(arm.guard, expected_position, matches, found_call, safe, false, true, depth + 1)
+                            return false if not proof_replay_literal_call_find_statements(arm.body, expected_position, matches, found_call, safe, true, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_replay_literal_call_find_expression(expression, expected_position, matches, found_call, safe, false, conditional, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_literal_call_source_declaration(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, current_module: sview, expected_position: Ast::Pos, matches: mutable usize&, found_call: mutable Ast::Expr&, safe: mutable bool&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, current_module, expected_position, matches, found_call, safe, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            return false if not proof_replay_literal_call_find_statements(body, expected_position, matches, found_call, safe, false, 0)
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_replay_literal_call_source_declaration(nested, owner, owner_line, module_name, expected_position, matches, found_call, safe, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_literal_call_source_declaration(nested, owner, owner_line, current_module, expected_position, matches, found_call, safe, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_literal_call_signature(declarations: darray[Ast::Decl]&, name: sview, target_module: sview, current_module: sview, argument_count: usize, argument_names: darray[sview]&, argument_index: usize, width: mutable i64&, function_matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            for declaration in declarations |name, target_module, current_module, argument_count, argument_names, argument_index, width, function_matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate_name, parameters, _, _, _, _, _):
+                        if candidate_name == name and current_module == target_module:
+                            function_matches <- function_matches + 1
+                            return false if argument_count != parameters.count or argument_index >= parameters.count
+                            return false if argument_names.count != 0 and argument_names.count != argument_count
+                            for index in 0..<argument_count |index, argument_names|:
+                                return false if argument_names.count > 0 and argument_names[index] != ""
+                            parameter: Ast::ParamDecl = parameters[argument_index]
+                            return false if parameter.is_mutable or parameter.has_default
+                            match parameter.type_expression:
+                                Ast::Expr.Ident(type_name, _):
+                                    width <- proof_signed_primitive_width(Ast::Expr.Ident(type_name, Ast::expr_pos(parameter.type_expression)))
+                                _:
+                                    return false
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_replay_literal_call_signature(nested, name, target_module, module_name, argument_count, argument_names, argument_index, width, function_matches, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_literal_call_signature(nested, name, target_module, current_module, argument_count, argument_names, argument_index, width, function_matches, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_literal_binding_symbol_index(name: sview) -> usize:
+            for index in 0..<PROOF_INTERNAL_REBIND_SYMBOL_COUNT |index, name|:
+                return index if proof_internal_rebind_name(index) == name
+            return PROOF_INTERNAL_REBIND_SYMBOL_COUNT
+
+        def proof_replay_literal_binding_width_matches(report: ProofReport&, symbol: sview, expected_width: i64, expected_position: Ast::Pos, owner: sview, call_line: u32) -> bool:
+            signed_found: mutable bool = false
+            for trace in report.fact_traces |trace, symbol, expected_width, owner, call_line, signed_found|:
+                continue if trace.kind != "type-bound" or trace.name != owner or trace.line != call_line
+                match trace.expression:
+                    Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, argument_names, position):
+                        if callee == "__elisa_signed_type_bound" or callee == "__elisa_unsigned_type_bound" or callee == "__elisa_signed_place_type_bound":
+                            return false if position.line != call_line or not proof_replay_source_position_equal(position, expected_position) or argument_names.count != 0
+                            continue if arguments.count == 0
+                            match arguments[0]:
+                                Ast::Expr.Ident(bound_name, _) if bound_name == symbol:
+                                    return false if callee != "__elisa_signed_type_bound" or arguments.count != 2
+                                    match arguments[1]:
+                                        Ast::Expr.IntLit(width, _) if width == expected_width:
+                                            signed_found <- true
+                                        _:
+                                            return false
+                                _:
+                                    pass
+                    _:
+                        pass
+            return signed_found
+
+        def proof_replay_literal_binding_unique(report: ProofReport&, symbol: sview, expected: Ast::Expr, owner: sview, call_line: u32) -> bool:
+            for trace in report.fact_traces |trace, symbol, expected, owner, call_line|:
+                continue if trace.kind != "local-binding" or trace.name != owner or trace.line != call_line
+                match trace.expression:
+                    Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.EqEq, _, _) if name == symbol:
+                        return false if not proof_replay_expr_equal(trace.expression, expected)
+                        return false if not proof_replay_source_position_equal(Ast::expr_pos(trace.expression), Ast::expr_pos(expected))
+                    _:
+                        pass
+            return true
+
+        def proof_replay_literal_call_argument_binding_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if report.trace_owner_line != trace.line
+            return false if report.replay_owner_line == 0 or report.replay_owner_line == 4294967295
+            return false if proof_replay_summary_has_unresolved_import(report.source_annotations)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, 0)
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, literal, position):
+                    return false if symbol == "" or not proof_replay_source_position_equal(symbol_position, position)
+                    return false if position.line != trace.line or trace.line != report.trace_owner_line
+                    symbol_index: usize = proof_replay_literal_binding_symbol_index(symbol)
+                    # Rebind counters restart per function, while this report field is only
+                    # scratch for whichever function was checked last. The reserved spelling
+                    # plus exact source-call evidence is the stable identity; do not trust that
+                    # transient counter during replay.
+                    return false if symbol_index >= PROOF_INTERNAL_REBIND_SYMBOL_COUNT or not proof_replay_literal_binding_unique(report, symbol, trace.expression, trace.name, trace.line)
+                    caller_module: mutable sview = ""
+                    caller_count: mutable usize = 0
+                    proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &caller_module, &caller_count, 0)
+                    return false if caller_count != 1
+                    source_matches: mutable usize = 0
+                    source_call: mutable Ast::Expr = Ast::Expr.Invalid
+                    source_safe: mutable bool = true
+                    return false if not proof_replay_literal_call_source_declaration(report.source_declarations, trace.name, report.replay_owner_line, "", position, &source_matches, &source_call, &source_safe, 0)
+                    return false if source_matches != 1 or not source_safe
+                    match source_call:
+                        Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), arguments, argument_names, call_position):
+                            return false if callee_name == "" or proof_name_is_reserved_internal(callee_name)
+                            return false if not proof_replay_source_position_equal(call_position, position)
+                            argument_index: mutable usize = arguments.count
+                            for index in 0..<arguments.count |index, arguments, literal, argument_index|:
+                                if proof_replay_source_position_equal(Ast::expr_pos(arguments[index]), Ast::expr_pos(literal)) and proof_replay_expr_equal(arguments[index], literal):
+                                    return false if argument_index != arguments.count
+                                    argument_index <- index
+                            return false if argument_index >= arguments.count
+                            overload_count: mutable usize = 0
+                            return false if not proof_replay_summary_same_module_name_count(report.source_declarations, callee_name, caller_module, "", &overload_count, 0)
+                            return false if overload_count != 1
+                            global_candidate_count: mutable usize = 0
+                            return false if not proof_replay_summary_global_candidate_count(report.source_declarations, callee_name, &global_candidate_count, 0)
+                            return false if global_candidate_count != 1
+                            function_matches: mutable usize = 0
+                            width: mutable i64 = 0
+                            return false if not proof_replay_literal_call_signature(report.source_declarations, callee_name, caller_module, "", arguments.count, argument_names, argument_index, &width, &function_matches, 0)
+                            return false if function_matches != 1 or width <= 0 or not proof_literal_argument_fits(literal, width, 0)
+                            return proof_replay_literal_binding_width_matches(report, symbol, width, position, trace.name, trace.line)
+                        _:
+                            return false
+                _:
+                    return false

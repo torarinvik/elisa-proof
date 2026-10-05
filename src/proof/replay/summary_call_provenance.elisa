@@ -9,11 +9,46 @@ extend ElisaProof:
         def proof_replay_summary_has_unresolved_import(annotations: darray[Ast::EnumAnnotation]&) -> bool:
             for annotation in annotations:
                 match annotation.name:
-                    "__using" | "__using_alias" | "__using_alias_target" | "__binding_wildcard_import" | "__from_member" | "__from_src":
+                    "__using" | "__using_alias" | "__using_alias_target" | "__using_member" | "__binding_wildcard_import" | "__from_member" | "__from_src" | "__from_decl":
                         return true
                     _:
                         pass
             return false
+
+        def proof_replay_summary_has_unresolved_declaration_import(declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for declaration in declarations |depth|:
+                match declaration:
+                    Ast::Decl.Import(_, _):
+                        return true
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_summary_has_unresolved_declaration_import(nested, depth + 1)
+                    _:
+                        pass
+            return false
+
+        # Without the importer's resolved-callee witness, a same-spelled declaration in any
+        # namespace may be a candidate for bare-name or qualified lookup. Until lookup identity
+        # is carried into the report, require a globally unique declaration spelling.
+        def proof_replay_summary_global_candidate_count(declarations: darray[Ast::Decl]&, name: sview, count: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            for declaration in declarations |name, count, depth|:
+                candidate: mutable sview = ""
+                match declaration:
+                    Ast::Decl.Func(candidate_name, _, _, _, _, _, _) | Ast::Decl.Extern(candidate_name, _, _, _, _, _, _, _) | Ast::Decl.Struct(candidate_name, _, _, _, _, _, _) | Ast::Decl.Enum(candidate_name, _, _, _, _) | Ast::Decl.Alias(candidate_name, _, _) | Ast::Decl.Law(candidate_name, _, _) | Ast::Decl.Const(candidate_name, _, _, _, _):
+                        candidate <- candidate_name
+                    Ast::Decl.Module(module_name, nested, _):
+                        count <- count + 1 if module_name == name
+                        return false if not proof_replay_summary_global_candidate_count(nested, name, count, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_summary_global_candidate_count(nested, name, count, depth + 1)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+                count <- count + 1 if candidate == name
+                return false if count > 1
+            return true
 
         def proof_replay_summary_same_module_name_count(declarations: darray[Ast::Decl]&, name: sview, owner_module: sview, current_module: sview, count: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
@@ -65,13 +100,17 @@ extend ElisaProof:
             # Replay lacks their resolved targets and selected declaration witness, so fail
             # closed if any such resolution metadata appears in the source snapshot.
             return false if proof_replay_summary_has_unresolved_import(report.source_annotations)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, 0)
             owner_module: mutable sview = ""
             owner_count: mutable usize = 0
             proof_replay_function_owner_module(report.source_declarations, trace.dependency, trace.owner_line, "", &owner_module, &owner_count, 0)
             return false if owner_count != 1
             same_module_count: mutable usize = 0
             return false if not proof_replay_summary_same_module_name_count(report.source_declarations, trace.dependency, owner_module, "", &same_module_count, 0)
-            return same_module_count == 1
+            return false if same_module_count != 1
+            global_candidate_count: mutable usize = 0
+            return false if not proof_replay_summary_global_candidate_count(report.source_declarations, trace.dependency, &global_candidate_count, 0)
+            return global_candidate_count == 1
 
         def proof_replay_local_call_value_state(value: Ast::Expr, expected_call: Ast::Expr) -> usize:
             match value:
