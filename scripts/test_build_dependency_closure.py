@@ -162,6 +162,19 @@ fi
     assert clang_log.read_text().splitlines() == ["hook", "link", "link"]
     assert product_state() == before, (initial.stderr, after_kernel_change.stderr)
 
+    # A damaged sidecar must invalidate only its product and drive the full build
+    # path through compile, link, manifest write, and checksum refresh.
+    main_checksum = products[0].with_name(products[0].name + ".manifest.json.sha256")
+    main_checksum.write_text("0" * 64 + "\n", encoding="ascii")
+    after_checksum_corruption = subprocess.run([str(build)], cwd=proof, env=environment,
+                                                check=True, capture_output=True, text=True)
+    assert "product src/main.elisa is unchanged" not in after_checksum_corruption.stderr
+    assert "product src/replay_main.elisa is unchanged" in after_checksum_corruption.stderr
+    assert compiler_log.read_text().splitlines() == ["main.elisa", "replay_main.elisa", "main.elisa"]
+    assert clang_log.read_text().splitlines() == ["hook", "link", "link", "link"]
+    refreshed = main_checksum.read_text(encoding="ascii").strip()
+    assert refreshed == hashlib.sha256(products[0].with_name(products[0].name + ".manifest.json").read_bytes()).hexdigest()
+
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
     base = Path(directory)
