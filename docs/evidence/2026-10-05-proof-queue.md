@@ -150,8 +150,11 @@ bounded failure and was not repeated.
 
 ## P-07 current census
 
-The six-input refresh ran serially against the same coherent product identity above. All input
-hashes matched before and after. Per-input time/RSS ceilings and raw captures are recorded in
+The six-input refresh ran serially against proof source digest
+`1f273bf1ec466404c40a5d3f86f0654a6c42df0679541f0f1b1fd06366411ee9`, frontend/Stage1 revision
+`7b27fa312c5af923f044f6ee0e5e1de4f811f595`, and proof binary SHA-256
+`ba640c47a1107c87e3105bf3ad005d3b2bbddc9d09bfb066427e27ee7610fd1e`. All input hashes matched
+before and after. Per-input time/RSS ceilings and raw captures are recorded in
 `/private/tmp/elisa-p07-current-20261005/aggregate.json`.
 
 | Input | Result | Obligations / proven | Certificates / replayed / gaps | Time | Peak RSS |
