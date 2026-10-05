@@ -23,10 +23,14 @@ FIXTURES = (
     ("real_small", ROOT / "examples/perf_luna_accept.elisa"),
     ("real_refusal", ROOT / "examples/perf_luna_refusal.elisa"),
     ("adversarial", ROOT / "examples/rejected_symbolic_quantifier.elisa"),
+    ("qualified_constants", ROOT / "examples/qualified_constants_statements.elisa"),
+    ("qualified_constant_refusal", ROOT / "examples/rejected_qualified_constants_statements.elisa"),
 )
 EXPECTED_OUTCOMES = {
     "real_small": {"status": "proved", "returncode": 0},
     "real_refusal": {"status": "failed", "returncode": 1},
+    "qualified_constants": {"status": "proved", "returncode": 0},
+    "qualified_constant_refusal": {"status": "failed", "returncode": 1},
     # The bounded symbolic-quantifier case may time out; if it emits a complete report,
     # it must remain a non-proof with the CLI's ordinary refusal exit code.
     "adversarial": {"not_proved": True, "returncode": 1},
