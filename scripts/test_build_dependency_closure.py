@@ -247,6 +247,7 @@ fi
     # publication is not a transaction spanning both products.
     old_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
                 for path in products]
+    before_failed_build = product_state()
     (proof / "src/main.elisa").write_text('include "./shared.elisa"\nmain failed-generation\n')
     (proof / "src/replay_main.elisa").write_text("replay failed-generation\n")
     failed_environment = dict(environment, MOCK_FAIL_REPLAY_LINK="1")
@@ -256,8 +257,8 @@ fi
     assert not lock.exists()
     failed_pair = [json.loads(path.with_name(path.name + ".manifest.json").read_text())
                    for path in products]
-    assert failed_pair[0]["proof"]["source_tree_sha256"] != old_pair[0]["proof"]["source_tree_sha256"]
-    assert failed_pair[1] == old_pair[1]
+    assert failed_pair == old_pair
+    assert product_state() == before_failed_build
 
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
