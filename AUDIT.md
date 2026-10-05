@@ -11353,3 +11353,15 @@ replay gaps. The gate also negates or tightens each invariant and requires all e
 stay unproved, confirming the annotations constrain the proof result.
 
 Evidence: `scripts/test_loop_invariants_compile.py`.
+
+## Entry-state postconditions for collection pushes (D-02)
+
+On strict O2 binary `9d4c4e21e50136996a84f5401adc305f5d8c18d89048ceb22588c2a12f259e63`,
+`v.push(x)` postconditions prove one, two, and twelve increments over `old(v.count)`; the same
+probe checks an unchanged count, returning the entry count, and reading the pushed value at the old
+count. The rejected matrix covers missing or conditional pushes, undone effects, receiver reads,
+wrong/overwritten elements, and stale count assumptions. All emitted certificates replay without
+gaps. The mutable-aggregate `old(field)` control also remains refused after the field changes.
+
+Evidence: `scripts/test_collection_push_count.py` and
+`scripts/test_old_mutable_reference.py`.
