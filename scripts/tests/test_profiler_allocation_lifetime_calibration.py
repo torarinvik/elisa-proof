@@ -129,6 +129,33 @@ class AllocationLifetimeCalibration(unittest.TestCase):
         self.assertEqual(repetition["lifetime_reason"], "incomplete capture")
         self.assertIsNone(repetition["metrics"])
 
+    def test_unreported_event_loss_withholds_lifetimes_without_changing_run_result(self):
+        profile = json.loads(json.dumps(self.profile))
+        run = profile["run"]
+        run["outcome"] = "success"
+        run["exit_code"] = 0
+        repetition = run["repetitions"][0]
+        # Model a lost event even though the producer left all loss indicators
+        # clear. The discontinuous sequence is the remaining evidence of loss.
+        repetition["allocation_events"].pop(1)
+        original_run = json.loads(json.dumps(run))
+
+        result = self.analyzer.analyze(profile)
+        analyzed = result["repetitions"][0]
+
+        self.assertEqual(analyzed["lifetime_status"], "unavailable")
+        self.assertEqual(
+            analyzed["lifetime_reason"],
+            "non-contiguous sequence or invalid monotonic timestamp",
+        )
+        self.assertIsNone(analyzed["metrics"])
+        self.assertEqual(len(analyzed["sites"]), 1)
+        self.assertEqual(analyzed["sites"][0]["allocation_count"], 1)
+        self.assertEqual(analyzed["sites"][0]["requested_bytes"], 8)
+        self.assertNotIn("retired_count", analyzed["sites"][0])
+        self.assertEqual(run, original_run)
+        self.assertFalse(analyzed["traffic_truncated"])
+
     def test_analysis_bound_reports_truncation_and_withholds_metrics(self):
         profile = json.loads(json.dumps(self.profile))
         events = profile["run"]["repetitions"][0]["allocation_events"]
