@@ -16,6 +16,7 @@ WORK="${ELISA_REMOTE_WORK:-${TMPDIR:-/tmp}/elisa-proof-remote-build}"
 REV="$(tr -d '[:space:]' < "$SRC/ELISA_COMPILER_REV")"
 TARGET="x86_64-unknown-linux-gnu"
 CROSS_RSS="${ELISA_STAGE1_MAX_RSS_KB:-8388608}"
+GENERATION="$(python3 "$SRC/scripts/build_manifest.py" --new-pair-generation)"
 status=0
 {
   set -e
@@ -55,17 +56,37 @@ status=0
   $RSH "$HOST" 'set -e; cd ~/work/elisa-proof; C=~/work/Elisa-compiler; mkdir -p build
     export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=$C  # rsynced checkout, other owner
     export LLVM_CONFIG=/usr/lib/llvm-19/bin/llvm-config PATH=$C/tools/linux_shim:$PATH
+    generation='"$GENERATION"'; stage="build/.remote-pair-$generation"
+    mkdir "$stage"
+    trap '\''rm -rf "$stage"'\'' EXIT
     clang -c -O2 -o build/profile_hooks.o $C/test/parity/profile_hooks.c
-    clang -Wl,-dead_strip -o build/elisa-proof.tmp ../elisa-proof-linux.o build/profile_hooks.o $C/build/runtime/elisacore_runtime.o 2>&1 | grep -v -e no-pie -e "^$" || true
-    mv -f build/elisa-proof.tmp build/elisa-proof
-    clang -Wl,-dead_strip -o build/elisa-proof-replay.tmp ../elisa-proof-replay-linux.o build/profile_hooks.o $C/build/runtime/elisacore_runtime.o 2>&1 | grep -v -e no-pie -e "^$" || true
-    mv -f build/elisa-proof-replay.tmp build/elisa-proof-replay
-    python3 scripts/build_manifest.py --binary build/elisa-proof --compiler $C/scripts/elisac_stage1.sh \
-      --compiler-product $C/bin/elisac-stage1 --compiler-root $C --stage stage1 --stage1-revision "" \
-      --runtime $C/build/runtime/elisacore_runtime.o --profile-hooks build/profile_hooks.o \
-      --frontend-repo $C --frontend-revision "$(git -C $C rev-parse HEAD)" --proof-root "$PWD" \
-      --snapshot-root "$PWD" --opt-level '"$OPT"' --compile-mode strict --contract-flag "" \
-      --installed-as build/elisa-proof --output build/elisa-proof.manifest.json
+    clang -Wl,-dead_strip -o "$stage/elisa-proof" ../elisa-proof-linux.o build/profile_hooks.o $C/build/runtime/elisacore_runtime.o
+    clang -Wl,-dead_strip -o "$stage/elisa-proof-replay" ../elisa-proof-replay-linux.o build/profile_hooks.o $C/build/runtime/elisacore_runtime.o
+    frontend_revision=$(git -C "$C" rev-parse HEAD)
+    for product in elisa-proof elisa-proof-replay; do
+      python3 scripts/build_manifest.py --pair-generation "$generation" \
+        --binary "$stage/$product" --compiler "$C/scripts/elisac_stage1.sh" \
+        --compiler-product "$C/bin/elisac-stage1" --compiler-root "$C" --stage stage1 --stage1-revision "" \
+        --runtime "$C/build/runtime/elisacore_runtime.o" --profile-hooks build/profile_hooks.o \
+        --frontend-repo "$C" --frontend-revision "$frontend_revision" --proof-root "$PWD" \
+        --snapshot-root "$PWD" --opt-level '"$OPT"' --compile-mode strict --contract-flag "" \
+        --installed-as "build/elisa-proof-generations/$generation/$product" \
+        --output "$stage/$product.manifest.json"
+      sha256sum "$stage/$product.manifest.json" | cut -d" " -f1 > "$stage/$product.manifest.json.sha256"
+    done
+    python3 scripts/verify_product_pair.py publish \
+      --generation-root build/elisa-proof-generations --generation "$generation" \
+      --proof-binary "$stage/elisa-proof" --proof-manifest "$stage/elisa-proof.manifest.json" \
+      --replay-binary "$stage/elisa-proof-replay" --replay-manifest "$stage/elisa-proof-replay.manifest.json"
+    for product in elisa-proof elisa-proof-replay; do
+      cp "build/elisa-proof-generations/$generation/$product" "build/$product.$generation.tmp"
+      mv -f "build/$product.$generation.tmp" "build/$product"
+      cp "build/elisa-proof-generations/$generation/$product.manifest.json" "build/$product.manifest.json.$generation.tmp"
+      mv -f "build/$product.manifest.json.$generation.tmp" "build/$product.manifest.json"
+      cp "build/elisa-proof-generations/$generation/$product.manifest.json.sha256" "build/$product.manifest.json.sha256.$generation.tmp"
+      mv -f "build/$product.manifest.json.sha256.$generation.tmp" "build/$product.manifest.json.sha256"
+    done
+    python3 scripts/verify_product_pair.py resolve --generation-root build/elisa-proof-generations >/dev/null
     build/elisa-proof examples/verified.elisa >/dev/null'
 } || status=$?
 echo "build=$status"
