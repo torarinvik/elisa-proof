@@ -22,7 +22,7 @@ REQUIRED_VERIFIED_DECLARATIONS = {
     "proof_kernel_replay_binary_operands",
     "proof_kernel_replay_negated_operand",
     "proof_kernel_replay_integer_literal",
-    "proof_kernel_replay_name_pin",
+    "proof_kernel_replay_term_pin",
     "proof_kernel_replay_pinned_constant",
     "proof_kernel_replay_false_boolean_literal",
     "proof_kernel_replay_negated_true_boolean_literal",
