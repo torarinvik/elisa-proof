@@ -131,6 +131,18 @@ with tempfile.TemporaryDirectory(prefix="elisa-package-correspondence-preflight-
         run("--correspondence", over_depth_path, SOURCE), "malformed", "json",
     )
 
+    inadmissible_arena = copy.deepcopy(package)
+    conclusion = inadmissible_arena["theorems"][0]["conclusion"]
+    inadmissible_arena["kernel"]["nodes"][conclusion]["kind"] = "proof-oracle"
+    inadmissible_arena_path = work / "inadmissible-arena.json"
+    inadmissible_arena_path.write_text(
+        json.dumps(inadmissible_arena, separators=(",", ":")), encoding="utf-8",
+    )
+    assert_package_wide_error(
+        run("--correspondence", inadmissible_arena_path, SOURCE),
+        "malformed", "arena-inadmissible",
+    )
+
     rejected = copy.deepcopy(package)
     rejected["source"]["admissible"] = False
     rejected_path = work / "rejected.json"
