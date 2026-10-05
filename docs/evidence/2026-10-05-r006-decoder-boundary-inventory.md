@@ -42,6 +42,14 @@ and six Boolean-type regressions passed in the agent's strict pinned O2 build an
 `6b897fd8a11ef7f828fb7236d0662e6d6541eeca6ad0ba7f9f873caa5de77624`; see the concise cross-check
 `docs/evidence/2026-10-05-r006-package-decoder-audit.md` and commits `df652ae0`, `58d07b65`.
 
+After integration, an isolated detached worktree at root commit
+`e9d27ef62933944a08f5901f0d5524dfce1a5315` passed the strict pinned Stage1 O2 build. Its replay
+binary SHA-256 was `d77669e81223424b16496c689e486a2ed2f0fbb3dbf9084b6c807bde4444e552`.
+`scripts/test_portable_replay.py`, `scripts/tests/test_portable_package_string_budget.py`, and
+`scripts/test_p05_package_restart.py` passed against those products. This updates product-level
+evidence for the focused regression; the deterministic suite remains short of the plan's fuzzing
+and exhaustive decoder-boundary gates.
+
 ## R-006 work still required
 
 - The plan's full decoder inventory spans `src/portable/`, `src/proof/kernel_replay/` and
