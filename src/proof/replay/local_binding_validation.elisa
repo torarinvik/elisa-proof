@@ -1,0 +1,120 @@
+# Narrow source reconstruction for value-local literal assignments. This is intentionally
+# separate from the checker: it accepts only a uniquely owned function, a direct primitive
+# local declaration, an unconditional literal write, and straight-line paths to returns.
+extend ElisaProof:
+    private:
+        def proof_replay_local_binding_literal(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(_, _), _):
+                    return true
+                _:
+                    return false
+
+        def proof_replay_local_binding_primitive_type(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name == "bool" or name == "char" or name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "int" or name == "isize" or name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize"
+                Ast::Expr.Unary(TokenKind.Mutable, inner, _) | Ast::Expr.Paren(inner, _):
+                    return proof_replay_local_binding_primitive_type(inner, depth + 1)
+                _:
+                    return false
+
+        def proof_replay_local_binding_find_function(declarations: darray[Ast::Decl]&, name: sview, owner_line: u32, body: mutable darray[Ast::Stmt]&, parameters: mutable darray[Ast::ParamDecl]&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            for declaration in declarations |name, owner_line, body, parameters, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate, candidate_parameters, _, candidate_body, _, _, position):
+                        if candidate == name and position.line == owner_line:
+                            matches <- matches + 1
+                            body <- candidate_body
+                            parameters <- candidate_parameters
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_local_binding_find_function(nested, name, owner_line, body, parameters, matches, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_local_binding_scan_body(body: darray[Ast::Stmt]&, name: sview, expected: Ast::Expr, source_line: u32, consumer_line: u32, found: mutable bool&, declarations: mutable usize&, returns: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            for statement in body |name, expected, source_line, consumer_line, found, declarations, returns, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                        return false if proof_expr_mentions_name(initializer, name)
+                        if local_name == name:
+                            return false if not proof_replay_local_binding_primitive_type(type_expression, 0)
+                            declarations <- declarations + 1
+                            return false if declarations != 1 or found or position.line > source_line
+                            if position.line == source_line:
+                                return false if not proof_replay_local_binding_literal(initializer) or not proof_replay_expr_equal(initializer, expected)
+                                found <- true
+                    Ast::Stmt.Assign(target, operator, value, position):
+                        match target:
+                            Ast::Expr.Ident(target_name, _):
+                                if target_name == name:
+                                    if position.line == source_line:
+                                        return false if found or declarations != 1 or operator != TokenKind.LArrow
+                                        return false if not proof_replay_local_binding_literal(value) or not proof_replay_expr_equal(value, expected)
+                                        found <- true
+                                    else:
+                                        return false if found or position.line >= source_line
+                                        return false if operator != TokenKind.LArrow or proof_expr_mentions_name(value, name)
+                                else:
+                                    return false if proof_expr_mentions_name(target, name) or proof_expr_mentions_name(value, name)
+                            _:
+                                return false if proof_expr_mentions_name(target, name) or proof_expr_mentions_name(value, name)
+                    Ast::Stmt.Block(kind, _, binding, nested, _):
+                        return false if kind != "trusted" or binding != ""
+                        return false if not proof_replay_local_binding_scan_body(nested, name, expected, source_line, consumer_line, found, declarations, returns, depth + 1)
+                    Ast::Stmt.Return(value, position):
+                        return false if found == false or position.line <= source_line or position.line > consumer_line
+                        return false if value is returned and proof_expr_mentions_name(returned, name) and position.line <= source_line
+                        returns <- returns + 1
+                    Ast::Stmt.Contract(_, expression, position):
+                        if proof_expr_mentions_name(expression, name):
+                            return false if found == false or position.line <= source_line or position.line > consumer_line
+                    Ast::Stmt.Expr(expression, _):
+                        return false if proof_expr_mentions_name(expression, name)
+                    # Branches, loops, pattern binders and abrupt control flow are outside this
+                    # first supported source subset. Rejecting them avoids treating a write on
+                    # one path as a function-wide reaching value.
+                    _:
+                        return false
+            return true
+
+        def proof_replay_local_binding_source_valid(report: ProofReport&, trace: ProofFactTrace, owner: sview, consumer_line: u32) -> bool:
+            return false if trace.kind != "local-binding" or trace.name != owner or trace.line == 0 or consumer_line <= trace.line
+            trace_owner_line: mutable u32 = 0
+            consumer_owner_line: mutable u32 = 0
+            proof_replay_owner_function_line(report.source_declarations, owner, trace.line, &trace_owner_line, 0)
+            proof_replay_owner_function_line(report.source_declarations, owner, consumer_line, &consumer_owner_line, 0)
+            return false if trace_owner_line == 0 or trace_owner_line != consumer_owner_line
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.EqEq, expected, _):
+                    return false if name == "" or proof_name_is_reserved_internal(name) or not proof_replay_local_binding_literal(expected)
+                    body: mutable darray[Ast::Stmt] = []
+                    parameters: mutable darray[Ast::ParamDecl] = []
+                    matches: mutable usize = 0
+                    proof_replay_local_binding_find_function(report.source_declarations, owner, trace_owner_line, &body, &parameters, &matches, 0)
+                    return false if matches != 1 or body.count == 0
+                    return false if any parameter in parameters where parameter.name == name
+                    found: mutable bool = false
+                    declarations: mutable usize = 0
+                    returns: mutable usize = 0
+                    return false if not proof_replay_local_binding_scan_body(body, name, expected, trace.line, consumer_line, &found, &declarations, &returns, 0)
+                    return found and declarations == 1 and returns > 0
+                _:
+                    return false
+
+        def proof_replay_local_binding_kernel_trace_valid(report: ProofReport&, trace: ProofFactTrace, owner: sview, consumer_line: u32) -> bool:
+            return false if trace.name != owner or trace.kind != "local-binding" or trace.owner_line != 0
+            return false if trace.dependency != "" or trace.premises_count != 0 or trace.kernel_premises_count != 0
+            return false if trace.summary_bindings_count != 0 or trace.summary_requires_count != 0 or trace.summary_ensure_index != 0
+            return false if trace.premises_start > report.fact_trace_premises.count or trace.kernel_premises_start > report.kernel_fact_trace_premises.count
+            return false if trace.summary_bindings_start > report.fact_trace_summary_names.count or trace.summary_requires_start > report.fact_trace_summary_require_goal_ids.count
+            return false if trace.kernel_expression >= report.kernel_nodes.count
+            return false if not proof_replay_ast_matches_kernel(report, trace.expression, trace.kernel_expression, 0)
+            return proof_replay_local_binding_source_valid(report, trace, owner, consumer_line)
