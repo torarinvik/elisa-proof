@@ -44,7 +44,9 @@ def run(path, timeout):
         if not isinstance(data, dict) or not isinstance(data.get("summary"), dict):
             return data_key(path), None, time.monotonic() - started, "invalid-report"
         status = data.get("status")
-        expected_exit = {"proved": 0, "failed": 1}.get(status) if isinstance(status, str) else None
+        # Replay gaps are a documented non-success verdict, not malformed JSON.
+        # Keep their obligations in the census without ever accepting exit zero.
+        expected_exit = {"proved": 0, "failed": 1, "proved_with_replay_gaps": 1}.get(status) if isinstance(status, str) else None
         if expected_exit is None:
             return data_key(path), None, time.monotonic() - started, "invalid-verdict"
         if result.returncode != expected_exit:

@@ -118,6 +118,9 @@ provenance_guard_test()
 # A complete-looking report cannot hide a crash or an inconsistent process verdict.
 for status, code, expected_error in (
     ("proved", 0, None), ("failed", 1, None),
+    ("proved_with_replay_gaps", 1, None),
+    ("proved_with_replay_gaps", 0, "exit-verdict-mismatch"),
+    ("proved_with_replay_gaps", -11, "exit-verdict-mismatch"),
     ("proved", -11, "exit-verdict-mismatch"),
     ("proved", 1, "exit-verdict-mismatch"),
     ("failed", 0, "exit-verdict-mismatch"),
