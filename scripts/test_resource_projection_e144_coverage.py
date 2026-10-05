@@ -59,6 +59,18 @@ assert any(
     for goal in fixed_array["goals"]
 ), "fixed-array aggregate copy resource-safety certificate did not replay"
 
+inferred_copy = report("resource_projection_e144_inferred_copy", 0, "proved")
+assert inferred_copy["summary"]["semantic_errors"] == 0, inferred_copy["summary"]
+assert inferred_copy["summary"]["obligations"] > 0, inferred_copy["summary"]
+assert inferred_copy["summary"]["proven"] == inferred_copy["summary"]["obligations"], inferred_copy["summary"]
+assert inferred_copy["trust"]["trusted_assumptions"] == [], inferred_copy["trust"]
+assert any(
+    goal["name"] == "resource_projection_e144_inferred_copy"
+    and goal["rule"] == "resource-safety" and goal["proven"]
+    and goal.get("replay_status") == "replayed"
+    for goal in inferred_copy["goals"]
+), "inferred aggregate copy resource-safety certificate did not replay"
+
 mutable_write = report("rejected_resource_projection_e144_mutable_field_write", 1, "failed")
 assert any(
     finding["name"] == "rejected_resource_projection_e144_mutable_field_write"
@@ -89,4 +101,4 @@ for example in (
         for goal in negative["goals"]
     ), (example, "expected the shadowed/different container index-upper obligation to remain unproven")
 
-print("e144 resource projection coverage: typed copy replays; mutable write, region copy, shadow, and cross-container controls refuse")
+print("e144 resource projection coverage: typed, inferred, and fixed-array copies replay; mutable write, region copy, shadow, and cross-container controls refuse")
