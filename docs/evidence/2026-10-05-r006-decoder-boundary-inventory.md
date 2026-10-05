@@ -62,6 +62,22 @@ and exhaustive decoder-boundary gates.
 - Existing visible budget mutations cover selected over-limit values. A systematic below/at/above
   boundary matrix for every count, index range, typed-literal tag and theorem label is not
   established here.
+- A focused Boolean kernel-payload regression was added to
+  `scripts/tests/portable_replay_package_validation.py`. Five non-string JSON payloads (`true`,
+  numeric `1`, `null`, array and object) return structured `malformed/node-schema` before arena
+  admission. Canonical decimal strings `-1`, `2` and `9223372036854775807` pass package decoding
+  and return structured `malformed/arena-inadmissible`; the kernel's Boolean scalar shape requires
+  value 0 or 1 (`proof_kernel_replay_arena_bool_scalar_shape`). The malformed nodes are reachable
+  from a theorem with a recomputed statement and fingerprint, so the result exercises package
+  parsing, arena admission and theorem checking as one path. All 16 positive packages and the
+  complete portable replay refusal corpus passed against strict pinned O2 proof revision
+  `15560c60aab2540b8fd18137c8d2fd1ed2282e1e`. Replay product SHA-256:
+  `6664442a5e7de99cd99763b0c1fa2c630c13c69d5215bc0908c485f1aa7e6a84`; proof product SHA-256:
+  `54824e53bab5aa7f6c031f3db527dedf1515b44d594f0624cf44e78c65f6bbcb`. Pinned Stage1 SHA-256:
+  `f77278c716dea7f3dba8f4fcbcf76ecc473426ab3f163c95fea4e358f6337653`, runtime SHA-256:
+  `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`, target
+  `arm64-apple-darwin27.0.0`. These probes found no malformed Boolean payload accepted by this
+  product; they do not establish parser/checker fuzz coverage or the remaining decoder inventory.
 - `goal_id` and `line` are parsed as bounded indexes and echoed as presentation labels, but the
   checker does not establish uniqueness. Their consumer-facing identity semantics need to be
   documented or tested before treating duplicate labels as harmless.
