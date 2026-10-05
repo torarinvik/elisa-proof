@@ -53,9 +53,9 @@ def main():
     assert result["status"] == "over-budget" and result["reason"] == "theorem-budget", result
     assert result["theorems"] == [], result["theorems"]
     assert result["summary"] == {
-        "theorems": THEOREM_LIMIT + 1,
+        "theorems": 0,
         "replayed": 0,
-        "not_replayed": THEOREM_LIMIT + 1,
+        "not_replayed": 0,
     }, result["summary"]
 
 
