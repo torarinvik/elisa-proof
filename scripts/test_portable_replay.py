@@ -8,6 +8,13 @@ from portable_replay_support import *
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def export_repro(name):
+    run = subprocess.run([str(BINARY), "--package", str(ROOT / "test" / "repro" / name)],
+                         capture_output=True, text=True, timeout=120)
+    assert run.returncode in (0, 1), (name, run.returncode, run.stderr)
+    return json.loads(run.stdout)
+
 # One example per kernel rule family; export and replay each positive package exactly once.
 POSITIVE = {
     "global_constant_module": {"goal", "resource-safety"},
@@ -46,6 +53,26 @@ for example, rules in POSITIVE.items():
                                        capture_output=True, text=True, timeout=120).stdout)
     replayed_goals = [goal for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed"]
     assert len(package["theorems"]) == len(replayed_goals), (example, len(package["theorems"]), len(replayed_goals))
+
+# The positive-conjunction rule is useful on its source shape, but a re-sealed portable theorem
+# cannot replace the required conjunct with a merely related comparison.
+conditional = export_repro("minimal_conditional_positive_conjunct_replay.elisa")
+conditional_goal = next(theorem for theorem in conditional["theorems"] if theorem["rule"] == "goal")
+code, result = replay(conditional, "conditional-positive-conjunct")
+assert code == 0 and result["status"] == "replayed", result
+forged_conditional = with_theorem(conditional, conditional_goal)
+forged_goal = forged_conditional["theorems"][0]
+nodes = forged_conditional["kernel"]["nodes"]
+original = nodes[forged_goal["conclusion"]]
+assert original["kind"] == "binary" and original["operator"] == "or", original
+at_root = next(index for index, node in enumerate(nodes)
+               if node["kind"] == "ident" and node["name"] == "at")
+two_root = append_node(forged_conditional, "int", value="2")
+missing_conjunct = append_node(forged_conditional, "binary", ">=", at_root, two_root)
+forged_goal["conclusion"] = append_node(forged_conditional, "binary", "or",
+                                        original["left"], missing_conjunct)
+forged_conditional["theorems"] = [reseal(forged_conditional, forged_goal)]
+refused(forged_conditional, "conditional-fallback-without-conjunct", "rejected", "kernel-rejected")
 
 # Replay scratch quantifier binders are never part of the exported package.
 quantified = packages["collection_quantifier"]

@@ -8,12 +8,15 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
 CASES = (
     (ROOT / "test/repro/minimal_conditional_ensure_replay_gap.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
-    (ROOT / "test/repro/minimal_slide_inner_replay_gap.elisa", {"certificates": 6, "replayed": 4, "gaps": 2}),
+    (ROOT / "test/repro/minimal_conditional_positive_conjunct_replay.elisa", {"certificates": 2, "replayed": 2, "gaps": 0}),
+    (ROOT / "test/repro/minimal_slide_inner_replay_gap.elisa", {"certificates": 6, "replayed": 5, "gaps": 1}),
 )
 
+reports = {}
 for source, current_replay in CASES:
     run = subprocess.run([BINARY, "--json", str(source)], capture_output=True, text=True, timeout=20)
     report = json.loads(run.stdout)
+    reports[source.name] = report
     replay = report["replay"]
     declaration = next(
         item for item in report["declaration_details"]
@@ -34,6 +37,10 @@ for source, current_replay in CASES:
         assert replay["certificates"] == replay["replayed"], (source, replay)
         assert declaration["verified"] is True, (source, declaration)
 
+slide_roots = {item.get("kernel_goal"): item.get("replayed")
+               for item in reports["minimal_slide_inner_replay_gap.elisa"]["certificates"]}
+assert slide_roots[48] is True and slide_roots[51] is False, slide_roots
+
 bad_source = ROOT / "test/repro/minimal_conditional_ensure_bad_guard.elisa"
 bad_run = subprocess.run([BINARY, "--json", str(bad_source)], capture_output=True, text=True, timeout=20)
 bad_report = json.loads(bad_run.stdout)
@@ -50,4 +57,20 @@ assert any(
     for item in bad_report["findings"]
 ), (bad_source, bad_report["findings"])
 
-print("conditional ensure gaps are refused or fully replayed; the wrong-guard control stays unproved")
+for name in ("minimal_conditional_missing_conjunct_refusal.elisa",
+             "minimal_conditional_overflow_refusal.elisa"):
+    source = ROOT / "test/repro" / name
+    run = subprocess.run([BINARY, "--json", str(source)], capture_output=True, text=True, timeout=20)
+    report = json.loads(run.stdout)
+    declaration = next(
+        item for item in report["declaration_details"]
+        if item.get("kind") == "function" and item.get("name") == "inner"
+    )
+    assert run.returncode == 1 and report["status"] == "failed", (source, report)
+    assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"], (source, report["replay"])
+    assert declaration["verified"] is False, (source, declaration)
+    assert declaration["verification_reason"] != "replay-gap", (source, declaration)
+    assert any(item.get("kind") == "ensure-unproven" and item.get("name") == "inner"
+               for item in report["findings"]), (source, report["findings"])
+
+print("positive conditional conjunct replays; Slide.inner root 48 closes; root 51, missing-conjunct, overflow and wrong-guard controls remain refused")
