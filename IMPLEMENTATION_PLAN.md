@@ -892,6 +892,15 @@ after warm-up and it reports median/p95 wall time, CPU and peak RSS. Fifteen foc
 and its self-test pass. A `Popen.kill()`/`wait4()` double-reap race in the P-01 measurement runner
 was fixed, with its test passing five consecutive runs.
 
+**Pinned corpus follow-up (2026-10-05):** Commit `1b20400d` adds three semantic-shape sentinels
+with source path, byte size, SHA-256 and expected exit/status: unsigned-boundary refusal,
+quantifier success and region-lending success. The manifest test passes. All three also produced
+their expected outcomes with zero replay gaps on the explicitly identified published pair in
+[`docs/evidence/2026-10-05-r011-sentinel-corpus-follow-up.md`](docs/evidence/2026-10-05-r011-sentinel-corpus-follow-up.md).
+That run used a source-dirty product built from `3ebb3605`, so it does not validate the current
+integrated source. This is a small corpus expansion, not completion of the semantic-shape matrix,
+paired timing baseline, or P1.1 gate.
+
 The actual paired preflight rejected the current `build/elisa-proof` and
 `build/elisa-proof-replay`: their proof-source tree hashes are respectively
 `8ad03c75…d35715` and `0de5d950…b62f35b`, although both identify the same clean Stage1 compiler
