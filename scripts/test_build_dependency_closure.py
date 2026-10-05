@@ -62,6 +62,21 @@ def run_outside_closure_build_control(base: Path) -> None:
     for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh", "link_flags.sh",
                  "build_manifest.py", "compiler_environment.py", "verify_product_pair.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
+    # Add a fixture-only barrier in the copied publisher. This lets the test kill the
+    # complete build process group at a real publication boundary without adding a
+    # pause hook to the production publisher.
+    fixture_publisher = proof / "scripts/verify_product_pair.py"
+    publisher_source = fixture_publisher.read_text()
+    publisher_source = publisher_source.replace(
+        'def failpoint(name: str) -> None:\n',
+        'def failpoint(name: str) -> None:\n'
+        '    if os.environ.get("MOCK_PUBLISH_PAUSE_AT") == name:\n'
+        '        Path(os.environ["MOCK_PUBLISH_PAUSE_MARKER"]).write_text(str(os.getpid()))\n'
+        '        while Path(os.environ["MOCK_PUBLISH_PAUSE_RELEASE"]).exists():\n'
+        '            import time\n'
+        '            time.sleep(0.01)\n'
+    )
+    fixture_publisher.write_text(publisher_source)
     (compiler / "src/front.elisa").write_text("frontend\n")
     (compiler / "elisacore_std/placeholder").write_text("fixture\n")
     (compiler / "test/parity/profile_hooks.c").write_text("void profile_hook(void) {}\n")
@@ -375,6 +390,57 @@ os.execv('/bin/mv', ['mv', *args])
                           for row in after["products"].values()]
         assert pair_manifests[0]["pair_generation"] == pair_manifests[1]["pair_generation"]
         assert pair_manifests[0]["proof"] == pair_manifests[1]["proof"]
+
+    # Kill a complete build process group after its immutable generation directory
+    # is durable but before CURRENT switches. The resolver must select the old pair.
+    # SIGKILL bypasses build.sh's EXIT cleanup, so recover the stale lock explicitly
+    # after confirming its recorded owner is dead.
+    before_kill = resolve_generation()
+    (proof / "src/main.elisa").write_text('include "./shared.elisa"\nmain killed publication\n')
+    (proof / "src/replay_main.elisa").write_text("replay killed publication\n")
+    pause_marker = project / "publisher-paused.pid"
+    pause_release = project / "publisher-release"
+    pause_release.touch()
+    kill_env = dict(environment, MOCK_PUBLISH_PAUSE_AT="before-pointer-replace",
+                    MOCK_PUBLISH_PAUSE_MARKER=str(pause_marker),
+                    MOCK_PUBLISH_PAUSE_RELEASE=str(pause_release))
+    killed_build = subprocess.Popen([str(build)], cwd=proof, env=kill_env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    start_new_session=True)
+    deadline = time.monotonic() + 30
+    while not pause_marker.exists() and time.monotonic() < deadline:
+        if killed_build.poll() is not None:
+            stdout, stderr = killed_build.communicate()
+            raise AssertionError(f"build exited before authoritative boundary: {stdout} {stderr}")
+        time.sleep(0.01)
+    assert pause_marker.exists(), "build did not reach the deterministic publisher barrier"
+    publisher_pid = int(pause_marker.read_text())
+    lock = proof / "build/.elisa-proof-build.lock"
+    lock_owner = int((lock / "pid").read_text())
+    assert lock_owner == killed_build.pid
+    os.killpg(killed_build.pid, __import__("signal").SIGKILL)
+    killed_stdout, killed_stderr = killed_build.communicate(timeout=10)
+    assert killed_build.returncode == -__import__("signal").SIGKILL, (killed_build.returncode,
+                                                                         killed_stdout, killed_stderr)
+    # The shell owner has been reaped; the publisher PID is retained in the marker
+    # only as evidence that SIGKILL targeted the blocked publisher process group.
+    assert publisher_pid > 0
+    assert lock.is_dir() and (lock / "pid").read_text().strip() == str(lock_owner)
+    after_kill = resolve_generation()
+    assert after_kill["pair_generation"] == before_kill["pair_generation"]
+    # Owner death is confirmed by Popen completion; remove only this fixture lock.
+    shutil.rmtree(lock)
+    pause_release.unlink()
+
+    restarted = subprocess.run([str(build)], cwd=proof, env=environment,
+                               capture_output=True, text=True)
+    assert restarted.returncode == 0, (restarted.returncode, restarted.stdout, restarted.stderr)
+    after_restart = resolve_generation()
+    assert after_restart["pair_generation"] != before_kill["pair_generation"]
+    restart_manifests = [json.loads(Path(row["manifest"]).read_text())
+                         for row in after_restart["products"].values()]
+    assert restart_manifests[0]["pair_generation"] == restart_manifests[1]["pair_generation"]
+    assert restart_manifests[0]["proof"] == restart_manifests[1]["proof"]
     legacy_boundaries = (
         "legacy-proof-binary", "legacy-proof-manifest", "legacy-proof-checksum",
         "legacy-replay-binary", "legacy-replay-manifest", "legacy-replay-checksum",
@@ -397,6 +463,7 @@ os.execv('/bin/mv', ['mv', *args])
         assert manifests[0]["proof"] == manifests[1]["proof"]
     print("build publication: link failure preserved pair; legacy interruption left pinned generation "
           "coherent; all four authoritative and six compatibility boundaries resolved complete; "
+          "SIGKILL before CURRENT kept the old pair resolvable and restart published a complete pair; "
           "separate compatibility roots passed")
     print("build publication source trees: installed-proof="
           f"{interrupted_pair[0]['proof']['source_tree_sha256']}; installed-replay="
