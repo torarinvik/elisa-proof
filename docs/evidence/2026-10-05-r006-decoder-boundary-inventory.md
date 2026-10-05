@@ -56,9 +56,9 @@ and exhaustive decoder-boundary gates.
   admission. This note follows only the portable package path; it does not inventory declaration
   artifacts, caches, source admission payloads, every textual marker, or all integer IDs.
 - No parser-plus-checker fuzz harness or retained minimized fuzz failure was located in the
-  focused portable tests. Escaped unpaired-surrogate policy, parser nesting/resource limits, and
-  malformed Boolean node payloads still need explicit end-to-end cases; the added UTF-8 tests
-  cover raw input bytes and the header Boolean type only.
+  focused portable tests. Parser nesting/resource limits remain untested. End-to-end cases for
+  escaped surrogate handling and malformed Boolean node payloads are recorded below; the earlier
+  UTF-8 cases cover raw input bytes and the header Boolean type.
 - Existing visible budget mutations cover selected over-limit values. A systematic below/at/above
   boundary matrix for every count, index range, typed-literal tag and theorem label is not
   established here.
@@ -78,6 +78,18 @@ and exhaustive decoder-boundary gates.
   `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`, target
   `arm64-apple-darwin27.0.0`. These probes found no malformed Boolean payload accepted by this
   product; they do not establish parser/checker fuzz coverage or the remaining decoder inventory.
+- Escaped UTF-16 handling now has an explicit package policy regression: a valid high/low pair
+  (`\\ud83d\\ude00`) in `source.path` is accepted and the package replays; isolated high and low
+  surrogates, high-surrogate followed by ordinary text or another high surrogate, repeated low
+  surrogates, and low-then-high ordering all fail closed as `malformed/json`. The escaped cases
+  are sent as ASCII JSON bytes, so they exercise JSON escape decoding rather than invalid raw
+  UTF-8. These results were checked with the strict pinned O2 replay product from source revision
+  `15560c60aab2540b8fd18137c8d2fd1ed2282e1e`, SHA-256
+  `6664442a5e7de99cd99763b0c1fa2c630c13c69d5215bc0908c485f1aa7e6a84` (Stage1
+  `f77278c716dea7f3dba8f4fcbcf76ecc473426ab3f163c95fea4e358f6337653`, runtime
+  `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`, target
+  `arm64-apple-darwin27.0.0`). The package reader's decoded-string UTF-8 check remains an
+  additional boundary; this policy evidence does not establish parser/checker fuzz coverage.
 - `goal_id` and `line` are parsed as bounded indexes and echoed as presentation labels, but the
   checker does not establish uniqueness. Their consumer-facing identity semantics need to be
   documented or tested before treating duplicate labels as harmless.

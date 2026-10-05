@@ -714,13 +714,15 @@ strict pinned O2 end-to-end probe also rejects malformed Boolean kernel payload 
 `malformed/node-schema` and out-of-range decimal payloads as `malformed/arena-inadmissible`; all
 16 positive packages and the complete portable replay refusal corpus passed. Product identities
 and exact refusal boundaries are recorded in `docs/evidence/2026-10-05-r006-decoder-boundary-inventory.md`.
+Escaped UTF-16 policy is now explicit and covered: valid surrogate pairs are accepted, while
+isolated, reversed, or malformed high/low surrogates return `malformed/json`.
 The integrated root snapshot also passed the strict pinned O2 build, `scripts/test_portable_replay.py`,
 `scripts/tests/test_portable_package_string_budget.py`, and `scripts/test_p05_package_restart.py`;
 the exact replay product identity is recorded in the cross-check note. The broad decoder/ID
-inventory, parser/checker fuzzing, escaped-surrogate policy, systematic boundary matrix,
-parser-resource tests and worst-case memory evidence remain open, so R-006 is not complete. Commit
-`c87fc1b9` adds one focused malformed-package-Boolean control; it does not establish exhaustive
-Boolean-field or all-decoder coverage.
+inventory, parser/checker fuzzing, systematic boundary matrix, parser-resource tests and
+worst-case memory evidence remain open, so R-006 is not complete. Commit `c87fc1b9` adds one
+focused malformed-package-Boolean control; it does not establish exhaustive Boolean-field or
+all-decoder coverage.
 
 #### R-007 — Freeze typed contexts and control assumption discharge
 

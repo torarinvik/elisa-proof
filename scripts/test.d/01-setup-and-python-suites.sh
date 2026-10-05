@@ -74,6 +74,7 @@ run_py_test test_conditional_ensure_replay_gap.py
 run_py_test test_declaration_artifact_identity.py
 run_py_test test_declaration_artifact_concurrency.py
 run_py_test test_p07_support_census.py
+run_py_test test_scalar_witness_name_index.py
 run_py_test remote/test_object_cache_key.py
 run_py_test test_build_dependency_closure.py
 run_py_test test_build_manifest_sidecar_integrity.py
