@@ -3,13 +3,14 @@
 import copy
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-PRODUCER = ROOT / "build/elisa-proof"
-REPLAY = ROOT / "build/elisa-proof-replay"
+sys.path.insert(0, str(ROOT / "scripts"))
+from portable_replay_support import BINARY as PRODUCER, REPLAY
 
 
 def invoke(command):
