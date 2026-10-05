@@ -249,6 +249,17 @@ claims marked "(checked)".
 | Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | ~5k | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
 | Presentation | `app/*` except repair | ~2.8k | Output and CLI. Fingerprints are binding guards only (limitation 2). |
 
+### Host-side soundness-incident registry
+
+`scripts/soundness_incident_registry.py` validates the confirmed-incident ledger and can determine
+whether an exact persisted product is named by an incident for the exact semantic rule/version it
+used. The match requires product kind, identity and SHA-256 as well as rule and semantic version;
+cache/artifact schema labels do not participate. Invalid registries or malformed product metadata
+raise an error, so callers must refuse reuse. This Python policy is not part of kernel replay and
+does not currently gate the report-cache reader, declaration-artifact store reader, or portable
+package replay path; those integrations and a complete rule-version inventory remain open R-009
+work. The focused host-side regression is `scripts/tests/test_soundness_incident_registry.py`.
+
 ## Guarded arithmetic completeness rules
 
 These rules reuse the ordinary `goal` certificate; they add no trusted fact or arena kind.

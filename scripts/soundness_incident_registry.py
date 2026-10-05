@@ -84,6 +84,48 @@ def validate(registry):
     return errors
 
 
+def product_is_semantically_affected(registry, product):
+    """Return whether a confirmed incident invalidates this exact product under its rule IDs.
+
+    Product presentation/schema fields are deliberately excluded from matching: only the exact
+    product kind, identity and digest plus the rule's semantic version establish impact. Invalid
+    registry or product metadata raises rather than allowing a cache/artifact hit.
+    """
+    errors = validate(registry)
+    if errors:
+        raise ValueError("invalid soundness incident registry: " + "; ".join(errors))
+    required = {"kind", "identity", "sha256", "rule_semantics"}
+    optional = {"schema", "label"}
+    if not _object(product, required, optional):
+        raise ValueError("product semantic identity has missing or unknown fields")
+    if not isinstance(product["kind"], str) or product["kind"] not in PRODUCT_KINDS \
+            or not isinstance(product["identity"], str) \
+            or not product["identity"].strip() or not isinstance(product["sha256"], str) \
+            or not SHA256.fullmatch(product["sha256"]):
+        raise ValueError("product semantic identity is malformed")
+    rules = product["rule_semantics"]
+    if not isinstance(rules, list) or not all(
+        _object(rule, {"rule", "version"})
+        and isinstance(rule["rule"], str) and rule["rule"].strip()
+        and isinstance(rule["version"], str) and rule["version"].strip()
+        for rule in rules
+    ):
+        raise ValueError("product rule_semantics must be an array of exact rule/version identities")
+
+    product_identity = (product["kind"], product["identity"], product["sha256"])
+    product_rules = {(rule["rule"], rule["version"]) for rule in rules}
+    for incident in registry["incidents"]:
+        incident_products = {
+            (item["kind"], item["identity"], item["sha256"])
+            for item in incident["affected_products"]
+        }
+        semantics = incident["rule_semantics"]
+        if product_identity in incident_products \
+                and (semantics["rule"], semantics["version"]) in product_rules:
+            return True
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("registry", nargs="?", default=str(Path(__file__).with_name("soundness_incidents.json")))
