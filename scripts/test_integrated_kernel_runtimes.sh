@@ -24,3 +24,15 @@ if ! "$standalone_probe_dir/kernel-interval-contradiction"; then
     printf 'proof test matrix failed: integer contradiction replay or consistent/wrap rejection failed\n' >&2
     exit 1
 fi
+if ! "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-expr-equal-budget.o" "$ROOT_DIR/examples/kernel_expr_equal_budget_runtime.elisa" >/dev/null 2>&1; then
+    printf 'proof test matrix failed: direct expression-equality budget probe did not compile\n' >&2
+    exit 1
+fi
+if ! "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/kernel-expr-equal-budget" "$standalone_probe_dir/kernel-expr-equal-budget.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"; then
+    printf 'proof test matrix failed: direct expression-equality budget probe did not link\n' >&2
+    exit 1
+fi
+if ! "$standalone_probe_dir/kernel-expr-equal-budget"; then
+    printf 'proof test matrix failed: expression equality malformed-input or budget-boundary controls failed\n' >&2
+    exit 1
+fi
