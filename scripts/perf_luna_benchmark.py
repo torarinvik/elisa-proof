@@ -11,6 +11,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import platform
 import resource
@@ -22,9 +23,17 @@ import tempfile
 import time
 from pathlib import Path
 
+from perf_build_provenance import (
+    file_identity,
+    manifest_self_test,
+    read_build_manifest,
+    require_compatible_products,
+    shared_product_context,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = "elisa-proof-perf-luna-v1"
+SCHEMA = "elisa-proof-perf-luna-v2"
 FIXTURES = (
     ("accept", ROOT / "examples" / "perf_luna_accept.elisa", 0, "proved"),
     ("refusal", ROOT / "examples" / "perf_luna_refusal.elisa", 1, "failed"),
@@ -66,16 +75,7 @@ MUST_PROVE = {
 MUST_BE_INADMISSIBLE = {"rejected_symbolic_quantifier"}
 MAX_ROUNDS = 9
 MAX_TIMEOUT = 300
-
-
-def file_identity(path: Path) -> dict:
-    digest = hashlib.sha256()
-    size = 0
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-            size += len(block)
-    return {"sha256": digest.hexdigest(), "size_bytes": size}
+MAX_WARMUP_ROUNDS = 3
 
 
 def require_unchanged_inputs(identities: dict[Path, dict]) -> None:
@@ -91,16 +91,20 @@ def measured_child(command: list[str]) -> int:
     has no independent timeout that could orphan descendants.
     """
     started = time.perf_counter()
+    cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             check=False)
     stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
     elapsed = time.perf_counter() - started
-    peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+    cpu_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    peak = cpu_after.ru_maxrss
     # macOS reports bytes; Linux and the supported Vast Linux hosts report KiB.
     peak_kib = peak / 1024 if sys.platform == "darwin" else peak
     payload = {
         "returncode": returncode,
         "wall_seconds": elapsed,
+        "user_cpu_seconds": max(0.0, cpu_after.ru_utime - cpu_before.ru_utime),
+        "system_cpu_seconds": max(0.0, cpu_after.ru_stime - cpu_before.ru_stime),
         "peak_rss_kib": peak_kib,
         "stdout": base64.b64encode(stdout).decode("ascii"),
         "stderr": base64.b64encode(stderr).decode("ascii"),
@@ -169,6 +173,28 @@ def self_test_process_group_cleanup() -> None:
         raise RuntimeError("ordinary measurement returned invalid output") from error
     if measured.get("returncode") != 0 or ordinary_stdout != b"ordinary\n":
         raise RuntimeError("ordinary measurement did not preserve its successful command output")
+
+    coherent_manifest = {
+        "proof": {"source_tree_sha256": "source"},
+        "frontend": {"revision": "frontend", "tree": "frontend-tree"},
+        "compiler": {"stage": "stage1", "product": {"sha256": "compiler"},
+                     "executable": {"sha256": "driver"}},
+        "runtime": {"sha256": "runtime"},
+        "profile_hooks": {"sha256": "hooks"},
+        "target": "arm64-fixture", "optimization": "O2", "compile_mode": "strict",
+        "compiler_flags": ["-emit", "obj", "-O2"],
+    }
+    require_compatible_products(coherent_manifest, coherent_manifest, "fixture")
+    measurement_self_test()
+    mismatched_manifest = dict(coherent_manifest)
+    mismatched_manifest["frontend"] = {"revision": "stale-frontend", "tree": "stale-tree"}
+    try:
+        require_compatible_products(coherent_manifest, mismatched_manifest, "fixture")
+    except RuntimeError as error:
+        if "frontend" not in str(error):
+            raise
+    else:
+        raise RuntimeError("proof/replay products with different frontend revisions were accepted")
 
     with tempfile.TemporaryDirectory(prefix="elisa-perf-luna-self-test-") as temporary:
         directory = Path(temporary)
@@ -299,12 +325,33 @@ def replay_result(result: dict, expected_status: str, expected_reason: str | Non
 
 def record_measurements(samples: list[dict]) -> dict:
     times = [sample["wall_seconds"] for sample in samples]
+    user_cpu = [sample["user_cpu_seconds"] for sample in samples]
+    system_cpu = [sample["system_cpu_seconds"] for sample in samples]
     rss = [sample["peak_rss_kib"] for sample in samples]
+    ordered_times = sorted(times)
+    p95_index = max(0, math.ceil(0.95 * len(ordered_times)) - 1)
     return {
         "rounds": len(samples),
         "median_wall_seconds": round(statistics.median(times), 6),
+        "p95_wall_seconds": round(ordered_times[p95_index], 6),
+        "median_user_cpu_seconds": round(statistics.median(user_cpu), 6),
+        "median_system_cpu_seconds": round(statistics.median(system_cpu), 6),
         "peak_rss_kib": int(max(rss)),
     }
+
+
+def measurement_self_test() -> None:
+    samples = [
+        {"wall_seconds": float(value), "user_cpu_seconds": float(value) / 2,
+         "system_cpu_seconds": float(value) / 4, "peak_rss_kib": value * 10}
+        for value in range(1, 8)
+    ]
+    measured = record_measurements(samples)
+    if (measured["rounds"] != 7 or measured["median_wall_seconds"] != 4.0
+            or measured["p95_wall_seconds"] != 7.0
+            or measured["median_user_cpu_seconds"] != 2.0
+            or measured["median_system_cpu_seconds"] != 1.0):
+        raise RuntimeError(f"measurement summary statistics are incorrect: {measured}")
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -317,18 +364,47 @@ def run(args: argparse.Namespace) -> dict:
             if not binary.is_file() or not os.access(binary, os.X_OK):
                 raise RuntimeError(f"{label} executable is missing or not executable: {binary}")
 
+    product_contexts = {}
+    for label, (proof_binary, replay_binary) in binaries.items():
+        proof_manifest = read_build_manifest(proof_binary, f"{label}/proof")
+        replay_manifest = read_build_manifest(replay_binary, f"{label}/replay")
+        product_contexts[label] = require_compatible_products(
+            proof_manifest, replay_manifest, label
+        )
+    toolchain_keys = tuple(key for key in product_contexts["baseline"]
+                           if not key.startswith("proof."))
+    toolchain_differences = [key for key in toolchain_keys
+                             if product_contexts["baseline"][key]
+                             != product_contexts["candidate"][key]]
+    if toolchain_differences:
+        raise RuntimeError(
+            "baseline/candidate builds use different frontends or toolchains: "
+            f"{toolchain_differences}"
+        )
+
+    manifest_paths = [Path(str(binary) + suffix)
+                      for pair in binaries.values() for binary in pair
+                      for suffix in (".manifest.json", ".manifest.json.sha256")]
     identities = {path: file_identity(path) for pair in binaries.values() for path in pair}
+    identities.update({path: file_identity(path) for path in manifest_paths})
     identities.update({source: file_identity(source) for _, source, _, _ in FIXTURES})
 
     entries = []
     with tempfile.TemporaryDirectory(prefix="elisa-proof-perf-luna-") as temporary:
         scratch = Path(temporary)
         for fixture, source, proof_exit, proof_status in FIXTURES:
-            run_outputs = {}
-            for variant, (proof_binary, replay_binary) in binaries.items():
-                outputs = {"proof": [], "export": [], "replay": []}
-                package_path = scratch / f"{variant}-{fixture}.json"
-                for _ in range(args.rounds):
+            run_outputs = {variant: {"proof": [], "export": [], "replay": []}
+                           for variant in binaries}
+            total_rounds = args.warmup_rounds + args.rounds
+            for round_index in range(total_rounds):
+                is_warmup = round_index < args.warmup_rounds
+                variants = list(binaries)
+                if round_index % 2:
+                    variants.reverse()
+                for variant in variants:
+                    proof_binary, replay_binary = binaries[variant]
+                    outputs = run_outputs[variant]
+                    package_path = scratch / f"{variant}-{fixture}.json"
                     proof = invoke(proof_binary, ["--json", str(source)], args.timeout)
                     check_exit(proof, proof_exit, f"{variant}/{fixture}/proof")
                     proof_report(proof, proof_status, f"{variant}/{fixture}/proof",
@@ -341,7 +417,8 @@ def run(args: argparse.Namespace) -> dict:
                            and certificate.get("rule", "").startswith("quantifier")
                            for certificate in report.get("certificates", [])):
                         raise RuntimeError(f"{variant}/{fixture}: adversarial quantifier certificate admitted")
-                    outputs["proof"].append(proof)
+                    if not is_warmup:
+                        outputs["proof"].append(proof)
 
                     export = invoke(proof_binary, ["--package", str(source)], args.timeout)
                     # Export exit status reports source admissibility. Refused sources may
@@ -374,14 +451,15 @@ def run(args: argparse.Namespace) -> dict:
                         "source-inadmissible" if not admissible else "no-theorems")
                     replay_exit = 0 if theorems else 1
                     package_path.write_bytes(export["stdout"])
-                    outputs["export"].append(export)
+                    if not is_warmup:
+                        outputs["export"].append(export)
 
                     replay = invoke(replay_binary, [str(package_path)], args.timeout)
                     check_exit(replay, replay_exit, f"{variant}/{fixture}/replay")
                     replay_result(replay, expected_replay, expected_reason,
                                   f"{variant}/{fixture}/replay")
-                    outputs["replay"].append(replay)
-                run_outputs[variant] = outputs
+                    if not is_warmup:
+                        outputs["replay"].append(replay)
 
             baseline = run_outputs["baseline"]
             candidate = run_outputs["candidate"]
@@ -408,14 +486,22 @@ def run(args: argparse.Namespace) -> dict:
     return {
         "schema": SCHEMA,
         "comparison": "exact-stdout-bytes",
+        "measurement_order": "alternating-baseline-candidate",
+        "wall_percentile_method": "nearest-rank",
         "rounds": args.rounds,
+        "warmup_rounds": args.warmup_rounds,
         "timeout_seconds": args.timeout,
         "host": {"platform": sys.platform, "machine": platform.machine(),
                  "python": platform.python_version()},
         "binaries": {label: {"proof": str(pair[0]), "replay": str(pair[1]),
                              "proof_identity": identities[pair[0]],
-                             "replay_identity": identities[pair[1]]}
+                             "replay_identity": identities[pair[1]],
+                             "proof_manifest_identity": identities[Path(
+                                 str(pair[0]) + ".manifest.json")],
+                             "replay_manifest_identity": identities[Path(
+                                 str(pair[1]) + ".manifest.json")]}
                      for label, pair in binaries.items()},
+        "build_context": product_contexts,
         "fixtures": entries,
     }
 
@@ -434,10 +520,12 @@ def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
         try:
             self_test_process_group_cleanup()
+            measurement_self_test()
+            manifest_self_test()
         except (OSError, RuntimeError) as error:
             print(f"perf_luna_benchmark self-test failed: {error}", file=sys.stderr)
             return 1
-        print("perf_luna_benchmark input identity and process cleanup self-tests passed")
+        print("perf_luna_benchmark provenance, metrics, input identity, and process cleanup self-tests passed")
         return 0
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -445,7 +533,8 @@ def main() -> int:
     parser.add_argument("--candidate-proof", type=Path, required=True)
     parser.add_argument("--baseline-replay", type=Path, required=True)
     parser.add_argument("--candidate-replay", type=Path, required=True)
-    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--rounds", type=int, default=7)
+    parser.add_argument("--warmup-rounds", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--output", type=Path, help="write the JSON report here; stdout by default")
     args = parser.parse_args()
@@ -453,6 +542,8 @@ def main() -> int:
         parser.error(f"--rounds must be between 1 and {MAX_ROUNDS}")
     if not 1 <= args.timeout <= MAX_TIMEOUT:
         parser.error(f"--timeout must be between 1 and {MAX_TIMEOUT} seconds")
+    if not 0 <= args.warmup_rounds <= MAX_WARMUP_ROUNDS:
+        parser.error(f"--warmup-rounds must be between 0 and {MAX_WARMUP_ROUNDS}")
     try:
         report = run(args)
     except (OSError, RuntimeError) as error:
