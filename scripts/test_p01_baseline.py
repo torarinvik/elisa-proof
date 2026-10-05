@@ -17,6 +17,18 @@ SPEC.loader.exec_module(MODULE)
 
 assert ("proof_kernel_core", MODULE.ROOT / "src/proof/kernel_core.elisa") in MODULE.FIXTURES
 assert MODULE.EXPECTED_OUTCOMES["proof_kernel_core"] == {"status": "proved", "returncode": 0}
+assert {name for name, _ in MODULE.FIXTURES} >= {
+    "unsigned_boundary_refusal", "quantifier_success", "region_lending_success",
+}
+assert MODULE.EXPECTED_OUTCOMES["unsigned_boundary_refusal"] == {
+    "status": "failed", "returncode": 1,
+}
+assert MODULE.EXPECTED_OUTCOMES["quantifier_success"] == {
+    "status": "proved", "returncode": 0,
+}
+assert MODULE.EXPECTED_OUTCOMES["region_lending_success"] == {
+    "status": "proved", "returncode": 0,
+}
 
 
 def main() -> None:

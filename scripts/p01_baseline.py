@@ -28,6 +28,9 @@ FIXTURES = (
     ("adversarial", ROOT / "examples/rejected_symbolic_quantifier.elisa"),
     ("qualified_constants", ROOT / "examples/qualified_constants_statements.elisa"),
     ("qualified_constant_refusal", ROOT / "examples/rejected_qualified_constants_statements.elisa"),
+    ("unsigned_boundary_refusal", ROOT / "examples/counterexample_unsigned_boundaries.elisa"),
+    ("quantifier_success", ROOT / "examples/quantifier.elisa"),
+    ("region_lending_success", ROOT / "examples/region_lend_calls.elisa"),
 )
 def load_sentinel_manifest() -> dict:
     try:
