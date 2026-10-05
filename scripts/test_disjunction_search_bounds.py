@@ -42,6 +42,25 @@ source = "\n".join(
 code, late = run(source)
 assert code == 0 and late["status"] == "proved", late["findings"]
 
+# A contract statement can begin on a different line from its call expression. Replay binds
+# by the call node's exact source span, not by assuming the statement and expression share a line.
+multiline_contract = """\
+def identity(value: bool) -> bool:
+    ensure result == value
+    return value
+
+def multiline_contract(accepted: bool) -> bool:
+    requires (
+        identity(accepted) or false
+    )
+    ensure (
+        identity(accepted)
+    )
+    return accepted
+"""
+code, multiline = run(multiline_contract)
+assert code == 0 and multiline["status"] == "proved", multiline["findings"]
+
 # These premises each have a goal-matching alternative, but their other side
 # remains open, so eight/nine of them genuinely fail the entailment check.
 def relevant_failures(count, late_success=False):

@@ -184,6 +184,14 @@ PY
 run_probe kernel_core src/proof/kernel_core.elisa 0
 run_probe kernel_core_fixture examples/dogfood_kernel_core.elisa 0
 run_probe source_context_scope examples/source_context_scope.elisa 0
+# Bind the dogfood claim to the exact checked source, full declaration inventory, and
+# named property goals. The totals below remain useful diagnostics, not the coverage oracle.
+python3 "$ROOT_DIR/scripts/check_dogfood_kernel_core_inventory.py" \
+    --root "$ROOT_DIR" --report "$REPORT_DIR/kernel_core.json" \
+    --inventory "$ROOT_DIR/scripts/dogfood_kernel_core_inventory.json" --slice kernel_core
+python3 "$ROOT_DIR/scripts/check_dogfood_kernel_core_inventory.py" \
+    --root "$ROOT_DIR" --report "$REPORT_DIR/kernel_core_fixture.json" \
+    --inventory "$ROOT_DIR/scripts/dogfood_kernel_core_inventory.json" --slice kernel_core_fixture
 python3 - "$REPORT_DIR/kernel_core.json" "$REPORT_DIR/kernel_core_fixture.json" <<'PY'
 import json
 import sys
@@ -198,11 +206,17 @@ for path, proven in zip(sys.argv[1:], (37, 50)):
 PY
 # The kernel's own audit, exported as a package, replays in the separate checker theorem by
 # theorem: the package carries every replayed goal, and the checker trusts no fingerprint.
+portable_pair_json="$(python3 "$ROOT_DIR/scripts/verify_product_pair.py" resolve \
+    --generation-root "${ELISA_PROOF_GENERATION_ROOT:-$ROOT_DIR/build/elisa-proof-generations}")"
+portable_pair_paths="$(python3 -c 'import json, sys; pair = json.loads(sys.argv[1])["products"]; print(pair["elisa-proof"]["binary"]); print(pair["elisa-proof-replay"]["binary"])' \
+    "$portable_pair_json")"
+PORTABLE_PROOF_BIN="${portable_pair_paths%%$'\n'*}"
+PORTABLE_REPLAY_BIN="${portable_pair_paths#*$'\n'}"
 for label in kernel_core kernel_core_fixture; do
     source_path="src/proof/kernel_core.elisa"
     [[ "$label" == kernel_core_fixture ]] && source_path="examples/dogfood_kernel_core.elisa"
-    "$ROOT_DIR/build/elisa-proof" --package "$ROOT_DIR/$source_path" >"$REPORT_DIR/$label.package.json"
-    if ! "$ROOT_DIR/build/elisa-proof-replay" "$REPORT_DIR/$label.package.json" >"$REPORT_DIR/$label.replay.json"; then
+    "$PORTABLE_PROOF_BIN" --package "$ROOT_DIR/$source_path" >"$REPORT_DIR/$label.package.json"
+    if ! "$PORTABLE_REPLAY_BIN" "$REPORT_DIR/$label.package.json" >"$REPORT_DIR/$label.replay.json"; then
         printf 'dogfood failed: %s package did not replay in the portable checker\n' "$label" >&2
         exit 1
     fi

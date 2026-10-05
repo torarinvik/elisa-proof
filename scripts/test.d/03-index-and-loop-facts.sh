@@ -80,6 +80,7 @@ if [[ "$loop_range_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: loop-derived collection bounds\n' >&2
     exit 1
 fi
+python3 "$ROOT_DIR/scripts/test_foreach_element_lower_bound.py"
 run_json_report "$ROOT_DIR/examples/for_invariant.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert any(origin and origin["kind"] == "loop-invariant" for goal in report["goals"] for origin in goal["fact_origins"]); assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0'
 for_invariant_probe_status=${PIPESTATUS[1]}
 if [[ "$for_invariant_probe_status" -ne 0 ]]; then
@@ -277,18 +278,6 @@ run_json_report "$ROOT_DIR/examples/rejected_counting_loop_measure.elisa" >"$rej
 rejected_counting_loop_measure_status=$?
 if [[ "$rejected_counting_loop_measure_status" -ne 1 ]] || ! python3 -c 'import json, sys; report = json.load(open(sys.argv[1])); assert report["status"] == "failed"; found = sorted((finding["line"], finding["name"], finding["kind"]) for finding in report["findings"]); assert found == [(9, "flipped_descent", "loop-decreases-unproven"), (9, "flipped_descent", "loop-decreases-unproven"), (9, "flipped_descent", "loop-decreases-unproven"), (14, "flipped_descent", "ensure-unproven"), (20, "unguarded_cancellation", "ensure-unproven"), (26, "doubled_name", "ensure-unproven"), (32, "wrong_step", "ensure-unproven"), (39, "rebind_without_peer", "ensure-unproven")], found; assert not any(goal["proven"] for goal in report["goals"] if goal["rule"] == "goal" and goal["line"] not in (9, 47)); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0' "$rejected_counting_loop_measure_report"; then
     printf 'proof test matrix failed: rejected_counting_loop_measure=%s\n' "$rejected_counting_loop_measure_status" >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==50 and r["summary"]["obligations"]==50; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'
-dogfood_core_contract_probe_status=${PIPESTATUS[1]}
-if [[ "$dogfood_core_contract_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: direct calls to dogfood kernel contracts\n' >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==37 and r["summary"]["obligations"]==37; assert r["findings"]==[] and r["summary"]["semantic_errors"]==0; assert r["replay"]["gaps"]==0 and r["kernel"]["independent_replay"] is True'
-kernel_core_self_probe_status=${PIPESTATUS[1]}
-if [[ "$kernel_core_self_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: kernel core does not verify itself\n' >&2
     exit 1
 fi
 run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] for goal in report["goals"]); assert any(not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_cycle_arena" for finding in report["findings"])'

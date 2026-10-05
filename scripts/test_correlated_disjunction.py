@@ -1,20 +1,19 @@
 """Case correlations survive OR introduction without adding proof-search fuel."""
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
 
+from portable_replay_support import BINARY as PRODUCER, REPLAY
+
 if not __debug__:
     raise SystemExit("correlation checks must run without Python -O")
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
-REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
 SOURCE = ROOT / "examples/linear_disequality_refuted.elisa"
 
 
 def report(path):
-    run = subprocess.run([str(BINARY), "--json", str(path)], capture_output=True,
+    run = subprocess.run([str(PRODUCER), "--json", str(path)], capture_output=True,
                          text=True, timeout=60)
     data = json.loads(run.stdout)
     assert all(row["kind_code"] == 322 for row in data["semantic_diagnostics"]), data["semantic_diagnostics"]
@@ -33,7 +32,7 @@ assert positive["replay"] == {"certificates": 4, "replayed": 4, "gaps": 0}
 
 original = SOURCE.read_text()
 with tempfile.TemporaryDirectory(prefix="elisa-correlated-disjunction-") as temporary:
-    package_run = subprocess.run([str(BINARY), "--package", str(SOURCE)], capture_output=True,
+    package_run = subprocess.run([str(PRODUCER), "--package", str(SOURCE)], capture_output=True,
                                  text=True, timeout=60)
     package = json.loads(package_run.stdout)
     assert package_run.returncode == 0 and len(package["theorems"]) == 4, package

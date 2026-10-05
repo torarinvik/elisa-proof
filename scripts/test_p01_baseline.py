@@ -5,6 +5,7 @@ import importlib.util
 import hashlib
 import json
 import tempfile
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,88 @@ SPEC.loader.exec_module(MODULE)
 
 assert ("proof_kernel_core", MODULE.ROOT / "src/proof/kernel_core.elisa") in MODULE.FIXTURES
 assert MODULE.EXPECTED_OUTCOMES["proof_kernel_core"] == {"status": "proved", "returncode": 0}
+assert {name for name, _ in MODULE.FIXTURES} >= {
+    "unsigned_boundary_refusal", "quantifier_success", "region_lending_success",
+}
+assert MODULE.EXPECTED_OUTCOMES["unsigned_boundary_refusal"] == {
+    "status": "failed", "returncode": 1,
+}
+assert MODULE.EXPECTED_OUTCOMES["quantifier_success"] == {
+    "status": "proved", "returncode": 0,
+}
+assert MODULE.EXPECTED_OUTCOMES["region_lending_success"] == {
+    "status": "proved", "returncode": 0,
+}
+assert {name for name, _ in MODULE.FIXTURES} >= {"branch_join", "rejected_branch_join"}
+sentinels = MODULE.load_sentinel_manifest()
+pair = json.loads(MODULE.SENTINEL_MANIFEST.read_text(encoding="utf-8"))["workloads"]["branch_join_pair"]
+assert pair["members"] == ["branch_join", "rejected_branch_join"]
+for name, count, status in (("branch_join", 12, "proved"),
+                            ("rejected_branch_join", 6, "failed")):
+    fixture = sentinels[name]
+    expected = fixture["semantic_expectations"]
+    assert fixture["expected_outcome"]["status"] == status
+    assert fixture["expected_outcome"]["returncode"] == (0 if status == "proved" else 1)
+    assert MODULE.identity(MODULE.ROOT / fixture["path"]) == {
+        "sha256": fixture["sha256"], "size_bytes": fixture["size_bytes"],
+    }
+    assert expected["obligation_count"] == count
+    assert expected["obligation_ids"] == list(range(count))
+    assert len(expected["obligation_details"]) == count
+    assert sum(item["result"] == "proved" for item in expected["obligation_details"]) == expected["proven"]
+    assert sum(item["result"] == "unproven" for item in expected["obligation_details"]) == expected["unproven"]
+    assert expected["failed"] == expected["unproven"]
+    assert expected["trusted_assumptions"] == 0
+    assert expected["replay_gaps"] == 0
+    assert expected["replay_certificates"] == expected["replayed"]
+    assert fixture["budget_classification"] == pair["budget_classification"]
+    assert pair["budget_classification"] == {
+        "classification": "standard-bounded", "timeout_seconds": 20,
+        "rss_limit_kib": 1500000, "output_limit_bytes": MODULE.MAX_OUTPUT_BYTES,
+    }
+
+positive = sentinels["branch_join"]["semantic_expectations"]
+profile_measurement = {"stop_reason": None, "report_complete": True, "wall_seconds": 0.02,
+                       "cpu_seconds": 0.01,
+                       "phase_timings_seconds": {"proof_cli_invocation_wall": 0.02,
+                           "proof_cli_child_cpu": 0.01, "baseline_harness_json_decode": 0.001},
+                       "replay_gaps": positive["replay_gaps"],
+                       "replay_certificates": positive["replay_certificates"],
+                       "replayed": positive["replayed"], "goal_cache_hits": 0,
+                       "goal_cache_misses": 0, "control_flow_steps": 0,
+                       "live_facts_peak": 0, "status": "proved", "returncode": 0,
+                       "obligations": positive["obligation_count"],
+                       "obligation_ids": positive["obligation_ids"],
+                       "obligation_details": positive["obligation_details"],
+                       "proven": positive["proven"], "unproven": positive["unproven"],
+                       "failed": positive["failed"],
+                       "trusted_assumptions": positive["trusted_assumptions"],
+                       "trusted_boundary_facts": positive["trusted_boundary_facts"],
+                       "proof_certificates": positive["proof_certificates"]}
+MODULE.check_report(profile_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+for invalid_timings, message in (
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.01}, "schema"),
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.01,
+      "baseline_harness_json_decode": float("nan")}, "invalid baseline_harness_json_decode"),
+    ({"proof_cli_invocation_wall": 0.03, "proof_cli_child_cpu": 0.01,
+      "baseline_harness_json_decode": 0.001}, "disagrees with proof CLI invocation"),
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.02,
+      "baseline_harness_json_decode": 0.001}, "disagrees with proof CLI child CPU"),
+):
+    invalid_measurement = {**profile_measurement, "phase_timings_seconds": invalid_timings}
+    try:
+        MODULE.check_report(invalid_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+    except RuntimeError as error:
+        assert message in str(error), (message, error)
+    else:
+        raise AssertionError(f"invalid P-01 phase timing was accepted: {invalid_timings}")
+profile_measurement["trusted_assumptions"] = 1
+try:
+    MODULE.check_report(profile_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+except RuntimeError as error:
+    assert "trusted_assumptions" in str(error)
+else:
+    raise AssertionError("semantic workload profile drift was accepted")
 
 
 def main() -> None:
@@ -55,8 +138,14 @@ def main() -> None:
         old = MODULE.FIXTURES
         MODULE.FIXTURES = (("test", fixture),)
         try:
-            result = MODULE.run(SimpleNamespace(binary=binary, timeout=5, rss_limit_kib=500000,
-                                                rounds=2, warmup_runs=1))
+            with mock.patch.object(MODULE, "ROOT", root), \
+                    mock.patch.object(MODULE, "load_sentinel_manifest", return_value={
+                "test": {"path": "fixture.elisa", "sha256": MODULE.identity(fixture)["sha256"],
+                         "size_bytes": fixture.stat().st_size,
+                         "expected_outcome": {"status": "proved", "returncode": 0}},
+            }):
+                result = MODULE.run(SimpleNamespace(binary=binary, timeout=5, rss_limit_kib=500000,
+                                                    rounds=2, warmup_runs=1))
         finally:
             MODULE.FIXTURES = old
         assert result["schema"] == "elisa-proof-p01-baseline-v3"
@@ -130,8 +219,10 @@ def main() -> None:
         old_output_limit = MODULE.MAX_OUTPUT_BYTES
         try:
             MODULE.MAX_OUTPUT_BYTES = 1024
-            limited = MODULE.invoke(binary, fixture, timeout=5, rss_limit_kib=500000)
+            with mock.patch.object(MODULE.os, "killpg", side_effect=PermissionError("denied")):
+                limited = MODULE.invoke(binary, fixture, timeout=5, rss_limit_kib=500000)
             assert limited["stop_reason"] == "output_limit", limited
+            assert limited["returncode"] is not None
             assert limited["stdout_bytes"] > limited["stdout_sha256_bytes"]
             assert limited["stdout_sha256_complete"] is False
         finally:

@@ -19,6 +19,73 @@ extend ElisaProof:
                 return false if sview_at(owner, start + offset) != sview_at(leaf, offset)
             return true
 
+        def proof_replay_source_local_use(expression: Ast::Expr, name: sview, expected: Ast::Pos, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(found, position):
+                    return found == name and position.line == expected.line and position.column == expected.column and position.offset == expected.offset and position.end_line == expected.end_line and position.end_column == expected.end_column and position.end_offset == expected.end_offset
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _):
+                    return proof_replay_source_local_use(inner, name, expected, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_source_local_use(left, name, expected, depth + 1) or proof_replay_source_local_use(right, name, expected, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_replay_source_local_use(callee, name, expected, depth + 1)
+                    for argument in arguments |name, expected, depth|:
+                        return true if proof_replay_source_local_use(argument, name, expected, depth + 1)
+                    return false
+                _:
+                    return false
+
+        def proof_replay_source_position_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
+            return left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
+
+        def proof_replay_call_source_position_equal(left: Ast::Expr, right: Ast::Expr) -> bool:
+            return proof_replay_source_position_equal(Ast::expr_pos(left), Ast::expr_pos(right))
+
+        # Match a module expression against a suffix of its declared qualified owner without
+        # flattening or allocating. Returning the start offset lets callers distinguish an exact
+        # path from a single-segment path resolved relative to an enclosing module.
+        def proof_replay_module_path_start(owner: sview, expression: Ast::Expr, end: usize, depth: usize) -> (valid: bool, start: usize):
+            return (false, 0) if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    name_length: usize = sview_len(name)
+                    return (false, 0) if name_length == 0 or name_length > end
+                    start: usize = end - name_length
+                    for offset in 0..<name_length |owner, name, start|:
+                        return (false, 0) if sview_at(owner, start + offset) != sview_at(name, offset)
+                    return (true, start)
+                Ast::Expr.Scope(base, member, _):
+                    member_length: usize = sview_len(member)
+                    return (false, 0) if member_length == 0 or member_length + 2 > end
+                    start: usize = end - member_length
+                    for offset in 0..<member_length |owner, member, start|:
+                        return (false, 0) if sview_at(owner, start + offset) != sview_at(member, offset)
+                    return (false, 0) if sview_at(owner, start - 1) != 58 or sview_at(owner, start - 2) != 58
+                    return proof_replay_module_path_start(owner, base, start - 2, depth + 1)
+                _:
+                    return (false, 0)
+
+        # Fully qualified source spellings must match the complete declared module name.
+        def proof_replay_exact_module_path_matches_owner(owner: sview, expression: Ast::Expr) -> bool:
+            path: (valid: bool, start: usize) = proof_replay_module_path_start(owner, expression, sview_len(owner), 0)
+            return path.valid and path.start == 0
+
+        # A one-segment qualifier may name a nested module relative to the caller's module or
+        # one of its ancestors. Requiring that lexical prefix prevents a same-leaf module under
+        # an unrelated parent from being mistaken for the target summary's owner.
+        def proof_replay_relative_module_path_matches_owner(owner: sview, module_name: sview, caller_owner: sview) -> bool:
+            return true if owner == module_name
+            return false if not proof_replay_module_leaf_matches(owner, module_name)
+            owner_prefix_length: usize = sview_len(owner) - sview_len(module_name) - 2
+            caller_length: usize = sview_len(caller_owner)
+            return false if owner_prefix_length == 0 or caller_length < owner_prefix_length
+            for index in 0..<owner_prefix_length |owner, caller_owner|:
+                return false if sview_at(owner, index) != sview_at(caller_owner, index)
+            return true if caller_length == owner_prefix_length
+            return false if caller_length < owner_prefix_length + 2
+            return sview_at(caller_owner, owner_prefix_length) == 58 and sview_at(caller_owner, owner_prefix_length + 1) == 58
+
         def proof_replay_function_owner_module(declarations: darray[Ast::Decl]&, name: sview, line: u32, current: sview, owner: mutable sview&, count: mutable usize&, depth: usize) -> void:
             return if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
             for declaration in declarations |name, line, current, owner, count, depth|:
@@ -50,36 +117,40 @@ extend ElisaProof:
                     _:
                         pass
 
-        # When several executable summaries share the dependency's bare name, the recorded
-        # result must be a call qualified by the module that declares the chosen summary.
-        def proof_replay_summary_owner_matches_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> bool:
+        # The recorded result must resolve to the module that declares the chosen summary. A
+        # matching final segment is insufficient: unrelated parents can declare same-leaf modules.
+        def proof_replay_summary_owner_matches_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, callee: Ast::Expr) -> bool:
             same_name: mutable usize = 0
             for candidate in report.executable_summaries |candidate, trace, same_name|:
                 same_name <- same_name + 1 if candidate.name == trace.dependency
-            return true if same_name <= 1
             return false if trace.owner_line == 0 or summary.line != trace.owner_line
             owner: mutable sview = ""
             owners: mutable usize = 0
             proof_replay_function_owner_module(report.source_declarations, trace.dependency, trace.owner_line, "", &owner, &owners, 0)
-            return false if owners != 1 or owner == ""
-            result_slot: usize = trace.summary_bindings_start + summary.parameters_count
-            return false if result_slot >= report.fact_trace_summary_values.count
-            match report.fact_trace_summary_values[result_slot]:
-                Ast::Expr.Call(callee, _, _, _):
-                    match callee:
-                        Ast::Expr.Scope(base, member, _):
-                            return member == trace.dependency and proof_replay_module_leaf_matches(owner, proof_head_name(base))
-                        Ast::Expr.Ident(callee_name, _):
-                            # A bare call resolves to the caller's own module first, so it names
-                            # this summary only when the certificate being replayed is declared
-                            # in exactly the callee's module.
-                            return false if callee_name != trace.dependency or report.replay_owner_line == 0
+            return false if owners != 1
+            match callee:
+                Ast::Expr.Scope(base, member, _):
+                    return false if member != trace.dependency or owner == ""
+                    return true if proof_replay_exact_module_path_matches_owner(owner, base)
+                    match base:
+                        Ast::Expr.Ident(module_name, _):
+                            return false if report.replay_owner_line == 0
                             caller_owner: mutable sview = ""
                             callers: mutable usize = 0
                             proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &caller_owner, &callers, 0)
-                            return callers == 1 and caller_owner == owner
+                            return callers == 1 and proof_replay_relative_module_path_matches_owner(owner, module_name, caller_owner)
                         _:
                             return false
+                Ast::Expr.Ident(callee_name, _):
+                    return false if callee_name != trace.dependency
+                    return true if same_name <= 1
+                    # A bare call resolves to the caller's own module first, so it names
+                    # this summary only when the certificate is declared in the callee's module.
+                    return false if owner == "" or report.replay_owner_line == 0
+                    caller_owner: mutable sview = ""
+                    callers: mutable usize = 0
+                    proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &caller_owner, &callers, 0)
+                    return callers == 1 and caller_owner == owner
                 _:
                     return false
 
@@ -101,7 +172,6 @@ extend ElisaProof:
                     summary_found <- true
                     summary <- candidate
             return false if not summary_found or not summary.verified
-            return false if not proof_replay_summary_owner_matches_call(report, trace, summary)
             return false if summary.parameters_start > report.executable_parameters.count or summary.parameters_count > report.executable_parameters.count - summary.parameters_start
             return false if summary.requires_start > report.executable_requires.count or summary.requires_count > report.executable_requires.count - summary.requires_start
             return false if summary.ensures_start > report.executable_ensures.count or summary.ensures_count > report.executable_ensures.count - summary.ensures_start
@@ -110,6 +180,17 @@ extend ElisaProof:
             for index in 0..<summary.parameters_count |index, summary, report, trace|:
                 return false if report.fact_trace_summary_names[trace.summary_bindings_start + index] != report.executable_parameters[summary.parameters_start + index]
             return false if report.fact_trace_summary_names[trace.summary_bindings_start + summary.parameters_count] != "result"
+            source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call(report, trace, summary)
+            return false if not source_call.known
+            # Independently recover the caller's actual source call and pre-state. The
+            # producer's resolved local value is not itself evidence that this call occurred.
+            return false if not proof_replay_deterministic_call_source_site(report, trace, source_call.call)
+            return false if not proof_replay_summary_call_arguments_match(report, trace, summary, source_call.call)
+            match source_call.call:
+                Ast::Expr.Call(callee, _, _, _):
+                    return false if not proof_replay_summary_owner_matches_call(report, trace, summary, callee)
+                _:
+                    return false
             instance: mutable Ast::Expr = report.executable_ensures[summary.ensures_start + trace.summary_ensure_index]
             old_reference: (known: bool, found: bool, parameter: sview) = proof_replay_old_reference_parameter(instance, 0)
             has_call_old: bool = old_reference.known and old_reference.found

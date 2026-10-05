@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from compiler_environment import select_compiler_environment
 
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
@@ -124,7 +125,13 @@ def main() -> int:
     parser.add_argument("--recipe-path", action="append", default=[])
     parser.add_argument("--identity-link-flags", default="")
     parser.add_argument("--identity-output", default="")
+    parser.add_argument("--pair-generation", default="")
+    parser.add_argument("--new-pair-generation", action="store_true")
     parser.add_argument("--check-existing", action="store_true")
+    parser.add_argument("--refresh-proof-provenance", action="store_true")
+    parser.add_argument("--refresh-manifest", default="")
+    parser.add_argument("--refresh-snapshot-root", default="")
+    parser.add_argument("--refresh-proof-root", default="")
     parser.add_argument("--existing-binary", default="")
     parser.add_argument("--existing-manifest", default="")
     parser.add_argument("--existing-manifest-sha256", default="")
@@ -142,6 +149,10 @@ def main() -> int:
 
     if arguments.effective_env_digest:
         print(effective_environment_digest())
+        return 0
+
+    if arguments.new_pair_generation:
+        print(uuid.uuid4().hex)
         return 0
 
     if arguments.recipes_digest:
@@ -224,6 +235,46 @@ def main() -> int:
             matches = False
         return 0 if matches else 1
 
+    if arguments.refresh_proof_provenance:
+        if not all((arguments.refresh_manifest, arguments.refresh_snapshot_root,
+                    arguments.refresh_proof_root)):
+            print("build manifest: provenance refresh requires manifest, snapshot and proof roots",
+                  file=sys.stderr)
+            return 2
+        manifest_path = os.path.realpath(arguments.refresh_manifest)
+        checksum_path = manifest_path + ".sha256"
+        try:
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            current_proof = {
+                "head": git(arguments.refresh_proof_root, "rev-parse", "HEAD") or None,
+                "source_dirty": bool(git(arguments.refresh_proof_root, "status", "--porcelain", "--", "src")),
+                "source_tree_sha256": tree_digest(os.path.join(arguments.refresh_snapshot_root, "src")),
+            }
+            if manifest.get("proof") == current_proof:
+                return 0
+            manifest["proof"] = current_proof
+            encoded = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+            digest = hashlib.sha256(encoded).hexdigest()
+            token = str(os.getpid())
+            manifest_temp = manifest_path + ".tmp." + token
+            checksum_temp = checksum_path + ".tmp." + token
+            with open(manifest_temp, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            with open(checksum_temp, "w", encoding="ascii") as handle:
+                handle.write(digest + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            # A reader seeing the brief mixed generation rejects it via the checksum sidecar.
+            os.replace(manifest_temp, manifest_path)
+            os.replace(checksum_temp, checksum_path)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            print(f"build manifest: cannot refresh proof provenance: {error}", file=sys.stderr)
+            return 2
+        return 0
+
     if arguments.dependency_root or arguments.dependency_main:
         if not arguments.dependency_root or not arguments.dependency_main:
             print("build manifest: --dependency-root and --dependency-main must be used together", file=sys.stderr)
@@ -247,6 +298,7 @@ def main() -> int:
     frontend_tree = git(arguments.frontend_repo, "rev-parse", f"{arguments.frontend_revision}^{{tree}}")
     manifest = {
         "schema": MANIFEST_SCHEMA,
+        "pair_generation": arguments.pair_generation or None,
         "build_identity": arguments.recorded_build_identity or None,
         "proof": {
             "head": proof_head or None,

@@ -93,6 +93,59 @@ def certificate_rules() -> set[str]:
     return match_arms(function_body(text, "proof_replay_certificate_rule_valid"))
 
 
+def certificate_producer_functions() -> set[str]:
+    producers: set[str] = set()
+    for path in elisa_files(PROOF):
+        lines = strip_comments(read(path)).splitlines()
+        for index, line in enumerate(lines):
+            definition = re.match(r"\s*def (\w+)\b", line)
+            if not definition:
+                continue
+            indent = len(line) - len(line.lstrip())
+            body = []
+            for following in lines[index + 1:]:
+                if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                    break
+                body.append(following)
+            text = "\n".join(body)
+            if "report.certificates" in text and "ProofGoalCertificate{" in text:
+                producers.add(definition.group(1))
+    return producers
+
+
+def public_certificate_producers() -> set[str]:
+    """Find certificate appending functions declared in a public section."""
+    public: set[str] = set()
+    for path in elisa_files(PROOF):
+        lines = strip_comments(read(path)).splitlines()
+        section_visibility: str | None = None
+        section_indent = -1
+        for index, line in enumerate(lines):
+            section = re.match(r"(\s*)(public|private):\s*$", line)
+            if section:
+                section_visibility = section.group(2)
+                section_indent = len(section.group(1))
+                continue
+            definition = re.match(r"(\s*)def (\w+)\b", line)
+            if definition and len(definition.group(1)) > section_indent:
+                name = definition.group(2)
+                indent = len(definition.group(1))
+                body = []
+                for following in lines[index + 1:]:
+                    if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                        break
+                    body.append(following)
+                text = "\n".join(body)
+                if "report.certificates" in text and "ProofGoalCertificate{" in text and section_visibility == "public":
+                    public.add(name)
+            # A sibling section ends the preceding section; sections at the same indentation
+            # replace its visibility for following declarations.
+            elif line.strip() and len(line) - len(line.lstrip()) <= section_indent and not section:
+                section_visibility = None
+                section_indent = -1
+    return public
+
+
 def boundary_trace_kinds() -> set[str]:
     text = read(PROOF / "replay" / "certificate_validation.elisa") + read(PROOF / "replay" / "boundary_trace_shapes.elisa")
     return match_arms(function_body(text, "proof_replay_boundary_trace_kind"))
@@ -154,6 +207,7 @@ def main() -> int:
         "node-kinds": node_kinds(),
         "typing-kinds": typing_kinds(),
         "certificate-rules": certificate_rules(),
+        "certificate-producers": certificate_producer_functions(),
         "boundary-trace-kinds": boundary_trace_kinds(),
         "derived-trace-kinds": derived_trace_kinds(),
         "summary-trace-kinds": summary_trace_kinds(),
@@ -162,6 +216,9 @@ def main() -> int:
         "correspondence-external-calls": correspondence_external_calls(),
     }
     failures: list[str] = []
+    public_producers = public_certificate_producers()
+    if public_producers:
+        failures.append(f"certificate producers are public: {sorted(public_producers)}")
     for table, source in checks.items():
         if not source:
             failures.append(f"{table}: extracted an empty set from source")

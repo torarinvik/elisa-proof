@@ -29,6 +29,27 @@ The P-01 baseline is seven paired rounds on three fixtures, but phase timings, a
 Linux qualification, and the broader compiler/Core corpus remain open. See the active queue in
 [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md); no weakness is marked closed by this sample.
 
+## 2026-10-05 partial R-004: declaration inventory consistency
+
+`proof_report_source_has_unresolved_checks` now requires `report.declarations` to equal the
+number of recorded `declaration_details`. The recursive declaration scheduler increments the
+counter and records a summary for each declaration, including nested module and scope contents.
+This catches a report that loses a declaration summary while leaving the remaining obligations
+and replay certificates complete. The standalone `examples/report_invariants_runtime.elisa`
+harness mutates the count to model a missing summary and requires the report to remain incomplete;
+it compiled, linked and ran successfully with pinned Stage1. Strict O2 build product
+`build/elisa-proof` SHA-256 is
+`73e0af5e2057da569724dca13c5733691fcf71a77d5eb71c74b533cc7e67f8c2` (pinned Stage1 revision
+`7b27fa312c5af923f044f6ee0e5e1de4f811f595`). End-to-end `--json` checks on
+`examples/perf_luna_accept.elisa` (1 declaration, 2/2 obligations) and
+`examples/global_constant_module.elisa` (3 declarations, 2/2 obligations) both returned `proved`
+with zero replay gaps and matching declaration-summary counts.
+
+This is one report-integrity cross-check, not completion of R-004. The report still does not
+independently reconstruct the expected declaration inventory from the immutable source tree, and
+this change does not establish that every exported theorem is bound to a complete checked source
+root. The full suite and cross-platform gates were not run.
+
 ## 2026-10-04 checkpoint: Boolean summary disjunctions over signed call results
 
 The clamp-then-check regression reproduced on the existing main binary: 23 of 24
@@ -10409,25 +10430,71 @@ signed widths below 64. The same limitation remains for a *goal* written `>= -12
 
 ## Deterministic call witnesses (BACKLOG B-02)
 
-`proof_mark_deterministic_functions` classifies a function as deterministic when it is pure, or when it meets both of the following:
-- It is non-recursive and passes `proof_function_is_directly_pure` with its `requires` allowed. That means no effects, no `changes` or `preserves`, no mutable or mutable-typed parameter, and no read of a mutable global.
-- Every call it makes is to another deterministic function.
+At an executable call site of a verified deterministic callee with a scalar result,
+`proof_add_deterministic_call_witness` records a `deterministic-call` trace. Producer eligibility
+requires an acyclic call chain of effect-free functions, no `changes` or `preserves`, no mutable or
+mutable-typed callee parameter, and no read of a mutable global. The call has already executed, so
+its `requires` was discharged at that call site. Its result depends only on fixed by-value inputs;
+the marker gives that exact call term stable scalar identity while its arguments remain stable. It
+does not authorize unfolding or merging different calls by their arguments. The marker is never
+added in contract position, where a partial callee could be named outside its precondition.
 
-At an executable call site of a verified deterministic callee with a scalar result, `proof_add_deterministic_call_witness` records `__elisa_primitive_scalar_type(call)` and the declared signed width. It does this only when every argument is witnessed or is a value binding.
+Replay does not trust the producer's classification. `proof_replay_deterministic_call_valid`
+reconstructs the callee and helper call graph from source declarations, rejects recursive or
+unsupported body shapes, checks effect rows and parameter/result scalar types, and rejects mutable
+global reads. A direct in-memory mutation regression now also wraps a forged reference actual in
+parentheses; replay rejects it while the original trace still replays. The argument-shape check is
+recursive, so reference operators cannot be hidden below parentheses or refinements. The
+conservative subset may refuse safe functions with recursive calls, unsupported statements, or
+non-scalar parameters/results.
 
-The soundness argument:
-- The call ran, so its precondition was proved there.
-- The callee's result depends only on its by-value arguments, so the call text denotes one value for as long as those arguments do.
-- `proof_expr_call_stable` already requires stable arguments before it retains the term.
-- The witness is never added in contract position. There a partial callee could be named outside its precondition.
+R-005 remains broader than this B-02 hardening. Replay now requires one executable call expression
+with the trace owner name and line whose callee, ordered actuals and named-argument positions
+match the marker after independently replaying straight-line caller bindings up to that call. It
+then resolves the callee by unique source declaration and reconstructs its deterministic helper
+graph. The direct trace mutation harness changes a scalar actual while keeping a valid
+deterministic callee and kernel encoding; replay rejects the forged actual.
 
-This lets summaries survive a later call, as in `first = f(x); second = f(first)`.
+The current `ProofFactTrace` has no pre-call state-version or resolved caller-declaration identity
+field: deterministic-call traces leave `owner_line` at zero (the field is used by global-constant
+and function-summary traces). The current source walk fails closed for calls inside or after
+control-flow joins and unsupported statements. For straight-line sites, owner name, line and
+reconstructed call arguments recover a unique source site, but do not prove that an argument
+binding retains the same value at every later certificate that consumes the trace. Closing that
+remaining gap needs a deterministic-call trace version with an owner declaration line and source
+call identity, then independent replay of the write path from the call to the consuming obligation.
+Until then, trace replay proves the call's pre-state source origin, not its state liveness across
+subsequent statements.
 
-**Budget:** at most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be live at once. Past that cap, summaries are dropped at the next call as before. This keeps `dispatch_wide` at a live-fact peak of 61 against its 66-fact snapshot budget; the peak was 53 before this change.
+At most `PROOF_DETERMINISTIC_CALL_WITNESS_LIMIT` (2) witnessed call terms may be live at once.
+Past that cap, summaries are dropped at the next call as before. A witnessed arithmetic chain may
+receive one additional call term when needed to read its nested arithmetic operands.
 
-**Replay gap:** replay trusts the type-bound trace as a boundary fact, exactly as it does for pure-call witnesses. Replay does not re-derive the callee's classification. Closing that gap for both witness kinds is a follow-up.
+Before the source-site binding update, the combined strict O2 product (`build/elisa-proof` SHA-256
+`532cb70fcc3b2694616db3d9cc3278d0f1cc7099a5d04dcb4b232c379ad543ac`, proof HEAD `9a1a4531`) used
+pinned Stage1 compiler revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`.
+`scripts/test_deterministic_call_chain.py` and `scripts/test_portable_replay.py` passed. The direct
+mutation harness `examples/deterministic_call_trace_replay_runtime.elisa` compiled, linked and ran
+with exit 0 against that commit. Earlier protocol-v2 coverage passed on strict O2 product
+`e989e4336e7be1fe8c843af105a0daa52615d9bf181a74ba10b3a7d359adff53` via
+`scripts/test_agent_protocol_schema.py`.
 
-Tests: `examples/deterministic_call_chain.elisa`, `examples/rejected_deterministic_call_chain.elisa` (effects, global read, mutable borrow, indirect effect), and `scripts/test_deterministic_call_chain.py`, including a 40-call budget case.
+At the B-02 close checkpoint, focused evidence on the strict O2 product (`build/elisa-proof` SHA-256
+`e989e4336e7be1fe8c843af105a0daa52615d9bf181a74ba10b3a7d359adff53`) with pinned Stage1 compiler
+revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`: `scripts/test_deterministic_call_chain.py`,
+`scripts/test_portable_replay.py`, and `scripts/test_agent_protocol_schema.py` passed, including
+positive call chains and effect, mutable-global, mutable-borrow, indirect-effect, package schema,
+and replay controls. A complete suite was not run at that checkpoint.
+
+R-005 focused evidence after source-site binding: strict O2 `build/elisa-proof` SHA-256
+`121bcc14ba1422b0dffa8077ef316fbae61be901d92293c0d35e7ee89623b512`, built with pinned Stage1
+revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`; `scripts/test_deterministic_call_chain.py`
+passed, including both positive nested-call chains and negative effect/global/borrow/indirect-call
+controls. The in-memory `examples/deterministic_call_trace_replay_runtime.elisa` harness passed
+after rejecting a parenthesized reference actual and a forged scalar actual, restoring the original
+trace, then revalidating every trace in the nested-chain source. The full dogfood script and full
+suite were not run. Straight-line source binding is covered; control-flow sites fail closed, and
+post-call state liveness remains open as described above.
 
 ## Tuple-field call summaries (BACKLOG B-03)
 

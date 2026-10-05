@@ -12,7 +12,10 @@ BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 KEYS = (
     "declarations", "obligations", "goal_attempts", "certificates", "certificate_facts",
     "largest_certificate_facts", "repeated_certificate_fact_roots", "fact_traces",
-    "control_flow_steps", "live_facts_peak", "goal_cache_hits", "goal_cache_misses", "kernel_nodes", "kernel_nodes_shared",
+    "control_flow_steps", "live_facts_peak", "goal_cache_hits", "goal_cache_misses",
+    "producer_disjunction_facts_scanned", "producer_disjunction_refutation_checks",
+    "replay_disjunction_facts_scanned", "replay_disjunction_refutation_checks",
+    "kernel_nodes", "kernel_nodes_shared",
     "kernel_children", "report_bytes",
 )
 # Kinds whose left/right/auxiliary fields are node references, in that order. Mirrors

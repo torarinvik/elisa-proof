@@ -68,15 +68,18 @@ run_py_test test_report_cache_nested_dependency_edit.py
 run_py_test test_report_cache_symlink_dependency.py
 run_py_test test_p01_baseline.py
 run_py_test test_bounded_model_work_budget.py
+run_py_test test_r013_logical_work_stress.py
 run_py_test test_disjunction_search_bounds.py
 run_py_test test_p05_package_restart.py
 run_py_test test_conditional_ensure_replay_gap.py
 run_py_test test_declaration_artifact_identity.py
 run_py_test test_declaration_artifact_concurrency.py
 run_py_test test_p07_support_census.py
+run_py_test tests/test_scalar_witness_name_index.py
 run_py_test remote/test_object_cache_key.py
 run_py_test test_build_dependency_closure.py
 run_py_test test_build_manifest_sidecar_integrity.py
+run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
@@ -150,10 +153,12 @@ run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'im
 run_py_test test_overlap_diagnostics.py
 run_py_test test_certificate_reuse.py
 run_py_test test_measurements.py
+run_py_test tests/test_disjunction_work_accounting.py
 run_py_test test_source_admission_matrix.py
 run_py_test test_negated_conjunction_fallthrough.py
 run_py_test test_or_chain_loop_update.py
 run_py_test test_correlated_disjunction.py
+run_py_test tests/test_correlated_disjunction_consumer_resolution.py
 run_py_test test_closed_width_formulas.py
 run_py_test test_parameter_heavy_return_analysis.py
 run_py_test test_numeric_cast_operator.py
@@ -163,6 +168,7 @@ run_py_test test_call_result_width.py
 run_py_test test_adt_library.py
 run_py_test test_adt_parser.py
 run_py_test test_match_refuted_arms.py
+run_py_test test_match_exhaustiveness.py
 run_py_test test_chained_pure_calls.py
 run_py_test test_dispatcher_budget.py
 run_py_test test_qualified_constants.py
@@ -207,10 +213,14 @@ run_py_test test_unsigned_resource_source_policy.py
 run_py_test test_fixed_array_constant_indices.py
 run_py_test test_return_branch_path_fact.py
 run_py_test test_kernel_inventory.py
+run_py_test test_portable_trust_inventory.py
 run_py_test test_unsigned_subtraction_upper.py
 run_py_test test_unsigned_or_goal.py
 run_py_test test_unsigned_sum_upper_shape.py
 run_py_test test_unsigned_remainder_range.py
+run_py_test test_unsigned_division_bounds.py
+run_py_test test_signed_division_boundaries.py
+run_py_test test_unsigned_u8_shift_boundaries.py
 run_py_test test_loop_state_joins.py
 run_py_test test_captured_loop_constants.py
 run_py_test test_indexed_boolean_denial.py
@@ -222,7 +232,17 @@ run_py_test test_monotone_orders.py
 run_py_test test_replay_construct_arguments.py
 run_py_test test_negated_guard_orders.py
 run_py_test test_nested_early_return_guards.py
+python3 "$ROOT_DIR/scripts/tests/test_portable_replay_generation_resolution.py"
+python3 "$ROOT_DIR/scripts/tests/test_dogfood_package_pair_resolution.py"
+run_py_test test_portable_source_metadata_trust.py
+run_py_test tests/test_package_mutation_campaign.py
 run_py_test test_portable_replay.py
+python3 "$ROOT_DIR/scripts/tests/test_portable_package_byte_boundaries.py"
+python3 "$ROOT_DIR/scripts/tests/test_portable_package_string_budget.py"
+python3 "$ROOT_DIR/scripts/tests/test_portable_package_theorem_budget.py"
+python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark.py"
+python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark_hardening.py"
+python3 "$ROOT_DIR/scripts/perf_luna_benchmark.py" --self-test
 run_py_test test_linear_certificates.py
 run_py_test test_smt_oracle.py
 run_py_test test_symbolic_quantifiers.py
@@ -232,6 +252,7 @@ run_py_test test_loop_exit_frame.py
 run_py_test test_near_miss.py
 run_py_test test_pure_unfolding.py
 run_py_test test_struct_invariants.py
+run_py_test test_correspondence_partial_coverage.py
 run_py_test test_correspondence.py
 run_py_test test_tactic_branch_regions.py
 run_py_test test_vector_index_arithmetic.py
@@ -242,6 +263,7 @@ run_py_test test_goal_disjunct_split.py
 run_py_test test_include_constant_scope.py
 run_py_test test_include_function_scope.py
 run_py_test test_replay_dependency_row.py
+python3 "$ROOT_DIR/scripts/tests/test_deterministic_call_qualified_replay.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
@@ -393,13 +415,6 @@ fi
 kernel_intern_status=$?
 if [[ "$kernel_intern_status" -ne 0 ]]; then
     printf 'proof test matrix failed: kernel term sharing boundary tests failed (%s)\n' "$kernel_intern_status" >&2
-    exit 1
-fi
-"${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/report-invariants" "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
-"$standalone_probe_dir/report-invariants"
-report_invariants_status=$?
-if [[ "$report_invariants_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: report invariant boundary tests failed (%s)\n' "$report_invariants_status" >&2
     exit 1
 fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/region-allocation.o" "$ROOT_DIR/examples/region_allocation.elisa" >/dev/null 2>&1

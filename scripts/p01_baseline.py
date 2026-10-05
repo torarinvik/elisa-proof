@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import signal
@@ -18,6 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "elisa-proof-p01-baseline-v3"
+SENTINEL_MANIFEST = ROOT / "scripts" / "p01_sentinels.json"
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
 FIXTURES = (
     ("real_small", ROOT / "examples/perf_luna_accept.elisa"),
@@ -27,17 +29,24 @@ FIXTURES = (
     ("adversarial", ROOT / "examples/rejected_symbolic_quantifier.elisa"),
     ("qualified_constants", ROOT / "examples/qualified_constants_statements.elisa"),
     ("qualified_constant_refusal", ROOT / "examples/rejected_qualified_constants_statements.elisa"),
+    ("unsigned_boundary_refusal", ROOT / "examples/counterexample_unsigned_boundaries.elisa"),
+    ("quantifier_success", ROOT / "examples/quantifier.elisa"),
+    ("region_lending_success", ROOT / "examples/region_lend_calls.elisa"),
+    ("branch_join", ROOT / "examples/branch_join.elisa"),
+    ("rejected_branch_join", ROOT / "examples/rejected_branch_join.elisa"),
 )
-EXPECTED_OUTCOMES = {
-    "real_small": {"status": "proved", "returncode": 0},
-    "real_refusal": {"status": "failed", "returncode": 1},
-    "proof_kernel_core": {"status": "proved", "returncode": 0},
-    "qualified_constants": {"status": "proved", "returncode": 0},
-    "qualified_constant_refusal": {"status": "failed", "returncode": 1},
-    # The bounded symbolic-quantifier case may time out; if it emits a complete report,
-    # it must remain a non-proof with the CLI's ordinary refusal exit code.
-    "adversarial": {"not_proved": True, "returncode": 1},
-}
+def load_sentinel_manifest() -> dict:
+    try:
+        payload = json.loads(SENTINEL_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"cannot read P-01 sentinel manifest: {error}") from error
+    if payload.get("schema") != "elisa-proof-p01-sentinels-v2" or not isinstance(payload.get("fixtures"), dict):
+        raise RuntimeError("P-01 sentinel manifest has an unsupported schema")
+    return payload["fixtures"]
+
+
+EXPECTED_OUTCOMES = {name: row["expected_outcome"]
+                     for name, row in load_sentinel_manifest().items()}
 PHASE_TIMING_AVAILABILITY = {
     "proof_cli_invocation_wall": "measured-external-monotonic-wall",
     "proof_cli_child_cpu": "measured-wait4-child-user-plus-system",
@@ -53,6 +62,11 @@ PHASE_TIMING_AVAILABILITY = {
     "kernel_replay": "unavailable-no-internal-clock-hook",
     "proof_json_reporting": "unavailable-no-internal-clock-hook",
 }
+MEASURED_PHASE_TIMINGS = (
+    "proof_cli_invocation_wall",
+    "proof_cli_child_cpu",
+    "baseline_harness_json_decode",
+)
 
 
 def identity(path: Path) -> dict:
@@ -159,11 +173,30 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
             elif output_bytes > MAX_OUTPUT_BYTES:
                 stop = "output_limit"
             if stop:
+                proc_kill_fallback = False
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                if wait4_supported:
+                except PermissionError:
+                    # Some hosts deny signaling a process group even though the
+                    # caller owns the child. Prefer os.kill here: Popen.kill()
+                    # polls (and may reap) the child with waitpid, racing the
+                    # wait4 below and losing child resource usage.
+                    try:
+                        os.kill(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        # Only use Popen's fallback if direct signaling is denied.
+                        # In that rare path, Popen may reap the child internally,
+                        # so do not call wait4 afterward.
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+                        proc_kill_fallback = True
+                if wait4_supported and not proc_kill_fallback:
                     _, wait_status, usage = os.wait4(proc.pid, 0)
                     proc.returncode = os.waitstatus_to_exitcode(wait_status)
                     cpu_seconds = usage.ru_utime + usage.ru_stime
@@ -222,6 +255,15 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
             1 for item in declarations if item.get("verified") is True),
         "goals": len(goals), "replay_certificates": replay.get("certificates"),
         "replayed": replay.get("replayed"), "replay_gaps": replay.get("gaps"),
+        "obligation_ids": [goal.get("goal_id") for goal in goals],
+        "obligation_details": [{"id": goal.get("goal_id"), "function": goal.get("name"),
+                                "line": goal.get("line"), "rule": goal.get("rule"),
+                                "result": "proved" if goal.get("proven") is True else "unproven"}
+                               for goal in goals],
+        "failed": summary.get("failed"),
+        "proof_certificates": measurements.get("certificates"),
+        "trusted_assumptions": len(report.get("trust", {}).get("trusted_assumptions", [])),
+        "trusted_boundary_facts": report.get("trust", {}).get("trusted_boundary_facts"),
         # Preserve the complete CLI measurement object. This keeps newly emitted serialized
         # counters available to baseline consumers without implying internal timing coverage.
         "proof_report_measurements": measurements,
@@ -233,13 +275,26 @@ def invoke(binary: Path, source: Path, timeout: float, rss_limit_kib: int) -> di
     return result
 
 
-def check_report(measurement: dict, expected: dict | None = None) -> None:
+def check_report(measurement: dict, expected: dict | None = None,
+                 semantic_expectations: dict | None = None) -> None:
     if measurement["stop_reason"]:
         raise RuntimeError(f"bounded failure: {measurement['stop_reason']}")
     if not measurement["report_complete"]:
         raise RuntimeError("proof process did not emit a complete JSON report")
     if not isinstance(measurement.get("cpu_seconds"), (int, float)):
         raise RuntimeError("proof process CPU time is unavailable on this host")
+    phase_timings = measurement.get("phase_timings_seconds")
+    if not isinstance(phase_timings, dict) or set(phase_timings) != set(MEASURED_PHASE_TIMINGS):
+        raise RuntimeError("report has a missing or unexpected phase-timing schema")
+    for phase in MEASURED_PHASE_TIMINGS:
+        value = phase_timings[phase]
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise RuntimeError(f"report has an invalid {phase} duration")
+    if phase_timings["proof_cli_invocation_wall"] != measurement.get("wall_seconds"):
+        raise RuntimeError("phase timing disagrees with proof CLI invocation wall time")
+    if phase_timings["proof_cli_child_cpu"] != measurement.get("cpu_seconds"):
+        raise RuntimeError("phase timing disagrees with proof CLI child CPU time")
     if measurement["replay_gaps"] != 0:
         raise RuntimeError(f"report contains replay gaps: {measurement['replay_gaps']}")
     if measurement["replay_certificates"] != measurement["replayed"]:
@@ -255,6 +310,17 @@ def check_report(measurement: dict, expected: dict | None = None) -> None:
             raise RuntimeError(f"unexpected proof status: {measurement['status']}")
         if measurement["returncode"] != expected["returncode"]:
             raise RuntimeError(f"unexpected CLI exit code: {measurement['returncode']}")
+    if semantic_expectations:
+        for key in ("obligation_count", "proven", "unproven", "failed", "trusted_assumptions",
+                    "trusted_boundary_facts", "proof_certificates", "replay_certificates",
+                    "replayed", "replay_gaps"):
+            observed_key = "obligations" if key == "obligation_count" else key
+            if measurement.get(observed_key) != semantic_expectations[key]:
+                raise RuntimeError(f"unexpected {observed_key}: {measurement.get(observed_key)}")
+        if measurement.get("obligation_ids") != semantic_expectations["obligation_ids"]:
+            raise RuntimeError("obligation IDs differ from the pinned semantic workload")
+        if measurement.get("obligation_details") != semantic_expectations["obligation_details"]:
+            raise RuntimeError("obligation details differ from the pinned semantic workload")
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -280,6 +346,28 @@ def run(args: argparse.Namespace) -> dict:
     if rounds <= 0 or warmup_runs < 0:
         raise RuntimeError("rounds must be positive and warm-up runs cannot be negative")
     fixture_ids = {name: identity(path) for name, path in FIXTURES}
+    sentinels = load_sentinel_manifest()
+    if set(sentinels) != {name for name, _ in FIXTURES}:
+        raise RuntimeError("P-01 fixtures do not match the versioned sentinel manifest")
+    for name, path in FIXTURES:
+        sentinel = sentinels[name]
+        if sentinel.get("path") != str(path.relative_to(ROOT)):
+            raise RuntimeError(f"P-01 sentinel path changed for {name}")
+        if (sentinel.get("sha256") != fixture_ids[name]["sha256"]
+                or sentinel.get("size_bytes") != fixture_ids[name]["size_bytes"]):
+            raise RuntimeError(f"P-01 workload identity changed for {name}; review and version the sentinel")
+    manifest = json.loads(SENTINEL_MANIFEST.read_text(encoding="utf-8"))
+    for workload_name, workload in manifest.get("workloads", {}).items():
+        members = workload.get("members", [])
+        if not any(member in sentinels for member in members):
+            continue
+        if len(members) != 2 or any(member not in sentinels for member in members):
+            raise RuntimeError(f"P-01 workload {workload_name} must name exactly two pinned fixtures")
+        for member in members:
+            if sentinels[member].get("workload") != workload_name:
+                raise RuntimeError(f"P-01 fixture {member} is not wired to workload {workload_name}")
+            if sentinels[member].get("budget_classification") != workload.get("budget_classification"):
+                raise RuntimeError(f"P-01 fixture {member} has a different workload budget")
     cases = []
     failures = []
     with tempfile.TemporaryDirectory(prefix="elisa-p01-") as temp:
@@ -292,7 +380,8 @@ def run(args: argparse.Namespace) -> dict:
                 row = invoke(binary, input_path, args.timeout, args.rss_limit_kib)
                 row["round"] = round_index
                 try:
-                    check_report(row, EXPECTED_OUTCOMES.get(name))
+                    check_report(row, sentinels[name]["expected_outcome"],
+                                 sentinels[name].get("semantic_expectations"))
                 except RuntimeError as error:
                     row["validation_error"] = str(error)
                     failures.append(f"{name}/{label}/round-{round_index}: {error}")
@@ -302,7 +391,8 @@ def run(args: argparse.Namespace) -> dict:
                 source.write_bytes(fixture.read_bytes())
                 warmup = invoke(binary, source, args.timeout, args.rss_limit_kib)
                 try:
-                    check_report(warmup, EXPECTED_OUTCOMES.get(name))
+                    check_report(warmup, sentinels[name]["expected_outcome"],
+                                 sentinels[name].get("semantic_expectations"))
                 except RuntimeError as error:
                     failures.append(f"{name}/warmup-{warmup_index + 1}: {error}")
             edit_source = None
@@ -348,7 +438,12 @@ def run(args: argparse.Namespace) -> dict:
             "phase_timing_availability": PHASE_TIMING_AVAILABILITY,
             "fixtures": [{"name": name, "path": str(path), "sha256": fixture_ids[name]["sha256"],
                           "size_bytes": fixture_ids[name]["size_bytes"],
-                          "expected_outcome": EXPECTED_OUTCOMES.get(name)} for name, path in FIXTURES],
+                          "expected_outcome": sentinels[name]["expected_outcome"],
+                          **({"workload": sentinels[name]["workload"],
+                              "semantic_expectations": sentinels[name]["semantic_expectations"],
+                              "budget_classification": sentinels[name]["budget_classification"]}
+                             if "semantic_expectations" in sentinels[name] else {})}
+                         for name, path in FIXTURES],
             "cases": cases}
 
 

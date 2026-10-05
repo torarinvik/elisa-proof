@@ -1,5 +1,52 @@
 # Derived invariants shared by report rendering, CLI admission, and adversarial tests.
 extend ElisaProof:
+    private:
+        def proof_report_declaration_function_kind_matches(report: ProofReport&, summary: ProofDeclarationSummary) -> bool:
+            for theorem in report.theorem_summaries:
+                return summary.kind == "lemma" if theorem.name == summary.name and theorem.line == summary.line
+            return summary.kind == "function"
+
+        def proof_report_declaration_matches_source(declaration: Ast::Decl, summary: ProofDeclarationSummary, report: ProofReport&) -> bool:
+            match declaration:
+                Ast::Decl.Func(name, _, _, _, _, _, position):
+                    return summary.name == name and summary.line == position.line and proof_report_declaration_function_kind_matches(report, summary)
+                Ast::Decl.Struct(name, _, _, _, _, _, position):
+                    return summary.kind == "struct" and summary.name == name and summary.line == position.line
+                Ast::Decl.Enum(name, _, _, _, position):
+                    return summary.kind == "enum" and summary.name == name and summary.line == position.line
+                Ast::Decl.Alias(name, _, position):
+                    return summary.kind == "alias" and summary.name == name and summary.line == position.line
+                Ast::Decl.Law(name, _, position):
+                    return summary.kind == "law" and summary.name == name and summary.line == position.line
+                Ast::Decl.Import(name, position):
+                    return summary.kind == "import" and summary.name == name and summary.line == position.line
+                Ast::Decl.Scoped(_, position):
+                    return summary.kind == "scope" and summary.name == "" and summary.line == position.line
+                Ast::Decl.Extern(name, _, _, _, _, _, _, position):
+                    return summary.kind == "extern" and summary.name == name and summary.line == position.line
+                Ast::Decl.Const(name, _, _, _, position):
+                    return summary.kind == "const" and summary.name == name and summary.line == position.line
+                Ast::Decl.Module(name, _, position):
+                    return summary.kind == "module" and summary.name == name and summary.line == position.line
+                Ast::Decl.Invalid:
+                    return summary.kind == "invalid" and summary.name == "" and summary.line == 0
+                _:
+                    return false
+
+        def proof_report_declaration_sequence_matches_source(declarations: darray[Ast::Decl]&, report: ProofReport&, cursor: mutable usize&) -> bool:
+            for declaration in declarations |report, cursor|:
+                return false if cursor >= report.declaration_details.count
+                return false if not proof_report_declaration_matches_source(declaration, report.declaration_details[cursor], report)
+                cursor <- cursor + 1
+                match declaration:
+                    Ast::Decl.Module(_, nested, _):
+                        return false if not proof_report_declaration_sequence_matches_source(nested, report, cursor)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_report_declaration_sequence_matches_source(nested, report, cursor)
+                    _:
+                        pass
+            return true
+
     public:
         # Completion requires every counted obligation to have a proven result. This independent
         # counter invariant catches checker paths that accidentally omit both an open attempt and
@@ -12,6 +59,177 @@ extend ElisaProof:
         def proof_report_failure_count_consistent(report: ProofReport&) -> bool:
             return report.findings.count == report.failed.usize()
 
+        # The declaration schedule increments `declarations` and emits one summary for every
+        # AST declaration (including nested module/scope declarations). A count mismatch means
+        # the report lost part of its admission inventory, even if its remaining obligations
+        # and certificates happen to replay.
+        def proof_report_declaration_inventory_consistent(report: ProofReport&) -> bool:
+            return false if report.declarations.usize() != report.declaration_details.count
+            cursor: mutable usize = 0
+            return false if not proof_report_declaration_sequence_matches_source(report.source_declarations, report, &cursor)
+            return cursor == report.declaration_details.count
+
+        # Keep the result row for each source-check accounting event separate from its aggregate
+        # totals and goal-attempt rows. Some unsupported obligations intentionally have no goal
+        # attempt; the ledger preserves them and prevents deleting an attempt plus both totals.
+        def proof_report_obligation_inventory_consistent(report: ProofReport&) -> bool:
+            return false if report.obligation_inventory.count != report.obligations.usize()
+            proven_obligations: mutable usize = 0
+            identity: mutable usize = 0
+            for obligation in report.obligation_inventory |proven_obligations, identity|:
+                return false if obligation.identity != identity
+                identity <- identity + 1
+                proven_obligations <- proven_obligations + 1 if obligation.proven
+            return proven_obligations == report.proven.usize()
+
+        # Goal attempts are a subset of source-accounted obligations: some unsupported checks
+        # terminate before a proof goal exists, but a proof goal must never outlive its counted
+        # obligation. This catches coordinated removal of an open obligation row and its total
+        # while the corresponding attempted goal remains in the report.
+        def proof_report_goal_attempts_bounded_by_obligations(report: ProofReport&) -> bool:
+            return report.goal_attempts.count <= report.obligations.usize()
+
+        # Every successful accounting increment must have a corresponding proof attempt. This
+        # prevents a report from keeping its `proven` counter while losing the checked root that
+        # justifies that result; replay separately verifies each proven attempt's certificate.
+        def proof_report_proven_attempts_consistent(report: ProofReport&) -> bool:
+            proven_attempts: mutable usize = 0
+            expected_certificate: mutable usize = 0
+            for attempt in report.goal_attempts |proven_attempts, expected_certificate, report|:
+                if attempt.proven:
+                    return false if not attempt.has_certificate or attempt.certificate_index != expected_certificate
+                    return false if expected_certificate >= report.certificates.count
+                    certificate: ProofGoalCertificate = report.certificates[expected_certificate]
+                    return false if certificate.kernel_goal != attempt.kernel_goal or certificate.kernel_facts_start != attempt.kernel_facts_start or certificate.kernel_facts_count != attempt.kernel_facts_count
+                    return false if certificate.line != attempt.line or certificate.name != attempt.name or certificate.rule != attempt.rule
+                    expected_certificate <- expected_certificate + 1
+                    proven_attempts <- proven_attempts + 1
+                else:
+                    return false if attempt.has_certificate
+            return false if proven_attempts != report.proven.usize()
+            return expected_certificate == report.certificates.count
+
+        # Focused source queries may return one checked goal while another declaration was
+        # absent from the report. Their admission still depends on a structurally complete
+        # source inventory and a consistent finding ledger, even when other goals remain open.
+        def proof_report_source_admission_invariants_consistent(report: ProofReport&) -> bool:
+            # This is report-internal consistency, not evidence that every source-required
+            # obligation was scheduled. The current event ledger has no source identity, so
+            # source-obligation completeness must not be inferred from these aggregate checks.
+            return false if not proof_report_failure_count_consistent(report)
+            return false if not proof_report_declaration_inventory_consistent(report)
+            return false if not proof_report_obligation_inventory_consistent(report)
+            return false if not proof_report_goal_attempts_bounded_by_obligations(report)
+            return proof_report_proven_attempts_consistent(report)
+
+        # Independent source inventory slice (R-004): unique top-level functions with exactly
+        # one ensure/ensures and one integer literal return. Store the substituted equality
+        # proposition even when it is false; dropping a mismatched return would hide an
+        # obligation instead of recording a source-derived proposition the kernel must reject.
+        def proof_source_literal_ensure_candidate(declaration: Ast::Decl) -> (known: bool, name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool):
+            match declaration:
+                Ast::Decl.Func(name, _, _, body, _, _, _):
+                    return (false, "", 0, 0, 0, false, false) if body.count != 2
+                    has_ensure: mutable bool = false
+                    has_return: mutable bool = false
+                    contract_value: mutable i64 = 0
+                    returned_value: mutable i64 = 0
+                    result_on_left: mutable bool = false
+                    contract_line: mutable u32 = 0
+                    equality_postcondition: mutable bool = false
+                    for statement in body |has_ensure, has_return, contract_value, returned_value, result_on_left, contract_line, equality_postcondition|:
+                        match statement:
+                            Ast::Stmt.Contract(kind, expression, position):
+                                return (false, "", 0, 0, 0, false, false) if (kind != "ensure" and kind != "ensures") or has_ensure or has_return
+                                match expression:
+                                    Ast::Expr.BoolLit(value, _):
+                                        return (false, "", 0, 0, 0, false, false) if not value
+                                    Ast::Expr.Binary(Ast::Expr.Ident("result", _), TokenKind.EqEq, Ast::Expr.IntLit(expected, _), _):
+                                        equality_postcondition <- true
+                                        result_on_left <- true
+                                        contract_value <- expected
+                                    Ast::Expr.Binary(Ast::Expr.IntLit(expected, _), TokenKind.EqEq, Ast::Expr.Ident("result", _), _):
+                                        equality_postcondition <- true
+                                        contract_value <- expected
+                                    _:
+                                        return (false, "", 0, 0, 0, false, false)
+                                contract_line <- position.line
+                                has_ensure <- true
+                            Ast::Stmt.Return(value, _):
+                                return (false, "", 0, 0, 0, false, false) if has_return
+                                match value:
+                                    Ast::Expr.IntLit(returned, _):
+                                        has_return <- true
+                                        returned_value <- returned
+                                    _:
+                                        return (false, "", 0, 0, 0, false, false)
+                            _:
+                                return (false, "", 0, 0, 0, false, false)
+                    return (has_ensure and has_return, name, contract_line, contract_value, returned_value, result_on_left, equality_postcondition)
+                _:
+                    return (false, "", 0, 0, 0, false, false)
+
+        def proof_source_literal_ensure_count(declarations: darray[Ast::Decl]&, name: sview) -> usize:
+            count: mutable usize = 0
+            for declaration in declarations |count, name|:
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, _, _, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Module(_, nested, _):
+                        count <- count + proof_source_literal_ensure_count(nested, name)
+                    Ast::Decl.Scoped(nested, _):
+                        count <- count + proof_source_literal_ensure_count(nested, name)
+                    _:
+                        pass
+            return count
+
+        def proof_source_literal_ensure_inventory(declarations: darray[Ast::Decl]&) -> darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool)]:
+            inventory: mutable darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool)] = []
+            for declaration in declarations |inventory|:
+                match declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, _):
+                        candidate: (known: bool, name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool) = proof_source_literal_ensure_candidate(declaration)
+                        if candidate.known:
+                            # Empty is an explicit fail-closed ambiguity marker; otherwise the
+                            # inventory retains only the immutable source name, not a mutable AST
+                            # body or any report-owned scheduling information.
+                            inventory.push((candidate.name, candidate.contract_line, candidate.contract_value, candidate.returned_value, candidate.result_on_left, candidate.equality_postcondition) if proof_source_literal_ensure_count(declarations, candidate.name) == 1 else ("", 0, 0, 0, false, false))
+                    # Module/scope members are outside this first bounded inventory. They are
+                    # not silently flattened because that would make bare names ambiguous.
+                    Ast::Decl.Module(_, _, _) | Ast::Decl.Scoped(_, _):
+                        pass
+                    _:
+                        pass
+            return inventory
+
+        # Check the claim stored on either a goal attempt or its certificate against the
+        # source-derived postcondition. Checking both matters: a mutable attempt display goal
+        # must not relabel a certificate for a different proposition as the source proof.
+        def proof_source_literal_ensure_goal_matches(goal: Ast::Expr, expected: (name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool)) -> bool:
+            match goal:
+                Ast::Expr.BoolLit(value, position):
+                    return value and not expected.equality_postcondition and position.line == expected.contract_line
+                Ast::Expr.Binary(Ast::Expr.IntLit(left, left_position), TokenKind.EqEq, Ast::Expr.IntLit(right, right_position), _):
+                    expected_left: mutable i64 = expected.contract_value
+                    expected_right: mutable i64 = expected.returned_value
+                    if expected.result_on_left:
+                        expected_left <- expected.returned_value
+                        expected_right <- expected.contract_value
+                    return expected.equality_postcondition and left == expected_left and right == expected_right and (left_position.line == expected.contract_line or right_position.line == expected.contract_line)
+                _:
+                    return false
+
+        def proof_source_literal_ensure_coverage(inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, result_on_left: bool, equality_postcondition: bool)]&, report: ProofReport&) -> bool:
+            for expected in inventory |report|:
+                return false if expected.name == ""
+                matching: mutable usize = 0
+                for attempt in report.goal_attempts |expected, matching, report|:
+                    if attempt.name == expected.name and attempt.rule == "goal" and attempt.proven and attempt.has_certificate and attempt.certificate_index < report.certificates.count:
+                        certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
+                        matching <- matching + 1 if certificate.replayed and proof_source_literal_ensure_goal_matches(attempt.goal, expected) and proof_source_literal_ensure_goal_matches(certificate.goal, expected)
+                return false if matching != 1
+            return true
+
         def proof_report_has_open_goals(report: ProofReport&) -> bool:
             for attempt in report.goal_attempts:
                 return true if not attempt.proven
@@ -21,7 +239,7 @@ extend ElisaProof:
         # obligation failed or remains open, or the aggregate obligation counters disagree.
         # Keep this independent predicate shared by the CLI and machine-readable renderers.
         def proof_report_source_has_unresolved_checks(report: ProofReport&, import_failed: bool, semantic_errors: u32) -> bool:
-            return true if not proof_report_failure_count_consistent(report)
+            return true if not proof_report_source_admission_invariants_consistent(report)
             return true if import_failed or semantic_errors > 0 or report.failed > 0
             return true if not proof_report_all_obligations_proven(report) or proof_report_has_open_goals(report)
             return false

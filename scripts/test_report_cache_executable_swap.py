@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import tempfile
 
@@ -33,10 +34,13 @@ def main() -> None:
         with tempfile.TemporaryDirectory(prefix="elisa-report-cache-executable-swap-") as temporary:
             directory = Path(temporary)
             executable = directory / "elisa-proof"
+            reference_binary = directory / "elisa-proof-original"
             cache_dir = directory / "reports"
             cache_dir.mkdir()
             (cache_dir / "pending").mkdir()
-            shutil.copy2(SOURCE_BINARY, executable)
+            shutil.copy2(SOURCE_BINARY, reference_binary)
+            reference_binary.chmod(reference_binary.stat().st_mode | 0o111)
+            shutil.copy2(reference_binary, executable)
             executable.chmod(executable.stat().st_mode | 0o111)
             report_cache.DEFAULT_BINARY = executable
             os.environ["ELISA_PROOF_REPORT_CACHE"] = str(cache_dir)
@@ -46,10 +50,15 @@ def main() -> None:
             original = report_cache._read_cached_entry(str(cache_dir / original_key))
             assert original is not None, "initial real verifier did not publish a valid report"
 
-            # Appending inert trailing bytes creates a distinct executable product at the same
-            # path while preserving the actual verifier and its report behavior.
-            with executable.open("ab") as handle:
-                handle.write(b"\nreport-cache-same-path-replacement\n")
+            # Replace the product at the same path with an executable launcher that forwards to
+            # an untouched copy. Appending bytes to a signed Mach-O can invalidate its code
+            # signature on macOS, so the replacement must change identity without corrupting it.
+            executable.chmod(0o755)
+            executable.write_text(
+                "#!/bin/sh\nexec " + shlex.quote(str(reference_binary)) + ' "$@"\n',
+                encoding="utf-8",
+            )
+            executable.chmod(0o755)
             replacement_key = report_cache.cache_key(FIXTURE, executable)
             assert replacement_key != original_key, "same-path executable replacement kept its cache key"
 

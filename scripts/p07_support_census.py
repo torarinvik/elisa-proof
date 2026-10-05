@@ -90,6 +90,23 @@ def source_site(finding: dict, fallback: Path, files: list | None = None) -> str
     return f"{source}:{line} {function} {finding.get('kind', 'unknown')}"
 
 
+def report_inventory(report: dict, path: Path) -> tuple[list[dict], list[str]]:
+    details = report.get("declaration_details", [])
+    findings = report.get("findings", [])
+    unresolved = [
+        {key: declaration.get(key) for key in
+         ("kind", "name", "line", "verified", "verification_reason")}
+        for declaration in details
+        if isinstance(declaration, dict) and declaration.get("verified") is False
+    ] if isinstance(details, list) else []
+    unsupported_sites = sorted({
+        source_site(finding, path, report.get("files"))
+        for finding in findings
+        if isinstance(finding, dict) and finding.get("status") == "unsupported"
+    }) if isinstance(findings, list) else []
+    return unresolved, unsupported_sites
+
+
 def validate_report(report: object, returncode: int) -> str | None:
     if not isinstance(report, dict):
         return "invalid-report"
@@ -131,6 +148,24 @@ def process_rss_kib(pid: int) -> int | None:
         return None
 
 
+def terminate_process_group(proc: subprocess.Popen) -> None:
+    """Stop the child tree without treating an exit race as a census failure."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # On macOS a child can exit after poll() but before killpg(); its zombie
+        # process-group entry can make killpg report EPERM instead of ESRCH.
+        # poll() reaps that already-exited child. If it is still alive, fall
+        # back to killing the direct child rather than crashing the census.
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+
 def partial_report_metadata(report: object) -> dict:
     if not isinstance(report, dict):
         return {}
@@ -145,7 +180,10 @@ def rank_unsupported_kinds(results: list[dict]) -> list[dict]:
     affected_inputs = defaultdict(set)
     sites_by_kind = defaultdict(set)
     for result in results:
-        if result.get("error") is not None:
+        # Failed, timed-out or malformed reports are not a trustworthy sample of the
+        # unsupported-language surface. Preserve them in the failure report, but exclude their
+        # partial source scan from the success-only kind ranking.
+        if result.get("error") is not None or "unsupported_sites" not in result:
             continue
         for site in result.get("unsupported_sites", []):
             kind = site.rsplit(" ", 1)[-1]
@@ -161,7 +199,8 @@ def rank_unsupported_kinds(results: list[dict]) -> list[dict]:
     ]
 
 
-def run(path: Path, timeout: int, rss_limit_kib: int) -> dict:
+def run(path: Path, timeout: int, rss_limit_kib: int,
+        reports_dir: Path | None = None) -> dict:
     started = time.monotonic()
     with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
         try:
@@ -186,10 +225,7 @@ def run(path: Path, timeout: int, rss_limit_kib: int) -> dict:
             elif output_bytes > MAX_OUTPUT_BYTES:
                 stop_reason = "output-limit"
             if stop_reason:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                terminate_process_group(proc)
                 break
             time.sleep(0.025)
         proc.wait()
@@ -202,12 +238,22 @@ def run(path: Path, timeout: int, rss_limit_kib: int) -> dict:
         stderr_file.seek(max(0, stderr_bytes - 2000))
         stderr_tail = stderr_file.read()
     elapsed = round(time.monotonic() - started, 3)
+    report_path = None
+    if reports_dir is not None and stdout:
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        suffix = sha256(path)[:12]
+        report_path = reports_dir / f"{path.stem}-{suffix}"
+        report_path = report_path.with_suffix(
+            ".json" if len(stdout) == stdout_bytes else ".partial"
+        )
+        report_path.write_bytes(stdout)
     common = {"input": str(path), "input_sha256": sha256(path), "seconds": elapsed,
               "peak_rss_kib": peak_rss_kib, "exit_code": proc.returncode,
               "stdout_bytes": stdout_bytes, "stderr_bytes": stderr_bytes,
               "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
               "stdout_sha256_bytes": len(stdout),
               "stdout_sha256_complete": len(stdout) == stdout_bytes,
+              "report_path": str(report_path) if report_path is not None else None,
               "stderr_tail_bytes": len(stderr_tail),
               "stderr_tail_sha256": hashlib.sha256(stderr_tail).hexdigest()}
     if stop_reason:
@@ -220,22 +266,15 @@ def run(path: Path, timeout: int, rss_limit_kib: int) -> dict:
                 "stderr": stderr_tail.decode("utf-8", errors="replace")}
     validation_error = validate_report(report, proc.returncode)
     if validation_error:
-        return {**common, "error": validation_error,
+        inventory = {}
+        if isinstance(report, dict):
+            unresolved, unsupported_sites = report_inventory(report, path)
+            inventory = {"unverified_declarations": unresolved,
+                         "unsupported_sites": unsupported_sites}
+        return {**common, **inventory, "error": validation_error,
                 "partial_report": partial_report_metadata(report)}
 
-    details = report.get("declaration_details", [])
-    findings = report.get("findings", [])
-    unresolved = [
-        {key: declaration.get(key) for key in
-         ("kind", "name", "line", "verified", "verification_reason")}
-        for declaration in details
-        if isinstance(declaration, dict) and declaration.get("verified") is False
-    ] if isinstance(details, list) else []
-    unsupported_sites = sorted({
-        source_site(finding, path, report.get("files"))
-        for finding in findings
-        if isinstance(finding, dict) and finding.get("status") == "unsupported"
-    }) if isinstance(findings, list) else []
+    unresolved, unsupported_sites = report_inventory(report, path)
     return {
         **common,
         "status": report.get("status"),
@@ -254,6 +293,8 @@ def main() -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--rss-limit-kib", type=int, default=1_500_000)
+    parser.add_argument("--reports-dir", type=Path,
+                        help="preserve each complete JSON report (or captured partial stdout)")
     args = parser.parse_args()
     if args.timeout_seconds < 1 or args.rss_limit_kib < 1:
         parser.error("timeout and RSS limit must be positive")
@@ -265,7 +306,8 @@ def main() -> int:
             parser.error(f"input does not exist: {path}")
     before = identity()
     input_hashes_before = {str(path): sha256(path) for path in paths}
-    results = [run(path, args.timeout_seconds, args.rss_limit_kib) for path in paths]
+    results = [run(path, args.timeout_seconds, args.rss_limit_kib, args.reports_dir)
+               for path in paths]
     input_hashes_after = {str(path): sha256(path) for path in paths}
     after = identity()
     if before != after:
@@ -276,7 +318,7 @@ def main() -> int:
     affected = defaultdict(set)
     declaration_impact = defaultdict(set)
     for result in results:
-        if result.get("error") is not None:
+        if "unsupported_sites" not in result and "unverified_declarations" not in result:
             continue
         for site in result.get("unsupported_sites", []):
             affected[site].add(result["input"])

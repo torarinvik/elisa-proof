@@ -63,6 +63,7 @@ class ProfileSummaryTests(unittest.TestCase):
     def test_ranks_leaf_and_inclusive_frames_with_identity_definition(self) -> None:
         result = summarize_capture(capture_fixture(), top=10)
         self.assertEqual(result["capture"]["sample_quality"], "complete")
+        self.assertTrue(result["capture"]["complete_measurement_accepted"])
         self.assertEqual(result["rankings"]["leaf_frames"][0], {
             "name": "leaf", "samples": 2, "share_percent": 50.0,
         })
@@ -165,6 +166,19 @@ class ProfileSummaryTests(unittest.TestCase):
             "sampling_setup_failed", "capture_records_dropped_or_overflowed",
             "repetitions_incomplete",
         })
+
+    def test_event_loss_refuses_complete_measurement_even_if_runtime_says_complete(self) -> None:
+        data = capture_fixture()
+        # Contradict the producer's completion bit while keeping the retained
+        # sample count consistent: one overflow alone must close the gate.
+        data["summary"]["stack_overflow_entries"] = 1
+        quality = summarize_capture(data)["capture"]
+        self.assertTrue(quality["complete"])
+        self.assertEqual(quality["sample_quality"], "degraded")
+        self.assertFalse(quality["complete_measurement_accepted"])
+        self.assertEqual(quality["quality_reasons"], [
+            "capture_records_dropped_or_overflowed",
+        ])
 
     def test_malformed_capture_and_malformed_sample_are_rejected_or_reported(self) -> None:
         with self.assertRaisesRegex(CaptureError, "schema_version"):

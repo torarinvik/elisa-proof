@@ -1,6 +1,6 @@
 # Elisa-Proof high-ROI backlog
 
-Companion to [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §20. The plan sets milestones and rules; this file lists concrete tasks ordered by return on investment. ROI means proved goals, user-visible usefulness or trust reduction gained per unit of work and per line added to the trusted base. Every task follows the plan's execution loop and §22 definition of done. That means positive, adversarial, malformed and budget tests; kernel-inventory updates for new trace kinds or replay calls; full chunks and dogfood green; an AUDIT.md entry; and a commit with evidence.
+Companion to [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §23.17 (current ranked execution order) and §23.16 (detailed child gates). The plan sets milestones and the authoritative current order; this file retains the themed feature inventory. ROI means proved goals, user-visible usefulness or trust reduction gained per unit of work and per line added to the trusted base. Every task follows the plan's execution loop and §22 definition of done: positive, adversarial, malformed and budget tests; kernel-inventory updates for new trace kinds or replay calls; applicable full chunks and dogfood; an `AUDIT.md` entry; and a commit with evidence.
 
 Tiers:
 - **T0**: finish or unblock what is almost there. Days of work; closes known refusals.
@@ -41,7 +41,7 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 | ID | Task | ROI | Done when |
 | --- | --- | --- | --- |
 | B-01 (T0, DONE 2026-10-05) | Typed negative literals in goals: let `proof_signed_constant_at_width` accept `-(MAX+1)` as the exact minimum so `ensure result >= -128` proves without the `-127 - 1` spelling | Removes a user-facing trap found while landing the signed lower bound | `scripts/test_signed_upper_bound.py` verifies `>= -128` on `i8` proves/replays and `>= -129` refuses at `literal-width`; `scripts/test_refusal_gate.py` also passes |
-| B-02 (T0) | Determinism witness for effect-free callees: a callee with `requires` but no effects and scalar by-value arguments gets a `__elisa_deterministic_call` marker, retained by `proof_expr_call_stable` | Fixes `returned_chain` and likely `parse_twice_agrees`; a common idiom (call, call, compare) | Soundness argument in DESIGN.md; kernel replay checks the callee's effect set from `source_declarations`; adversarial: a callee with `can[...]`, a global read, or a mutable borrow argument is not retained |
+| B-02 (T0, DONE 2026-10-05) | Determinism witness for verified effect-free calls with `requires` and scalar by-value arguments | Fixes `returned_chain` and likely `parse_twice_agrees`; a common idiom (call, call, compare) | `deterministic-call` traces replay by re-deriving the acyclic source call graph, effect rows, mutable-global reads, by-value scalar parameter types and scalar return type. `scripts/test_deterministic_call_chain.py`: positive and widened-result chains prove/replay; effect grants, mutable-global reads, mutable-borrow arguments, and indirect impure calls remain unproven with zero gaps. `examples/deterministic_call_trace_replay_runtime.elisa` rejects a forged reference argument hidden by parentheses. Limit: replay refuses recursive calls and unsupported body forms; exact source-site/argument-state binding remains open under R-005. |
 | B-03 (DONE) | Tuple-field `@r` for package_reader: resolve `result.field` for named-tuple returns into per-field summary facts | Named-tuple returns are the house style for multi-value parsers | `scripts/test_tuple_field_region.py`: ordered count/value call summaries prove and replay; wrong-label and reordered-position variants stay unproven |
 | B-04 (T0, DONE 2026-10-05) | Preserve the exact `c4` widened-call summary witness across a later call | An undefined item cannot be tracked | `examples/widened_call_result.elisa` reproduces the `base(x)` summary beside a widened `u8` argument; `scripts/test_deterministic_call_chain.py` requires all nine goals to prove/replay and rejects the too-tight bound with zero gaps. The implementation is the deterministic-call witness tracked by B-02; origin and rationale are recorded in `AUDIT.md`. |
 | B-05 (DONE) | `is` between enum values in contracts (`ensure result == (a is E.V)`) | Bool-valued predicates over enums are everywhere in parsers | `scripts/test_enum_tag_equality.py`: named tag equalities/conjunctions replay; wrong variant, wrong subject and call subject are refused. Conditional `if c is E.V: return true` is a distinct bool-literal-equality gap, not this item. |
@@ -157,10 +157,6 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 
 ## Execution order
 
-1. A-01, A-02, A-03 first. Every later choice uses the census.
-2. B-01 through B-08 and K-01 through K-08, in census order.
-3. Tier 1 in this order: C-01, D-01, D-02, E-01, E-03, C-02/C-03, H-03, D-04, E-02, F-02, I-03, I-01.
-4. J-01 once E-01, E-02, E-03 and D-02 land. It is the headline result and validates the stack.
-5. Tier 2, and tier-3 items only after their plan §21 decision is recorded.
-
-Re-rank after every ten landed tasks using the census delta. A task whose census impact came in under a third of its estimate is a signal to re-measure before the next one ("the obvious refactor is usually not what the cluster needs").
+The themed tables above preserve feature ideas and their completion evidence; their original
+numbered order is historical and must not override the current schedule. The authoritative
+prioritized queue is [IMPLEMENTATION_PLAN.md §23.17](IMPLEMENTATION_PLAN.md#2317-re-ranked-high-roi-program-after-the-latest-committed-tranche), with detailed child gates in §23.16 and architecture/soundness gates in plan §§3, 19, 22, and 23. Reconcile every backlog item with current code/tests before starting it, because some entries have since been completed or narrowed. Re-rank after every five to ten committed slices using exact-current census deltas, source/product provenance, trust risk, measured cost, and proof coverage. Do not optimize from stale timings or increase proof coverage by weakening expected outcomes.

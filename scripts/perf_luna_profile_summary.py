@@ -253,6 +253,11 @@ def summarize_capture(capture: Any, top: int = 20) -> dict[str, Any]:
             "sampling_setup_failed": setup_failed,
             "dropped": dropped,
             "sample_quality": "degraded" if reasons else "complete",
+            # The raw runtime completion bit may contradict loss counters (for
+            # example, a producer bug setting capture_complete with an overflow).
+            # Consumers can use this derived gate before treating ranks as a
+            # complete measurement.
+            "complete_measurement_accepted": not reasons,
             "quality_reasons": reasons,
         },
         "proof_verification": {
