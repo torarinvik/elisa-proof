@@ -2,8 +2,8 @@
 # Strict AST-level differential test against the former scalar-witness scan.
 set -euo pipefail
 MARKER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MARKER_COMPILER="${ELISA_COMPILER_BIN:-$MARKER_ROOT/build/elisac-stage0-a891}"
 source "$MARKER_ROOT/scripts/compiler_provenance.sh"
+MARKER_COMPILER="$(elisa_default_stage0 "$MARKER_ROOT")" || { printf 'pinned stage0 compiler not found\n' >&2; exit 2; }
 if ! elisa_compiler_is_stage0 "$MARKER_COMPILER"; then
     printf 'this differential test requires the pinned stage0 compiler\n' >&2
     exit 2

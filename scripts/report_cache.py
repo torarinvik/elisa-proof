@@ -9,6 +9,7 @@ import concurrent.futures
 import contextlib
 import fcntl
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -17,6 +18,60 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BINARY = ROOT / "build/elisa-proof"
+REPORT_CACHE_SCHEMA = b"elisa-proof-report-cache-v2\0"
+INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"', re.MULTILINE)
+
+
+def _report_inputs(path, binary):
+    """Return the complete identity inputs for one report.
+
+    Reports depend on the fixture and every textually included file, the exact executable, and
+    mode/loader settings inherited from the environment. Cache files may be shared between
+    workers, so directory-local assumptions are not an identity boundary.
+    """
+    visited = set()
+    pending = [Path(os.path.realpath(str(path)))]
+    inputs = []
+    while pending:
+        current = pending.pop()
+        identity = os.path.realpath(str(current))
+        if identity in visited:
+            continue
+        visited.add(identity)
+        try:
+            data = Path(identity).read_bytes()
+        except OSError:
+            inputs.append((identity, None))
+            continue
+        inputs.append((identity, hashlib.sha256(data).hexdigest()))
+        try:
+            source = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        for include in INCLUDE_RE.findall(source):
+            pending.append(current.parent / include)
+    executable = os.path.realpath(str(binary))
+    try:
+        binary_digest = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
+    except OSError:
+        binary_digest = None
+    orchestration_env = {
+        "ELISA_PROOF_REPORT_CACHE", "ELISA_PROOF_JOBS", "ELISA_PROOF_HEAVY_JOBS",
+        "ELISA_PROOF_SHARDS", "ELISA_PROOF_PREFETCH_PHASE",
+    }
+    relevant_env = {
+        key: value for key, value in os.environ.items()
+        if key not in orchestration_env and
+        (key.startswith(("ELISA_", "LD_", "DYLD_")) or key in ("LANG", "LC_ALL"))
+    }
+    return {
+        "schema": 2,
+        "fixture": os.path.realpath(str(path)),
+        "inputs": sorted(inputs),
+        "binary": executable,
+        "binary_sha256": binary_digest,
+        "environment": relevant_env,
+    }
 
 
 # A fixture that includes the kernel sources (or is large) peaks at ~2.7 GB of memory; the
@@ -103,23 +158,33 @@ def heavy_slot(path, lock_dir=None, force=False):
         time.sleep(0.5)  # poll-ok: waiting for a local heavy-fixture slot
 
 
-def cache_key(path) -> str:
-    return hashlib.sha1(os.path.realpath(str(path)).encode("utf-8")).hexdigest()
+def cache_key(path, binary=DEFAULT_BINARY) -> str:
+    payload = json.dumps(_report_inputs(path, binary), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(REPORT_CACHE_SCHEMA + payload).hexdigest()
 
 
 def _cached(binary, path):
     cache = os.environ.get("ELISA_PROOF_REPORT_CACHE")
     if not cache or os.path.realpath(str(binary)) != os.path.realpath(str(DEFAULT_BINARY)):
         return None
-    entry = os.path.join(cache, cache_key(path))
-    pending = os.path.join(cache, "pending", cache_key(path))
+    key = cache_key(path, binary)
+    entry = os.path.join(cache, key)
+    pending = os.path.join(cache, "pending", key)
     # A prefetch that is still running this fixture finishes it sooner than a second run would.
     while os.path.exists(pending) and not os.path.exists(entry + ".rc"):
         time.sleep(0.5)  # poll-ok: local file from our own prefetcher
     if not os.path.exists(entry + ".rc"):
         return None
-    with open(entry + ".json", encoding="utf-8") as out, open(entry + ".rc", encoding="utf-8") as rc:
-        return int(rc.read().strip()), out.read()
+    try:
+        with open(entry + ".json", encoding="utf-8") as out, open(entry + ".rc", encoding="utf-8") as rc:
+            status, payload = int(rc.read().strip()), out.read()
+        report = json.loads(payload)
+        expected = 0 if report.get("status") == "proved" else 1 if report.get("status") == "failed" else None
+        if expected is None or status != expected:
+            return None
+        return status, payload
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def json_run(path, binary=DEFAULT_BINARY, timeout=600):
@@ -144,6 +209,9 @@ if __name__ == "__main__":
     import sys
     if sys.argv[1:] == ["--cpus"]:
         print(effective_cpus())
+        sys.exit(0)
+    if len(sys.argv) == 4 and sys.argv[1] == "--key":
+        print(cache_key(sys.argv[2], sys.argv[3]))
         sys.exit(0)
     if len(sys.argv) < 5 or sys.argv[1] != "--slot" or sys.argv[3] != "--":
         sys.exit("usage: report_cache.py --slot <fixture> -- <command...>")

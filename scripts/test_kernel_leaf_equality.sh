@@ -3,8 +3,8 @@
 set -euo pipefail
 
 LEAF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LEAF_COMPILER="${ELISA_COMPILER_BIN:-$LEAF_ROOT/build/elisac-stage0-a891}"
 source "$LEAF_ROOT/scripts/compiler_provenance.sh"
+LEAF_COMPILER="$(elisa_default_stage0 "$LEAF_ROOT")" || { printf 'pinned stage0 compiler not found\n' >&2; exit 2; }
 if ! elisa_compiler_is_stage0 "$LEAF_COMPILER"; then
     printf 'this focused regression requires the pinned stage0 compiler\n' >&2
     exit 2

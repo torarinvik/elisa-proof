@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 KEYS = (
     "declarations", "obligations", "goal_attempts", "certificates", "certificate_facts",
     "largest_certificate_facts", "repeated_certificate_fact_roots", "fact_traces",
-    "control_flow_steps", "live_facts_peak", "kernel_nodes", "kernel_nodes_shared",
+    "control_flow_steps", "live_facts_peak", "goal_cache_hits", "goal_cache_misses", "kernel_nodes", "kernel_nodes_shared",
     "kernel_children", "report_bytes",
 )
 # Kinds whose left/right/auxiliary fields are node references, in that order. Mirrors
@@ -85,6 +85,7 @@ def main():
     # Every certificate re-encodes its facts, so a proved source with several goals shares terms.
     assert verified["measurements"]["kernel_nodes_shared"] > 0
     assert verified["measurements"]["control_flow_steps"] > 0 and verified["measurements"]["live_facts_peak"] > 0
+    assert verified["measurements"]["goal_cache_hits"] >= 0 and verified["measurements"]["goal_cache_misses"] > 0
 
     text, library = run(ROOT / "examples/adt_library.elisa", 0)
     check_measurements(text, library)

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPILER="${ELISA_COMPILER_BIN:-$ROOT/build/elisac-stage0-a891}"
 source "$ROOT/scripts/compiler_provenance.sh"
+COMPILER="$(elisa_default_stage0 "$ROOT")" || { printf 'pinned stage0 compiler not found\n' >&2; exit 2; }
 elisa_verify_stage0_provenance "$COMPILER" "$ROOT"
 REV="$(tr -d '[:space:]' < "$ROOT/ELISA_COMPILER_REV")"
 if [[ ! -f "$ROOT/build/snapshot/Elisa-compiler/.rev" ]] || [[ "$(<"$ROOT/build/snapshot/Elisa-compiler/.rev")" != "$REV"* ]]; then

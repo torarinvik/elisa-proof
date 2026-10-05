@@ -188,6 +188,10 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
         exit 2
     fi
 fi
+COMPILER_PRODUCT="$COMPILER"
+if [[ -n "${stage1_root:-}" && -x "${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}" ]]; then
+    COMPILER_PRODUCT="${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}"
+fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
     printf 'missing profiler ABI hook source: %s\n' "$PROFILE_HOOKS_SOURCE" >&2
@@ -196,11 +200,15 @@ fi
 # The stamp names the clang that built the hook object, so switching toolchains rebuilds it
 # instead of linking an object from the previous clang.
 PROFILE_HOOKS_STAMP="$PROFILE_HOOKS_OBJ.clang"
-profile_hooks_clang="$CLANG_TOOL $("$CLANG_TOOL" --version | head -1) $PROFILE_HOOKS_SOURCE"
-if [[ ! -f "$PROFILE_HOOKS_OBJ" || "$PROFILE_HOOKS_SOURCE" -nt "$PROFILE_HOOKS_OBJ" || ! -f "$PROFILE_HOOKS_STAMP" || "$(<"$PROFILE_HOOKS_STAMP")" != "$profile_hooks_clang" ]]; then
+profile_hooks_clang="$(shasum -a 256 "$CLANG_TOOL" | cut -d' ' -f1) $("$CLANG_TOOL" --version | head -1) $(shasum -a 256 "$PROFILE_HOOKS_SOURCE" | cut -d' ' -f1) -O2"
+profile_hooks_stamp="$profile_hooks_clang"
+if [[ -f "$PROFILE_HOOKS_OBJ" ]]; then
+    profile_hooks_stamp+=" $(shasum -a 256 "$PROFILE_HOOKS_OBJ" | cut -d' ' -f1)"
+fi
+if [[ ! -f "$PROFILE_HOOKS_OBJ" || ! -f "$PROFILE_HOOKS_STAMP" || "$(<"$PROFILE_HOOKS_STAMP")" != "$profile_hooks_stamp" ]]; then
     "$CLANG_TOOL" -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
-    printf '%s\n' "$profile_hooks_clang" > "$PROFILE_HOOKS_STAMP"
+    printf '%s %s\n' "$profile_hooks_clang" "$(shasum -a 256 "$PROFILE_HOOKS_OBJ" | cut -d' ' -f1)" > "$PROFILE_HOOKS_STAMP"
 fi
 # Objects are shared across checkouts and agents, keyed by everything the compile reads: the
 # source snapshot, the pinned compiler revision and binary, and every compile flag. A hit skips
@@ -208,25 +216,49 @@ fi
 # ELISA_PROOF_OBJECT_CACHE=0 disables it.
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
 compiler_digest=""
-source_digests=""
-if [[ "$OBJECT_CACHE" != "0" ]]; then
-    # Hash only the compiler files that exist: with ELISA_COMPILER_BIN pointing straight at a
-    # stage1 binary (scripts/linux_toolchain.sh) there is no checkout root, and an empty path
-    # made shasum fail, which pipefail turned into a silent build failure.
-    compiler_files=()
-    for compiler_file in "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER"; do
-        [[ -n "$compiler_file" && -f "$compiler_file" ]] && compiler_files+=("$compiler_file")
-    done
-    # Without a compiler binary to hash, a key could match an object built by another compiler.
-    if [[ ${#compiler_files[@]} -gt 0 ]]; then
-        compiler_digest="$(shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n')"
-        source_digests="$(cd "$SNAPSHOT_ROOT" && find src -type f | LC_ALL=C sort | xargs shasum -a 256)"
-    fi
+compiler_files=()
+for compiler_file in "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER"; do
+    [[ -n "$compiler_file" && -f "$compiler_file" ]] && compiler_files+=("$compiler_file")
+done
+if [[ ${#compiler_files[@]} -gt 0 ]]; then
+    compiler_digest="$(shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n')"
 fi
+compiler_environment_digest="$(env | LC_ALL=C sort | sed -E '/^(PWD|OLDPWD|SHLVL|_|PS1|ELISA_PROOF_OUTPUT|ELISA_PROOF_PRODUCTS|ELISA_PROOF_MAIN|ELISA_PROOF_BUILD_JOBS|ELISA_PROOF_OBJECT_CACHE|ELISA_PROFILE_HOOKS_OBJ|ELISA_PROFILE_HOOKS_SOURCE|ELISA_EXTRA_LINK_INPUTS|ELISA_RUNTIME_OBJ)=/d' | shasum -a 256 | cut -d' ' -f1)"
+compiler_target_triple="$("$CLANG_TOOL" -dumpmachine)"
 object_key_of() {
-    [[ "$OBJECT_CACHE" != "0" && -n "$compiler_digest" ]] || return 0
-    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1" "$(uname -m)"
-        printf '%s\n' "$source_digests"; } | shasum -a 256 | cut -d' ' -f1
+    local main="$1" dependencies
+    [[ -n "$compiler_digest" ]] || return 0
+    dependencies="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --dependency-root "$SNAPSHOT_ROOT" --dependency-main "$main")" || return $?
+    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1" "$(uname -smr)"
+        printf '%s\n' "$dependencies"; } | shasum -a 256 | cut -d' ' -f1
+}
+build_identity_of() {
+    local index="$1" object_key="$2" flags input sign_version
+    local -a identity_args=(--identity-link-input "$PROFILE_HOOKS_OBJ" --identity-link-input "$PROFILE_HOOKS_SOURCE")
+    [[ -n "$RUNTIME_OBJ" ]] && identity_args+=(--identity-link-input "$RUNTIME_OBJ")
+    if [[ -n "${ELISA_EXTRA_LINK_INPUTS:-}" ]]; then
+        local -a identity_extra_inputs=()
+        read -r -a identity_extra_inputs <<< "$ELISA_EXTRA_LINK_INPUTS"
+        for input in "${identity_extra_inputs[@]}"; do
+            identity_args+=(--identity-link-input "$input")
+        done
+    fi
+    flags="$(printf '%q ' "${ELISA_DEAD_STRIP_LINK[@]}")"
+    if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+        input="$(command -v codesign)"
+        identity_args+=(--identity-link-input "$input")
+        sign_version="$(codesign --version 2>&1 || true)"
+        flags+=";codesign=-s_-_--force;$sign_version"
+    else
+        flags+=";codesign=disabled"
+    fi
+    flags+=";compile=-$OPT_LEVEL:$CONTRACT_FLAG:$COMPILE_MODE;frontend=$RESOLVED_REV;stage=$COMPILER_IS_STAGE1:${stage1_revision:-}"
+    python3 "$ROOT_DIR/scripts/build_manifest.py" --identity-only \
+        --identity-root "$SNAPSHOT_ROOT" --identity-main "${PRODUCT_MAINS[$index]}" \
+        --identity-object-key "$object_key" --identity-compiler "$COMPILER" \
+        --identity-compiler-product "$COMPILER_PRODUCT" --identity-clang "$CLANG_TOOL" \
+        "${identity_args[@]}" \
+        --identity-link-flags="$flags" --identity-output "${PRODUCT_OUTPUTS[$index]}"
 }
 compile_object() {
     local main="$1" object="$2"
@@ -239,13 +271,28 @@ compile_object() {
 # Cache hits are copied; misses compile, side by side up to BUILD_JOBS at a time. A compile run
 # in the background keeps its output in a log that is printed, in product order, once it ends.
 OBJECT_KEYS=()
+BUILD_IDENTITIES=()
+SKIP_PRODUCTS=()
 COMPILE_INDICES=()
 compile_count=0
 for index in "${!PRODUCT_MAINS[@]}"; do
     object_key="$(object_key_of "${PRODUCT_MAINS[$index]}")"
     OBJECT_KEYS+=("$object_key")
-    if [[ -n "$object_key" && -f "$OBJECT_CACHE/$object_key.o" ]]; then
-        cp "$OBJECT_CACHE/$object_key.o" "$(stage_object_of "$index")"
+    identity="$(build_identity_of "$index" "$object_key")"
+    BUILD_IDENTITIES+=("$identity")
+    if python3 "$ROOT_DIR/scripts/build_manifest.py" --check-existing \
+        --recorded-build-identity "$identity" --existing-binary "${PRODUCT_OUTPUTS[$index]}" \
+        --existing-manifest "${PRODUCT_OUTPUTS[$index]}.manifest.json" \
+        --existing-manifest-sha256 "${PRODUCT_OUTPUTS[$index]}.manifest.json.sha256"; then
+        SKIP_PRODUCTS+=(1)
+        printf 'build: product %s is unchanged\n' "${PRODUCT_MAINS[$index]}" >&2
+        continue
+    fi
+    SKIP_PRODUCTS+=(0)
+    cached_object="$OBJECT_CACHE/$object_key.o"
+    if [[ "$OBJECT_CACHE" != "0" && -n "$object_key" && -f "$cached_object" && -f "$cached_object.sha256" && \
+          "$(shasum -a 256 "$cached_object" | cut -d' ' -f1)" == "$(<"$cached_object.sha256")" ]]; then
+        cp "$cached_object" "$(stage_object_of "$index")"
         printf 'build: reused cached object %s\n' "${object_key:0:12}" >&2
     else
         COMPILE_INDICES+=("$index")
@@ -282,17 +329,17 @@ fi
 [[ "$compile_status" -eq 0 ]] || exit "$compile_status"
 for index in "${COMPILE_INDICES[@]}"; do
     object_key="${OBJECT_KEYS[$index]}"
-    if [[ -n "$object_key" ]]; then
+    if [[ "$OBJECT_CACHE" != "0" && -n "$object_key" ]]; then
         mkdir -p "$OBJECT_CACHE"
-        cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" && mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
+        cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN"
+        mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
+        shasum -a 256 "$OBJECT_CACHE/$object_key.o" | cut -d' ' -f1 > "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN"
+        mv -f "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o.sha256"
     fi
 done
 fi
-COMPILER_PRODUCT="$COMPILER"
-if [[ -n "${stage1_root:-}" && -x "${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}" ]]; then
-    COMPILER_PRODUCT="${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}"
-fi
 for index in "${!PRODUCT_MAINS[@]}"; do
+    [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] && continue
     PROOF_MAIN="${PRODUCT_MAINS[$index]}"
     PROOF_OUTPUT="${PRODUCT_OUTPUTS[$index]}"
     STAGE_OBJECT="$(stage_object_of "$index")"
@@ -314,6 +361,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
     fi
     MANIFEST_TEMP="$PROOF_BINARY.manifest.json"
     python3 "$ROOT_DIR/scripts/build_manifest.py" \
+        --recorded-build-identity "${BUILD_IDENTITIES[$index]}" \
         --binary "$PROOF_BINARY" \
         --compiler "$COMPILER" \
         --compiler-product "$COMPILER_PRODUCT" \
@@ -322,6 +370,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --stage1-revision "${stage1_revision:-}" \
         --runtime "${RUNTIME_OBJ:-}" \
         --profile-hooks "$PROFILE_HOOKS_OBJ" \
+        --target-clang "$CLANG_TOOL" \
         --frontend-repo "$COMPILER_SRC" \
         --frontend-revision "$RESOLVED_REV" \
         --proof-root "$ROOT_DIR" \
@@ -333,4 +382,6 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --output "$MANIFEST_TEMP"
     mv -f "$PROOF_BINARY" "$PROOF_OUTPUT"
     mv -f "$MANIFEST_TEMP" "$PROOF_OUTPUT.manifest.json"
+    shasum -a 256 "$PROOF_OUTPUT.manifest.json" | cut -d' ' -f1 > "$PROOF_OUTPUT.manifest.json.sha256.$BUILD_TOKEN"
+    mv -f "$PROOF_OUTPUT.manifest.json.sha256.$BUILD_TOKEN" "$PROOF_OUTPUT.manifest.json.sha256"
 done

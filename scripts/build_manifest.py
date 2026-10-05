@@ -12,10 +12,19 @@ import hashlib
 import json
 import os
 import platform
+import re
+import shutil
 import subprocess
 import sys
 
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
+INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"', re.MULTILINE)
+NON_PRODUCT_ENV = {
+    "_", "PWD", "OLDPWD", "SHLVL", "PS1", "ELISA_PROOF_OUTPUT",
+    "ELISA_PROOF_PRODUCTS", "ELISA_PROOF_MAIN", "ELISA_PROOF_BUILD_JOBS",
+    "ELISA_PROOF_OBJECT_CACHE", "ELISA_PROFILE_HOOKS_OBJ",
+    "ELISA_PROFILE_HOOKS_SOURCE", "ELISA_EXTRA_LINK_INPUTS", "ELISA_RUNTIME_OBJ",
+}
 
 
 def file_digest(path: str) -> dict:
@@ -43,6 +52,35 @@ def tree_digest(root: str) -> str:
     return digest.hexdigest()
 
 
+def dependency_digest(root: str, main: str) -> str:
+    """Hash the transitive textual include closure for one proof product."""
+    root = os.path.realpath(root)
+    pending = [os.path.realpath(os.path.join(root, main))]
+    visited = set()
+    digest = hashlib.sha256()
+    while pending:
+        path = pending.pop()
+        if path in visited:
+            continue
+        visited.add(path)
+        try:
+            with open(path, "rb") as handle:
+                contents = handle.read()
+        except OSError as error:
+            raise ValueError(f"missing include dependency {path}: {error}") from error
+        # Include paths may point from the proof snapshot into its adjacent pinned
+        # compiler export, but may not escape the snapshot directory's parent.
+        allowed_root = os.path.dirname(root)
+        if os.path.commonpath((allowed_root, path)) != allowed_root:
+            raise ValueError(f"include dependency escapes snapshot: {path}")
+        relative = os.path.relpath(path, allowed_root).replace(os.sep, "/")
+        digest.update(relative.encode() + b"\0" + hashlib.sha256(contents).digest())
+        text = contents.decode("utf-8")
+        for include in INCLUDE_RE.findall(text):
+            pending.append(os.path.realpath(os.path.join(os.path.dirname(path), include)))
+    return digest.hexdigest()
+
+
 def git(repository: str, *arguments: str) -> str:
     try:
         result = subprocess.run(
@@ -56,9 +94,9 @@ def git(repository: str, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def target_triple() -> str:
+def target_triple(clang: str = "clang") -> str:
     try:
-        result = subprocess.run(["clang", "-dumpmachine"], check=True, capture_output=True, text=True)
+        result = subprocess.run([clang, "-dumpmachine"], check=True, capture_output=True, text=True)
         return result.stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return f"{platform.machine()}-{platform.system().lower()}"
@@ -66,6 +104,24 @@ def target_triple() -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dependency-root", default="")
+    parser.add_argument("--dependency-main", default="")
+    parser.add_argument("--identity-only", action="store_true")
+    parser.add_argument("--identity-root", default="")
+    parser.add_argument("--identity-main", default="")
+    parser.add_argument("--identity-object-key", default="")
+    parser.add_argument("--identity-compiler", default="")
+    parser.add_argument("--identity-compiler-product", default="")
+    parser.add_argument("--identity-clang", default="")
+    parser.add_argument("--identity-link-input", action="append", default=[])
+    parser.add_argument("--identity-link-flags", default="")
+    parser.add_argument("--identity-output", default="")
+    parser.add_argument("--check-existing", action="store_true")
+    parser.add_argument("--existing-binary", default="")
+    parser.add_argument("--existing-manifest", default="")
+    parser.add_argument("--existing-manifest-sha256", default="")
+    parser.add_argument("--recorded-build-identity", default="")
+    parser.add_argument("--target-clang", default="clang")
     for option in (
         "binary", "compiler", "stage", "stage1-revision", "runtime", "profile-hooks",
         "frontend-repo", "frontend-revision", "proof-root", "snapshot-root",
@@ -74,6 +130,87 @@ def main() -> int:
     ):
         parser.add_argument(f"--{option}", default="")
     arguments = parser.parse_args()
+
+    if arguments.identity_only:
+        required = (arguments.identity_root, arguments.identity_main, arguments.identity_object_key,
+                    arguments.identity_compiler, arguments.identity_compiler_product,
+                    arguments.identity_clang, arguments.identity_output)
+        if not all(required):
+            print("build manifest: incomplete build identity inputs", file=sys.stderr)
+            return 2
+        try:
+            closure = dependency_digest(arguments.identity_root, arguments.identity_main)
+            clang_version = subprocess.run([arguments.identity_clang, "--version"], check=True,
+                                           capture_output=True, text=True).stdout.splitlines()[0]
+            clang_target = subprocess.run([arguments.identity_clang, "-dumpmachine"], check=True,
+                                          capture_output=True, text=True).stdout.strip()
+            clang_resource = subprocess.run([arguments.identity_clang, "-print-resource-dir"], check=True,
+                                            capture_output=True, text=True).stdout.strip()
+            linker = shutil.which("ld") or ""
+            linker_version = ""
+            if linker:
+                result = subprocess.run([linker, "--version"], capture_output=True, text=True)
+                linker_version = (result.stdout or result.stderr).splitlines()[0]
+            sdk = {}
+            if platform.system() == "Darwin" and shutil.which("xcrun"):
+                for key, command in (
+                    ("path", ["xcrun", "--sdk", "macosx", "--show-sdk-path"]),
+                    ("version", ["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
+                ):
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    sdk[key] = result.stdout.strip() if result.returncode == 0 else ""
+            payload = {
+                "proof_closure": closure,
+                "object_key": arguments.identity_object_key,
+                "compiler": file_digest(arguments.identity_compiler),
+                "compiler_product": file_digest(arguments.identity_compiler_product),
+                "clang": file_digest(arguments.identity_clang),
+                "clang_version": clang_version,
+                "clang_target": clang_target,
+                "clang_resource_dir": clang_resource,
+                "linker": file_digest(linker),
+                "linker_version": linker_version,
+                "sdk": sdk,
+                "link_inputs": [file_digest(path) for path in arguments.identity_link_input],
+                "link_flags": arguments.identity_link_flags,
+                "output": os.path.realpath(arguments.identity_output),
+                "environment": {key: value for key, value in sorted(os.environ.items())
+                                if key not in NON_PRODUCT_ENV},
+                "platform": {"system": platform.system(), "machine": platform.machine()},
+            }
+            encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+            print(hashlib.sha256(encoded).hexdigest())
+        except (OSError, subprocess.CalledProcessError, ValueError, IndexError) as error:
+            print(f"build manifest: cannot compute build identity: {error}", file=sys.stderr)
+            return 2
+        return 0
+
+    if arguments.check_existing:
+        try:
+            with open(arguments.existing_manifest, encoding="utf-8") as handle:
+                previous = json.load(handle)
+            current_digest = file_digest(arguments.existing_binary)["sha256"]
+            manifest_digest = file_digest(arguments.existing_manifest)["sha256"]
+            with open(arguments.existing_manifest_sha256, encoding="ascii") as handle:
+                recorded_manifest_digest = handle.read().strip()
+            matches = (previous.get("build_identity") == arguments.recorded_build_identity
+                       and previous.get("binary", {}).get("sha256") == current_digest
+                       and manifest_digest == recorded_manifest_digest
+                       and current_digest is not None)
+        except (OSError, json.JSONDecodeError, TypeError):
+            matches = False
+        return 0 if matches else 1
+
+    if arguments.dependency_root or arguments.dependency_main:
+        if not arguments.dependency_root or not arguments.dependency_main:
+            print("build manifest: --dependency-root and --dependency-main must be used together", file=sys.stderr)
+            return 2
+        try:
+            print(dependency_digest(arguments.dependency_root, arguments.dependency_main))
+        except (OSError, ValueError) as error:
+            print(f"build manifest: {error}", file=sys.stderr)
+            return 2
+        return 0
 
     if arguments.stage not in ("stage0", "stage1"):
         print(f"build manifest: unknown compiler stage {arguments.stage!r}", file=sys.stderr)
@@ -87,6 +224,7 @@ def main() -> int:
     frontend_tree = git(arguments.frontend_repo, "rev-parse", f"{arguments.frontend_revision}^{{tree}}")
     manifest = {
         "schema": MANIFEST_SCHEMA,
+        "build_identity": arguments.recorded_build_identity or None,
         "proof": {
             "head": proof_head or None,
             "source_dirty": bool(proof_status),
@@ -107,7 +245,7 @@ def main() -> int:
         },
         "runtime": file_digest(arguments.runtime),
         "profile_hooks": file_digest(arguments.profile_hooks),
-        "target": target_triple(),
+        "target": target_triple(arguments.target_clang),
         "optimization": arguments.opt_level,
         "compile_mode": arguments.compile_mode,
         "compiler_flags": [flag for flag in (arguments.contract_flag, "-emit", "obj", f"-{arguments.opt_level}") if flag],

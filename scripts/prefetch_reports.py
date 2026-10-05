@@ -15,19 +15,13 @@ hosts with the same checkout path can split one run (scripts/remote/farm.sh).
 """
 import concurrent.futures
 import glob
-import hashlib
 import os
 import re
 import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from report_cache import effective_cpus, heavy_slot, heavy_slots  # noqa: E402
-
-
-def cache_key(path: str) -> str:
-    # The real path, so scripts/report_cache.py (resolved ROOT) and test.sh agree on the key.
-    return hashlib.sha1(os.path.realpath(path).encode("utf-8")).hexdigest()
+from report_cache import cache_key, effective_cpus, heavy_slot, heavy_slots  # noqa: E402
 
 
 def matrix_text(test_script: str) -> str:
@@ -69,7 +63,7 @@ def run_py(root: str, cache: str, name: str) -> None:
 
 
 def run_one(binary: str, cache: str, path: str) -> None:
-    key = cache_key(path)
+    key = cache_key(path, binary)
     # Marks a fixture in progress so a reader waits for it instead of running it twice.
     pending = os.path.join(cache, "pending", key)
     open(pending, "w").close()

@@ -60,6 +60,8 @@ run_py_test() {
     fi
     python3 "$ROOT_DIR/scripts/$name"
 }
+run_py_test test_report_cache_identity.py
+run_py_test test_p05_package_restart.py
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
 # The downstream assertions still check the report's expected shape; this adapter checks that the
@@ -76,7 +78,7 @@ run_json_report() {
     fi
     local cache_key=""
     if [[ -n "$REPORT_CACHE" ]]; then
-        cache_key="$REPORT_CACHE/$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$source_path" | tr -d '\n' | shasum | cut -d' ' -f1)"
+        cache_key="$REPORT_CACHE/$(python3 "$ROOT_DIR/scripts/report_cache.py" --key "$source_path" "$ROOT_DIR/build/elisa-proof")"
         # Wait for a prefetched fixture's entry while the prefetcher still runs.
         while [[ ! -f "$cache_key.rc" ]] && [[ -n "$REPORT_PREFETCH_PID" ]] && kill -0 "$REPORT_PREFETCH_PID" 2>/dev/null; do
             sleep 1  # poll-ok: local file from our own prefetcher

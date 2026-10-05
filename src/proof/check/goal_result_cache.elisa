@@ -1,7 +1,7 @@
 # Run-local result cache for the built-in decision procedure.
 #
-# `proof_goal_with_operator_mask` is a pure function of its four inputs -- the premise list, the
-# goal, the enum annotations, and the source operator mask: it takes no report, declares no
+# `proof_goal_with_operator_mask` is a pure function of its five inputs -- the premise list, the
+# goal, the enum annotations, the source operator mask, and float decision mode: it takes no report, declares no
 # effect beyond allocation, and starts its split budget at zero on every call. So a second call
 # with exactly the same inputs must return exactly the same answer, and that answer can be reused
 # instead of recomputed. Nothing else is reused: the caller still records the attempt, encodes
@@ -302,30 +302,30 @@ extend ElisaProof:
             for annotation in annotations |annotation, report|:
                 report.goal_cache_annotations.push(annotation)
 
-        def proof_goal_cache_key_hash(facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize) -> (ok: bool, hash: u32):
+        def proof_goal_cache_key_hash(facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize, float_mode: bool) -> (ok: bool, hash: u32):
             goal_hash: (ok: bool, hash: u32) = proof_goal_cache_expr_hash(goal, 0)
             return (false, 0) if not goal_hash.ok
-            seed: u32 = proof_goal_cache_mix(proof_goal_cache_mix(goal_hash.hash, operator_mask.i64()), operator_mask.i64() >> 32)
+            seed: u32 = proof_goal_cache_mix(proof_goal_cache_mix(proof_goal_cache_mix(goal_hash.hash, operator_mask.i64()), operator_mask.i64() >> 32), 1 if float_mode else 0)
             return proof_goal_cache_array_hash(seed, facts, 0)
 
-        def proof_goal_cache_entry_matches(report: ProofReport&, entry: ProofGoalCacheEntry, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize) -> bool:
-            return false if entry.operator_mask != operator_mask or entry.facts_count != facts.count
+        def proof_goal_cache_entry_matches(report: ProofReport&, entry: ProofGoalCacheEntry, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize, float_mode: bool) -> bool:
+            return false if entry.operator_mask != operator_mask or entry.float_mode != float_mode or entry.facts_count != facts.count
             return false if entry.facts_start > report.goal_cache_facts.count or entry.facts_count > report.goal_cache_facts.count - entry.facts_start
             return false if not proof_goal_cache_expr_same(entry.goal, goal, 0)
             for offset in 0..<facts.count |offset, facts, entry, report|:
                 return false if not proof_goal_cache_expr_same(report.goal_cache_facts[entry.facts_start + offset], facts[offset], 1)
             return true
 
-        def proof_goal_cache_find(report: ProofReport&, hash: u32, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize) -> (found: bool, proven: bool):
+        def proof_goal_cache_find(report: ProofReport&, hash: u32, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize, float_mode: bool) -> (found: bool, proven: bool):
             capacity: usize = report.goal_cache_slots.count
             return (false, false) if capacity == 0
             slot: mutable usize = (hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity |probes, slot, capacity, report, hash, facts, goal, operator_mask|:
+            while probes < capacity |probes, slot, capacity, report, hash, facts, goal, operator_mask, float_mode|:
                 candidate: usize = report.goal_cache_slots[slot]
                 return (false, false) if candidate >= report.goal_cache_entries.count
                 entry: ProofGoalCacheEntry = report.goal_cache_entries[candidate]
-                if entry.hash == hash and proof_goal_cache_entry_matches(report, entry, facts, goal, operator_mask):
+                if entry.hash == hash and proof_goal_cache_entry_matches(report, entry, facts, goal, operator_mask, float_mode):
                     return (true, entry.proven)
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
@@ -354,7 +354,7 @@ extend ElisaProof:
             for index in 0..<report.goal_cache_entries.count |index, report|:
                 proof_goal_cache_slot_insert(report, index)
 
-        def proof_goal_cache_store(report: mutable ProofReport&, hash: u32, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize, proven: bool) -> void:
+        def proof_goal_cache_store(report: mutable ProofReport&, hash: u32, facts: darray[Ast::Expr]&, goal: Ast::Expr, operator_mask: usize, float_mode: bool, proven: bool) -> void:
             return if report.goal_cache_entries.count >= PROOF_GOAL_CACHE_ENTRY_LIMIT
             return if facts.count > PROOF_GOAL_CACHE_FACT_LIMIT - report.goal_cache_facts.count
             # Grow first: a rehash reinserts every existing entry, so the new one goes in once, after.
@@ -362,7 +362,7 @@ extend ElisaProof:
             facts_start: usize = report.goal_cache_facts.count
             for fact in facts |fact, report|:
                 report.goal_cache_facts.push(fact)
-            report.goal_cache_entries.push(ProofGoalCacheEntry{hash: hash, goal: goal, facts_start: facts_start, facts_count: facts.count, operator_mask: operator_mask, proven: proven})
+            report.goal_cache_entries.push(ProofGoalCacheEntry{hash: hash, goal: goal, facts_start: facts_start, facts_count: facts.count, operator_mask: operator_mask, float_mode: float_mode, proven: proven})
             proof_goal_cache_slot_insert(report, report.goal_cache_entries.count - 1)
 
         def proof_goal_cache_clear_entries(report: mutable ProofReport&) -> void:
@@ -384,17 +384,18 @@ extend ElisaProof:
         def proof_goal_cached(report: mutable ProofReport&, facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, exhausted: mutable bool&) -> bool:
             already_exhausted: bool = exhausted
             return proof_goal_with_operator_mask(facts, goal, annotations, operator_mask, exhausted) if already_exhausted
-            key: (ok: bool, hash: u32) = proof_goal_cache_key_hash(facts, goal, operator_mask)
+            float_mode: bool = proof_float_mode
+            key: (ok: bool, hash: u32) = proof_goal_cache_key_hash(facts, goal, operator_mask, float_mode)
             return proof_goal_with_operator_mask(facts, goal, annotations, operator_mask, exhausted) if not key.ok
             proof_goal_cache_adopt_annotations(report, annotations)
-            cached: (found: bool, proven: bool) = proof_goal_cache_find(report, key.hash, facts, goal, operator_mask)
+            cached: (found: bool, proven: bool) = proof_goal_cache_find(report, key.hash, facts, goal, operator_mask, float_mode)
             if cached.found:
                 report.goal_cache_hits <- report.goal_cache_hits + 1
                 return cached.proven
             report.goal_cache_misses <- report.goal_cache_misses + 1
             proven: bool = proof_goal_with_operator_mask(facts, goal, annotations, operator_mask, exhausted)
             finished_exhausted: bool = exhausted
-            proof_goal_cache_store(report, key.hash, facts, goal, operator_mask, proven) if not finished_exhausted
+            proof_goal_cache_store(report, key.hash, facts, goal, operator_mask, float_mode, proven) if not finished_exhausted
             return proven
 
         # `proof_goal` with each of its decisions answered through the cache above: the same
