@@ -683,13 +683,17 @@ terminal status, including unsupported and skipped paths.
 
 **Gate:** Swapped arguments, similarly named modules, changed contracts, stale pre-call facts, forged origins and substituted alias targets refuse. Document each remaining adapter-trusted fact. Zero replay gaps must not conceal an unjustified source premise.
 
-**Progress (2026-10-05):** Replay now rejects a deterministic-call trace whose scalar call contains a
-reference actual hidden under parentheses; `examples/deterministic_call_trace_replay_runtime.elisa`
-mutates the in-memory trace and confirms refusal, then restores and replays the original. Exact
-call-site binding to source owner/line, exact argument values/places and state version remains open,
-as do the wider parameter/range/alias/resource boundary inventory and the rest of this gate.
-Commits `078aeb9f` and `57572c60` add focused source-call coverage and qualified-target checks;
-they do not by themselves establish complete source-to-witness correspondence.
+**Progress (2026-10-05):** `src/proof/replay/source_call_coverage.elisa` now independently
+reconstructs straight-line local bindings and assignments before a witnessed call, then checks its
+source site and ordered/named actuals. The replay path rejects a parenthesized reference actual and
+a forged scalar actual; the direct mutation harness restored and replayed the original trace.
+Qualified calls are checked against a unique declaration in the named module, and a wrong-module
+forgery was rejected. These focused results are recorded in
+[`docs/evidence/2026-10-05-luna-slices-integrated-validation.md`](docs/evidence/2026-10-05-luna-slices-integrated-validation.md).
+The standalone replay manifest in that combined run still names an older source tree, so no
+coherent producer/replay-pair claim is made. Control-flow call sites remain fail-closed, and
+post-call state liveness/version validation plus the wider parameter/range/alias/resource inventory
+remain open.
 
 #### R-006 — Exhaustively harden all certificate/package decoders
 
@@ -865,11 +869,14 @@ R-010–R-014 identify which items have the greatest payoff; reorder within this
 
 **Gate:** Indexed and scan implementations agree on a differential corpus including malformed markers and collisions. Demonstrate reduced scans and allocation on fact-heavy workloads. Index membership alone never establishes an unvalidated fact.
 
-**Progress (2026-10-05):** `4eb4fec1` adds hashed lookup for scalar witness names and a runtime
-marker-dispatch fixture. It is a first narrow index, not yet an established speedup: exact scan
-parity under forced collisions, duplicate names, markers, shadowing and ordering remains to be
-tested, and paired counters/timings must show lower end-to-end work on a representative fact-heavy
-input. Broader frame indexes remain behind that measurement.
+**Progress (2026-10-05):** `4eb4fec1` adds an open-addressed hash lookup for scalar witness names,
+retaining the ordered source list and exact string comparison as authority. The Stage1 marker
+fixture compares indexed and original scan behavior for valid/malformed markers and a same-bucket
+collision. The combined strict O2 proof product and focused checks are identified in
+[`docs/evidence/2026-10-05-luna-slices-integrated-validation.md`](docs/evidence/2026-10-05-luna-slices-integrated-validation.md).
+This is a narrow correctness-checked index, not an established speedup: duplicate-heavy and
+saturated-table behavior and paired scan/allocation/timing measurements on a representative
+fact-heavy workload remain open. Broader frame indexes remain behind those measurements.
 
 #### R-020 — Introduce bounded canonical term sharing
 
