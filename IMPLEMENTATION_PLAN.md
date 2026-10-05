@@ -591,6 +591,19 @@ These have the highest ROI because every other feature depends on trustworthy ou
 
 **Gate:** Source-level explanation and minimized responsible regression, or explicit unresolved incident with affected product identities. Crash disappearance alone cannot mark this done. Require O0/O2 and stage0/stage1 controls plus Linux qualification for a confirmed fix.
 
+**Progress (2026-10-05):** The exact 51-byte reproducer (SHA-256 `3cf171b7…fd94ea2`) passes on
+the current strict O2 Stage1 proof product `6502ec0e…ccde64` (proof revision `e9d27ef6`) with a
+complete report and independent replay, while retained product `74f49810…789658a` still crashes
+before producing JSON. The retained product was built from dirty proof/compiler trees and is not
+the unavailable originally measured binary `d734fd75…`; current success does not identify a fix.
+The crash trace localizes an invalid generated indexed store in
+`proof_qualified_body_rewrite`, but the cause remains unresolved and Linux is untested. Exact
+inputs, manifests, controls, and limits are recorded in
+[`docs/evidence/2026-10-05-p00-exact-current-recheck.md`](docs/evidence/2026-10-05-p00-exact-current-recheck.md)
+and [`docs/evidence/2026-10-05-p00-qualified-crash-cause-audit.md`](docs/evidence/2026-10-05-p00-qualified-crash-cause-audit.md).
+R-002 remains open pending reconstructable historical source/product evidence or an isolated
+source-level cause and qualified regression.
+
 #### R-003 — Eliminate known producer/replay disagreements
 
 **Change:** Reproduce remaining `Slide.inner` conditional roots and any new census gaps; trace exact formation, branch premises, arithmetic type witnesses and conclusion evidence. Extend the smallest justified inference or stop the producer from advertising unsupported evidence. Reuse conditional replay modules rather than adding a blanket acceptance fallback.
