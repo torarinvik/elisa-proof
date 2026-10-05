@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-05 against committed tree baseline `a09b65c3`; the latest committed proof implementation in this audit slice is `5596eefc`, with later commits recording fixture, audit, and evidence updates. Section 23.23 is the authoritative execution order. Section 23.22 remains a detailed design and acceptance reference, but its queue ordering is superseded. The shared checkout has parallel, uncommitted proof-source and test edits; they are explicitly in-flight, not completed work, and are excluded from this committed baseline. Sections 23.16–23.21 preserve useful historical design and evidence, but their snapshots and queue ordering are superseded by §23.23.
+Status: refreshed 2026-10-05 against proof-implementation baseline `5596eefc`; subsequent commits record fixture, audit, and evidence updates rather than later proof-rule changes. Section 23.23 is the authoritative execution order. Section 23.22 remains a detailed design and acceptance reference, but its queue ordering is superseded. The shared checkout has parallel, uncommitted proof-source and test edits; they are explicitly in-flight, not completed work, and are excluded from this committed baseline. Sections 23.16–23.21 preserve useful historical design and evidence, but their snapshots and queue ordering are superseded by §23.23.
 
 High-return gains committed since the previous plan refresh include: `1ee75edd` fixes immutable pair provenance refresh when proof sources change without rebuilding either executable, and tests that a repeated no-op preserves the published generation; `23feb047` adds cross-route regression coverage for a guarded `i8` local increment plus unguarded overflow, `i16` boundary, and suffix-only negatives; `c05da046` expands portable-package mutation assurance; `3c5d1003` validates profiler phase-timing evidence without claiming an optimization; `c44dff5e` keeps the build-closure suite within its source-file size limit; and `6d94df44` fixes lossy JSON-number interpretation in portable packages. Its reader rejects signed, fractional and exponent-form numeric tokens before binary64 DOM conversion, preventing a fractional index from rounding to an integer field; positive replay, malformed/budget outcomes and no-theorem-on-package-error regressions pass. The byte-boundary regression is committed in `927a5db9` and passed against immutable Stage1 generation `764f254a07404c24986b1b3e52bfcf24`; this verifies the supported numeric boundary cases, not the whole JSON codec. Since that refresh, `00b7fa0a` bound the narrow source-literal obligation inventory to both attempt and certificate claims, and `3eccfc76` extended it to plural `ensures` plus mismatched literal returns. Those remain a partial top-level inventory, not whole-program completeness. Commit `41c2bc7c` added source-call replay validation, but an independent review has now found a stale-call/branch-join false acceptance in that path; treat the call-summary provenance slice and any proofs depending on it as suspect until its repair and fresh replay tests land. A separate custom numeric `__cast__` hook also bypasses builtin-conversion assumptions and has a minimized false-proof reproducer; its consumer audit and fix are in progress. Earlier committed groundwork includes typed signed arithmetic, package budget/mutation cases, source/build-input revalidation, and benchmark identity validation. These are narrow invariants and tests, not completion of whole-program obligation enumeration, machine-integer semantics, package decoder assurance, a performance baseline, or the full build/replay gate.
 
@@ -5045,9 +5045,14 @@ and must not be combined or described as landed without ownership review and a f
 The compiler checkout is now at `6b475d894331f0a81c3112167ef7fcf5c642a424` (the shared compiler tree
 has only a pre-existing `.gitignore` edit). The installed Stage1 provenance still records
 `541788548651d43dd466d0b5210955eb966eb18e`; the freshness guard fails both `source_revision` and
-`source_tree_sha256`. A Stage1 pass against one detached snapshot does not qualify later source or
-another generation; no proof/replay validation may claim fresh-Stage1 status until a product from
-the current verified compiler source is seeded and checked.
+`source_tree_sha256`. The currently resolvable proof/replay pair is generation
+`0c78eae78863426bb9c68eba3f49bf46`, but both manifests bind proof HEAD `9184f6a2f0b4a77ef58b28570e8a1c109307b861`
+and source-tree digest `73d5cbf620b209cada34f4e1f2070a2ac9eb3f6cd282aa5c50ba4f08fe5bf988`; they also bind
+Stage1 source revision `541788548651d43dd466d0b5210955eb966eb18e` and product SHA-256
+`27925891cf3185d91c678d902fc14db4d525d0fa47448f2104f91423c16ee1d1`. Thus the pair is resolvable but
+does not validate the current proof sources or compiler checkout. A Stage1 pass against one detached
+snapshot does not qualify later source or another generation; no proof/replay validation may claim
+fresh-Stage1 status until products from the current verified compiler source are seeded and checked.
 
 | Finding | Evidence and certainty | Immediate disposition |
 | --- | --- | --- |
