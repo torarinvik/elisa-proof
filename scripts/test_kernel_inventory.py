@@ -93,6 +93,21 @@ def certificate_rules() -> set[str]:
     return match_arms(function_body(text, "proof_replay_certificate_rule_valid"))
 
 
+def certificate_producer_functions() -> set[str]:
+    producers: set[str] = set()
+    for path in elisa_files(PROOF):
+        current_function = ""
+        for line in strip_comments(read(path)).splitlines():
+            definition = re.match(r"\s*def (\w+)\b", line)
+            if definition:
+                current_function = definition.group(1)
+            if "report.certificates" in line and "ProofGoalCertificate{" in line:
+                if not current_function:
+                    raise AssertionError(f"certificate construction outside function in {path}")
+                producers.add(current_function)
+    return producers
+
+
 def boundary_trace_kinds() -> set[str]:
     text = read(PROOF / "replay" / "certificate_validation.elisa") + read(PROOF / "replay" / "boundary_trace_shapes.elisa")
     return match_arms(function_body(text, "proof_replay_boundary_trace_kind"))
@@ -154,6 +169,7 @@ def main() -> int:
         "node-kinds": node_kinds(),
         "typing-kinds": typing_kinds(),
         "certificate-rules": certificate_rules(),
+        "certificate-producers": certificate_producer_functions(),
         "boundary-trace-kinds": boundary_trace_kinds(),
         "derived-trace-kinds": derived_trace_kinds(),
         "summary-trace-kinds": summary_trace_kinds(),
