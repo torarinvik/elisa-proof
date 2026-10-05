@@ -50,9 +50,42 @@ with tempfile.TemporaryDirectory(prefix="elisa-p05-restart-") as directory:
     code, result = run_replay(forged_path)
     assert code == 1 and result["status"] == "malformed" and result["reason"] == "theorem-schema", result
 
+    # Package integrity is structural and comes from strict schema validation plus independent
+    # kernel replay; the source adapter boundary itself is never authenticated by the package.
+    # Reject attempts to upgrade that boundary or to claim stronger trust than this format grants.
+    authenticated = copy.deepcopy(package)
+    authenticated["source"]["authenticated"] = True
+    authenticated_path = work / "authenticated.json"
+    authenticated_path.write_text(json.dumps(authenticated), encoding="utf-8")
+    code, result = run_replay(authenticated_path)
+    assert code == 1 and result["status"] == "malformed" and result["reason"] == "source-schema", result
+
+    elevated_trust = copy.deepcopy(package)
+    elevated_trust["trust"]["hypotheses"] = "kernel"
+    elevated_trust_path = work / "elevated-trust.json"
+    elevated_trust_path.write_text(json.dumps(elevated_trust), encoding="utf-8")
+    code, result = run_replay(elevated_trust_path)
+    assert code == 1 and result["status"] == "malformed" and result["reason"] == "trust-schema", result
+
+    # Keep the serialized statement tied to the kernel roots, and keep its legacy fingerprint
+    # explicitly in the identity-hint role. Neither is an admission bit.
+    changed_statement = copy.deepcopy(package)
+    changed_statement["theorems"][0]["statement"] += " forged"
+    changed_statement_path = work / "changed-statement.json"
+    changed_statement_path.write_text(json.dumps(changed_statement), encoding="utf-8")
+    code, result = run_replay(changed_statement_path)
+    assert code == 1 and result["status"] == "rejected" and result["theorems"][0]["reason"] == "statement-mismatch", result
+
+    changed_fingerprint = copy.deepcopy(package)
+    changed_fingerprint["theorems"][0]["goal_fingerprint"] += 1
+    changed_fingerprint_path = work / "changed-fingerprint.json"
+    changed_fingerprint_path.write_text(json.dumps(changed_fingerprint), encoding="utf-8")
+    code, result = run_replay(changed_fingerprint_path)
+    assert code == 1 and result["status"] == "rejected" and result["theorems"][0]["reason"] == "fingerprint-mismatch", result
+
     truncated_path = work / "truncated.json"
     truncated_path.write_text(persisted.read_text(encoding="utf-8")[:-1], encoding="utf-8")
     code, result = run_replay(truncated_path)
     assert code == 1 and result["status"] == "malformed" and result["reason"] == "json", result
 
-print("P-05 package restart: persisted certificate replayed in a fresh process; stale, forged and truncated artifacts refused")
+print("P-05 package restart: persisted certificate replayed in a fresh process; stale, forged, trust-upgraded, identity-mismatched and truncated artifacts refused")
