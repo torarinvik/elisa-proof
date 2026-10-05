@@ -11317,3 +11317,15 @@ complete replay; wrong-value and shadowing controls still fail. The first diagno
 finished with 42 failed steps, including stale expectations, build/provenance failures and
 the since-fixed CLI routing. It ran across investigation snapshots and is not a final
 validation of these commits. A clean full matrix and dogfood are still required.
+## Nested early-return guards keep their fall-through facts
+
+K-03's focused probe uses the postfix guard form inside both an `if` arm and a `for` body:
+`return 0 if index >= values.count`. The following index access verifies in each case, and the
+certificates replay with zero gaps. Removing the guard from the loop body leaves
+`index-upper-unproven`, so the control confirms that the access depends on the branch fact.
+The producer and branch replay already carried these surviving facts through recursive
+`proof_check_returns` calls; no proof rule or trace kind was needed. A separate foreach-element
+index probe also refused its generated binder's lower-bound goal. That is unrelated to guard
+propagation and remains outside K-03.
+
+Evidence: `scripts/test_nested_early_return_guards.py`.
