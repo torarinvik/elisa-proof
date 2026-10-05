@@ -73,8 +73,6 @@ def summarize_allocation_captures(value: Any) -> dict[str, Any]:
             if not isinstance(lifetime, str):
                 raise CaptureError(f"{label}.lifetime_status must be a string")
             quality = "complete" if complete and dropped == 0 else "incomplete"
-            if lifetime != "available":
-                quality = "lifetime_unavailable"
             runs.append({
                 "repetition": _nonnegative_int(record.get("repetition", index + 1),
                                                 f"{label}.repetition"),

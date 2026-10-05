@@ -45,6 +45,13 @@ class AllocationSummaryTests(unittest.TestCase):
         self.assertEqual(dropped["workloads"][0]["runs"][0]["allocation_events_dropped"], 2)
         self.assertEqual(truncated["workloads"][0]["runs"][0]["capture_quality"], "incomplete")
 
+    def test_lifetime_availability_is_not_conflated_with_capture_completeness(self) -> None:
+        item = record()
+        item["lifetime_status"] = "unavailable"
+        run = summarize_allocation_captures({"probe": [item]})["workloads"][0]["runs"][0]
+        self.assertEqual(run["capture_quality"], "complete")
+        self.assertEqual(run["lifetime_status"], "unavailable")
+
     def test_rejects_malformed_counts_and_reads_artifact_envelope(self) -> None:
         malformed = record()
         malformed["event_counts"]["alloc"] = True
