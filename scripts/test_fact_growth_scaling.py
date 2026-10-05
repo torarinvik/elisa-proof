@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
+import re
 import signal
 import subprocess
 import tempfile
@@ -82,14 +84,33 @@ def sample_sources():
         yield "duplicate-facts", size, duplicate_source(size)
 
 
-def sampled_rss_kib(pid):
+def sampled_group_rss_kib(process_group):
     try:
-        result = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)],
+        result = subprocess.run(["ps", "-axo", "pgid=,rss="],
                                 capture_output=True, text=True, timeout=1, check=False)
-        value = result.stdout.strip()
-        return int(value) if result.returncode == 0 and value else None
+        if result.returncode != 0:
+            return None
+        rss_values = [int(fields[1]) for line in result.stdout.splitlines()
+                      if len(fields := line.split()) == 2
+                      and fields[0].isdigit() and int(fields[0]) == process_group
+                      and fields[1].isdigit()]
+        return sum(rss_values) if rss_values else None
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
+
+
+def time_command():
+    if platform.system() == "Darwin":
+        return ["/usr/bin/time", "-l"]
+    return ["/usr/bin/time", "-f", "__MAX_RSS_KIB__=%M"]
+
+
+def exact_peak_rss_kib(stderr):
+    if platform.system() == "Darwin":
+        match = re.search(r"([0-9]+)\s+maximum resident set size", stderr)
+        return (int(match.group(1)) + 1023) // 1024 if match else None
+    match = re.search(r"__MAX_RSS_KIB__=([0-9]+)", stderr)
+    return int(match.group(1)) if match else None
 
 
 def run_case(path, timeout_seconds, max_rss_kib):
@@ -102,11 +123,12 @@ def run_case(path, timeout_seconds, max_rss_kib):
         reason = None
         with stdout_path.open("w+") as stdout, stderr_path.open("w+") as stderr:
             process = subprocess.Popen(
-                [str(BINARY), "--json", str(path)], stdout=stdout, stderr=stderr,
+                [*time_command(), str(BINARY), "--json", str(path)],
+                stdout=stdout, stderr=stderr,
                 start_new_session=True,
             )
             while process.poll() is None:
-                rss = sampled_rss_kib(process.pid)
+                rss = sampled_group_rss_kib(process.pid)
                 if rss is not None:
                     rss_samples += 1
                     peak_rss = max(peak_rss, rss)
@@ -127,6 +149,12 @@ def run_case(path, timeout_seconds, max_rss_kib):
             stderr.flush()
         output = stdout_path.read_text()
         error = stderr_path.read_text()
+    exact_rss = exact_peak_rss_kib(error)
+    if exact_rss is not None:
+        peak_rss = max(peak_rss, exact_rss)
+        rss_samples += 1
+        if exact_rss > max_rss_kib:
+            reason = "rss-limit"
 
     report = None
     parse_error = None
@@ -144,12 +172,19 @@ def run_case(path, timeout_seconds, max_rss_kib):
         "replay_status": goal.get("replay_status"),
         "refusal_gate": goal.get("refusal_gate"),
     } for goal in goals]
+    replay = report.get("replay", {}) if report else {}
+    replay_inconsistent = bool(report) and (
+        replay.get("gaps") != 0
+        or replay.get("certificates") != replay.get("replayed")
+    )
     if reason:
         outcome = reason
     elif parse_error:
         outcome = "invalid-report"
     elif report.get("summary", {}).get("semantic_errors", 0):
         outcome = "semantic-error"
+    elif replay_inconsistent:
+        outcome = "replay-inconsistent"
     elif report.get("verification_state") == "proved":
         outcome = "proved" if report.get("replay", {}).get("gaps") == 0 else "proved-with-replay-gaps"
     elif report.get("verification_state") == "unknown":
@@ -160,7 +195,7 @@ def run_case(path, timeout_seconds, max_rss_kib):
         "outcome": outcome,
         "exit_code": returncode,
         "wall_seconds": round(elapsed, 6),
-        "peak_sampled_rss_kib": peak_rss if rss_samples else None,
+        "peak_rss_kib": peak_rss if rss_samples else None,
         "rss_samples": rss_samples,
         "semantic_errors": report.get("summary", {}).get("semantic_errors") if report else None,
         "status": report.get("status") if report else None,
@@ -168,9 +203,9 @@ def run_case(path, timeout_seconds, max_rss_kib):
         "proofs": sum(1 for goal in goals if goal.get("proven")),
         "obligations": len(goals) if report else None,
         "goal_outcomes": goal_outcomes,
-        "replay_gaps": report.get("replay", {}).get("gaps") if report else None,
-        "replay_certificates": report.get("replay", {}).get("certificates") if report else None,
-        "replayed_certificates": report.get("replay", {}).get("replayed") if report else None,
+        "replay_gaps": replay.get("gaps") if report else None,
+        "replay_certificates": replay.get("certificates") if report else None,
+        "replayed_certificates": replay.get("replayed") if report else None,
         "measurements": metrics,
         "stderr_tail": error[-1000:],
         "report_parse_error": parse_error,
@@ -232,11 +267,12 @@ def main():
             "per_case_timeout_seconds": args.timeout_seconds,
             "per_case_sampled_rss_kib": args.max_rss_kib,
             "rss_sampling_interval_seconds": 0.025,
-            "rss_sampling_method": "ps -o rss=; sampled peak, process-group kill above cap",
+            "rss_sampling_method": "sampled process-group RSS plus /usr/bin/time exact command peak; kill process group above sampled cap",
             "wall_time_interpretation": "descriptive only; not an asymptotic work estimate",
         },
         "sizes": {"single_axis_fact_sweeps": list(SIZES),
                   "duplicate_fact_sweep": list(DUPLICATE_SIZES)},
+        "available_counters": list(MEASUREMENT_KEYS),
         "results": results,
         "unavailable_counters": [
             "per-goal fact visits outside goal-cache-key hashing",
@@ -248,6 +284,12 @@ def main():
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    invalid = [row for row in results if row["outcome"] not in ("proved", "unknown/refused")]
+    if invalid:
+        raise RuntimeError(f"invalid scaling result(s), evidence retained at {args.output}: {invalid}")
+    duplicate_rows = {row["size"]: row for row in results if row["axis"] == "duplicate-facts"}
+    if duplicate_rows[12]["outcome"] != "proved" or duplicate_rows[13]["outcome"] != "unknown/refused":
+        raise RuntimeError(f"12/13 duplicate controls changed, evidence retained at {args.output}")
     print(f"fact-growth scaling: wrote {len(results)} bounded cases to {args.output}")
 
 
