@@ -62,7 +62,12 @@ assert any(
 for name in ("minimal_conditional_missing_conjunct_refusal.elisa",
              "minimal_conditional_overflow_refusal.elisa",
              "minimal_conditional_signed_unit_shift_wrong_bound_refusal.elisa",
-             "minimal_conditional_signed_unit_shift_overflow_guard_refusal.elisa"):
+             "minimal_conditional_signed_unit_shift_overflow_guard_refusal.elisa",
+             "minimal_conditional_signed_unit_shift_missing_premise_refusal.elisa",
+             "minimal_conditional_signed_unit_shift_near_max_refusal.elisa",
+             "minimal_conditional_signed_unit_shift_near_min_refusal.elisa",
+             "minimal_conditional_signed_unit_shift_wrong_width_refusal.elisa",
+             "minimal_conditional_signed_unit_shift_wrong_sort_refusal.elisa"):
     source = ROOT / "test/repro" / name
     run = subprocess.run([BINARY, "--json", str(source)], capture_output=True, text=True, timeout=20)
     report = json.loads(run.stdout)
@@ -70,11 +75,21 @@ for name in ("minimal_conditional_missing_conjunct_refusal.elisa",
         item for item in report["declaration_details"]
         if item.get("kind") == "function" and item.get("name") == "inner"
     )
-    assert run.returncode == 1 and report["status"] == "failed", (source, report)
-    assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"], (source, report["replay"])
+    expected_status = "proved_with_replay_gaps" if name == "minimal_conditional_signed_unit_shift_wrong_sort_refusal.elisa" else "failed"
+    assert run.returncode == 1 and report["status"] == expected_status, (source, report)
+    # The unsigned-sort mutation currently exposes a producer/replay disagreement: the
+    # producer emits an unsigned certificate, which independent replay rejects. Keep that
+    # visible as a gap while still checking fail-closed admission. All signed controls must
+    # replay completely so their refusal comes from the proof obligation, not a replay gap.
+    if name == "minimal_conditional_signed_unit_shift_wrong_sort_refusal.elisa":
+        assert report["verification_state"] != "proved", (source, report["verification_state"])
+        assert report["declaration_details"][0]["verification_reason"] == "replay-gap", report["declaration_details"][0]
+    else:
+        assert report["replay"]["gaps"] == 0 and report["replay"]["certificates"] == report["replay"]["replayed"], (source, report["replay"])
+        assert declaration["verification_reason"] != "replay-gap", (source, declaration)
     assert declaration["verified"] is False, (source, declaration)
-    assert declaration["verification_reason"] != "replay-gap", (source, declaration)
-    assert any(item.get("kind") == "ensure-unproven" and item.get("name") == "inner"
-               for item in report["findings"]), (source, report["findings"])
+    if name != "minimal_conditional_signed_unit_shift_wrong_sort_refusal.elisa":
+        assert any(item.get("kind") == "ensure-unproven" and item.get("name") == "inner"
+                   for item in report["findings"]), (source, report["findings"])
 
-print("positive conditional conjunct and range-checked signed unit shift replay; Slide.inner roots 48 and 51 close; missing-conjunct, overflow, wrong-bound and wrong-guard controls remain refused")
+print("positive conditional conjunct and range-checked signed unit shift replay; Slide.inner roots 48 and 51 close; missing-conjunct, premise, overflow, near-min/max, wrong-width, wrong-sort and wrong-bound controls remain unadmitted")
