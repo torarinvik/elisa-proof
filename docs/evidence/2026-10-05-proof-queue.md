@@ -75,8 +75,13 @@ arm64 macOS target. Bounded child runs on both `examples/kernel_comparison_runti
 is byte-identical to its blob at audit HEAD `13d686b2`; the track file is clean in its repository
 and last changed at `133622721` on 2026-10-03, though its capture-time digest was not saved. The
 audit assessment instead records binary SHA-256 `d734fd75…`, leaving the identity of that original
-captured executable unresolved. This reproduction localizes the old failure to the retained
-manifest-bound binary; it does not establish the cause.
+captured executable unresolved. The measurement record at `/private/tmp/elisa-proof-p01-baseline.json`
+names its path as `build/elisa-proof`; that path now holds SHA-256
+`18f2d6dbef5580d31e310e4e00c61d3f2de658eaf3ade61a1b3b64f8f43c2d09` and is 16 bytes larger than
+the recorded 5,429,696-byte product. An inventory of retained project and temporary candidates
+found no file matching `d734fd75…`. The 74f binary reproduction therefore establishes that this
+retained manifest-bound binary crashes, but does not reproduce the exact measured executable or
+establish the cause.
 
 The current strict O0 product has SHA-256
 `1a1ea6eac860ffc3854f7bd209135f4513ce97780639853a0c1993b323ea2d8e`; its manifest SHA-256 is
