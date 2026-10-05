@@ -34,14 +34,14 @@ with tempfile.TemporaryDirectory(prefix="proof-output-write-") as directory:
                     str(ROOT / "scripts/fixtures/output_write_interpose.c")], check=True)
     preload = "DYLD_INSERT_LIBRARIES" if system == "Darwin" else "LD_PRELOAD"
     failures = []
-    for mode in ("partial", "zero", "error"):
+    for mode in ("partial", "interrupt", "zero", "error", "interrupt_forever"):
         env = dict(environment, ELISA_TEST_WRITE_MODE=mode)
         env[preload] = str(library)
         result = run(env)
-        if mode == "partial":
+        if mode in ("partial", "interrupt"):
             if result.returncode != 0 or result.stdout != baseline.stdout:
-                failures.append(f"partial: exit={result.returncode}, bytes={len(result.stdout)}, expected={len(baseline.stdout)}")
+                failures.append(f"{mode}: exit={result.returncode}, bytes={len(result.stdout)}, expected={len(baseline.stdout)}")
         elif result.returncode <= 0:
             failures.append(f"{mode}: expected deliberate nonzero refusal, got {result.returncode}")
     assert not failures, "; ".join(failures)
-print("output write regression PASS: exact partial output; zero/error refusal")
+print("output write regression PASS: exact partial/interrupted output; bounded zero/error/interruption refusal")

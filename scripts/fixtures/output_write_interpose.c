@@ -7,10 +7,16 @@
 #include <unistd.h>
 
 static ssize_t injected_write(int fd, const void *data, size_t count) {
+    static unsigned int interruptions;
     const char *mode = getenv("ELISA_TEST_WRITE_MODE");
     if (fd == STDOUT_FILENO && mode) {
         if (!strcmp(mode, "zero")) return 0;
         if (!strcmp(mode, "error")) { errno = EIO; return -1; }
+        if (!strcmp(mode, "interrupt") && interruptions++ == 0) {
+            errno = EINTR;
+            return -1;
+        }
+        if (!strcmp(mode, "interrupt_forever")) { errno = EINTR; return -1; }
         if (!strcmp(mode, "partial") && count > 7) count = 7;
     }
     return syscall(SYS_write, fd, data, count);
