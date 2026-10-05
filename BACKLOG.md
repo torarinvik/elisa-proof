@@ -1,6 +1,6 @@
 # Elisa-Proof high-ROI backlog
 
-Companion to [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §20. The plan sets milestones and rules; this file lists concrete tasks ordered by return on investment. ROI means proved goals, user-visible usefulness or trust reduction gained per unit of work and per line added to the trusted base. Every task follows the plan's execution loop and §22 definition of done. That means positive, adversarial, malformed and budget tests; kernel-inventory updates for new trace kinds or replay calls; full chunks and dogfood green; an AUDIT.md entry; and a commit with evidence.
+Companion to [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) §23.16. The plan sets milestones and the authoritative current order; this file retains the themed feature inventory. ROI means proved goals, user-visible usefulness or trust reduction gained per unit of work and per line added to the trusted base. Every task follows the plan's execution loop and §22 definition of done: positive, adversarial, malformed and budget tests; kernel-inventory updates for new trace kinds or replay calls; applicable full chunks and dogfood; an `AUDIT.md` entry; and a commit with evidence.
 
 Tiers:
 - **T0**: finish or unblock what is almost there. Days of work; closes known refusals.
