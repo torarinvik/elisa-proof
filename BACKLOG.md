@@ -152,7 +152,7 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 | K-04 (T0, DONE 2026-10-05) | `bool` locals as fact carriers: `ok: bool = i < n; if ok:` gives `i < n` in the branch | Common readability refactor that loses proofs today | `scripts/test_bool_local_branch_fact.py`: the initialized flag's bound replays; a reassigned flag does not retain the stale bound |
 | K-05 (T0) | `char` range facts (`'0' <= c <= '9'` implies `c - '0' <= 9`) | Every lexer | Digit-parse example proves |
 | K-06 (T0) | `.count` of a literal array beyond empty (use the kernel-safe usize constant route) | Table-driven code | `[1, 2, 3].count == 3` proves without the old cascade cost |
-| K-07 (T0) | Better message for the i8 `ensure` front-end diagnostic so users know the proof engine still ran | Confusing status seen during signed-bound work | Report states "front end diagnostic, engine: proved" |
+| K-07 (T0, DONE 2026-10-05) | Better message for the i8 `ensure` front-end diagnostic so users know the proof engine still ran | Confusing status seen during signed-bound work | `scripts/test_engine_state.py`: the i8 front-end diagnostic reports `engine: proved`, with the engine state and replay result checked separately |
 | K-08 (T0) | `--explain <goal_id>` CLI printing facts, origins and the refusing gate | Makes A-02 usable by hand | Snapshot test |
 
 ## Execution order
