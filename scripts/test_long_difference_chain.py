@@ -30,6 +30,8 @@ data = run(ROOT / "examples/rejected_long_difference_chain.elisa")
 assert data["status"] == "failed" and data["replay"]["gaps"] == 0
 assert data["replay"]["certificates"] == data["replay"]["replayed"]
 failures = sorted((finding["kind"], finding["line"]) for finding in data["findings"])
-assert failures == [("ensure-unproven", 9), ("ensure-unproven", 22), ("ensure-unproven", 34), ("ensure-unproven", 42)], failures
+assert failures == [("ensure-unproven", 9), ("ensure-unproven", 22), ("ensure-unproven", 34), ("ensure-unproven", 42), ("ensure-unproven", 48)], failures
+assert data["replay"]["gaps"] == 0 and data["replay"]["certificates"] == data["replay"]["replayed"], data["replay"]
+assert any(finding["name"] == "thirty_three_name_difference" for finding in data["findings"]), data["findings"]
 
 print("long difference chain: bounds travel every link, and only the ones the facts imply")

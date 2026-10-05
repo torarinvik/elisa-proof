@@ -53,7 +53,7 @@ Tasks are grouped by theme (A–R); the tier sits beside each task's ID.
 
 | ID | Task | ROI | Done when |
 | --- | --- | --- | --- |
-| C-01 (DONE) | Bounded difference-bound closure with producer/kernel replay parity | Chains of `a < b < c < n` are the bread and butter of index proofs | `scripts/test_long_difference_chain.py`: transitive interval bounds through a 32-name chain, 10/10 certificates replayed, 60-second boundary budget, and rejected controls; both closure implementations are bounded to 33 rounds |
+| C-01 (T1) | Full difference-bound closure (Floyd–Warshall on ≤ 32 names) with matching producer/kernel resource guards | Chains of `a < b < c < n` are the bread and butter of index proofs | `scripts/test_long_difference_chain.py`: the 32-name boundary proves and replays; a 33-name relevant chain is refused with zero replay gaps; 33-round interval bound propagation remains intact |
 | C-02 (T1) | Fourier–Motzkin elimination for small linear systems (≤ 6 variables) with a certificate of the combination used | Proves the sums-of-bounds goals that interval reasoning cannot | The certificate lists nonnegative multipliers; replay checks the linear combination only, not the search |
 | C-03 (T1) | Farkas certificates for unsat linear facts, checked by the kernel with exact i128-by-parts arithmetic | Makes C-02 and contradiction detection independently replayable | Malformed multipliers and overflowing combinations refused |
 | C-04 (T1) | Multiplication by a constant and division by a positive constant in the affine layer (`2*i + 1 < n`) | Strided loops and packing code | Positive and overflow-adversarial examples at every width |
