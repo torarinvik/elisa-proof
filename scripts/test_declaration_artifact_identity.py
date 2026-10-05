@@ -99,6 +99,55 @@ with tempfile.TemporaryDirectory(prefix="elisa-declaration-identity-") as tempor
     else:
         raise AssertionError("artifact for a stale source slice was accepted")
 
+    # Even a deliberately colliding digest backend cannot make a different source slice
+    # indistinguishable at admission or at a content-addressed store path.
+    collision_store = root / "collision-store"
+    source_one = b"def collision_a(): pass\n"
+    source_two = b"def collision_b(): pass\n"
+    original_digest = identity.sha256_bytes
+    forced_digest = "a" * 64
+
+    def colliding_digest(data: bytes) -> str:
+        if data in (source_one, source_two):
+            return forced_digest
+        try:
+            value = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            value = None
+        if isinstance(value, dict) and isinstance(value.get("declaration"), dict) \
+                and "source_slice_base64" in value["declaration"]:
+            return forced_digest
+        return original_digest(data)
+
+    identity.sha256_bytes = colliding_digest
+    try:
+        collision_one = identity.artifact_record(manifest, "src/collision.elisa", "function", "f",
+                                                 source_one, payload, dependencies)
+        collision_two = identity.artifact_record(manifest, "src/collision.elisa", "function", "f",
+                                                 source_two, payload, dependencies)
+        assert collision_one["declaration"]["key"] == collision_two["declaration"]["key"]
+        assert collision_one["artifact_sha256"] == collision_two["artifact_sha256"]
+        collision_path = identity.publish_artifact(collision_store, collision_one, manifest,
+                                                   source_one, payload, dependencies)
+        first_entry = collision_path.read_bytes()
+        for operation in (
+            lambda: identity.publish_artifact(collision_store, collision_two, manifest,
+                                              source_two, payload, dependencies),
+            lambda: identity.read_artifact(collision_store, collision_two["artifact_sha256"],
+                                           manifest, source_two, dependencies),
+        ):
+            try:
+                operation()
+            except ValueError as error:
+                assert "identity" in str(error) or "identities" in str(error)
+            else:
+                raise AssertionError("colliding source digest bypassed artifact admission")
+        assert collision_path.read_bytes() == first_entry
+        assert identity.read_artifact(collision_store, collision_one["artifact_sha256"],
+                                      manifest, source_one, dependencies) == (collision_one, payload)
+    finally:
+        identity.sha256_bytes = original_digest
+
     oversized_store = root / "oversized-store"
     oversized_store.mkdir()
     oversized_path = oversized_store / f"{record['artifact_sha256']}.json"
@@ -173,7 +222,7 @@ with tempfile.TemporaryDirectory(prefix="elisa-declaration-identity-") as tempor
     corrupt["payload_sha256"] = digest(b"different payload")
     assert not identity.validate_record_for_source(corrupt, manifest, declaration_source)
     unsupported = json.loads(json.dumps(record))
-    unsupported["schema"] = "elisa-proof-declaration-artifact-v2"
+    unsupported["schema"] = "elisa-proof-declaration-artifact-v3"
     assert not identity.validate_record_for_source(unsupported, manifest, declaration_source)
     malformed_records = []
     malformed_declaration = json.loads(json.dumps(record))

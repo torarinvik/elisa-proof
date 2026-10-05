@@ -22,12 +22,13 @@ import sys
 import tempfile
 
 
-SCHEMA = "elisa-proof-declaration-artifact-v1"
+SCHEMA = "elisa-proof-declaration-artifact-v2"
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 STORE_SCHEMA = "elisa-proof-declaration-artifact-store-v1"
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+MAX_SOURCE_SLICE_BYTES = 512 * 1024
 MAX_STORE_FILE_BYTES = MAX_RECORD_BYTES + 4 * ((MAX_PAYLOAD_BYTES + 2) // 3) + 4096
 
 
@@ -161,6 +162,8 @@ def artifact_record(manifest: dict, module: str, kind: str, name: str,
     Dependencies are exact versioned identities supplied by the declaration graph producer.
     Their order is preserved to avoid silently normalizing a future order-sensitive format.
     """
+    if not isinstance(source_slice, bytes) or len(source_slice) > MAX_SOURCE_SLICE_BYTES:
+        raise ValueError("declaration source slice has an invalid type or exceeds the size limit")
     if not isinstance(dependencies, list):
         raise ValueError("dependencies must be an array")
     for dependency in dependencies:
@@ -178,6 +181,7 @@ def artifact_record(manifest: dict, module: str, kind: str, name: str,
             "kind": kind,
             "name": name,
             "source_slice_sha256": sha256_bytes(source_slice),
+            "source_slice_base64": base64.b64encode(source_slice).decode("ascii"),
         },
         "dependencies": dependencies,
         "payload_sha256": sha256_bytes(payload),
@@ -208,6 +212,14 @@ def validate_record(record: dict, current_manifest: dict) -> bool:
             return False
         if not SHA256_RE.fullmatch(declaration.get("source_slice_sha256", "")):
             return False
+        encoded_source = declaration.get("source_slice_base64")
+        if not isinstance(encoded_source, str):
+            return False
+        source_bytes = base64.b64decode(encoded_source, validate=True)
+        if len(source_bytes) > MAX_SOURCE_SLICE_BYTES \
+                or base64.b64encode(source_bytes).decode("ascii") != encoded_source \
+                or sha256_bytes(source_bytes) != declaration["source_slice_sha256"]:
+            return False
         if not SHA256_RE.fullmatch(record.get("payload_sha256", "")):
             return False
     except (AttributeError, KeyError, TypeError, ValueError):
@@ -230,7 +242,10 @@ def validate_record_for_source(record: dict, current_manifest: dict, source_slic
     if not validate_record(record, current_manifest):
         return False
     declaration = record["declaration"]
-    if declaration.get("source_slice_sha256") != sha256_bytes(source_slice):
+    if not isinstance(source_slice, bytes) or len(source_slice) > MAX_SOURCE_SLICE_BYTES:
+        return False
+    if declaration.get("source_slice_base64") != base64.b64encode(source_slice).decode("ascii") \
+            or declaration.get("source_slice_sha256") != sha256_bytes(source_slice):
         return False
     try:
         return declaration.get("key") == declaration_key(
