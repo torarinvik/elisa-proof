@@ -7,6 +7,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+REPLAY_BINARY = os.environ.get("ELISA_PROOF_REPLAY_BIN", str(ROOT / "build/elisa-proof-replay"))
 
 
 def run(source):
@@ -21,6 +22,30 @@ def run(source):
     assert report["replay"]["gaps"] == 0, report["replay"]
     assert report["replay"]["certificates"] == report["replay"]["replayed"], report["replay"]
     return process.returncode, report
+
+
+def export_package(source):
+    with tempfile.TemporaryDirectory() as directory:
+        source_path = Path(directory) / "probe.elisa"
+        source_path.write_text(source, encoding="utf-8")
+        process = subprocess.run(
+            [BINARY, "--package", str(source_path)], capture_output=True, text=True, timeout=120
+        )
+        assert process.returncode == 0, process.stderr or process.stdout
+        return json.loads(process.stdout)
+
+
+def replay_package(package):
+    with tempfile.TemporaryDirectory() as directory:
+        package_path = Path(directory) / "probe.json"
+        package_path.write_text(json.dumps(package), encoding="utf-8")
+        process = subprocess.run(
+            [REPLAY_BINARY, str(package_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return process.returncode, json.loads(process.stdout)
 
 
 # Irrelevant disjunctions do not consume the candidate budget before the
@@ -42,8 +67,70 @@ source = "\n".join(
 code, late = run(source)
 assert code == 0 and late["status"] == "proved", late["findings"]
 
-# A contract statement can begin on a different line from its call expression. Replay binds
-# by the call node's exact source span, not by assuming the statement and expression share a line.
+# Keep a passing, single-line control with the same call-summary/disjunction shape as the
+# multiline regression. Its certificate must survive standalone replay, while an out-of-range
+# conclusion index must be rejected by the portable kernel.
+single_line_contract = """\
+def identity(value: bool) -> bool:
+    ensure result == value
+    return value
+
+def single_line_contract(accepted: bool) -> bool:
+    requires identity(accepted) or false
+    ensure identity(accepted)
+    return accepted
+"""
+single_package = export_package(single_line_contract)
+code, single_portable = replay_package(single_package)
+assert code == 0 and single_portable["status"] == "replayed", single_portable
+single_goal_theorems = [
+    theorem for theorem in single_package["theorems"]
+    if theorem["name"] == "single_line_contract" and theorem["rule"] == "goal"
+]
+assert len(single_goal_theorems) == 1, single_goal_theorems
+malformed_package = json.loads(json.dumps(single_package))
+malformed_goal = next(
+    theorem for theorem in malformed_package["theorems"]
+    if theorem["name"] == "single_line_contract" and theorem["rule"] == "goal"
+)
+malformed_goal["conclusion"] = len(malformed_package["kernel"]["nodes"]) + 1
+code, malformed = replay_package(malformed_package)
+assert code == 1 and malformed["status"] == "rejected", malformed
+assert malformed["reason"] == "root-out-of-range", malformed
+
+# The same premises do not justify their negated result. Preserve this false-claim control and
+# check that package export omits the open goal rather than turning search recognition into a
+# proof.
+false_multiline_contract = """\
+def identity(value: bool) -> bool:
+    ensure result == value
+    return value
+
+def false_multiline_contract(accepted: bool) -> bool:
+    requires (
+        identity(accepted) or false
+    )
+    ensure (
+        not identity(accepted)
+    )
+    return accepted
+"""
+code, false_claim = run(false_multiline_contract)
+assert code == 1 and false_claim["status"] == "failed", false_claim["findings"]
+assert false_claim["summary"]["proven"] < false_claim["summary"]["obligations"], false_claim["summary"]
+false_goals = [
+    goal for goal in false_claim["goals"]
+    if goal["name"] == "false_multiline_contract" and goal["rule"] == "goal"
+]
+assert len(false_goals) == 1 and not false_goals[0]["proven"], false_goals
+false_package = export_package(false_multiline_contract)
+assert not any(
+    theorem["name"] == "false_multiline_contract" and theorem["rule"] == "goal"
+    for theorem in false_package["theorems"]
+), false_package["theorems"]
+
+# Preserve this multiline positive assertion unchanged. It is the currently failing replay-gap
+# regression; the controls above must pass before this line exposes the expected baseline failure.
 multiline_contract = """\
 def identity(value: bool) -> bool:
     ensure result == value
@@ -58,6 +145,7 @@ def multiline_contract(accepted: bool) -> bool:
     )
     return accepted
 """
+print("disjunction controls passed: positive portable replay, malformed index rejection, false-claim refusal")
 code, multiline = run(multiline_contract)
 assert code == 0 and multiline["status"] == "proved", multiline["findings"]
 
