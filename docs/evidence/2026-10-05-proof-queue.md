@@ -127,6 +127,12 @@ fresh no-cache product above completed all three fixtures with full reports and 
 the timing acceptance gate. Internal import/parse/search/replay/report phase hooks remain
 unavailable.
 
+The P-01 instrumentation audit found no monotonic-clock API in the proof or compiler Elisa source.
+`src/app/cli.elisa` exposes separate tokenization, parsing, proof-check, certificate-replay and
+serialization stages, but `ProofReport.measurements` currently contains counters only. Adding
+elapsed-time fields safely requires a runtime/compiler clock API first; no wall-clock substitute
+was added to the proof process.
+
 ## P-02 cache identity and P-03 orchestration
 
 P-02 recipe fingerprints now cover the report-cache and prefetch recipes plus the remote object
@@ -147,6 +153,11 @@ byte-for-byte: `examples/perf_luna_accept.elisa` (input SHA-256
 certificate replayed. The focused script and Python compilation passed. This is bounded real
 theorem/report equivalence for one accepted and one refused fixture; stale-product and broader
 dependency-mutation controls remain open.
+
+`scripts/test_report_cache_identity.py` also replaces the fake proof executable at the same path
+after caching a report. The binary digest changes, the old report is not returned, and the new
+prefetched result matches an uncached run byte-for-byte. This exercises stale-product invalidation
+in the identity/cache harness; it is not a real verifier-binary replacement test.
 
 P-03 passed a controlled strict O2 initial build followed by an identical no-op. The no-op kept
 main/replay binaries, runtime object, hook products and manifests unchanged, with identical hashes,
@@ -169,11 +180,14 @@ tools do not establish compiler or theorem semantics. The control passed on 2026
 
 P-04 now has a proof-side v1 identity envelope that validates the proof build manifest and binds
 frontend/compiler/runtime/checker/target context, normalized declaration identity, exact source
-slice, ordered current dependency identities, and payload digest. Mutation and malformed-record
-tests fail closed. Since the compiler currently exports syntax IR rather than resolved typed
-declaration bytes, the source slice conservatively invalidates formatting changes within a
-declaration. A real dependency graph, reverse invalidation scheduler, checked semantic summaries,
-and incremental admission equivalence remain unimplemented.
+slice, ordered current dependency identities, and payload digest. A bounded content-addressed
+store publishes that envelope and its payload in one immutable file via temporary-file fsync and
+atomic link; reads revalidate manifest, source, payload, and dependency identities and reject
+missing, oversized, truncated or stale entries. Focused tests cover idempotent publication and a
+simulated interruption before linking. Since the compiler currently exports syntax IR rather than
+resolved typed declaration bytes, the source slice conservatively invalidates formatting changes
+within a declaration. A real dependency graph, reverse invalidation scheduler, checked semantic
+summaries, and verifier/session reuse remain unimplemented.
 
 P-05 has a package restart/fresh-process replay slice with additional negatives for forged source
 authentication, elevated trust, altered statements and altered fingerprints. Packages explicitly
