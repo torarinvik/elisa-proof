@@ -8,7 +8,8 @@ extend ElisaProofKernelReplay:
         # `b >= 1, a >= 0` give `0 <= a % b <= b - 1` and `0 <= a / b <= a`; `b >= 1, a <= 0` give
         # `a <= a / b <= 0`; `b >= 1, x <= b`
         # give `x * K / b <= K` for a literal `K >= 0`. Truncating signed division obeys each for
-        # every value the source computes, so instantiating the name back is sound.
+        # every value the source computes, so instantiating the name back is sound. The unsigned
+        # direct quotient upper-bound fragment is checked separately before this signed rule.
         def proof_kernel_replay_division_goal(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             requires remaining > 0
@@ -18,6 +19,7 @@ extend ElisaProofKernelReplay:
             return false if not proof_kernel_replay_valid(nodes, goal_root)
             goal: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
             return false if goal.kind != "binary" or not (goal.operator == ">" or goal.operator == ">=" or goal.operator == "<" or goal.operator == "<=" or goal.operator == "==" or goal.operator == "!=")
+            return true if proof_kernel_replay_unsigned_quotient_upper_goal(nodes, children, facts, goal_root, split_depth, depth, remaining)
             probe: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, proof_kernel_replay_division_term_name(0), "")
             return false if not proof_kernel_replay_valid(nodes, probe)
             return false if proof_kernel_replay_replace_exact(nodes, children, goal_root, probe, probe, 0).changed
@@ -91,6 +93,76 @@ extend ElisaProofKernelReplay:
                 rewritten_facts.push(fact)
             return true if proof_kernel_replay_goal_depth_remaining(nodes, children, rewritten_facts, rewritten_goal, split_depth + 1, depth + 1, remaining: remaining - 1)
             return terms.count == 1 and proof_kernel_replay_division_monotone(nodes, children, goal_root, terms[0], lower_bound, upper_bound)
+
+        # Independent replay of the same-width unsigned quotient bound. A positive divisor
+        # makes division defined; unsigned floor division cannot exceed its dividend. Typed
+        # literal and variable divisor widths are inspected separately to reject mixed-width
+        # certificates and signed reinterpretations.
+        def proof_kernel_replay_unsigned_quotient_upper_goal(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, goal_root) or remaining <= 1
+            goal: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
+            quotient: mutable usize = nodes.count
+            dividend: mutable usize = nodes.count
+            divisor_root: mutable usize = nodes.count
+            if goal.operator == "<=":
+                parts: (known: bool, dividend: usize, percent: bool, divisor: usize) = proof_kernel_replay_division_parts(nodes, goal.left)
+                return false if not parts.known or parts.percent or not proof_kernel_replay_expr_equal(nodes, children, parts.dividend, goal.right, 0)
+                quotient <- goal.left
+                dividend <- parts.dividend
+                divisor_root <- parts.divisor
+            elif goal.operator == ">=":
+                parts: (known: bool, dividend: usize, percent: bool, divisor: usize) = proof_kernel_replay_division_parts(nodes, goal.right)
+                return false if not parts.known or parts.percent or not proof_kernel_replay_expr_equal(nodes, children, parts.dividend, goal.left, 0)
+                quotient <- goal.right
+                dividend <- parts.dividend
+                divisor_root <- parts.divisor
+            else:
+                return false
+            width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, quotient, facts, depth + 1)
+            return false if proof_kernel_replay_unsigned_width_max(width) == 0 or proof_kernel_replay_unsigned_width_in_expression(nodes, children, dividend, facts, depth + 1) != width
+            return false if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, dividend, 0)
+            return false if not proof_kernel_replay_unsigned_division_divisor_width_matches(nodes, children, facts, divisor_root, width, 0)
+            divisor_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, divisor_root, 0)
+            typed_divisor_positive: mutable bool = false
+            if nodes[divisor_root].kind == "typed-int":
+                literal: (known: bool, bits: u64, unsigned: bool, width: i64) = ElisaProofKernelCore::typed_literal_value(nodes[divisor_root])
+                typed_divisor_positive <- literal.known and literal.unsigned and literal.bits > 0
+            return true if divisor_constant.known and divisor_constant.value > 0 or typed_divisor_positive
+            return proof_kernel_replay_unsigned_positive_divisor_fact(nodes, children, facts, divisor_root, width)
+
+        def proof_kernel_replay_unsigned_positive_divisor_fact(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], divisor: usize, width: i64) -> bool:
+            for fact_root in facts |fact_root, nodes, children, divisor, width|:
+                continue if not proof_kernel_replay_valid(nodes, fact_root)
+                fact: ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
+                continue if fact.kind != "binary" or (fact.operator != ">=" and fact.operator != ">")
+                continue if not proof_kernel_replay_expr_equal(nodes, children, fact.left, divisor, 0)
+                bound: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, fact.right, 0)
+                continue if not bound.known
+                if fact.operator == ">=":
+                    continue if bound.value != 1 or not proof_kernel_replay_unsigned_literal_bound_fits(nodes, fact.right, width)
+                    return true
+                continue if bound.value != 0 or not proof_kernel_replay_unsigned_literal_bound_fits(nodes, fact.right, width)
+                return true
+            return false
+
+        def proof_kernel_replay_division_parts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> (known: bool, dividend: usize, percent: bool, divisor: usize):
+            return (false, 0, false, 0) if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return (false, 0, false, 0) if node.kind != "binary" or (node.operator != "/" and node.operator != "%")
+            return (true, node.left, node.operator == "%", node.right)
+
+        def proof_kernel_replay_unsigned_division_divisor_width_matches(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], divisor: usize, width: i64, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or divisor >= nodes.count or width == 0
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[divisor]
+            if node.kind == "typed-int":
+                literal: (known: bool, bits: u64, unsigned: bool, width: i64) = ElisaProofKernelCore::typed_literal_value(node)
+                return literal.known and literal.unsigned and literal.width == width and literal.bits > 0
+            if node.kind == "int":
+                value: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, divisor, 0)
+                return value.known and value.value > 0 and proof_kernel_replay_unsigned_literal_bound_fits(nodes, divisor, width)
+            if node.kind == "paren":
+                return proof_kernel_replay_unsigned_division_divisor_width_matches(nodes, children, facts, node.left, width, depth + 1)
+            return proof_kernel_replay_unsigned_width_in_expression(nodes, children, divisor, facts, depth + 1) == width and proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, divisor, 0)
 
         # Mirror of `proof_division_monotone`.
         def proof_kernel_replay_division_monotone(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, goal_root: usize, term: usize, lower_bound: usize, upper_bound: usize) -> bool:
