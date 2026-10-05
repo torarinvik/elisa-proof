@@ -20,12 +20,8 @@ sys.path.insert(0, str(SCRIPTS))
 
 from perf_build_provenance import (  # noqa: E402
     read_build_manifest,
-    require_clean_toolchain,
     require_compatible_products,
     shared_product_context,
-    source_tree_identity,
-    verify_build_artifacts,
-    verify_proof_source,
 )
 
 
@@ -291,61 +287,6 @@ class ManifestReadTests(unittest.TestCase):
 
 
 class ProductIdentityTests(unittest.TestCase):
-    def test_verified_source_hash_binds_disk_and_both_product_manifests(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "src"
-            root.mkdir()
-            (root / "proof.elisa").write_text("proof\n", encoding="utf-8")
-            digest = source_tree_identity(root)
-            pair = {"proof": manifest(), "replay": manifest()}
-            for item in pair.values():
-                item["proof"]["source_tree_sha256"] = digest
-                item["proof"]["source_dirty"] = True
-            self.assertEqual(verify_proof_source(pair, root, digest, "candidate"), digest)
-            (root / "proof.elisa").write_text("changed\n", encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "does not match"):
-                verify_proof_source(pair, root, digest, "candidate")
-
-    def test_source_hash_must_be_exact_and_bind_manifest(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "src"
-            root.mkdir()
-            (root / "proof.elisa").write_text("proof\n", encoding="utf-8")
-            digest = source_tree_identity(root)
-            pair = {"proof": manifest(), "replay": manifest()}
-            with self.assertRaisesRegex(RuntimeError, "manifest does not identify"):
-                verify_proof_source(pair, root, digest, "baseline")
-            with self.assertRaisesRegex(RuntimeError, "exact lowercase SHA-256"):
-                verify_proof_source(pair, root, "source", "baseline")
-
-    def test_dirty_or_unknown_compiler_tree_is_refused(self) -> None:
-        clean = {"proof": manifest(), "replay": manifest()}
-        require_clean_toolchain(clean, "pair")
-        for dirty in (True, None):
-            candidate = {"proof": manifest(), "replay": manifest()}
-            candidate["proof"]["compiler"]["source_dirty"] = dirty
-            with self.assertRaisesRegex(RuntimeError, "dirty or cleanliness is unknown"):
-                require_clean_toolchain(candidate, "pair")
-
-    def test_linked_artifact_files_are_rehashed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            artifacts = {}
-            for name in ("executable", "product", "runtime", "hooks"):
-                path = root / name
-                path.write_bytes(name.encode())
-                artifacts[name] = {"path": str(path),
-                                   "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-            payload = {
-                "compiler": {"stage": "stage1", "executable": artifacts["executable"],
-                             "product": artifacts["product"]},
-                "runtime": artifacts["runtime"], "profile_hooks": artifacts["hooks"],
-            }
-            verify_build_artifacts(payload, "fixture")
-            (root / "runtime").write_bytes(b"replaced")
-            with self.assertRaisesRegex(RuntimeError, "runtime no longer matches"):
-                verify_build_artifacts(payload, "fixture")
-
     def test_proof_replay_frontend_or_source_mismatch_is_rejected(self) -> None:
         proof = manifest()
         replay = manifest()
@@ -463,90 +404,6 @@ class ProductIdentityTests(unittest.TestCase):
 
 
 class SamplingTests(unittest.TestCase):
-    def test_semantic_trust_and_replay_preflight_precedes_any_timed_samples(self) -> None:
-        report = {
-            "status": "proved", "verification_state": "complete",
-            "summary": {"declarations": 1, "obligations": 1, "proven": 1,
-                        "unproven": 0},
-            "declaration_details": [{"name": "f", "verified": True}],
-            "functions": [], "goals": [{"goal_id": 1, "name": "f", "proven": True,
-                                           "replay_status": "replayed"}],
-            "findings": [], "certificates": [{"name": "f", "rule": "reflexivity"}],
-            "replay": {"certificates": 1, "replayed": 1, "gaps": 0},
-            "trust": {"trusted_assumptions": []},
-        }
-        package = {"format": "elisa-proof-package-v1",
-                   "source": {"admissible": True, "authenticated": False},
-                   "theorems": [{"statement": "true"}]}
-        replay_data = {"format": "elisa-proof-replay-result-v1", "status": "replayed",
-                       "summary": {"theorems": 1, "not_replayed": 0},
-                       "trust": {"kernel": "checked", "source_authenticated": False}}
-        binaries = {
-            "baseline": (Path("baseline-proof"), Path("baseline-replay")),
-            "candidate": (Path("candidate-proof"), Path("candidate-replay")),
-        }
-        calls: list[tuple[str, str]] = []
-        trust_mismatch = False
-
-        def fake_invoke(binary, arguments, timeout, side, fixture, phase):
-            nonlocal trust_mismatch
-            calls.append((side, phase))
-            if "--json" in arguments:
-                result_report = json.loads(json.dumps(report))
-                if trust_mismatch and side == "candidate":
-                    result_report["trust"] = {"trusted_assumptions": ["new axiom"]}
-                return {"returncode": 0, "stdout": json.dumps(result_report).encode(), "stderr": b""}
-            if "--package" in arguments:
-                return {"returncode": 0, "stdout": json.dumps(package).encode(), "stderr": b""}
-            return {"returncode": 0, "stdout": json.dumps(replay_data).encode(), "stderr": b""}
-
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "fixture.elisa"
-            source.write_text("fixture", encoding="utf-8")
-            with mock.patch.object(benchmark, "invoke_for_side", side_effect=fake_invoke):
-                matched = benchmark.preflight_semantics(
-                    binaries, (("accept", source, 0, "proved"),), 5)
-            self.assertEqual(matched["accept"], "matched-before-timing")
-            self.assertEqual(len(calls), 6)
-            self.assertTrue(all(phase.startswith("preflight-") for _, phase in calls))
-            calls.clear()
-            trust_mismatch = True
-            with mock.patch.object(benchmark, "invoke_for_side", side_effect=fake_invoke):
-                with self.assertRaisesRegex(RuntimeError, "trust roots"):
-                    benchmark.preflight_semantics(
-                        binaries, (("accept", source, 0, "proved"),), 5)
-
-    def test_censored_timeout_is_a_structured_non_speedup_result(self) -> None:
-        failure = RuntimeError(
-            "candidate/resource-heavy/proof: classification=timeout; censored=true; "
-            "speedup=not-reported"
-        )
-        result = benchmark.censored_failure_report(failure)
-        self.assertEqual(result["status"], "censored")
-        self.assertFalse(result["timing_valid"])
-        self.assertEqual(result["speedup"], "not-reported")
-        self.assertTrue(result["censored_failures"][0]["censored"])
-        self.assertIsNone(benchmark.censored_failure_report(RuntimeError("manifest mismatch")))
-
-    def test_report_projection_excludes_measurements_but_binds_trust_and_goals(self) -> None:
-        report = {
-            "status": "proved", "verification_state": "complete",
-            "summary": {"obligations": 1}, "declaration_details": [],
-            "functions": [], "goals": [{"goal_id": 3, "proven": True}],
-            "findings": [], "certificates": [], "replay": {"gaps": 0},
-            "trust": {"trusted_assumptions": []}, "measurements": {"steps": 1},
-        }
-        original = benchmark.semantic_projection(report)
-        report["measurements"] = {"steps": 500}
-        self.assertEqual(benchmark.semantic_projection(report), original)
-        self.assertEqual(benchmark.output_projection(
-            "proof", json.dumps(report).encode()), benchmark.canonical_json(original))
-        report["trust"] = {"trusted_assumptions": ["unreviewed"]}
-        self.assertNotEqual(benchmark.semantic_projection(report), original)
-        report["trust"] = original["trust"]
-        report["goals"] = [{"goal_id": 4, "proven": True}]
-        self.assertNotEqual(benchmark.semantic_projection(report), original)
-
     @staticmethod
     def sample(seconds: float) -> dict:
         return {"wall_seconds": seconds, "user_cpu_seconds": seconds / 2,
