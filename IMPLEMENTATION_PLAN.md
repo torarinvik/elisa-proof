@@ -665,8 +665,9 @@ the exact executable, target, relevant environment and cache recipes; declaratio
 to the current build context, source slice, payload and dependencies; portable theorem packages
 are independently replayed and label source trust as adapter-supplied. The audit in
 `docs/evidence/2026-10-05-r009-invalidation-policy-audit.md` records focused test sources and
-limits claims to code inspection. No complete confirmed-incident/version registry or old/new
-semantic migration policy was found, so R-009 remains partial.
+three passing host-side cache/artifact identity checks; those checks use synthetic identities and
+do not validate a compiled proof product or package migration. No complete confirmed-incident/
+version registry or old/new semantic migration policy was found, so R-009 remains partial.
 
 ### 23.4 Priority band B — bounded work and usable performance evidence
 

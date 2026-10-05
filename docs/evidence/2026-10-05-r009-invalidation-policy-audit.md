@@ -1,8 +1,9 @@
 # R-009 artifact invalidation policy audit — 2026-10-05
 
 This source/test inventory was reviewed on proof HEAD `710733757fcbf533f505adfea1df101b35fc9f1d`.
-It describes existing identity and replay controls. It does not claim a complete inventory of
-historical incidents, run the tests, or establish a current product's behavior.
+It describes existing identity and replay controls and does not claim a complete inventory of
+historical incidents. Separate host-side checks, listed below, do not establish a current product's
+behavior.
 
 ## Existing version and invalidation controls
 
@@ -41,6 +42,19 @@ historical incidents, run the tests, or establish a current product's behavior.
 
 These are locations and claimed test intents from source review only; this audit did not execute
 them against the current executable.
+
+## Focused host-side checks run
+
+After the source review, proof HEAD `723278b0a394e82bf1e29c3258725ccc77ec779b` ran these
+standalone Python checks successfully:
+
+- `python3 scripts/test_report_cache_identity.py`
+- `python3 scripts/test_declaration_artifact_identity.py`
+- `python3 scripts/test_declaration_artifact_concurrency.py`
+
+The identity and concurrency checks use synthetic manifests and executables; they do not validate
+a compiled proof binary or portable package migration. No proof build was performed for this
+audit.
 
 ## Missing R-009 policy and evidence
 
