@@ -157,6 +157,18 @@ serialization stages, but `ProofReport.measurements` currently contains counters
 elapsed-time fields safely requires a runtime/compiler clock API first; no wall-clock substitute
 was added to the proof process.
 
+The corpus now also has a seven-round, one-warm-up strict O2 run with five fixtures. The binary
+SHA-256 is `ba640c47a1107c87e3105bf3ad005d3b2bbddc9d09bfb066427e27ee7610fd1e`; its manifest binds
+clean proof source digest `1f273bf1ec466404c40a5d3f86f0654a6c42df0679541f0f1b1fd06366411ee9`,
+frontend/Stage1 revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`, strict O2 and
+`arm64-apple-darwin27.0.0`. All 95 CLI reports were complete, had zero replay gaps, and replayed
+every emitted certificate. The two added fixtures were `qualified_constants` (17/17 proved, 17/17
+replayed; cold/warm/no-op median wall 34.196/34.259/34.324 ms; peak RSS 9,008 KiB) and
+`qualified_constant_refusal` (11/17 proved, 11/11 replayed; 33.832/33.899/34.022 ms; peak RSS
+10,224 KiB). Full raw data: `/private/tmp/elisa-p01-baseline-extended-20261005.json`. This broadens
+the baseline with a verified and a refused 17-obligation case, but the real-code corpus remains
+narrow and does not measure an incremental session.
+
 ## P-02 cache identity and P-03 orchestration
 
 P-02 recipe fingerprints now cover the report-cache and prefetch recipes plus the remote object
