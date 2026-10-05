@@ -161,7 +161,7 @@ The corpus now also has a seven-round, one-warm-up strict O2 run with five fixtu
 SHA-256 is `ba640c47a1107c87e3105bf3ad005d3b2bbddc9d09bfb066427e27ee7610fd1e`; its manifest binds
 clean proof source digest `1f273bf1ec466404c40a5d3f86f0654a6c42df0679541f0f1b1fd06366411ee9`,
 frontend/Stage1 revision `7b27fa312c5af923f044f6ee0e5e1de4f811f595`, strict O2 and
-`arm64-apple-darwin27.0.0`. All 95 CLI reports were complete, had zero replay gaps, and replayed
+`arm64-apple-darwin27.0.0`. All 117 CLI invocations were complete, had zero replay gaps, and replayed
 every emitted certificate. The two added fixtures were `qualified_constants` (17/17 proved, 17/17
 replayed; cold/warm/no-op median wall 34.196/34.259/34.324 ms; peak RSS 9,008 KiB) and
 `qualified_constant_refusal` (11/17 proved, 11/11 replayed; 33.832/33.899/34.022 ms; peak RSS
