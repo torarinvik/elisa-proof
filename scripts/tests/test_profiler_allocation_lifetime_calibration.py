@@ -46,6 +46,64 @@ class AllocationLifetimeCalibration(unittest.TestCase):
         self.assertEqual(repetition["sites"][0]["retired_count"], 2)
         self.assertEqual(repetition["sites"][0]["max_observed_lifetime_ns"], 50)
 
+    def test_nested_store_resets_keep_lifetimes_and_sites_separate(self):
+        profile = {
+            "locations": [
+                {"kind": "function", "identity_id": 11, "repetition": 1, "compiler_line": 0,
+                 "function": "outer_store_alloc",
+                 "source": "src/proof/outer_store.elisa"},
+                {"kind": "function", "identity_id": 22, "repetition": 1, "compiler_line": 0,
+                 "function": "inner_store_alloc",
+                 "source": "src/proof/inner_store.elisa"},
+                {"kind": "location", "identity_id": 11, "repetition": 1,
+                 "compiler_line": 100, "source": "src/proof/outer_store.elisa", "line": 12},
+                {"kind": "location", "identity_id": 22, "repetition": 1,
+                 "compiler_line": 200, "source": "src/proof/inner_store.elisa", "line": 18},
+            ],
+            "run": {"repetitions": [{
+                "repetition": 1,
+                "capture_complete": True,
+                "timed_out": False,
+                "detail_budget_exceeded": False,
+                "allocation_events_dropped": 0,
+                "frame_dropped": 0,
+                "trace_dropped": 0,
+                "capture_bytes_dropped": 0,
+                "trace_stack_overflow_entries": 0,
+                "allocation_events": [
+                    {"kind": "region_create", "arena": 7, "region": 0,
+                     "address": 4096, "size_bytes": 128, "sequence": 0, "timestamp_ns": 10},
+                    {"kind": "alloc", "arena": 7, "region": 0, "address": 8192,
+                     "size_bytes": 8, "sequence": 1, "timestamp_ns": 20,
+                     "repetition": 1, "site_stack": "11:100"},
+                    {"kind": "region_create", "arena": 9, "region": 0,
+                     "address": 12288, "size_bytes": 64, "sequence": 2, "timestamp_ns": 30},
+                    {"kind": "alloc", "arena": 9, "region": 0, "address": 16384,
+                     "size_bytes": 16, "sequence": 3, "timestamp_ns": 40,
+                     "repetition": 1, "site_stack": "22:200"},
+                    {"kind": "region_reset", "arena": 9, "region": 0,
+                     "address": 0, "size_bytes": 0, "sequence": 4, "timestamp_ns": 70},
+                    {"kind": "region_reset", "arena": 7, "region": 0,
+                     "address": 0, "size_bytes": 0, "sequence": 5, "timestamp_ns": 100},
+                ],
+            }]},
+        }
+
+        repetition = self.analyzer.analyze(profile)["repetitions"][0]
+        self.assertEqual(repetition["lifetime_status"], "available")
+        self.assertEqual(repetition["metrics"]["peak_logical_live_bytes"], 24)
+        self.assertEqual(repetition["metrics"]["logical_live_bytes_at_capture_end"], 0)
+        sites = {site["function"]: site for site in repetition["sites"]}
+        self.assertEqual(set(sites), {"outer_store_alloc", "inner_store_alloc"})
+        self.assertEqual(sites["inner_store_alloc"]["source"], "src/proof/inner_store.elisa")
+        self.assertEqual(sites["inner_store_alloc"]["line"], 18)
+        self.assertEqual(sites["inner_store_alloc"]["retired_count"], 1)
+        self.assertEqual(sites["inner_store_alloc"]["max_observed_lifetime_ns"], 30)
+        self.assertEqual(sites["outer_store_alloc"]["source"], "src/proof/outer_store.elisa")
+        self.assertEqual(sites["outer_store_alloc"]["line"], 12)
+        self.assertEqual(sites["outer_store_alloc"]["retired_count"], 1)
+        self.assertEqual(sites["outer_store_alloc"]["max_observed_lifetime_ns"], 80)
+
     def test_each_reported_loss_indicator_withholds_lifetime_metrics(self):
         loss_fields = (
             "allocation_events_dropped",

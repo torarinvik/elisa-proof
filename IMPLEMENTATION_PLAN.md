@@ -2311,8 +2311,13 @@ These are measurement gates, not optimization claims. Complete them before broad
     reports logical-live, retained-capacity and RSS separately. The destroyed-region `sview`
     refusal control (`0816f671`) has zero replay gaps but does not dereference stale storage. A
     synthetic analyzer control (`170083ee`) rejects a purported complete capture when stack-overflow
-    event loss is present; real event-emission loss/truncation behavior remains unverified. Add
-    nested-store attribution and profiler-noninterference controls. Then
+    event loss is present; real event-emission loss/truncation behavior remains unverified. A new
+    synthetic analyzer control models nested proof stores with distinct arena IDs and source sites;
+    the analyzer keeps the inner reset's 30 ns lifetime separate from the outer allocation's 80 ns
+    lifetime and resolves both supplied source locations. This checks accounting for hand-authored
+    events only. Runtime emission of nested-store identities/source stacks remains unverified. See
+    [nested-store analyzer control evidence](docs/evidence/2026-10-05-r014-nested-store-analyzer-control.md).
+    Add profiler-noninterference controls. Then
     capture one matched uninstrumented/counter-only/full-profiler run with identical products,
     workloads, reports and replay; quantify wall/CPU/RSS overhead before using profiles to select a
     hot path. The existing probe makes no claim that a returned view remains valid after reset.
