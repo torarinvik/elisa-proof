@@ -65,6 +65,7 @@ run_py_test test_report_cache_real_equivalence.py
 run_py_test test_report_cache_executable_swap.py
 run_py_test test_report_cache_missing_nested_dependency.py
 run_py_test test_p01_baseline.py
+run_py_test test_bounded_model_work_budget.py
 run_py_test test_p05_package_restart.py
 run_py_test test_conditional_ensure_replay_gap.py
 run_py_test test_declaration_artifact_identity.py
