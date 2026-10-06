@@ -180,6 +180,90 @@ extend ElisaProof:
                         pass
             return (enums, const_enums, members, known, value)
 
+        def proof_replay_enum_type_path(expression: Ast::Expr, path: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == ""
+                    path.push(name)
+                    return true
+                Ast::Expr.Scope(base, name, _):
+                    return false if name == "" or not proof_replay_enum_type_path(base, path, depth + 1)
+                    path.push(name)
+                    return true
+                _:
+                    return false
+            return false
+
+        def proof_replay_enum_scope_matches(current: darray[sview]&, target: darray[sview]&) -> bool:
+            return false if current.count + 1 != target.count or target.count == 0
+            for index in 0..<current.count |index, current, target|:
+                return false if current[index] != target[index]
+            return true
+
+        def proof_replay_const_enum_member_value_at_path(declarations: darray[Ast::Decl]&, target: darray[sview]&, current: darray[sview]&, member_name: sview, depth: usize) -> (enums: usize, const_enums: usize, members: usize, known: bool, value: i64):
+            return (2, 2, 2, false, 0) if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            enums: mutable usize = 0
+            const_enums: mutable usize = 0
+            members: mutable usize = 0
+            known: mutable bool = false
+            value: mutable i64 = 0
+            for declaration in declarations |target, current, member_name, depth, enums, const_enums, members, known, value|:
+                match declaration:
+                    Ast::Decl.Module(module_name, body, _):
+                        nested_scope: mutable darray[sview] = []
+                        nested_scope.extend(current)
+                        nested_scope.push(module_name)
+                        nested: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(body, target, nested_scope, member_name, depth + 1)
+                        enums <- enums + nested.enums
+                        const_enums <- const_enums + nested.const_enums
+                        members <- members + nested.members
+                        if nested.known:
+                            known <- true
+                            value <- nested.value
+                    Ast::Decl.Scoped(body, _):
+                        nested: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(body, target, current, member_name, depth + 1)
+                        enums <- enums + nested.enums
+                        const_enums <- const_enums + nested.const_enums
+                        members <- members + nested.members
+                        if nested.known:
+                            known <- true
+                            value <- nested.value
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        if proof_replay_enum_scope_matches(current, target) and target[target.count - 1] == enum_name:
+                            enums <- enums + 1
+                            const_enums <- const_enums + 1 if is_const
+                            for variant in variants |member_name, is_const, members, known, value|:
+                                if variant.name == member_name and variant.fields.count == 0:
+                                    members <- members + 1
+                                    if is_const:
+                                        match variant.value_expr:
+                                            Ast::Expr.IntLit(tag, _):
+                                                known <- true
+                                                value <- tag
+                                            _:
+                                                pass
+                    _:
+                        pass
+            return (enums, const_enums, members, known, value)
+
+        def proof_replay_const_enum_member_value_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Field(left_type, left_member, _), operator, Ast::Expr.Field(right_type, right_member, _), _):
+                    return false if (operator != TokenKind.EqEq and operator != TokenKind.BangEq) or left_member == "" or right_member == "" or not proof_expr_equal(left_type, right_type)
+                    path: mutable darray[sview] = []
+                    return false if not proof_replay_enum_type_path(left_type, &path, 0) or path.count == 0
+                    enum_name: sview = path[path.count - 1]
+                    return false if proof_report_builtin_operator_impl_exists(report, enum_name, "Eq")
+                    current_scope: darray[sview] = []
+                    left: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(report.source_declarations, path, current_scope, left_member, 0)
+                    right: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(report.source_declarations, path, current_scope, right_member, 0)
+                    return false if left.enums != 1 or left.const_enums != 1 or left.members != 1 or not left.known
+                    return false if right.enums != 1 or right.const_enums != 1 or right.members != 1 or not right.known
+                    return (left.value == right.value) if operator == TokenKind.EqEq else (left.value != right.value)
+                _:
+                    return false
+
         def proof_replay_const_enum_exclusion_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             match trace.expression:
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
