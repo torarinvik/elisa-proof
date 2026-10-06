@@ -281,6 +281,67 @@ extend ElisaProof:
                 _:
                     return expression
 
+        # Body contracts are checked directly as well as copied into the call-summary table.
+        # Apply the same lexical const-enum qualification to those direct checks.
+        def proof_qualify_function_enum_contract(file: Ast::File&, functions: ProofFunctionTable&, row: usize, expression: Ast::Expr) -> Ast::Expr:
+            scope_declarations: (known: bool, declarations: darray[Ast::Decl]) = proof_function_scope_declarations(file, functions, row)
+            return expression if not scope_declarations.known or row >= functions.declaration_path_starts.count or row >= functions.declaration_path_counts.count
+            module_scope: mutable darray[sview] = []
+            path_start: usize = functions.declaration_path_starts[row]
+            path_count: usize = functions.declaration_path_counts[row]
+            for depth in 0..<path_count - 1 |depth, module_scope, functions, path_start, file|:
+                declaration_index: usize = functions.all_declaration_path[path_start + depth]
+                declarations_at: mutable darray[Ast::Decl] = file.top_decls
+                for prior in 0..<depth |prior, declarations_at, file, functions, path_start|:
+                    prior_index: usize = functions.all_declaration_path[path_start + prior]
+                    match declarations_at[prior_index]:
+                        Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                            declarations_at <- body
+                        _:
+                            pass
+                match declarations_at[declaration_index]:
+                    Ast::Decl.Module(module_name, _, _):
+                        module_scope <- proof_global_constant_scope_with_module(module_scope, module_name)
+                    _:
+                        pass
+            proof_qualify_contract_enum_members(expression, scope_declarations.declarations, module_scope, functions, row, 0)
+
+        def proof_qualify_function_enum_body(file: Ast::File&, functions: ProofFunctionTable&, row: usize, body: darray[Ast::Stmt]&, depth: usize) -> darray[Ast::Stmt]:
+            rewritten: mutable darray[Ast::Stmt] = []
+            for statement in body |rewritten, file, functions, row, depth|:
+                match statement:
+                    Ast::Stmt.Return(value, position):
+                        if value is returned:
+                            rewritten.push(Ast::Stmt.Return(proof_qualify_function_enum_contract(file, functions, row, returned), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, position):
+                        rewritten.push(Ast::Stmt.VarDecl(name, type_expression, proof_qualify_function_enum_contract(file, functions, row, initializer), position))
+                    Ast::Stmt.If(condition, then_body, else_body, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.If(proof_qualify_function_enum_contract(file, functions, row, condition), proof_qualify_function_enum_body(file, functions, row, then_body, depth + 1), proof_qualify_function_enum_body(file, functions, row, else_body, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.While(condition, while_body, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.While(proof_qualify_function_enum_contract(file, functions, row, condition), proof_qualify_function_enum_body(file, functions, row, while_body, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.For(label, variables, iterable, for_body, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.For(label, variables, proof_qualify_function_enum_contract(file, functions, row, iterable), proof_qualify_function_enum_body(file, functions, row, for_body, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.Assign(target, operator, assigned, position):
+                        rewritten.push(Ast::Stmt.Assign(target, operator, proof_qualify_function_enum_contract(file, functions, row, assigned), position))
+                    Ast::Stmt.Expr(expression, position):
+                        rewritten.push(Ast::Stmt.Expr(proof_qualify_function_enum_contract(file, functions, row, expression), position))
+                    Ast::Stmt.Contract(kind, expression, position):
+                        rewritten.push(Ast::Stmt.Contract(kind, proof_qualify_function_enum_contract(file, functions, row, expression), position))
+                    _:
+                        rewritten.push(statement)
+            return rewritten
+
         # Qualify every table row's own requires and ensures from that row, so a caller in
         # another module that instantiates the contract never re-resolves a bare name from
         # its own module.

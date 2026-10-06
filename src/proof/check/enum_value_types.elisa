@@ -93,6 +93,65 @@ extend ElisaProof:
             return (false, "") if alias.count != 0
             return (true, member.owner)
 
+        def proof_enum_scope_path(expression: Ast::Expr, path: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == ""
+                    path.push(name)
+                    return true
+                Ast::Expr.Scope(base, name, _):
+                    return false if name == "" or not proof_enum_scope_path(base, path, depth + 1)
+                    path.push(name)
+                    return true
+                _:
+                    return false
+            return false
+
+        def proof_enum_scope_matches(current: darray[sview]&, target: darray[sview]&) -> bool:
+            return false if target.count == 0 or current.count + 1 != target.count
+            for index in 0..<current.count |index, current, target|:
+                return false if current[index] != target[index]
+            return true
+
+        def proof_exact_const_enum_member_in_scope(declarations: darray[Ast::Decl]&, target: darray[sview]&, current: darray[sview]&, member_name: sview, depth: usize) -> (types: usize, members: usize, owner: sview):
+            return (2, 2, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            types: mutable usize = 0
+            members: mutable usize = 0
+            owner: mutable sview = ""
+            for declaration in declarations |target, current, member_name, depth, types, members, owner|:
+                match declaration:
+                    Ast::Decl.Module(module_name, body, _):
+                        nested_scope: mutable darray[sview] = []
+                        nested_scope.extend(current)
+                        nested_scope.push(module_name)
+                        nested: (types: usize, members: usize, owner: sview) = proof_exact_const_enum_member_in_scope(body, target, nested_scope, member_name, depth + 1)
+                        types <- types + nested.types
+                        members <- members + nested.members
+                        owner <- nested.owner if nested.types > 0
+                    Ast::Decl.Scoped(body, _):
+                        nested: (types: usize, members: usize, owner: sview) = proof_exact_const_enum_member_in_scope(body, target, current, member_name, depth + 1)
+                        types <- types + nested.types
+                        members <- members + nested.members
+                        owner <- nested.owner if nested.types > 0
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        if is_const and proof_enum_scope_matches(current, target) and target[target.count - 1] == enum_name:
+                            types <- types + 1
+                            owner <- enum_name
+                            for variant in variants |member_name, members|:
+                                members <- members + 1 if variant.name == member_name
+                    _:
+                        pass
+            return (types, members, owner)
+
+        def proof_exact_const_enum_member_owner(enum_type: Ast::Expr, member_name: sview, declarations: darray[Ast::Decl]&) -> (known: bool, owner: sview):
+            path: mutable darray[sview] = []
+            return (false, "") if not proof_enum_scope_path(enum_type, &path, 0) or path.count < 2
+            root_scope: darray[sview] = []
+            found: (types: usize, members: usize, owner: sview) = proof_exact_const_enum_member_in_scope(declarations, path, root_scope, member_name, 0)
+            return (false, "") if found.types != 1 or found.members != 1 or found.owner == ""
+            return (true, found.owner)
+
         # State invalidation may retain this fact only when it is the exact marker shape the
         # producer creates for a unique const-enum member with no source operator overrides.
         # The marker is immutable and has no place root, so ordinary name-based type-fact
@@ -110,7 +169,8 @@ extend ElisaProof:
                         return false if proof_report_builtin_operator_impl_exists(report, member.owner, protocol)
                     return true
                 Ast::Expr.Field(enum_type, member_name, _):
-                    member: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(member_name, report.source_declarations)
+                    exact_member: (known: bool, owner: sview) = proof_exact_const_enum_member_owner(enum_type, member_name, report.source_declarations)
+                    member: (known: bool, owner: sview) = exact_member if exact_member.known else proof_unique_const_enum_member_owner(member_name, report.source_declarations)
                     return false if not member.known
                     return false if proof_type_head_name(enum_type, report.source_declarations, 0) != member.owner
                     protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
@@ -153,6 +213,25 @@ extend ElisaProof:
             for protocol in protocols |report, enum_name|:
                 return if proof_report_builtin_operator_impl_exists(report, enum_name, protocol)
             proof_add_const_enum_member_scalar_witnesses_in(report.source_declarations, facts, report, enum_name, type_expression, line, owner, position, 0)
+
+        def proof_add_qualified_enum_member_witnesses(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize) -> void:
+            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Field(enum_type, _, position):
+                    marker: Ast::Expr = proof_scalar_term_marker(expression, position)
+                    if proof_unique_builtin_const_enum_member_witness(marker, report):
+                        proof_add_scalar_type_witness(facts, report, marker, line, owner)
+                Ast::Expr.Binary(left, _, right, _) :
+                    proof_add_qualified_enum_member_witnesses(left, facts, report, line, owner, depth + 1)
+                    proof_add_qualified_enum_member_witnesses(right, facts, report, line, owner, depth + 1)
+                Ast::Expr.Unary(_, operand, _) | Ast::Expr.Paren(operand, _):
+                    proof_add_qualified_enum_member_witnesses(operand, facts, report, line, owner, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    proof_add_qualified_enum_member_witnesses(condition, facts, report, line, owner, depth + 1)
+                    proof_add_qualified_enum_member_witnesses(then_value, facts, report, line, owner, depth + 1)
+                    proof_add_qualified_enum_member_witnesses(else_value, facts, report, line, owner, depth + 1)
+                _:
+                    pass
 
         # Whether every payload field of the one payload enum named `name` is a plain value.
         # `visiting` already holds `name`, so a recursive mention is admitted coinductively.
