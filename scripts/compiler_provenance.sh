@@ -23,12 +23,17 @@ elisa_default_stage1() {
         pinned_revision="$(tr -d '[:space:]' < "$root_dir/ELISA_COMPILER_REV")"
     fi
     if [[ -f "$installed_root/SNAPSHOT" ]]; then
-        installed_revision="$(awk '$1 == "source_revision:" { print $2; exit }' "$installed_root/SNAPSHOT")"
+        while IFS=' :' read -r snapshot_key snapshot_value _; do
+            if [[ "$snapshot_key" == "source_revision" ]]; then
+                installed_revision="$snapshot_value"
+                break
+            fi
+        done < "$installed_root/SNAPSHOT"
     fi
     # Prefer an installed compiler only when its immutable source snapshot matches the
     # front end this project imports. This avoids silently building against an older live
     # sibling checkout when a newer, pinned Stage1 product is already installed.
-    if [[ -x "$installed_product" && -n "$pinned_revision" && -n "$installed_revision" && "$installed_revision" == "$pinned_revision"* ]]; then
+    if [[ -z "${ELISA_COMPILER_ROOT:-${ELISA_COMPILER_SRC:-}}" && -x "$installed_product" && -n "$pinned_revision" && -n "$installed_revision" && "$installed_revision" == "$pinned_revision"* ]]; then
         printf '%s\n' "$installed_product"
         return 0
     fi
