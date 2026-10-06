@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-06 against repository HEAD `4238f5b0`; the exact proof implementation under test is `f2d37570` (the intervening commits are roadmap/test-only), with compiler source revision `6b475d894331f0a81c3112167ef7fcf5c642a424`. Section 23.25 is the authoritative execution order; §§23.24 and earlier are historical design/evidence references except where this section explicitly reuses their acceptance detail. The main checkout has concurrent dirty audit work and is not a clean validation snapshot. A separate immutable `f2d37570` checkout was built with the exact Stage1 product and matching runtime; its full test matrix is still running and has already exposed numerous failing or incomplete proof paths. No clean full-suite pass is claimed. The pinned Stage0 candidate is identified, but Stage0/Stage1 parity is not established: Stage0 currently reports `Ast.Expr?` mismatches in proof sources, which must be minimized before assigning fault to source or compiler. Landed groundwork is kept distinct from partial coverage, in-flight edits, and unresolved release gates.
+Status: refreshed 2026-10-06 against proof implementation baseline `f2d37570`, package-test milestone `4238f5b0`, and compiler source revision `6b475d894331f0a81c3112167ef7fcf5c642a424`. Section 23.25 is the authoritative execution order; §§23.24 and earlier are historical design/evidence references except where this section explicitly reuses their acceptance detail. The main checkout has concurrent dirty audit work and is not a clean validation snapshot. A separate immutable `f2d37570` checkout was built with the exact Stage1 product and matching runtime; its full test matrix is still running and has already exposed numerous failing or incomplete proof paths. No clean full-suite pass is claimed. A minimized compiler differential now confirms a Stage1 soundness defect: Stage1 accepts an optional enum payload as a non-optional argument and emits an object; the pinned Stage0 rejects the same source (`Expr?` supplied where `Expr` is required). Compiler repair and proof-source correction are mandatory before trusting proofs that depend on this pattern. Landed groundwork is kept distinct from partial coverage, in-flight edits, and unresolved release gates.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), and `4238f5b0` (duplicate-key package mutation tests). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the current multiline-disjunction issue: 4 certificates are emitted, 3 replay, and 1 remains a gap. The exact `f2d37570` suite has also reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases that need attribution and repair. The current test run is not yet complete, so this is a partial failure inventory, not its final summary.
 
@@ -6029,9 +6029,17 @@ if it prevents a false proof. Commit each independently validated item or tightl
 - **Immutable validation checkout:** `/private/tmp/elisa-proof-f2d37570`; proof source clean at
   build time. Its full matrix is still running and has already reported failures; record final exit,
   all output, skips, and artifact digests before calling the run complete.
-- **Stage0:** pinned candidate revision `370110bc2913831f59fc190f266491efcf3ccabe` is known, but
-  proof compilation reports optional `Ast.Expr?` mismatches. This is an unresolved differential
-  question—not yet evidence that Stage0 is wrong or that proof source is invalid.
+- **Stage0:** pinned candidate revision `370110bc2913831f59fc190f266491efcf3ccabe` is known.
+  It rejects direct optional-to-non-optional calls in proof sources. The minimized differential below
+  confirms Stage1 has a hierarchical match-binder hole; the other proof diagnostics still need
+  individual classification and the source must explicitly handle optional values.
+- **Confirmed compiler soundness defect:** the minimized
+  `/private/tmp/elisa-stage-divergence-1d899e8a/hierarchical_optional_stage_probe.elisa` compiles
+  with Stage1 `6b475d89` (`-emit obj -O0`, exit 0) but Stage0 `370110bc` rejects line 18 with
+  `argument 1 ... expects Probe.Expr, got Probe.Expr?`. The code binds `Expr?` from a hierarchical
+  enum pattern and passes it to `consume(Expr)`. Fix Stage1 match-binder type tracking, add valid and
+  invalid sibling controls, rebuild, and then make proof source use an explicit valid optional-value
+  extraction. This is a compiler soundness blocker; do not treat Stage1's acceptance as source truth.
 - **Directly observed replay gaps:** multiline disjunction: 4 certificates / 3 replayed / 1 gap;
   widening-cast: 36 obligations / 33 replayed / 3 gaps; call-result-width: 2 gaps; ADT parser:
   35 obligations / 33 replayed / 2 gaps. Other reports have incomplete replay for pure unfolding,
@@ -6070,11 +6078,19 @@ result. Keep the failure reason stable and machine-readable.
     record expected status, actual status, certificate count, replay count, gaps, findings, and the
     first differing semantic field. Decide whether the defect is in source semantics, producer,
     replay checker, report aggregation, fixture expectation, or stale/invalid test setup.
-3. **P0.3 — Resolve the Stage0 `Ast.Expr?` compile discrepancy.** Minimize one diagnostic to a
-    smallest Elisa API client; compile it with exact pinned Stage0 and Stage1, inspect imported type
-    signatures and emitted diagnostics, then either repair proof source to valid syntax or file a
-    compiler regression if Stage1 acceptance is demonstrably correct. Do not change optional-field
-    semantics to make the build pass without a differential case.
+3. **P0.3 — Fix the confirmed Stage1 hierarchical optional-payload type-checking hole.** The exact
+    probe `Probe.Expr is Probe.Node`, `Probe.Stmt is Probe.Node`,
+    `Stmt.Return(value: Expr?, _)`, followed by `consume(value: Expr)`, is accepted by Stage1 6b and
+    rejected by pinned Stage0 3701. Trace enum payload TypeId binding through hierarchical match
+    lowering and type checking; ensure the narrowed arm variable retains `Expr?`, not `Expr`. Add
+    wrong-type rejection, valid non-optional payload, optional-to-optional forwarding, explicit
+    presence/refinement, shadowing, nested match, and unrelated hierarchy controls. Rebuild
+    Stage0→Stage1 from the fix and rerun the differential corpus; no proof depending on this path is
+    trustworthy before that gate passes.
+3a. **P0.3a — Correct proof source that relied on the Stage1 narrowing hole.** For each
+    `Ast.Expr?`-to-`Ast.Expr` call flagged by Stage0, add an explicit presence check and extraction or
+    change the helper signature to accept the optional type and handle absence. Re-run all proof
+    source under both stages; do not preserve invalid calls merely to maintain Stage1 compatibility.
 4. **P0.4 — Produce one exact proof/replay pair from committed HEAD.** Record compiler source/tree,
     Stage0 and Stage1 binary identities, frontend export, runtime/profiler objects, linker and flags,
     target ABI, proof source closure, and generated product digests. Reject dirty/untracked inputs for
@@ -6471,9 +6487,10 @@ redesign features whose complexity/cost exceeds verified corpus value.
 
 ### 23.25.7 Ordered execution batches and review cadence
 
-**Batch 1 — exact truth:** finish the immutable full matrix; classify failures; resolve the Stage0
-diagnostic; publish a clean exact proof/replay pair and a compact evidence manifest. Do not start
-speed tuning against the dirty main checkout.
+**Batch 1 — exact truth:** finish the immutable full matrix; classify failures; fix the confirmed
+Stage1 optional-payload type-check hole in the compiler; make proof source type-correct under both
+stages; then publish a clean exact proof/replay pair and compact evidence manifest. Do not start
+speed tuning against the dirty main checkout or rely on the current Stage1 acceptance.
 
 **Batch 2 — source/replay correctness:** close P0.5–P0.22 in small groups, prioritizing false-source
 binding, branch/loop reaching definitions, direct obligation completeness, then the known replay-gap
