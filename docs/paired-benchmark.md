@@ -39,6 +39,30 @@ python3 scripts/perf_luna_benchmark.py \
   --rounds 7 --warmup-rounds 1 --timeout 120 --output paired-results.json
 ```
 
+## Focused workflow mode
+
+Use `--fixture` to benchmark one or more reviewed workflows without running the whole corpus.
+For example, `symbolic_quantifier` exercises a realistic quantified contract proof, package
+export, and independent portable replay. The benchmark retains exact per-phase semantic projection
+digests for both arms; `scripts/validate_perf_luna_evidence.py` checks report schema, source and
+product identities, shared compiler/frontend/runtime/target provenance, semantic parity, replay
+closure, and complete paired samples without rerunning the workload.
+
+Reports retain every measured pair (wall time, user/system CPU, and peak RSS where available), as
+well as the aggregate statistics. They embed the exact build-manifest bytes; the offline validator
+checks those bytes against manifest identities and cross-checks each manifest against the reported
+build context and measured executable hashes:
+
+```sh
+python3 scripts/validate_perf_luna_evidence.py paired-results.json
+```
+
+For a reproducibility calibration (not a speedup experiment), supply the same immutable proof and
+replay products to both arms, select a focused fixture, and use at least seven paired rounds. The
+report labels this as a same-product reproducibility benchmark and does not assert speedup. A
+candidate-vs-baseline speedup claim still requires genuinely different immutable products and
+paired samples; semantic parity alone does not imply a performance improvement.
+
 ## Protocol and report
 
 Before timing, each binary pair must have valid manifest checksums and executable identities;
@@ -47,7 +71,7 @@ hooks, target, optimization, compile mode, and exact flags. Baseline and candida
 must agree; their proof-source hashes may differ, but each must be independently verified as
 above. The six benchmark fixtures have pinned source hashes and expected outcomes.
 
-An untimed preflight runs proof, package export, and standalone replay for every fixture. It
+An untimed preflight runs proof, package export, and standalone replay for every selected fixture. It
 compares canonical semantic report projections (including declaration and obligation inventory,
 trust roots, certificates, and replay), package source/theorem inventory, and replay results.
 Any mismatch aborts before timed samples. Timed rounds then alternate baseline-first and

@@ -13,8 +13,53 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - process accounting remains partially available.
+    resource = None
+
 from perf_build_provenance import file_identity, require_compatible_products
 from perf_luna_benchmark_validation import measurement_self_test
+
+
+def measured_child(command: list[str]) -> int:
+    """Emit a child command's exact output and its wall/CPU/peak-RSS measurements.
+
+    The parent process-group watchdog owns the deadline and descendant cleanup.
+    """
+    started = time.perf_counter()
+    user_cpu = system_cpu = peak_kib = None
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        process = subprocess.Popen(command, stdout=stdout_file, stderr=stderr_file,
+                                   close_fds=True)
+        if hasattr(os, "wait4"):
+            _, wait_status, usage = os.wait4(process.pid, 0)
+            process.returncode = os.waitstatus_to_exitcode(wait_status)
+            user_cpu, system_cpu = usage.ru_utime, usage.ru_stime
+            peak = max(0, int(usage.ru_maxrss))
+            peak_kib = (peak + 1023) // 1024 if sys.platform == "darwin" else peak
+        else:  # pragma: no cover - currently used only on platforms without wait4.
+            before = resource.getrusage(resource.RUSAGE_CHILDREN) if resource else None
+            process.wait()
+            after = resource.getrusage(resource.RUSAGE_CHILDREN) if resource else None
+            if before is not None and after is not None:
+                user_cpu = max(0.0, after.ru_utime - before.ru_utime)
+                system_cpu = max(0.0, after.ru_stime - before.ru_stime)
+        returncode = process.returncode
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout, stderr = stdout_file.read(), stderr_file.read()
+    payload = {
+        "returncode": returncode,
+        "wall_seconds": time.perf_counter() - started,
+        "user_cpu_seconds": user_cpu,
+        "system_cpu_seconds": system_cpu,
+        "peak_rss_kib": peak_kib,
+        "stdout": base64.b64encode(stdout).decode("ascii"),
+        "stderr": base64.b64encode(stderr).decode("ascii"),
+    }
+    sys.stdout.write(json.dumps(payload, separators=(",", ":")))
+    return 0
 
 
 def require_unchanged_inputs(identities: dict[Path, dict]) -> None:

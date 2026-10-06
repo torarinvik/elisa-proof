@@ -98,6 +98,12 @@ def require_compatible_products(proof_manifest: dict, replay_manifest: dict,
     replay_context = shared_product_context(replay_manifest)
     differences = [key for key in proof_context if proof_context[key] != replay_context[key]]
     optional = {"profile_hooks.sha256", "compiler.stage1_revision"}
+    # Installed immutable Stage1 snapshots may expose their release revision/product hash
+    # without the source checkout revision that produced them. The product and driver hashes
+    # remain mandatory; requiring a nonexistent source_revision would reject an otherwise
+    # fully identified compiler pair.
+    if proof_context["compiler.stage1_revision"] is not None:
+        optional.add("compiler.source_revision")
     if proof_context["compiler.stage"] == "stage0":
         optional.add("runtime.sha256")
     missing = [key for key, value in proof_context.items()

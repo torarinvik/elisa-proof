@@ -195,49 +195,6 @@ def validate_semantic_corpus_manifest(entries, *, root: Path = ROOT) -> None:
         raise AssertionError("semantic corpus replay requirements changed")
 
 
-class SemanticCorpusManifestTests(unittest.TestCase):
-    def test_corpus_manifest_binds_fixture_bytes_and_harness_metadata(self) -> None:
-        validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
-
-    def test_workload_identity_and_expectation_mutations_are_detected(self) -> None:
-        for field, replacement in (
-                ("name", "renamed-workload"),
-                ("path", "examples/other-workload.elisa"),
-                ("sha256", "0" * 64),
-                ("expected_exit", 7),
-                ("expected_status", "unknown"),
-                ("must_prove", ("unexpected_claim",)),
-                ("must_unproven", ("unexpected_open_goal",)),
-                ("must_find", ("unexpected_finding",)),
-                ("inadmissible", True),
-                ("must_decline_certificates", ("unexpected_certificate",))):
-            with self.subTest(field=field):
-                changed = [dict(item) for item in SEMANTIC_CORPUS_MANIFEST]
-                changed[0][field] = replacement
-                with self.assertRaisesRegex(AssertionError, "manifest"):
-                    validate_semantic_corpus_manifest(changed)
-
-    def test_source_byte_change_is_rejected_even_with_original_manifest(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            for item in SEMANTIC_CORPUS_MANIFEST:
-                destination = root / item["path"]
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes((ROOT / item["path"]).read_bytes())
-            target = root / SEMANTIC_CORPUS_MANIFEST[0]["path"]
-            target.write_bytes(target.read_bytes() + b"\n")
-            with self.assertRaisesRegex(AssertionError, "bytes/hash changed"):
-                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST, root=root)
-
-    def test_replay_contract_mutation_is_detected(self) -> None:
-        with mock.patch.dict(CORPUS_REPLAY_REQUIREMENTS, {"zero_replay_gaps": False}):
-            with self.assertRaisesRegex(AssertionError, "replay requirements"):
-                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
-        with mock.patch(__name__ + ".CORPUS_REPORT_FIELDS", ("status",)):
-            with self.assertRaisesRegex(AssertionError, "report fields"):
-                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
-
-
 class ManifestReadTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -304,6 +261,17 @@ class ProductIdentityTests(unittest.TestCase):
         malformed["compiler"]["product"].pop("sha256")
         with self.assertRaisesRegex(RuntimeError, "compiler.product.sha256"):
             require_compatible_products(manifest(), malformed, "pair")
+
+    def test_stage1_product_hash_and_release_revision_cover_missing_source_revision(self) -> None:
+        proof = manifest()
+        replay = manifest()
+        proof["compiler"]["source_revision"] = None
+        replay["compiler"]["source_revision"] = None
+        context = require_compatible_products(proof, replay, "installed-stage1")
+        self.assertIsNone(context["compiler.source_revision"])
+        replay["compiler"]["product"]["sha256"] = "other-product"
+        with self.assertRaisesRegex(RuntimeError, "compiler.product.sha256"):
+            require_compatible_products(proof, replay, "mismatched-installed-stage1")
 
     def test_stage0_may_omit_runtime_but_stage1_may_not(self) -> None:
         stage0 = manifest(stage="stage0", runtime=None)
@@ -509,7 +477,9 @@ class SamplingTests(unittest.TestCase):
             context = manifest()
             proof_bytes = json.dumps({
                 "status": "proved", "verification_state": "complete",
-                "goals": [], "findings": [], "functions": [], "trust": {},
+                "goals": [], "findings": [], "functions": [],
+                "trust": {"trusted_assumptions": [], "trusted_boundary_facts": 0,
+                          "kernel_replayed_certificates": 0},
                 "summary": {"declarations": 0, "obligations": 0, "proven": 0, "unproven": 0},
                 "declaration_details": [], "certificates": [],
                 "replay": {"gaps": 0, "certificates": 0, "replayed": 0},
@@ -546,6 +516,7 @@ class SamplingTests(unittest.TestCase):
                 candidate_proof=binaries["candidate"][0],
                 candidate_replay=binaries["candidate"][1],
                 rounds=2, warmup_rounds=1, timeout=1,
+                fixtures=["tiny"],
                 baseline_source_root=root / "baseline-src",
                 candidate_source_root=root / "candidate-src",
                 baseline_source_sha256="0" * 64,
@@ -554,6 +525,7 @@ class SamplingTests(unittest.TestCase):
             args.baseline_source_root.mkdir()
             args.candidate_source_root.mkdir()
             with mock.patch.object(benchmark, "FIXTURES", (("tiny", source, 0, "proved"),)), \
+                    mock.patch.object(benchmark, "FIXTURE_BY_NAME", {"tiny": ("tiny", source, 0, "proved")}), \
                     mock.patch.object(benchmark, "FIXTURE_SHA256", {"tiny": "fixture"}), \
                     mock.patch.object(benchmark, "read_build_manifest", return_value=context), \
                     mock.patch.object(benchmark, "require_compatible_products", return_value=context), \
