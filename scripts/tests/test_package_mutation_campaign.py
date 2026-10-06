@@ -256,6 +256,15 @@ def main():
             and result["summary"] == {"theorems": 2, "replayed": 1, "not_replayed": 1}, result
         assert [item["status"] for item in result["theorems"]] == ["replayed", "rejected"], result
 
+        # A malformed theorem after a replayable prefix is rejected by the package-wide
+        # schema-only preflight before any theorem result can be published. Exercise both a
+        # non-object list element and an object with a wrong-typed hypotheses field.
+        for label, malformed_suffix in (("late-null-theorem", None),
+                                         ("late-hypotheses-not-array", {**second, "hypotheses": 0})):
+            malformed_tail = copy.deepcopy(duplicate_ids)
+            malformed_tail["theorems"][1] = malformed_suffix
+            assert_no_publication(directory, label, malformed_tail, "theorem-schema")
+
         # Package-wide structure validation precedes per-theorem replay/publication. Even with
         # two valid theorem records before the malformed arena entry, no prefix may escape.
         late_global_error = copy.deepcopy(duplicate_ids)
@@ -311,7 +320,7 @@ def main():
         assert code == 0 and result["status"] == "replayed", result
         assert result["summary"]["replayed"] == len(changed_fingerprint["theorems"]), result
 
-    refused_count = len(cases) + len(schema_cases) + 6
+    refused_count = len(cases) + len(schema_cases) + 8
     print(f"package mutation campaign: {refused_count} adversarial inputs refused; exact empty-span boundary and duplicate-ID cache isolation checked; 2 hint-only edits freshly replayed; seed={SEED}")
 
 
