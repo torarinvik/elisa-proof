@@ -377,21 +377,22 @@ if [[ "$rejected_condition_call_positions_status" -ne 0 ]]; then
 fi
 
 # `--proof <id>` renders one goal as an Elisa-like proof. The block keyword carries the verdict and
-# only `proof ... qed` means the kernel checked it, so a goal that is unproven, or proven without a
-# replayed certificate, must never render one.
+# only `proof ... qed` means the kernel checked it for a complete, admitted source; open, partial,
+# unsupported, and replay-gap results must never render that success form.
+run_py_test tests/test_cli_result_lattice.py
 proof_render_dir="$(mktemp -d)"
 TEST_CLEANUP+=("$proof_render_dir")
 set +e
-proved_goal=$(run_json_report "$ROOT_DIR/examples/condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if goal["rule"] == "index-upper" and goal["proven"]))')
-"$ROOT_DIR/build/elisa-proof" --proof "$proved_goal" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/proved.txt"
+proved_goal=$(run_json_report "$ROOT_DIR/examples/early_return_index_guard.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if goal["rule"] == "index-upper" and goal["proven"]))')
+"$ROOT_DIR/build/elisa-proof" --proof "$proved_goal" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/proved.txt"
 proof_render_proved_status=$?
-open_goal=$(run_json_report "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if not goal["proven"]))')
-"$ROOT_DIR/build/elisa-proof" --proof "$open_goal" "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" > "$proof_render_dir/open.txt"
+open_goal=$(run_json_report "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if not goal["proven"]))')
+"$ROOT_DIR/build/elisa-proof" --proof "$open_goal" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/open.txt"
 proof_render_open_status=$?
-"$ROOT_DIR/build/elisa-proof" --proof 99999 "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/missing.txt"
+"$ROOT_DIR/build/elisa-proof" --proof 99999 "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/missing.txt"
 proof_render_missing_status=$?
 set -e
-if [[ "$proof_render_proved_status" -ne 0 || "$proof_render_open_status" -ne 0 || "$proof_render_missing_status" -ne 2 ]]; then
+if [[ "$proof_render_proved_status" -ne 0 || "$proof_render_open_status" -ne 1 || "$proof_render_missing_status" -ne 2 ]]; then
     printf 'proof test matrix failed: --proof exit codes proved=%s open=%s missing=%s\n' "$proof_render_proved_status" "$proof_render_open_status" "$proof_render_missing_status" >&2
     exit 1
 fi
@@ -401,16 +402,16 @@ import sys
 
 proved, open_goal, missing = (open(path, encoding="utf-8").read() for path in sys.argv[1:])
 assert proved.startswith("# elisa-proof-proof-v1\n")
-assert "\nproof guarded_index_" in proved
+assert "\nproof " in proved
 assert "\nqed\n" in proved
 assert "    show index < values.count\n" in proved
 assert "    by kernel certificate " in proved
-assert "    given index < values.count" in proved
+assert "    given not (index >= values.count)" in proved
 assert "branch-condition" in proved
 assert "\nopen " in open_goal
 assert "proof " not in open_goal.replace("elisa-proof-proof-v1", "")
 assert "qed" not in open_goal
-assert "    unproved: index-upper-unproven" in open_goal
+assert "    unproved: " in open_goal
 assert "does not exist" in missing
 assert "qed" not in missing and "\nproof " not in missing
 PY
@@ -425,18 +426,18 @@ fi
 # untrusted input: an edited keyword, an invented hypothesis, a swapped conclusion or a block from
 # another source must all diverge, and a block naming no goal of this source cannot be checked.
 set +e
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/faithful.json"
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/faithful.json"
 proof_check_faithful_status=$?
 python3 -c 'import sys; text = open(sys.argv[1], encoding="utf-8").read(); open(sys.argv[2], "w", encoding="utf-8").write(text.replace("    show ", "    given values.count > 1000\n    show ", 1))' "$proof_render_dir/proved.txt" "$proof_render_dir/extra_given.txt"
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/extra_given.txt" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/extra_given.json"
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/extra_given.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/extra_given.json"
 proof_check_extra_status=$?
 python3 -c 'import sys; text = open(sys.argv[1], encoding="utf-8").read(); lines = [line for line in text.splitlines() if not line.startswith("    unproved:")]; lines = [line.replace("open ", "proof ", 1) if line.startswith("open ") else line for line in lines]; lines.append("qed"); open(sys.argv[2], "w", encoding="utf-8").write("\n".join(lines) + "\n")' "$proof_render_dir/open.txt" "$proof_render_dir/forged.txt"
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/forged.txt" "$ROOT_DIR/examples/rejected_condition_call_positions.elisa" > "$proof_render_dir/forged.json"
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/forged.txt" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/forged.json"
 proof_check_forged_status=$?
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/writable_lend_calls.elisa" > "$proof_render_dir/foreign.json"
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/foreign.json"
 proof_check_foreign_status=$?
 printf 'not a proof block\n' > "$proof_render_dir/junk.txt"
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/junk.txt" "$ROOT_DIR/examples/condition_call_positions.elisa" > "$proof_render_dir/junk.json"
+"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/junk.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/junk.json"
 proof_check_junk_status=$?
 set -e
 if [[ "$proof_check_faithful_status" -ne 0 || "$proof_check_extra_status" -ne 1 || "$proof_check_forged_status" -ne 1 || "$proof_check_foreign_status" -ne 1 || "$proof_check_junk_status" -ne 2 ]]; then
@@ -457,18 +458,22 @@ def load(name):
 faithful = load("faithful.json")
 assert faithful["format"] == "elisa-proof-proof-check-v1"
 assert faithful["status"] == "matches"
+assert faithful["verification_state"] == "proved"
 assert faithful["difference_count"] == 0 and faithful["differences"] == []
 extra = load("extra_given.json")
 assert extra["status"] == "diverges" and extra["difference_count"] > 0
 assert any(entry["found"] == "    given values.count > 1000" for entry in extra["differences"])
 forged = load("forged.json")
 assert forged["status"] == "diverges"
+assert forged["verification_state"] != "proved"
 assert any(entry["found"].startswith("proof ") and entry["expected"].startswith("open ") for entry in forged["differences"])
 assert any(entry["found"] == "qed" for entry in forged["differences"])
 foreign = load("foreign.json")
 assert foreign["status"] == "diverges"
+assert foreign["verification_state"] != "proved"
 junk = load("junk.json")
 assert junk["status"] == "unreadable" and junk["goal_id"] is None
+assert junk["verification_state"] != "proved"
 PY
 proof_check_shape_status=$?
 set -e

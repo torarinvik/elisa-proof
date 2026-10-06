@@ -109,6 +109,56 @@ def provenance_guard_test():
             refusal_census.ROOT, refusal_census.BINARY = old_root, old_binary
 
 
-provenance_guard_test()
+def subprocess_result_lattice_test():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        binary = root / "fake-proof"
+        source = ROOT / "examples/verified.elisa"
+        old_binary = refusal_census.BINARY
+        try:
+            def run_stub(report, exit_code):
+                payload = json.dumps(report)
+                binary.write_text(
+                    "#!/usr/bin/env python3\nimport sys\n"
+                    f"print({payload!r})\nsys.exit({exit_code})\n",
+                    encoding="utf-8",
+                )
+                binary.chmod(0o755)
+                refusal_census.BINARY = binary
+                return refusal_census.run(source, 10)
 
-print("refusal census: deterministic counts, dogfood inclusion, timings, and provenance guards")
+            proved = {
+                "status": "proved", "verification_state": "proved",
+                "summary": {"proven": 1, "obligations": 1}, "replay": {"gaps": 0}, "findings": [],
+            }
+            key, data, _, error = run_stub(proved, 1)
+            assert key == "verified.elisa" and data is None and error == "exit-status-mismatch"
+            key, data, _, error = run_stub(proved, 0)
+            assert data == proved and error is None
+
+            failed = {
+                "status": "failed", "verification_state": "unknown",
+                "summary": {"proven": 0, "obligations": 1}, "findings": [],
+            }
+            key, data, _, error = run_stub(failed, 0)
+            assert key == "verified.elisa" and data is None and error == "exit-status-mismatch"
+            key, data, _, error = run_stub(failed, 1)
+            assert data == failed and error is None
+
+            gap = {
+                "status": "proved_with_replay_gaps", "verification_state": "unknown",
+                "replay": {"gaps": 1},
+                "summary": {"proven": 0, "obligations": 1}, "findings": [],
+            }
+            key, data, _, error = run_stub(gap, 0)
+            assert key == "verified.elisa" and data is None and error == "exit-status-mismatch"
+            key, data, _, error = run_stub(gap, 1)
+            assert data == gap and error is None
+        finally:
+            refusal_census.BINARY = old_binary
+
+
+provenance_guard_test()
+subprocess_result_lattice_test()
+
+print("refusal census: deterministic counts, result/exit parity, dogfood inclusion, timings, and provenance guards")

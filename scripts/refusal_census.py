@@ -15,6 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from report_exit_status import expected_exit as report_expected_exit
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof")).resolve()
@@ -43,6 +44,12 @@ def run(path, timeout):
             return data_key(path), None, time.monotonic() - started, "invalid-json"
         if not isinstance(data, dict) or not isinstance(data.get("summary"), dict):
             return data_key(path), None, time.monotonic() - started, "invalid-report"
+        try:
+            expected_exit = report_expected_exit(data)
+        except ValueError:
+            return data_key(path), None, time.monotonic() - started, "invalid-result-lattice"
+        if result.returncode != expected_exit:
+            return data_key(path), None, time.monotonic() - started, "exit-status-mismatch"
         summary = data["summary"]
         if (type(summary.get("proven")) is not int or type(summary.get("obligations")) is not int
                 or summary["proven"] < 0 or summary["obligations"] < summary["proven"]):

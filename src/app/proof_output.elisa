@@ -1,12 +1,12 @@
 def proof_push_proof_check(buffer: mutable darray[u8]&, report: ProofReport&, contents: darray[u8]&, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
     claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
     if not claimed.known:
-        proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"unreadable\",\"goal_id\":null,\"differences\":[]}\n")
+        proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"unreadable\",\"verification_state\":\"unknown\",\"goal_id\":null,\"differences\":[]}\n")
         return 2
     if claimed.goal_id >= report.goal_attempts.count:
         proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"not_found\",\"goal_id\":")
         proof_push_number(buffer, claimed.goal_id.u32())
-        proof_push(buffer, ",\"differences\":[]}\n")
+        proof_push(buffer, ",\"verification_state\":\"unknown\",\"differences\":[]}\n")
         return 2
     canonical: mutable darray[u8] = []
     proof_push_elisa_proof(&canonical, report, claimed.goal_id, source_fingerprint, source_complete, source_admissible)
@@ -40,8 +40,13 @@ def proof_push_proof_check(buffer: mutable darray[u8]&, report: ProofReport&, co
         difference_count <- difference_count + 1 if not equal
         file_cursor <- file_line.next if file_present else file_cursor + 1
         canonical_cursor <- canonical_line.next if canonical_present else canonical_cursor + 1
+    goal_state: sview = proof_goal_verification_state(report, claimed.goal_id, source_complete, source_admissible)
+    verification_state: mutable sview = "unknown"
+    verification_state <- goal_state if difference_count == 0
     proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":")
     proof_push(buffer, "\"matches\"" if difference_count == 0 else "\"diverges\"")
+    proof_push(buffer, ",\"verification_state\":")
+    proof_push_json_string(buffer, verification_state)
     proof_push(buffer, ",\"goal_id\":")
     proof_push_number(buffer, claimed.goal_id.u32())
     # A faithful rendering of a goal in an inadmissible source still matches; the caller learns
@@ -54,7 +59,7 @@ def proof_push_proof_check(buffer: mutable darray[u8]&, report: ProofReport&, co
     for index in 0..<differences.count |index, buffer, differences|:
         buffer.push(differences[index])
     proof_push(buffer, "]}\n")
-    return 0 if difference_count == 0 else 1
+    return 0 if difference_count == 0 and verification_state == "proved" else 1
 
 def proof_push_elisa_proof(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "# elisa-proof-proof-v1\n")
@@ -65,6 +70,7 @@ def proof_push_elisa_proof(buffer: mutable darray[u8]&, report: ProofReport&, go
         return
     attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
     certificate_replayed: bool = proof_replay_attempt_certificate_replayed(report, attempt)
+    goal_verified: bool = proof_goal_verification_state(report, goal_id, source_complete, source_admissible) == "proved"
     proof_push(buffer, "# source: fingerprint fnv1a32=")
     proof_push_number(buffer, source_fingerprint)
     proof_push(buffer, ", complete=")
@@ -83,10 +89,10 @@ def proof_push_elisa_proof(buffer: mutable darray[u8]&, report: ProofReport&, go
     proof_push_number(buffer, attempt.line)
     proof_push(buffer, "\n")
     keyword: mutable sview = "open"
-    keyword <- "unchecked" if attempt.proven
-    keyword <- "proof" if attempt.proven and certificate_replayed
-    if attempt.proven and not certificate_replayed:
-        proof_push(buffer, "# no certificate replayed for this goal: the block below is not kernel-backed\n")
+    keyword <- "unchecked" if attempt.proven or attempt.has_certificate
+    keyword <- "proof" if goal_verified and certificate_replayed
+    if not goal_verified and (attempt.proven or attempt.has_certificate):
+        proof_push(buffer, "# the selected goal was not fully admitted as proved; this block is not a proof\n")
     proof_push(buffer, keyword)
     proof_push(buffer, " ")
     proof_push(buffer, attempt.name)
@@ -110,15 +116,21 @@ def proof_push_elisa_proof(buffer: mutable darray[u8]&, report: ProofReport&, go
     proof_push(buffer, "    show ")
     proof_push_elisa_expr(buffer, attempt.goal, false, 0)
     proof_push(buffer, "\n")
-    if attempt.proven and certificate_replayed:
+    if goal_verified and certificate_replayed:
         proof_push(buffer, "    by kernel certificate ")
         proof_push_number(buffer, attempt.certificate_index.u32())
         proof_push(buffer, ", arena root ")
         proof_push_number(buffer, attempt.kernel_goal.u32())
         proof_push(buffer, "\nqed\n")
         return
-    if attempt.proven:
+    if attempt.proven and not certificate_replayed:
         proof_push(buffer, "    by producer only\n")
+        return
+    if certificate_replayed:
+        proof_push(buffer, "    by kernel replay; selected-goal admission was not established\n")
+        return
+    if attempt.has_certificate:
+        proof_push(buffer, "    by certificate not replayed\n")
         return
     selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
     proof_push(buffer, "    unproved: ")
@@ -138,12 +150,7 @@ def proof_push_json_focused_goal(buffer: mutable darray[u8]&, report: ProofRepor
     if not found:
         proof_push_json_string(buffer, "not_found")
     else:
-        attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
-        certificate_replayed: bool = proof_replay_attempt_certificate_replayed(report, attempt)
-        attempt_status: mutable sview = "proved" if attempt.proven and certificate_replayed else "unknown"
-        if not attempt.proven:
-            selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
-            attempt_status <- report.findings[selected.index].status if selected.known else "unknown"
+        attempt_status: mutable sview = proof_goal_verification_state(report, goal_id, source_complete, source_admissible)
         proof_push_json_string(buffer, attempt_status)
     proof_push(buffer, ",\"source\":{\"bytes\":")
     proof_push_number(buffer, source_bytes.u32())
@@ -181,7 +188,7 @@ def proof_push_json_focused_goal(buffer: mutable darray[u8]&, report: ProofRepor
     proof_push(buffer, ",\"rule\":")
     proof_push_json_string(buffer, attempt.rule)
     proof_push(buffer, ",\"proven\":")
-    replay_proven: bool = proof_replay_attempt_is_proven(report, attempt)
+    replay_proven: bool = proof_goal_verification_state(report, goal_id, source_complete, source_admissible) == "proved"
     proof_push(buffer, "true" if replay_proven else "false")
     proof_push(buffer, ",\"replay_status\":")
     proof_push_json_string(buffer, replay_status)
